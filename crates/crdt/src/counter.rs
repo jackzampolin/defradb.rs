@@ -419,4 +419,113 @@ mod tests {
         let result = counter.merge(&ctx, &delta).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_counter_overflow_saturating() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Set counter to near max
+        let delta1 = CounterDelta {
+            doc_id: b"doc1".to_vec(),
+            field_name: "count".to_string(),
+            priority: 10,
+            nonce: 1,
+            schema_version_id: "v1".to_string(),
+            data: (i64::MAX - 10).to_be_bytes().to_vec(),
+        };
+        counter.merge(&ctx, &delta1).await.unwrap();
+
+        // Try to increment beyond max - should saturate
+        let delta2 = CounterDelta {
+            doc_id: b"doc1".to_vec(),
+            field_name: "count".to_string(),
+            priority: 20,
+            nonce: 2,
+            schema_version_id: "v1".to_string(),
+            data: 20i64.to_be_bytes().to_vec(),
+        };
+        counter.merge(&ctx, &delta2).await.unwrap();
+
+        // Should saturate at i64::MAX
+        let value_bytes = counter.value().await.unwrap();
+        let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+        assert_eq!(value, i64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_counter_field_name_mismatch() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Delta for wrong field
+        let delta = CounterDelta {
+            doc_id: b"doc1".to_vec(),
+            field_name: "wrong_field".to_string(),
+            priority: 10,
+            nonce: 1,
+            schema_version_id: "v1".to_string(),
+            data: 5i64.to_be_bytes().to_vec(),
+        };
+
+        let result = counter.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field name mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_counter_schema_version_mismatch() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Delta for wrong schema version
+        let delta = CounterDelta {
+            doc_id: b"doc1".to_vec(),
+            field_name: "count".to_string(),
+            priority: 10,
+            nonce: 1,
+            schema_version_id: "v2".to_string(),
+            data: 5i64.to_be_bytes().to_vec(),
+        };
+
+        let result = counter.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("schema version mismatch"));
+    }
 }
