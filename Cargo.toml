@@ -38,7 +38,7 @@ libp2p = { version = "0.54", features = ["tcp", "noise", "yamux", "gossipsub", "
 multiaddr = "0.18"
 
 # Storage
-rocksdb = "0.22"
+rocksdb = "0.24"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde"] }
