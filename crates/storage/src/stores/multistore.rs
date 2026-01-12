@@ -87,7 +87,7 @@ impl RocksDBMultistore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::corekv::{Key, Reader, Writer};
+    use crate::corekv::Key;
     use crate::keys::{
         blockstore::BlockstoreKey, datastore::DataStoreKey, headstore::HeadstoreDocKey,
         peerstore::ReplicatorKey, systemstore::CollectionKey, utils::InstanceType,

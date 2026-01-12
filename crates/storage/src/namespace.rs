@@ -148,11 +148,19 @@ impl Reader for NamespacedTxn {
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         // Prefix the iterator options
+        // IMPORTANT: If no prefix/start/end is specified, we MUST still scope to our namespace
+        // to prevent cross-namespace iteration
         let mut prefixed_opts = IterOptions::new();
 
         if let Some(prefix) = opts.prefix() {
+            // User specified a prefix - add namespace prefix to it
             prefixed_opts = prefixed_opts.with_prefix(self.namespace.prefix_key(prefix));
+        } else if opts.start().is_none() && opts.end().is_none() {
+            // No prefix, start, or end specified - default to namespace prefix
+            // This ensures we only iterate within our namespace
+            prefixed_opts = prefixed_opts.with_prefix(vec![self.namespace.prefix()]);
         }
+
         if let Some(start) = opts.start() {
             prefixed_opts = prefixed_opts.with_start(self.namespace.prefix_key(start));
         }
@@ -401,5 +409,79 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_no_prefix_collision() {
+        let store = Arc::new(MemoryStore::new());
+
+        // Create a key in datastore that starts with 'b' (blockstore prefix)
+        // This tests that namespace isolation prevents cross-namespace access
+        let datastore = NamespacedStore::new(store.clone(), Namespace::Datastore);
+        let mut txn = datastore.new_txn(false).await.unwrap();
+        txn.set(b"bmalicious_key", b"datastore_value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Blockstore should NOT see this key, even though the key starts with 'b'
+        let blockstore = NamespacedStore::new(store.clone(), Namespace::Blockstore);
+        let txn = blockstore.new_txn(true).await.unwrap();
+
+        // The key "malicious_key" should not exist in blockstore
+        // (because the actual stored key is "d" + "bmalicious_key", not "b" + "malicious_key")
+        let value = txn.get(b"malicious_key").await.unwrap();
+        assert_eq!(value, None, "Blockstore should not see datastore key");
+
+        // Also check the key with 'b' prefix doesn't exist in blockstore
+        let value = txn.get(b"bmalicious_key").await.unwrap();
+        assert_eq!(value, None, "Blockstore should not see key starting with 'b' from datastore");
+    }
+
+    #[tokio::test]
+    async fn test_namespace_default_prefix_scoping() {
+        // Test that iterating with no prefix still stays within namespace
+        let store = Arc::new(MemoryStore::new());
+
+        // Write to multiple namespaces
+        let datastore = NamespacedStore::new(store.clone(), Namespace::Datastore);
+        let blockstore = NamespacedStore::new(store.clone(), Namespace::Blockstore);
+
+        let mut txn = datastore.new_txn(false).await.unwrap();
+        txn.set(b"ds_key1", b"ds_value1").await.unwrap();
+        txn.set(b"ds_key2", b"ds_value2").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = blockstore.new_txn(false).await.unwrap();
+        txn.set(b"bs_key1", b"bs_value1").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Iterate datastore with no prefix - should only see datastore keys
+        let txn = datastore.new_txn(true).await.unwrap();
+        let opts = IterOptions::default(); // No prefix, start, or end
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut ds_keys: Vec<String> = vec![];
+        while let Some(pair) = iter.next().await.unwrap() {
+            ds_keys.push(pair.key_str());
+        }
+        drop(txn);
+
+        // Should only see datastore keys, not blockstore keys
+        assert_eq!(ds_keys.len(), 2);
+        assert!(ds_keys.contains(&"ds_key1".to_string()));
+        assert!(ds_keys.contains(&"ds_key2".to_string()));
+        assert!(!ds_keys.contains(&"bs_key1".to_string()));
+
+        // Similarly, blockstore iteration should only see blockstore keys
+        let txn = blockstore.new_txn(true).await.unwrap();
+        let opts = IterOptions::default();
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut bs_keys: Vec<String> = vec![];
+        while let Some(pair) = iter.next().await.unwrap() {
+            bs_keys.push(pair.key_str());
+        }
+
+        assert_eq!(bs_keys.len(), 1);
+        assert!(bs_keys.contains(&"bs_key1".to_string()));
     }
 }

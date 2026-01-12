@@ -265,27 +265,119 @@ impl Reader for RocksDBTxn {
             return Err(Error::DiscardedTxn);
         }
 
-        // Collect data from DB first, then merge with pending writes
-        // This ensures read-your-writes consistency for iteration
-        let mode = if opts.reverse() {
-            rocksdb::IteratorMode::End
-        } else {
-            rocksdb::IteratorMode::Start
-        };
-
         // Use a BTreeMap to merge DB data with pending writes
+        // Only collect keys that match the filter criteria to avoid loading entire DB
         let mut merged: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = std::collections::BTreeMap::new();
 
-        // First, collect from DB
-        let db_iter = self.db.iterator(mode);
+        // Determine iteration bounds based on options
+        let (start_bound, end_bound) = if let Some(prefix) = opts.prefix() {
+            // Use prefix to limit iteration range
+            let start = prefix.to_vec();
+            // Calculate end bound: increment last byte of prefix (or append 0xFF if all 0xFF)
+            let mut end = prefix.to_vec();
+            let mut found_non_ff = false;
+            for i in (0..end.len()).rev() {
+                if end[i] < 0xFF {
+                    end[i] += 1;
+                    end.truncate(i + 1);
+                    found_non_ff = true;
+                    break;
+                }
+            }
+            if !found_non_ff {
+                // All bytes are 0xFF, append 0xFF to create upper bound
+                end.push(0xFF);
+            }
+            (Some(start), Some(end))
+        } else if opts.start().is_some() || opts.end().is_some() {
+            (opts.start().map(|s| s.to_vec()), opts.end().map(|e| e.to_vec()))
+        } else {
+            (None, None)
+        };
+
+        // Use appropriate iterator mode based on bounds
+        let db_iter = match (&start_bound, opts.reverse()) {
+            (Some(start), false) => self.db.iterator(rocksdb::IteratorMode::From(start, rocksdb::Direction::Forward)),
+            (Some(_), true) => {
+                // For reverse with start bound, we need to start from end_bound or prefix end
+                if let Some(ref end) = end_bound {
+                    self.db.iterator(rocksdb::IteratorMode::From(end, rocksdb::Direction::Reverse))
+                } else {
+                    self.db.iterator(rocksdb::IteratorMode::End)
+                }
+            }
+            (None, false) => self.db.iterator(rocksdb::IteratorMode::Start),
+            (None, true) => self.db.iterator(rocksdb::IteratorMode::End),
+        };
+
+        // Collect from DB with early termination based on bounds
         for item in db_iter {
             let (key, value) = item?;
-            merged.insert(key.to_vec(), value.to_vec());
+            let key_vec = key.to_vec();
+
+            // Apply prefix filter
+            if let Some(prefix) = opts.prefix() {
+                if !key_vec.starts_with(prefix) {
+                    // For forward iteration, if we've passed the prefix range, stop
+                    if !opts.reverse() && key_vec.as_slice() >= end_bound.as_ref().map(|e| e.as_slice()).unwrap_or(&[0xFF]) {
+                        break;
+                    }
+                    // For reverse iteration, if we're before the prefix range, stop
+                    if opts.reverse() && key_vec.as_slice() < start_bound.as_ref().map(|s| s.as_slice()).unwrap_or(&[]) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // Apply start bound
+            if let Some(start) = opts.start() {
+                if key_vec.as_slice() < start {
+                    if opts.reverse() {
+                        break; // Past our range in reverse
+                    }
+                    continue;
+                }
+            }
+
+            // Apply end bound
+            if let Some(end) = opts.end() {
+                if key_vec.as_slice() >= end {
+                    if !opts.reverse() {
+                        break; // Past our range in forward
+                    }
+                    continue;
+                }
+            }
+
+            merged.insert(key_vec, value.to_vec());
         }
 
         // Then, merge pending writes (overwrites DB values)
+        // Only include pending writes that match the filter criteria
         let pending = self.pending.lock();
         for (key, value) in pending.iter() {
+            // Apply prefix filter
+            if let Some(prefix) = opts.prefix() {
+                if !key.starts_with(prefix) {
+                    continue;
+                }
+            }
+
+            // Apply start bound
+            if let Some(start) = opts.start() {
+                if key.as_slice() < start {
+                    continue;
+                }
+            }
+
+            // Apply end bound
+            if let Some(end) = opts.end() {
+                if key.as_slice() >= end {
+                    continue;
+                }
+            }
+
             match value {
                 Some(v) => {
                     merged.insert(key.clone(), v.clone());
@@ -297,42 +389,23 @@ impl Reader for RocksDBTxn {
         }
         drop(pending);
 
-        // Apply filters and collect results
-        let mut data = Vec::new();
-        for (key, value) in merged.iter() {
-            // Check prefix
-            if let Some(prefix) = opts.prefix() {
-                if !key.starts_with(prefix) {
-                    continue;
+        // Convert to vector and apply ordering
+        let mut data: Vec<KvPair> = merged
+            .into_iter()
+            .map(|(key, value)| {
+                if opts.keys_only() {
+                    KvPair::key_only(key)
+                } else {
+                    KvPair::new(key, value)
                 }
-            }
-
-            // Check start bound
-            if let Some(start) = opts.start() {
-                if key.as_slice() < start {
-                    continue;
-                }
-            }
-
-            // Check end bound
-            if let Some(end) = opts.end() {
-                if key.as_slice() >= end {
-                    continue;
-                }
-            }
-
-            if opts.keys_only() {
-                data.push(KvPair::key_only(key.clone()));
-            } else {
-                data.push(KvPair::new(key.clone(), value.clone()));
-            }
-        }
+            })
+            .collect();
 
         if opts.reverse() {
             data.reverse();
         }
 
-        Ok(Box::new(SimpleIterator { data, position: 0 }))
+        Ok(Box::new(SimpleIterator { data, position: 0, closed: false }))
     }
 }
 
@@ -482,17 +555,21 @@ impl Txn for RocksDBTxn {
 
 /// Simple in-memory iterator for RocksDB results.
 ///
-/// This collects all matching keys into memory. For large result sets,
-/// this is not ideal, but it works for the MVP. Future versions will
-/// implement streaming iteration.
+/// This collects matching keys into memory based on prefix/range filters.
+/// The iterator tracks its closed state to prevent use after close.
 struct SimpleIterator {
     data: Vec<KvPair>,
     position: usize,
+    closed: bool,
 }
 
 #[async_trait]
 impl Iterator for SimpleIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {
+        if self.closed {
+            return Err(Error::Iterator("Iterator has been closed".into()));
+        }
+
         if self.position >= self.data.len() {
             return Ok(None);
         }
@@ -503,13 +580,14 @@ impl Iterator for SimpleIterator {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.closed = true;
         // Clear data to free memory
         self.data.clear();
         Ok(())
     }
 
     fn is_valid(&self) -> bool {
-        self.position < self.data.len()
+        !self.closed && self.position < self.data.len()
     }
 }
 
@@ -741,5 +819,120 @@ mod tests {
         txn.commit().await.unwrap();
 
         assert!(success_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_iterator_closed_returns_error() {
+        let (store, _temp_dir) = create_test_store().await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"key1", b"value1").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let txn = store.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+        // Close the iterator
+        iter.close().await.unwrap();
+
+        // Using closed iterator should return an error
+        let result = iter.next().await;
+        assert!(matches!(result, Err(Error::Iterator(_))));
+
+        // is_valid should return false
+        assert!(!iter.is_valid());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_async_callback_execution() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (store, _temp_dir) = create_test_store().await;
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let async_success_called = Arc::new(AtomicBool::new(false));
+        let async_success_called_clone = Arc::clone(&async_success_called);
+
+        txn.on_success_async(Box::new(move || {
+            let flag = Arc::clone(&async_success_called_clone);
+            Box::pin(async move {
+                // Simulate async work
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                flag.store(true, Ordering::SeqCst);
+            })
+        }));
+
+        txn.set(b"key", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Async callback should have been awaited during commit
+        assert!(async_success_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_iterator_prefix_filtering() {
+        let (store, _temp_dir) = create_test_store().await;
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        // Insert keys with different prefixes
+        txn.set(b"user/1", b"alice").await.unwrap();
+        txn.set(b"user/2", b"bob").await.unwrap();
+        txn.set(b"post/1", b"hello").await.unwrap();
+        txn.set(b"post/2", b"world").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Iterate with user/ prefix
+        let txn = store.new_txn(true).await.unwrap();
+        let opts = IterOptions::new().with_prefix(b"user/".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut user_keys: Vec<String> = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            user_keys.push(kv.key_str());
+        }
+
+        assert_eq!(user_keys.len(), 2);
+        assert!(user_keys.contains(&"user/1".to_string()));
+        assert!(user_keys.contains(&"user/2".to_string()));
+
+        // Iterate with post/ prefix
+        let opts = IterOptions::new().with_prefix(b"post/".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut post_keys: Vec<String> = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            post_keys.push(kv.key_str());
+        }
+
+        assert_eq!(post_keys.len(), 2);
+        assert!(post_keys.contains(&"post/1".to_string()));
+        assert!(post_keys.contains(&"post/2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_iterator_start_end_range() {
+        let (store, _temp_dir) = create_test_store().await;
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        // Insert keys: a, b, c, d, e
+        for key in [b"a", b"b", b"c", b"d", b"e"] {
+            txn.set(key, b"value").await.unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        // Test start and end bounds
+        let txn = store.new_txn(true).await.unwrap();
+        let opts = IterOptions::new()
+            .with_start(b"b".to_vec())
+            .with_end(b"e".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut keys: Vec<String> = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            keys.push(kv.key_str());
+        }
+
+        assert_eq!(keys, vec!["b", "c", "d"]);
     }
 }

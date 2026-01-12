@@ -131,24 +131,33 @@ impl From<rocksdb::Error> for Error {
         // Check for specific RocksDB errors that map to CoreKV errors
         let err_str = err.to_string();
 
-        // Log the error for debugging if classification is unclear
+        // Log the error for debugging
         tracing::debug!(
             error = %err_str,
             "Converting RocksDB error to CoreKV error"
         );
 
-        // Use case-insensitive string matching as fallback
-        // TODO: Use RocksDB error kind/code when available in rust-rocksdb
-        let err_lower = err_str.to_lowercase();
-        if err_lower.contains("conflict")
-            || err_lower.contains("try again")
-            || err_lower.contains("tryagain")
-            || err_lower.contains("busy") {
-            tracing::debug!("Classified RocksDB error as TxnConflict");
+        // Use conservative string matching - only classify when we're confident
+        // about the specific RocksDB error patterns to avoid misclassification.
+        // Default to Backend error to preserve original message for unknown errors.
+        //
+        // Known RocksDB transaction conflict patterns:
+        // - "Resource busy" - write conflict
+        // - "Operation timed out: TryAgain" - transaction retry needed
+        // - "Busy" at start of message - resource contention
+        //
+        // We avoid matching substrings like "busy" or "conflict" that could
+        // appear in other contexts (e.g., custom error messages, file paths).
+        if err_str.starts_with("Resource busy")
+            || err_str.starts_with("Busy")
+            || err_str.contains("TryAgain")
+            || err_str.contains("WriteConflict")
+        {
+            tracing::debug!("Classified RocksDB error as TxnConflict (retriable)");
             Error::TxnConflict
-        } else if err_lower.contains("not found") {
-            Error::NotFound
         } else {
+            // Default to Backend error - preserves original message and
+            // lets callers decide how to handle based on context
             Error::Backend(err_str)
         }
     }

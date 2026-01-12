@@ -41,7 +41,6 @@ impl<S: Store> Store for RootStore<S> {
 mod tests {
     use super::*;
     use crate::backends::MemoryStore;
-    use crate::corekv::{Reader, Writer};
 
     #[tokio::test]
     async fn test_rootstore_basic() {

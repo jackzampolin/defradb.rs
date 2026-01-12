@@ -111,23 +111,18 @@ pub fn decode_uvarint_ascending(buf: &[u8]) -> Result<(&[u8], u64)> {
 
 /// Encodes a signed integer (varint) in ascending order
 pub fn encode_varint_ascending(buf: Vec<u8>, value: i64) -> Vec<u8> {
-    // Convert to unsigned using zigzag encoding for signed values
-    let unsigned = if value >= 0 {
-        (value as u64) << 1
-    } else {
-        (((-value - 1) as u64) << 1) | 1
-    };
+    // Convert to unsigned maintaining sort order by XORing with the sign bit.
+    // This maps 2's complement representation to a sortable unsigned value:
+    // i64::MIN -> 0, -1 -> 0x7FFFFFFFFFFFFFFF, 0 -> 0x8000000000000000, i64::MAX -> 0xFFFFFFFFFFFFFFFF
+    let unsigned = (value as u64) ^ 0x8000000000000000;
     encode_uvarint_ascending(buf, unsigned)
 }
 
 /// Decodes a signed varint from the buffer
 pub fn decode_varint_ascending(buf: &[u8]) -> Result<(&[u8], i64)> {
     let (remaining, unsigned) = decode_uvarint_ascending(buf)?;
-    let value = if unsigned & 1 == 0 {
-        (unsigned >> 1) as i64
-    } else {
-        -((unsigned >> 1) as i64) - 1
-    };
+    // Reverse the sort-preserving encoding by XORing with the sign bit
+    let value = (unsigned ^ 0x8000000000000000) as i64;
     Ok((remaining, value))
 }
 
@@ -373,5 +368,158 @@ mod tests {
         assert_eq!(InstanceType::from_byte(b'v').unwrap(), InstanceType::Value);
         assert_eq!(InstanceType::from_byte(b'p').unwrap(), InstanceType::Priority);
         assert_eq!(InstanceType::from_byte(b'd').unwrap(), InstanceType::Deleted);
+    }
+
+    #[test]
+    fn test_uvarint_maintains_sort_order() {
+        // Test that encoded uvarints maintain lexicographic sort order
+        // This is critical for range queries and prefix scans
+        let test_values: Vec<u64> = vec![
+            0,
+            1,
+            127,
+            128,
+            239,      // boundary between 1-byte and 2-byte
+            240,      // first 2-byte value
+            255,
+            256,
+            2287,     // boundary between 2-byte and 3-byte
+            2288,     // first 3-byte value
+            10000,
+            100000,
+            1000000,
+            u32::MAX as u64,
+            u64::MAX / 2,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+
+        // Encode all values
+        let encoded: Vec<Vec<u8>> = test_values
+            .iter()
+            .map(|v| encode_uvarint_ascending(vec![], *v))
+            .collect();
+
+        // Verify that encoded values are in sorted order
+        for i in 0..encoded.len() - 1 {
+            assert!(
+                encoded[i] < encoded[i + 1],
+                "Encoded values must be sorted: {} (encoded as {:?}) should be < {} (encoded as {:?})",
+                test_values[i],
+                encoded[i],
+                test_values[i + 1],
+                encoded[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_varint_maintains_sort_order() {
+        // Test that encoded signed varints maintain sort order
+        let test_values: Vec<i64> = vec![
+            i64::MIN,
+            i64::MIN + 1,
+            -1000000,
+            -1000,
+            -1,
+            0,
+            1,
+            1000,
+            1000000,
+            i64::MAX - 1,
+            i64::MAX,
+        ];
+
+        let encoded: Vec<Vec<u8>> = test_values
+            .iter()
+            .map(|v| encode_varint_ascending(vec![], *v))
+            .collect();
+
+        for i in 0..encoded.len() - 1 {
+            assert!(
+                encoded[i] < encoded[i + 1],
+                "Encoded signed values must be sorted: {} < {}",
+                test_values[i],
+                test_values[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_float_encoding_special_values() {
+        // Test special float values: NaN, Infinity, etc.
+
+        // Test positive infinity
+        let buf = encode_float64_ascending(vec![], f64::INFINITY);
+        let (_, decoded) = decode_float64_ascending(&buf).unwrap();
+        assert!(decoded.is_infinite() && decoded.is_sign_positive());
+
+        // Test negative infinity
+        let buf = encode_float64_ascending(vec![], f64::NEG_INFINITY);
+        let (_, decoded) = decode_float64_ascending(&buf).unwrap();
+        assert!(decoded.is_infinite() && decoded.is_sign_negative());
+
+        // Test NaN (NaN != NaN, so we just check it decodes to NaN)
+        let buf = encode_float64_ascending(vec![], f64::NAN);
+        let (_, decoded) = decode_float64_ascending(&buf).unwrap();
+        assert!(decoded.is_nan());
+
+        // Test smallest positive subnormal
+        let buf = encode_float64_ascending(vec![], f64::MIN_POSITIVE);
+        let (_, decoded) = decode_float64_ascending(&buf).unwrap();
+        assert_eq!(decoded, f64::MIN_POSITIVE);
+
+        // Test negative zero (should decode to negative zero)
+        let neg_zero = -0.0_f64;
+        let buf = encode_float64_ascending(vec![], neg_zero);
+        let (_, decoded) = decode_float64_ascending(&buf).unwrap();
+        // Note: -0.0 == 0.0 in Rust, but we can check the sign bit
+        assert!(decoded == 0.0);
+    }
+
+    #[test]
+    fn test_float_encoding_sort_order() {
+        // Test that floats maintain sort order when encoded
+        let test_values: Vec<f64> = vec![
+            f64::NEG_INFINITY,
+            f64::MIN,
+            -1000.0,
+            -1.0,
+            -f64::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            f64::MIN_POSITIVE,
+            1.0,
+            1000.0,
+            f64::MAX,
+            f64::INFINITY,
+        ];
+
+        let encoded: Vec<Vec<u8>> = test_values
+            .iter()
+            .map(|v| encode_float64_ascending(vec![], *v))
+            .collect();
+
+        for i in 0..encoded.len() - 1 {
+            assert!(
+                encoded[i] < encoded[i + 1],
+                "Encoded floats must be sorted: {} < {}",
+                test_values[i],
+                test_values[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_truncated_uvarint() {
+        // Test decoding truncated data returns error
+        let truncated_2byte = vec![0xF0]; // 2-byte marker without second byte
+        assert!(decode_uvarint_ascending(&truncated_2byte).is_err());
+
+        let truncated_large = vec![0xF9]; // 2-byte marker without data bytes
+        assert!(decode_uvarint_ascending(&truncated_large).is_err());
+
+        // Empty buffer
+        assert!(decode_uvarint_ascending(&[]).is_err());
     }
 }
