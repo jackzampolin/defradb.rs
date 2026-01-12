@@ -122,21 +122,18 @@ pub fn encrypt_ecies(
     // 2. ECDH: compute shared secret
     let shared_secret = ephemeral_private.diffie_hellman(public_key);
 
-    // 3. HKDF-SHA256: derive separate AES and HMAC keys (RFC 5869)
-    // HKDF (HMAC-based Key Derivation Function) expands the shared secret into
-    // cryptographically independent keys. We use empty salt and empty info parameters
-    // to match the Go implementation for P2P compatibility.
-    // The HKDF-SHA256 construction ensures the derived keys are cryptographically
-    // independent even without explicit info parameters.
+    // 3. HKDF-SHA256: derive AES and HMAC keys (RFC 5869)
+    // We expand 64 bytes and split: first 32 for AES, next 32 for HMAC.
+    // This matches Go's sequential hkdf.Read() calls for P2P compatibility.
+    // Empty salt and info parameters match the Go implementation.
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
 
-    let mut aes_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut aes_key)
-        .map_err(|e| crypto_error(format!("HKDF expansion failed for AES key (size: {}): {}", AES_KEY_SIZE, e)))?;
+    let mut keys = [0u8; AES_KEY_SIZE + AES_KEY_SIZE];
+    hkdf.expand(&[], &mut keys)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
 
-    let mut hmac_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut hmac_key)
-        .map_err(|e| crypto_error(format!("HKDF expansion failed for HMAC key (size: {}): {}", AES_KEY_SIZE, e)))?;
+    let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
+    let hmac_key: [u8; AES_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 4. Build AAD: ephemeral public key + optional additional data
     let mut aad = ephemeral_public.as_bytes().to_vec();
@@ -228,18 +225,17 @@ pub fn decrypt_ecies(
     // 3. ECDH: compute shared secret
     let shared_secret = private_key.diffie_hellman(&ephemeral_public);
 
-    // 4. HKDF-SHA256: derive same AES and HMAC keys as encryption (RFC 5869)
-    // Must use identical parameters (empty salt, empty info) to match the Go implementation
-    // and ensure sender and receiver derive the same keys from the shared secret via ECDH.
+    // 4. HKDF-SHA256: derive AES and HMAC keys (RFC 5869)
+    // We expand 64 bytes and split: first 32 for AES, next 32 for HMAC.
+    // This matches Go's sequential hkdf.Read() calls for P2P compatibility.
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
 
-    let mut aes_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut aes_key)
-        .map_err(|e| crypto_error(format!("HKDF expansion failed for AES key (size: {}): {}", AES_KEY_SIZE, e)))?;
+    let mut keys = [0u8; AES_KEY_SIZE + AES_KEY_SIZE];
+    hkdf.expand(&[], &mut keys)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
 
-    let mut hmac_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut hmac_key)
-        .map_err(|e| crypto_error(format!("HKDF expansion failed for HMAC key (size: {}): {}", AES_KEY_SIZE, e)))?;
+    let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
+    let hmac_key: [u8; AES_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 5. Verify HMAC
     let mut mac = Hmac::<Sha256>::new_from_slice(&hmac_key)

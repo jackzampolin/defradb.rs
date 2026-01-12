@@ -190,8 +190,6 @@ impl Key for Ed25519PublicKey {
 impl PublicKey for Ed25519PublicKey {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
         if signature.len() != 64 {
-            // Log invalid signature length for security monitoring
-            eprintln!("SECURITY: Ed25519 signature verification failed - invalid signature length: {} (expected 64)", signature.len());
             return Ok(false);
         }
 
@@ -203,12 +201,7 @@ impl PublicKey for Ed25519PublicKey {
 
         match self.key.verify(data, &signature) {
             Ok(_) => Ok(true),
-            Err(e) => {
-                // Log verification failures for security auditing
-                // Note: This could be a legitimate wrong signature, not necessarily an attack
-                eprintln!("SECURITY: Ed25519 signature verification failed: {:?}", e);
-                Ok(false)
-            }
+            Err(_) => Ok(false),
         }
     }
 

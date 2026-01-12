@@ -38,11 +38,7 @@ fn generate_random_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     let mut nonce = [0u8; AES_NONCE_SIZE];
     OsRng
         .try_fill_bytes(&mut nonce)
-        .map_err(|e| {
-            // CRITICAL: Log RNG failures - this is a security event
-            eprintln!("CRITICAL: RNG failure in nonce generation: {}", e);
-            crate::error::crypto_error(format!("RNG failure in nonce generation: {}", e))
-        })?;
+        .map_err(|e| crate::error::crypto_error(format!("RNG failure in nonce generation: {}", e)))?;
     Ok(nonce)
 }
 

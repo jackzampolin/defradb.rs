@@ -80,11 +80,7 @@ pub fn generate_ed25519() -> Result<Ed25519PrivateKey> {
     use rand::RngCore;
     let mut seed = [0u8; 32];
     OsRng.try_fill_bytes(&mut seed)
-        .map_err(|e| {
-            // CRITICAL: Log RNG failures - this is a security event
-            eprintln!("CRITICAL: RNG failure in Ed25519 key generation: {}", e);
-            crypto_error(format!("RNG failure in Ed25519 key generation: {}", e))
-        })?;
+        .map_err(|e| crypto_error(format!("RNG failure in Ed25519 key generation: {}", e)))?;
 
     let signing_key = Ed25519SigningKey::from_bytes(&seed);
 
@@ -126,11 +122,7 @@ pub fn generate_aes256() -> Result<Vec<u8>> {
     let mut key = vec![0u8; AES_KEY_SIZE];
     use rand::RngCore;
     OsRng.try_fill_bytes(&mut key)
-        .map_err(|e| {
-            // CRITICAL: Log RNG failures - this is a security event
-            eprintln!("CRITICAL: RNG failure in AES-256 key generation: {}", e);
-            crypto_error(format!("RNG failure in AES-256 key generation: {}", e))
-        })?;
+        .map_err(|e| crypto_error(format!("RNG failure in AES-256 key generation: {}", e)))?;
     Ok(key)
 }
 

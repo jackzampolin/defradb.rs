@@ -168,11 +168,7 @@ impl PublicKey for Secp256k1PublicKey {
         // Parse DER-encoded signature
         let sig = match Signature::from_der(signature) {
             Ok(s) => s,
-            Err(e) => {
-                // Log DER parsing failures for security monitoring
-                eprintln!("SECURITY: secp256k1 signature verification failed - invalid DER encoding: {:?}", e);
-                return Ok(false);
-            }
+            Err(_) => return Ok(false),
         };
 
         // Hash the message with SHA-256
@@ -181,12 +177,7 @@ impl PublicKey for Secp256k1PublicKey {
         // Verify signature
         match self.key.verify(&hash, &sig) {
             Ok(_) => Ok(true),
-            Err(e) => {
-                // Log verification failures for security auditing
-                // Note: This could be a legitimate wrong signature, not necessarily an attack
-                eprintln!("SECURITY: secp256k1 ECDSA signature verification failed: {:?}", e);
-                Ok(false)
-            }
+            Err(_) => Ok(false),
         }
     }
 
