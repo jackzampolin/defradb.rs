@@ -102,12 +102,20 @@ impl DatastoreTxn {
         let key_bytes = key.bytes();
 
         // Delete base key (for non-chunked values)
-        // Note: This is a no-op if the key doesn't exist
-        let _ = self.delete(&key_bytes).await;
+        // This may fail if the key doesn't exist (expected), but other errors should be logged
+        if let Err(e) = self.delete(&key_bytes).await {
+            // NotFound is expected and acceptable, other errors should be logged
+            if !e.is_not_found() {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to delete base key during delete_value - continuing with chunk deletion"
+                );
+            }
+        }
 
         // Try to delete chunks (if they exist)
         let mut deleted_chunks = 0;
-        let mut last_error: Option<Error> = None;
+        let mut failed_chunks: Vec<(u8, Error)> = Vec::new();
 
         for i in 0..=255u8 {
             let chunk_key = Self::chunk_key(&key_bytes, i);
@@ -122,7 +130,7 @@ impl DatastoreTxn {
                                 error = %e,
                                 "Failed to delete chunk during delete_value"
                             );
-                            last_error = Some(e);
+                            failed_chunks.push((i, e));
                             // Continue trying to delete remaining chunks
                         }
                     }
@@ -134,7 +142,7 @@ impl DatastoreTxn {
                         error = %e,
                         "Failed to check chunk existence during delete_value"
                     );
-                    last_error = Some(e);
+                    failed_chunks.push((i, e));
                     break;
                 }
             }
@@ -147,11 +155,17 @@ impl DatastoreTxn {
             );
         }
 
-        // Return error if any chunk deletion failed
-        if let Some(err) = last_error {
+        // Return error if any chunk deletion failed, including all failures
+        if !failed_chunks.is_empty() {
+            let error_details: Vec<String> = failed_chunks
+                .iter()
+                .map(|(idx, err)| format!("chunk {}: {}", idx, err))
+                .collect();
             return Err(Error::Other(format!(
-                "Partial chunk deletion: deleted {} chunks before error: {}",
-                deleted_chunks, err
+                "Partial chunk deletion: deleted {} chunks, {} chunks failed: [{}]",
+                deleted_chunks,
+                failed_chunks.len(),
+                error_details.join(", ")
             )));
         }
 
@@ -159,6 +173,10 @@ impl DatastoreTxn {
     }
 
     /// Put a chunked value (internal)
+    ///
+    /// This method writes new chunks first (overwriting existing ones at the same indices),
+    /// then deletes any extra old chunks. This ordering ensures that if a write fails,
+    /// the old data is still intact (no data loss).
     async fn put_chunked(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let num_chunks = value.len().div_ceil(CHUNK_SIZE);
 
@@ -172,29 +190,32 @@ impl DatastoreTxn {
             )));
         }
 
-        // Delete any existing chunks first
+        // Write new chunks first (overwrites existing chunks at same indices)
+        // This ensures that if write fails, old data is still intact
+        for (i, chunk) in value.chunks(CHUNK_SIZE).enumerate() {
+            let chunk_key = Self::chunk_key(key, i as u8);
+            self.set(&chunk_key, chunk).await?;
+        }
+
+        // Delete any extra old chunks (indices beyond what new value needs)
+        // Only delete chunks that exist beyond the new chunk count
         let mut deleted_count = 0;
-        for i in 0..=255u8 {
+        for i in (num_chunks as u8)..=255u8 {
             let chunk_key = Self::chunk_key(key, i);
             if self.has(&chunk_key).await? {
                 self.delete(&chunk_key).await?;
                 deleted_count += 1;
             } else {
+                // No more old chunks exist
                 break;
             }
         }
 
         if deleted_count > 0 {
             tracing::debug!(
-                deleted_chunks = deleted_count,
-                "Deleted existing chunks before writing new chunked value"
+                deleted_extra_chunks = deleted_count,
+                "Deleted extra old chunks after writing new chunked value"
             );
-        }
-
-        // Write new chunks
-        for (i, chunk) in value.chunks(CHUNK_SIZE).enumerate() {
-            let chunk_key = Self::chunk_key(key, i as u8);
-            self.set(&chunk_key, chunk).await?;
         }
 
         tracing::debug!(

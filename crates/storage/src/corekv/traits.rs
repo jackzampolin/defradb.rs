@@ -49,9 +49,6 @@ pub trait Reader: Send + Sync {
 
     /// Check if a key exists in the store.
     ///
-    /// This is more efficient than calling get() when you only need to know
-    /// if a key exists, as it doesn't fetch the value.
-    ///
     /// # Arguments
     ///
     /// * `key` - The key to check
@@ -61,6 +58,11 @@ pub trait Reader: Send + Sync {
     /// * `Ok(true)` if the key exists
     /// * `Ok(false)` if the key does not exist
     /// * `Err(Error)` if an error occurred
+    ///
+    /// # Note
+    ///
+    /// Performance may vary by backend. Some backends may need to fetch the value
+    /// to check existence.
     async fn has(&self, key: &[u8]) -> Result<bool>;
 
     /// Create an iterator over key-value pairs.
@@ -224,7 +226,7 @@ pub trait Txn: ReaderWriter {
 
     /// Register an asynchronous callback to be called on successful commit.
     ///
-    /// Multiple callbacks can be registered and will be executed concurrently.
+    /// Multiple callbacks can be registered and will be executed sequentially in registration order.
     fn on_success_async(&mut self, callback: AsyncTxnCallback);
 
     /// Register a synchronous callback to be called on commit error.
@@ -234,7 +236,7 @@ pub trait Txn: ReaderWriter {
 
     /// Register an asynchronous callback to be called on commit error.
     ///
-    /// Multiple callbacks can be registered and will be executed concurrently.
+    /// Multiple callbacks can be registered and will be executed sequentially in registration order.
     fn on_error_async(&mut self, callback: AsyncTxnCallback);
 
     /// Register a synchronous callback to be called on discard.
@@ -244,7 +246,7 @@ pub trait Txn: ReaderWriter {
 
     /// Register an asynchronous callback to be called on discard.
     ///
-    /// Multiple callbacks can be registered and will be executed concurrently.
+    /// Multiple callbacks can be registered and will be executed sequentially in registration order.
     fn on_discard_async(&mut self, callback: AsyncTxnCallback);
 
     /// Downcast to concrete type (for internal use in tests)

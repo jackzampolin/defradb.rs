@@ -100,7 +100,8 @@ impl BlockstoreTxn {
     /// Get all unmerged block CIDs
     ///
     /// Returns a list of CIDs for blocks that have not yet been merged.
-    /// Any keys that fail to parse are logged as errors but do not stop iteration.
+    /// If any keys fail to parse, returns an error to prevent silent data loss.
+    /// The error includes the count of successfully parsed CIDs for debugging.
     pub async fn get_unmerged_cids(&self) -> Result<Vec<Cid>> {
         let mut cids = Vec::new();
         let mut parse_errors = 0;
@@ -125,12 +126,14 @@ impl BlockstoreTxn {
             }
         }
 
+        // Return error if any keys failed to parse - this indicates data corruption
+        // and the caller should be aware that the result is incomplete
         if parse_errors > 0 {
-            tracing::warn!(
-                parse_errors = parse_errors,
-                successful_cids = cids.len(),
-                "Some merge index keys could not be parsed"
-            );
+            return Err(crate::corekv::Error::Other(format!(
+                "Data corruption detected: {} merge index keys could not be parsed (recovered {} CIDs). \
+                This may indicate storage corruption or a version mismatch.",
+                parse_errors, cids.len()
+            )));
         }
 
         Ok(cids)

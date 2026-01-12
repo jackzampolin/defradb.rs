@@ -1,16 +1,22 @@
-/// RocksDB backend implementation with MVCC transactions.
+/// RocksDB backend implementation with write batch atomicity.
 ///
 /// This backend provides a production-ready persistent key-value store using
-/// RocksDB. It supports full MVCC transactions with optimistic concurrency control
-/// and snapshot isolation.
+/// RocksDB. It uses write batches for atomic commits with read-your-writes
+/// consistency within transactions.
 ///
 /// # Features
 ///
 /// - Persistent storage with LSM-tree architecture
-/// - MVCC transactions with snapshot isolation
-/// - Optimistic concurrency control (transaction conflicts detected at commit)
+/// - Atomic writes via write batches
+/// - Read-your-writes consistency within transactions
 /// - High performance with configurable caching and compaction
 /// - Crash recovery with write-ahead logging (WAL)
+///
+/// # Limitations
+///
+/// - No full snapshot isolation (reads may see concurrent writes)
+/// - No optimistic concurrency control (conflicts not detected)
+/// - Future versions will add proper MVCC support
 ///
 /// # Use Cases
 ///
@@ -191,24 +197,21 @@ impl RocksDBTxn {
 
     /// Execute async callbacks with panic protection.
     ///
-    /// Each callback is executed sequentially to ensure proper error handling.
+    /// Each callback is executed sequentially with panic catching via FutureExt::catch_unwind.
     async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) {
+        use futures::FutureExt;
+
         for (i, callback) in callbacks.into_iter().enumerate() {
             let future = callback();
-            // Note: We can't catch panics in async code the same way, but we can
-            // catch panics from the callback creation and log them
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // The callback itself is already created, just await it
-            }));
+            // Wrap the future in AssertUnwindSafe and catch panics
+            let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
             if let Err(panic_info) = result {
                 tracing::error!(
                     callback_index = i,
                     panic = ?panic_info,
-                    "Async callback setup panicked"
+                    "Async callback panicked during execution - continuing with remaining callbacks"
                 );
-                continue;
             }
-            future.await;
         }
     }
 }
@@ -422,15 +425,20 @@ impl Txn for RocksDBTxn {
         // Handle async callbacks: spawn them in background with warning
         let on_discard_async = std::mem::take(&mut *self.on_discard_async.lock());
         if !on_discard_async.is_empty() {
-            tracing::error!(
-                count = on_discard_async.len(),
+            let callback_count = on_discard_async.len();
+            tracing::warn!(
+                count = callback_count,
                 "Transaction has async discard callbacks. Spawning in background - they may not complete if process exits. Consider using commit() instead of discard() when async callbacks are registered."
             );
 
-            // Spawn async callbacks in background
+            // Spawn async callbacks in background with error tracking
             // NOTE: These may not complete if the process exits before they finish
             tokio::spawn(async move {
                 Self::execute_async_callbacks(on_discard_async).await;
+                tracing::debug!(
+                    count = callback_count,
+                    "Async discard callbacks completed"
+                );
             });
         }
     }
@@ -615,5 +623,123 @@ mod tests {
         assert_eq!(count, 3);
 
         iter.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_empty_key_rejected() {
+        let (store, _temp_dir) = create_test_store().await;
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        // Empty key should be rejected for set
+        let result = txn.set(b"", b"value").await;
+        assert!(matches!(result, Err(Error::EmptyKey)));
+
+        // Empty key should be rejected for get
+        let result = txn.get(b"").await;
+        assert!(matches!(result, Err(Error::EmptyKey)));
+
+        // Empty key should be rejected for delete
+        let result = txn.delete(b"").await;
+        assert!(matches!(result, Err(Error::EmptyKey)));
+
+        // Empty key should be rejected for has
+        let result = txn.has(b"").await;
+        assert!(matches!(result, Err(Error::EmptyKey)));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_closed_store_rejected() {
+        let (store, _temp_dir) = create_test_store().await;
+
+        // Close the store
+        store.close().await.unwrap();
+
+        // Attempting to create a transaction on closed store should fail
+        let result = store.new_txn(false).await;
+        assert!(matches!(result, Err(Error::DBClosed)));
+
+        // Read-only transaction should also fail
+        let result = store.new_txn(true).await;
+        assert!(matches!(result, Err(Error::DBClosed)));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_has_operation() {
+        let (store, _temp_dir) = create_test_store().await;
+
+        // has() should return false for non-existent key
+        let txn = store.new_txn(true).await.unwrap();
+        assert!(!txn.has(b"nonexistent").await.unwrap());
+        drop(txn);
+
+        // Set a key and verify has() returns true
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"test_key", b"test_value").await.unwrap();
+        assert!(txn.has(b"test_key").await.unwrap());
+        txn.commit().await.unwrap();
+
+        // Verify has() returns true after commit
+        let txn = store.new_txn(true).await.unwrap();
+        assert!(txn.has(b"test_key").await.unwrap());
+        drop(txn);
+
+        // Delete the key and verify has() returns false
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.delete(b"test_key").await.unwrap();
+        assert!(!txn.has(b"test_key").await.unwrap());
+        txn.commit().await.unwrap();
+
+        // Verify has() returns false after delete
+        let txn = store.new_txn(true).await.unwrap();
+        assert!(!txn.has(b"test_key").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_read_your_writes() {
+        let (store, _temp_dir) = create_test_store().await;
+
+        // Test read-your-writes consistency within a transaction
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        // Write a value
+        txn.set(b"key", b"value1").await.unwrap();
+
+        // Should be able to read the uncommitted value
+        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value1".to_vec()));
+
+        // Update the value
+        txn.set(b"key", b"value2").await.unwrap();
+
+        // Should see the updated value
+        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value2".to_vec()));
+
+        // Delete the key
+        txn.delete(b"key").await.unwrap();
+
+        // Should see deletion
+        assert_eq!(txn.get(b"key").await.unwrap(), None);
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_callbacks() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (store, _temp_dir) = create_test_store().await;
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let success_called = Arc::new(AtomicBool::new(false));
+        let success_called_clone = Arc::clone(&success_called);
+
+        txn.on_success(Box::new(move || {
+            success_called_clone.store(true, Ordering::SeqCst);
+        }));
+
+        txn.set(b"key", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        assert!(success_called.load(Ordering::SeqCst));
     }
 }
