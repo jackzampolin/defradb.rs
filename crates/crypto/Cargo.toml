@@ -8,3 +8,33 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Core dependencies
+defra-core = { path = "../defra-core" }
+
+# Cryptography (workspace dependencies)
+ed25519-dalek.workspace = true
+k256.workspace = true
+sha2.workspace = true
+aes-gcm.workspace = true
+p256 = "0.13"              # secp256r1 (P-256) support
+
+# Additional crypto primitives
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }     # X25519 ECDH for ECIES
+hkdf = "0.12"             # HKDF key derivation for ECIES
+hmac = "0.12"             # HMAC authentication for ECIES
+rand = "0.8"              # Random number generation for keys and nonces
+
+# Encoding and serialization
+hex = "0.4"               # Hex encoding/decoding
+serde.workspace = true
+
+# DID support
+multibase = "0.9"         # Multibase encoding for DID keys
+unsigned-varint = "0.8"   # Varint encoding for multicodec
+
+# Error handling
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
