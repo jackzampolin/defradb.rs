@@ -8,3 +8,32 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+defra-core = { path = "../defra-core" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Storage backend
+rocksdb.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_cbor.workspace = true
+
+# IPLD
+cid.workspace = true
+# multihash.workspace = true  # Not needed yet in Phase 1
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion = "0.5"
+tempfile = "3.8"
