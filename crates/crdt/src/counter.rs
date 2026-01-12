@@ -4,8 +4,8 @@
 //! Counters use nonces to ensure unique DAG blocks for idempotent delivery.
 
 use crate::traits::{Context, Delta, ReplicatedData, ValueReader};
-use defra_core::{Error, Result, store::Store};
 use async_trait::async_trait;
+use defra_core::{store::Store, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::sync::Arc;
@@ -21,17 +21,133 @@ pub enum NumericKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CounterDelta {
     /// Document ID this delta applies to
-    pub doc_id: Vec<u8>,
+    doc_id: Vec<u8>,
     /// Field name within the document
-    pub field_name: String,
-    /// Priority for ordering (not used for conflict resolution in counters)
-    pub priority: u64,
-    /// Random nonce for uniqueness (prevents duplicate application)
-    pub nonce: i64,
+    field_name: String,
+    /// Priority for DAG ordering (counters merge commutatively, no conflict resolution needed)
+    priority: u64,
+    /// Nonce ensures idempotent delivery (same delta only applied once)
+    nonce: i64,
     /// Schema version identifier
-    pub schema_version_id: String,
+    schema_version_id: String,
     /// The increment/decrement value (can be negative)
-    pub data: Vec<u8>,
+    data: Vec<u8>,
+}
+
+impl CounterDelta {
+    /// Create a new Int64 counter delta
+    pub fn new_int64(
+        doc_id: Vec<u8>,
+        field_name: String,
+        priority: u64,
+        nonce: i64,
+        schema_version_id: String,
+        increment: i64,
+    ) -> Result<Self> {
+        if field_name.is_empty() {
+            return Err(Error::MergeError("field_name cannot be empty".into()));
+        }
+        if schema_version_id.is_empty() {
+            return Err(Error::MergeError(
+                "schema_version_id cannot be empty".into(),
+            ));
+        }
+        Ok(Self {
+            doc_id,
+            field_name,
+            priority,
+            nonce,
+            schema_version_id,
+            data: increment.to_be_bytes().to_vec(),
+        })
+    }
+
+    /// Create a new Float64 counter delta
+    pub fn new_float64(
+        doc_id: Vec<u8>,
+        field_name: String,
+        priority: u64,
+        nonce: i64,
+        schema_version_id: String,
+        increment: f64,
+    ) -> Result<Self> {
+        if field_name.is_empty() {
+            return Err(Error::MergeError("field_name cannot be empty".into()));
+        }
+        if schema_version_id.is_empty() {
+            return Err(Error::MergeError(
+                "schema_version_id cannot be empty".into(),
+            ));
+        }
+        if !increment.is_finite() {
+            return Err(Error::MergeError(format!(
+                "float64 increment must be finite, got: {}",
+                increment
+            )));
+        }
+        Ok(Self {
+            doc_id,
+            field_name,
+            priority,
+            nonce,
+            schema_version_id,
+            data: increment.to_be_bytes().to_vec(),
+        })
+    }
+
+    /// Get the document ID
+    pub fn doc_id(&self) -> &[u8] {
+        &self.doc_id
+    }
+
+    /// Get the field name
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    /// Get the priority
+    pub fn priority(&self) -> u64 {
+        self.priority
+    }
+
+    /// Get the nonce
+    pub fn nonce(&self) -> i64 {
+        self.nonce
+    }
+
+    /// Get the schema version ID
+    pub fn schema_version_id(&self) -> &str {
+        &self.schema_version_id
+    }
+
+    /// Get the raw data bytes
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Decode the increment value as i64
+    pub fn decode_int64(&self) -> Result<i64> {
+        if self.data.len() != 8 {
+            return Err(Error::MergeError(format!(
+                "invalid counter data length for field '{}': expected 8 bytes for i64, got {} bytes",
+                self.field_name, self.data.len()
+            )));
+        }
+        let bytes: [u8; 8] = self.data[..8].try_into().unwrap();
+        Ok(i64::from_be_bytes(bytes))
+    }
+
+    /// Decode the increment value as f64
+    pub fn decode_float64(&self) -> Result<f64> {
+        if self.data.len() != 8 {
+            return Err(Error::MergeError(format!(
+                "invalid counter data length for field '{}': expected 8 bytes for f64, got {} bytes",
+                self.field_name, self.data.len()
+            )));
+        }
+        let bytes: [u8; 8] = self.data[..8].try_into().unwrap();
+        Ok(f64::from_be_bytes(bytes))
+    }
 }
 
 impl Delta for CounterDelta {
@@ -57,26 +173,6 @@ impl Delta for CounterDelta {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl CounterDelta {
-    /// Decode the increment value as i64
-    pub fn decode_int64(&self) -> Result<i64> {
-        if self.data.len() != 8 {
-            return Err(Error::MergeError("invalid counter data length".into()));
-        }
-        let bytes: [u8; 8] = self.data[..8].try_into().unwrap();
-        Ok(i64::from_be_bytes(bytes))
-    }
-
-    /// Decode the increment value as f64
-    pub fn decode_float64(&self) -> Result<f64> {
-        if self.data.len() != 8 {
-            return Err(Error::MergeError("invalid counter data length".into()));
-        }
-        let bytes: [u8; 8] = self.data[..8].try_into().unwrap();
-        Ok(f64::from_be_bytes(bytes))
     }
 }
 
@@ -140,9 +236,20 @@ impl Counter {
     }
 
     /// Mark a nonce as applied
+    ///
+    /// Note: Nonces are stored permanently and never garbage collected in this implementation.
+    /// For production use, consider implementing nonce garbage collection strategies:
+    ///
+    /// 1. Time-based: Remove nonces older than a configurable retention period
+    /// 2. CID-based: Track nonces per DAG block and remove when blocks are pruned
+    /// 3. Hybrid: Combine time-based with causality tracking
+    ///
+    /// Nonce storage grows unbounded without GC, which could become a storage leak for
+    /// high-throughput counters. The trade-off is between storage cost and idempotency window.
     async fn mark_nonce(&self, nonce: i64) -> Result<()> {
         let mut nonce_key = self.nonce_prefix.clone();
         nonce_key.extend_from_slice(&nonce.to_be_bytes());
+        // Store [1] as marker (value unused, only key existence matters)
         self.store.set(&nonce_key, &[1]).await
     }
 
@@ -151,12 +258,25 @@ impl Counter {
         match self.store.get(&self.value_key).await? {
             Some(bytes) => {
                 if bytes.len() != 8 {
-                    return Err(Error::MergeError("invalid counter value length".into()));
+                    return Err(Error::MergeError(format!(
+                        "invalid counter value length for field '{}' in schema '{}': \
+                         expected 8 bytes, got {} bytes",
+                        self.field_name,
+                        self.schema_version_id,
+                        bytes.len()
+                    )));
                 }
                 let arr: [u8; 8] = bytes[..8].try_into().unwrap();
                 Ok(i64::from_be_bytes(arr))
             }
-            None => Ok(0),
+            None => {
+                eprintln!(
+                    "INFO: Counter value not found for field '{}' in schema '{}'. \
+                     Returning default value 0.",
+                    self.field_name, self.schema_version_id
+                );
+                Ok(0)
+            }
         }
     }
 
@@ -170,12 +290,25 @@ impl Counter {
         match self.store.get(&self.value_key).await? {
             Some(bytes) => {
                 if bytes.len() != 8 {
-                    return Err(Error::MergeError("invalid counter value length".into()));
+                    return Err(Error::MergeError(format!(
+                        "invalid counter value length for field '{}' in schema '{}': \
+                         expected 8 bytes, got {} bytes",
+                        self.field_name,
+                        self.schema_version_id,
+                        bytes.len()
+                    )));
                 }
                 let arr: [u8; 8] = bytes[..8].try_into().unwrap();
                 Ok(f64::from_be_bytes(arr))
             }
-            None => Ok(0.0),
+            None => {
+                eprintln!(
+                    "INFO: Counter value not found for field '{}' in schema '{}'. \
+                     Returning default value 0.0.",
+                    self.field_name, self.schema_version_id
+                );
+                Ok(0.0)
+            }
         }
     }
 
@@ -185,6 +318,13 @@ impl Counter {
     }
 
     /// Apply an increment/decrement
+    ///
+    /// WARNING: This implementation does NOT provide atomic updates across storage operations.
+    /// If the process crashes between updating the value and marking the nonce, the same delta
+    /// may be applied multiple times, violating CRDT idempotency guarantees.
+    ///
+    /// For production use, the Store implementation MUST guarantee atomicity across multiple
+    /// operations or provide a transaction API.
     async fn apply_delta(&mut self, delta: &CounterDelta) -> Result<()> {
         // Check if nonce already applied (idempotency)
         if self.has_nonce(delta.nonce).await? {
@@ -199,6 +339,7 @@ impl Counter {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
                 let current = self.get_int64().await?;
+                // Int64: Saturate on overflow to match Go DefraDB behavior
                 let new_value = current.saturating_add(increment);
                 self.set_int64(new_value).await?;
             }
@@ -227,6 +368,8 @@ impl Counter {
                     )));
                 }
 
+                // Float64: Reject overflow to infinity (different from int64 saturation)
+                // Rationale: NaN/infinity breaks CRDT convergence properties
                 let new_value = current + increment;
 
                 // Validate result (check for overflow to infinity)
@@ -290,51 +433,19 @@ impl ReplicatedData for Counter {
 #[async_trait]
 impl ValueReader for Counter {
     async fn value(&self) -> Result<Vec<u8>> {
-        self.store
-            .get(&self.value_key)
-            .await?
-            .ok_or_else(|| Error::MergeError("counter value not found".into()))
+        self.store.get(&self.value_key).await?.ok_or_else(|| {
+            Error::MergeError(format!(
+                "counter value not found for field '{}' in schema '{}'",
+                self.field_name, self.schema_version_id
+            ))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use tokio::sync::Mutex;
-
-    struct MemoryStore {
-        data: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
-    }
-
-    impl MemoryStore {
-        fn new() -> Self {
-            Self {
-                data: Arc::new(Mutex::new(HashMap::new())),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Store for MemoryStore {
-        async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            Ok(self.data.lock().await.get(key).cloned())
-        }
-
-        async fn set(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.data.lock().await.insert(key.to_vec(), value.to_vec());
-            Ok(())
-        }
-
-        async fn delete(&self, key: &[u8]) -> Result<()> {
-            self.data.lock().await.remove(key);
-            Ok(())
-        }
-
-        async fn has(&self, key: &[u8]) -> Result<bool> {
-            Ok(self.data.lock().await.contains_key(key))
-        }
-    }
+    use crate::test_utils::MemoryStore;
 
     #[tokio::test]
     async fn test_counter_increment() {
@@ -354,14 +465,15 @@ mod tests {
         };
 
         // Increment by 5
-        let delta1 = CounterDelta {
-            doc_id: b"doc1".to_vec(),
-            field_name: "count".to_string(),
-            priority: 10,
-            nonce: 12345,
-            schema_version_id: "v1".to_string(),
-            data: 5i64.to_be_bytes().to_vec(),
-        };
+        let delta1 = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            5,
+        )
+        .unwrap();
         counter.merge(&ctx, &delta1).await.unwrap();
 
         // Increment by 3
@@ -522,7 +634,10 @@ mod tests {
 
         let result = counter.merge(&ctx, &delta).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field name mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("field name mismatch"));
     }
 
     #[tokio::test]
@@ -554,7 +669,10 @@ mod tests {
 
         let result = counter.merge(&ctx, &delta).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("schema version mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema version mismatch"));
     }
 
     #[tokio::test]
@@ -847,5 +965,69 @@ mod tests {
         let value2_bytes = counter2.value().await.unwrap();
         let value2 = i64::from_be_bytes(value2_bytes.try_into().unwrap());
         assert_eq!(value2, 7);
+    }
+
+    #[tokio::test]
+    async fn test_counter_float64_precision_edge_cases() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store,
+            "v1".to_string(),
+            b"doc1",
+            "value".to_string(),
+            true,
+            NumericKind::Float64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Test very small increments (near machine epsilon)
+        let delta1 = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "value".to_string(),
+            10,
+            1001,
+            "v1".to_string(),
+            1e-308, // Very small number
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta1).await.unwrap();
+
+        // Add a large number
+        let delta2 = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "value".to_string(),
+            20,
+            1002,
+            "v1".to_string(),
+            1e308, // Very large number
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta2).await.unwrap();
+
+        // Subtract the large number
+        let delta3 = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "value".to_string(),
+            30,
+            1003,
+            "v1".to_string(),
+            -1e308,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta3).await.unwrap();
+
+        // Result should be close to the original small number
+        // Due to floating point precision, this tests that we don't lose the small value entirely
+        let value_bytes = counter.value().await.unwrap();
+        let arr: [u8; 8] = value_bytes.try_into().unwrap();
+        let value = f64::from_be_bytes(arr);
+
+        // Value should be finite and very small (not exactly 1e-308 due to FP precision)
+        assert!(value.is_finite());
+        assert!(value.abs() < 1e-100); // Should be very small
     }
 }

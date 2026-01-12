@@ -6,15 +6,20 @@
 //! - Idempotence: Merging same delta multiple times has same effect (A+A = A)
 //! - Convergence: All replicas converge to same state
 
-use crdt::{Lww, LwwDelta, Counter, CounterDelta, traits::{Context, ReplicatedData, ValueReader}};
-use defra_core::{types::DocId, store::Store, Result};
 use async_trait::async_trait;
+use crdt::{
+    traits::{Context, ReplicatedData, ValueReader},
+    Counter, CounterDelta, Lww, LwwDelta,
+};
+use defra_core::{store::Store, types::DocId, Result};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// In-memory store for testing
+/// Note: Duplicated from test_utils.rs because integration tests cannot access
+/// modules marked with #[cfg(test)]
 struct MemoryStore {
     data: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
 }
@@ -81,21 +86,23 @@ proptest! {
                 "field1".to_string(),
             );
 
-            let delta1 = LwwDelta {
-                doc_id: b"doc1".to_vec(),
-                field_name: "field1".to_string(),
-                priority: priority1,
-                schema_version_id: "v1".to_string(),
-                data: data1.clone(),
-            };
+            let delta1 = LwwDelta::new(
+                b"doc1".to_vec(),
+                "field1".to_string(),
+                priority1,
+                "v1".to_string(),
+                data1.clone(),
+            )
+            .unwrap();
 
-            let delta2 = LwwDelta {
-                doc_id: b"doc1".to_vec(),
-                field_name: "field1".to_string(),
-                priority: priority2,
-                schema_version_id: "v1".to_string(),
-                data: data2.clone(),
-            };
+            let delta2 = LwwDelta::new(
+                b"doc1".to_vec(),
+                "field1".to_string(),
+                priority2,
+                "v1".to_string(),
+                data2.clone(),
+            )
+            .unwrap();
 
             // Merge in order: delta1, delta2
             lww1.merge(&ctx, &delta1).await.unwrap();
@@ -134,13 +141,14 @@ proptest! {
                 "field1".to_string(),
             );
 
-            let delta = LwwDelta {
-                doc_id: b"doc1".to_vec(),
-                field_name: "field1".to_string(),
+            let delta = LwwDelta::new(
+                b"doc1".to_vec(),
+                "field1".to_string(),
                 priority,
-                schema_version_id: "v1".to_string(),
-                data: data.clone(),
-            };
+                "v1".to_string(),
+                data.clone(),
+            )
+            .unwrap();
 
             // Merge once
             lww.merge(&ctx, &delta).await.unwrap();
@@ -196,23 +204,25 @@ proptest! {
                 crdt::counter::NumericKind::Int64,
             );
 
-            let delta1 = CounterDelta {
-                doc_id: b"doc1".to_vec(),
-                field_name: "count".to_string(),
-                priority: 10,
-                nonce: nonce1,
-                schema_version_id: "v1".to_string(),
-                data: inc1.to_be_bytes().to_vec(),
-            };
+            let delta1 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            )
+            .unwrap();
 
-            let delta2 = CounterDelta {
-                doc_id: b"doc1".to_vec(),
-                field_name: "count".to_string(),
-                priority: 20,
-                nonce: nonce2,
-                schema_version_id: "v1".to_string(),
-                data: inc2.to_be_bytes().to_vec(),
-            };
+            let delta2 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            )
+            .unwrap();
 
             // Merge in order: delta1, delta2
             counter1.merge(&ctx, &delta1).await.unwrap();
@@ -257,14 +267,15 @@ proptest! {
                 crdt::counter::NumericKind::Int64,
             );
 
-            let delta = CounterDelta {
-                doc_id: b"doc1".to_vec(),
-                field_name: "count".to_string(),
-                priority: 10,
+            let delta = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
                 nonce,
-                schema_version_id: "v1".to_string(),
-                data: increment.to_be_bytes().to_vec(),
-            };
+                "v1".to_string(),
+                increment,
+            )
+            .unwrap();
 
             // Merge once
             counter.merge(&ctx, &delta).await.unwrap();
@@ -313,12 +324,15 @@ proptest! {
             // Create deltas
             let lww_deltas: Vec<LwwDelta> = deltas
                 .iter()
-                .map(|(priority, data)| LwwDelta {
-                    doc_id: b"doc1".to_vec(),
-                    field_name: "field1".to_string(),
-                    priority: *priority,
-                    schema_version_id: "v1".to_string(),
-                    data: data.clone(),
+                .map(|(priority, data)| {
+                    LwwDelta::new(
+                        b"doc1".to_vec(),
+                        "field1".to_string(),
+                        *priority,
+                        "v1".to_string(),
+                        data.clone(),
+                    )
+                    .unwrap()
                 })
                 .collect();
 

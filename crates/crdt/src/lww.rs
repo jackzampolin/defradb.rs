@@ -4,10 +4,10 @@
 //! When two concurrent writes occur, the one with higher priority wins.
 //! On tie, lexicographic comparison of values provides deterministic resolution.
 
-use crate::traits::{Context, Delta, ReplicatedData, ValueReader, PriorityReader};
-use crate::priority::{encode_priority, decode_priority};
-use defra_core::{Error, Result, store::Store};
+use crate::priority::{decode_priority, encode_priority};
+use crate::traits::{Context, Delta, PriorityReader, ReplicatedData, ValueReader};
 use async_trait::async_trait;
+use defra_core::{store::Store, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::sync::Arc;
@@ -16,15 +16,82 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LwwDelta {
     /// Document ID this delta applies to
-    pub doc_id: Vec<u8>,
+    doc_id: Vec<u8>,
     /// Field name within the document
-    pub field_name: String,
+    field_name: String,
     /// Priority for conflict resolution
-    pub priority: u64,
+    priority: u64,
     /// Schema version identifier
-    pub schema_version_id: String,
+    schema_version_id: String,
     /// The new value (empty vec = deletion/tombstone)
-    pub data: Vec<u8>,
+    data: Vec<u8>,
+}
+
+impl LwwDelta {
+    /// Create a new LWW delta
+    pub fn new(
+        doc_id: Vec<u8>,
+        field_name: String,
+        priority: u64,
+        schema_version_id: String,
+        data: Vec<u8>,
+    ) -> Result<Self> {
+        if field_name.is_empty() {
+            return Err(Error::MergeError("field_name cannot be empty".into()));
+        }
+        if schema_version_id.is_empty() {
+            return Err(Error::MergeError(
+                "schema_version_id cannot be empty".into(),
+            ));
+        }
+        Ok(Self {
+            doc_id,
+            field_name,
+            priority,
+            schema_version_id,
+            data,
+        })
+    }
+
+    /// Create a deletion delta (tombstone)
+    pub fn delete(
+        doc_id: Vec<u8>,
+        field_name: String,
+        priority: u64,
+        schema_version_id: String,
+    ) -> Result<Self> {
+        Self::new(doc_id, field_name, priority, schema_version_id, Vec::new())
+    }
+
+    /// Check if this delta is a tombstone (deletion)
+    pub fn is_tombstone(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Get the document ID
+    pub fn doc_id(&self) -> &[u8] {
+        &self.doc_id
+    }
+
+    /// Get the field name
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    /// Get the priority
+    pub fn priority(&self) -> u64 {
+        self.priority
+    }
+
+    /// Get the schema version ID
+    pub fn schema_version_id(&self) -> &str {
+        &self.schema_version_id
+    }
+
+    /// Get the data
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
 
 impl Delta for LwwDelta {
@@ -112,11 +179,14 @@ impl Lww {
         // Compare priorities
         match incoming_priority.cmp(&current_priority) {
             std::cmp::Ordering::Less => {
-                // Incoming priority is lower - ignore
+                // LWW semantics: Reject updates with lower priority
+                // This is not an error - it's correct CRDT behavior
                 return Ok(());
             }
             std::cmp::Ordering::Equal => {
                 // Same priority - use lexicographic tie-breaking
+                // On exact equality (data == current), current value wins (reject incoming)
+                // This ensures deterministic convergence across replicas
                 let current_value = self.get_value_internal().await?;
                 if data <= &current_value[..] {
                     // Current value wins or equal - ignore
@@ -145,17 +215,31 @@ impl Lww {
 
     /// Internal method to get current value
     async fn get_value_internal(&self) -> Result<Vec<u8>> {
-        self.store
-            .get(&self.value_key)
-            .await?
-            .ok_or_else(|| Error::MergeError("value not found".into()))
+        self.store.get(&self.value_key).await?.ok_or_else(|| {
+            Error::MergeError(format!(
+                "value not found for field '{}' in schema '{}'. \
+                     This indicates the field has never been set or has been deleted.",
+                self.field_name, self.schema_version_id
+            ))
+        })
     }
 
     /// Internal method to get current priority
     async fn get_priority_internal(&self) -> Result<u64> {
         match self.store.get(&self.priority_key).await? {
             Some(bytes) => decode_priority(&bytes),
-            None => Ok(0), // Default priority if not set
+            None => {
+                // WARNING: Missing priority should only occur on uninitialized state
+                // If value exists but priority doesn't, this indicates data corruption
+                // or partial write failure
+                eprintln!(
+                    "WARNING: Priority key not found for field '{}' in schema '{}'. \
+                     Returning default priority 0. This may indicate storage corruption \
+                     if the value key exists.",
+                    self.field_name, self.schema_version_id
+                );
+                Ok(0)
+            }
         }
     }
 }
@@ -216,52 +300,12 @@ impl PriorityReader for Lww {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use tokio::sync::Mutex;
-
-    /// Simple in-memory store for testing
-    struct MemoryStore {
-        data: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
-    }
-
-    impl MemoryStore {
-        fn new() -> Self {
-            Self {
-                data: Arc::new(Mutex::new(HashMap::new())),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Store for MemoryStore {
-        async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            Ok(self.data.lock().await.get(key).cloned())
-        }
-
-        async fn set(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.data.lock().await.insert(key.to_vec(), value.to_vec());
-            Ok(())
-        }
-
-        async fn delete(&self, key: &[u8]) -> Result<()> {
-            self.data.lock().await.remove(key);
-            Ok(())
-        }
-
-        async fn has(&self, key: &[u8]) -> Result<bool> {
-            Ok(self.data.lock().await.contains_key(key))
-        }
-    }
+    use crate::test_utils::MemoryStore;
 
     #[tokio::test]
     async fn test_lww_higher_priority_wins() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -269,13 +313,14 @@ mod tests {
         };
 
         // First write with priority 10
-        let delta1 = LwwDelta {
-            doc_id: b"doc1".to_vec(),
-            field_name: "name".to_string(),
-            priority: 10,
-            schema_version_id: "v1".to_string(),
-            data: b"Alice".to_vec(),
-        };
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
         lww.merge(&ctx, &delta1).await.unwrap();
         assert_eq!(lww.value().await.unwrap(), b"Alice");
 
@@ -294,12 +339,7 @@ mod tests {
     #[tokio::test]
     async fn test_lww_lower_priority_ignored() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -331,12 +371,7 @@ mod tests {
     #[tokio::test]
     async fn test_lww_same_priority_lexicographic() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -369,12 +404,7 @@ mod tests {
     #[tokio::test]
     async fn test_lww_deletion() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -403,5 +433,133 @@ mod tests {
 
         // Value should be deleted
         assert!(lww.value().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_lww_empty_data_tie_breaking() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Write value at priority 10
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
+        lww.merge(&ctx, &delta1).await.unwrap();
+        assert_eq!(lww.value().await.unwrap(), b"Alice");
+
+        // Delete (empty data) at same priority 10
+        // Lexicographically, empty < "Alice", so "Alice" should win
+        let delta2 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            Vec::new(),
+        )
+        .unwrap();
+        lww.merge(&ctx, &delta2).await.unwrap();
+
+        // Value should still be "Alice" (empty data lost tie-break)
+        assert_eq!(lww.value().await.unwrap(), b"Alice");
+
+        // Now delete at higher priority 20
+        let delta3 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            20,
+            "v1".to_string(),
+            Vec::new(),
+        )
+        .unwrap();
+        lww.merge(&ctx, &delta3).await.unwrap();
+
+        // Value should now be deleted
+        assert!(lww.value().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_lww_deletion_resurrection_with_priority() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Write value at priority 20
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            20,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
+        lww.merge(&ctx, &delta1).await.unwrap();
+
+        // Try to delete at lower priority 10 (should be ignored)
+        let delta2 =
+            LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 10, "v1".to_string()).unwrap();
+        lww.merge(&ctx, &delta2).await.unwrap();
+
+        // Value should still exist (deletion was lower priority)
+        assert_eq!(lww.value().await.unwrap(), b"Alice");
+
+        // Delete at same priority 20
+        // Since priorities are equal, lexicographic tie-breaking applies
+        // Empty data < "Alice", so "Alice" wins
+        let delta3 =
+            LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 20, "v1".to_string()).unwrap();
+        lww.merge(&ctx, &delta3).await.unwrap();
+
+        // Value should still be "Alice" (tie-break)
+        assert_eq!(lww.value().await.unwrap(), b"Alice");
+
+        // Delete at higher priority 30
+        let delta4 =
+            LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 30, "v1".to_string()).unwrap();
+        lww.merge(&ctx, &delta4).await.unwrap();
+
+        // Value should now be deleted
+        assert!(lww.value().await.is_err());
+
+        // Try to resurrect with lower priority 25 (should fail)
+        let delta5 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            25,
+            "v1".to_string(),
+            b"Bob".to_vec(),
+        )
+        .unwrap();
+        lww.merge(&ctx, &delta5).await.unwrap();
+
+        // Value should still be deleted (resurrection priority too low)
+        assert!(lww.value().await.is_err());
+
+        // Resurrect with higher priority 40
+        let delta6 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            40,
+            "v1".to_string(),
+            b"Bob".to_vec(),
+        )
+        .unwrap();
+        lww.merge(&ctx, &delta6).await.unwrap();
+
+        // Value should now be resurrected
+        assert_eq!(lww.value().await.unwrap(), b"Bob");
     }
 }

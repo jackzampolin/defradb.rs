@@ -1,7 +1,7 @@
 //! Core traits for CRDT operations
 
-use defra_core::{Result, types::DocId};
 use async_trait::async_trait;
+use defra_core::{types::DocId, Result};
 use std::any::Any;
 
 /// Context for CRDT operations
