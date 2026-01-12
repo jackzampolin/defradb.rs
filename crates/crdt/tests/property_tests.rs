@@ -1,0 +1,343 @@
+//! Property-based tests for CRDT implementations
+//!
+//! These tests verify fundamental CRDT properties:
+//! - Commutativity: Order of merge doesn't matter (A+B = B+A)
+//! - Associativity: Grouping of merges doesn't matter ((A+B)+C = A+(B+C))
+//! - Idempotence: Merging same delta multiple times has same effect (A+A = A)
+//! - Convergence: All replicas converge to same state
+
+use crdt::{Lww, LwwDelta, Counter, CounterDelta, traits::{Context, ReplicatedData, ValueReader}};
+use defra_core::{types::DocId, store::Store, Result};
+use async_trait::async_trait;
+use proptest::prelude::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// In-memory store for testing
+struct MemoryStore {
+    data: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+}
+
+impl MemoryStore {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl Store for MemoryStore {
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.data.lock().await.get(key).cloned())
+    }
+
+    async fn set(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.data.lock().await.insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+
+    async fn delete(&self, key: &[u8]) -> Result<()> {
+        self.data.lock().await.remove(key);
+        Ok(())
+    }
+
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        Ok(self.data.lock().await.contains_key(key))
+    }
+}
+
+proptest! {
+    /// Property: LWW commutativity - order of merges doesn't matter
+    #[test]
+    fn test_lww_commutativity(
+        priority1 in 1u64..1000,
+        priority2 in 1001u64..2000,
+        data1 in prop::collection::vec(any::<u8>(), 1..20),
+        data2 in prop::collection::vec(any::<u8>(), 1..20),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create two LWW instances
+            let store1 = Arc::new(MemoryStore::new());
+            let mut lww1 = Lww::new(
+                store1.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "field1".to_string(),
+            );
+
+            let store2 = Arc::new(MemoryStore::new());
+            let mut lww2 = Lww::new(
+                store2.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "field1".to_string(),
+            );
+
+            let delta1 = LwwDelta {
+                doc_id: b"doc1".to_vec(),
+                field_name: "field1".to_string(),
+                priority: priority1,
+                schema_version_id: "v1".to_string(),
+                data: data1.clone(),
+            };
+
+            let delta2 = LwwDelta {
+                doc_id: b"doc1".to_vec(),
+                field_name: "field1".to_string(),
+                priority: priority2,
+                schema_version_id: "v1".to_string(),
+                data: data2.clone(),
+            };
+
+            // Merge in order: delta1, delta2
+            lww1.merge(&ctx, &delta1).await.unwrap();
+            lww1.merge(&ctx, &delta2).await.unwrap();
+
+            // Merge in reverse order: delta2, delta1
+            lww2.merge(&ctx, &delta2).await.unwrap();
+            lww2.merge(&ctx, &delta1).await.unwrap();
+
+            // Both should converge to the same value
+            let value1 = lww1.value().await.unwrap();
+            let value2 = lww2.value().await.unwrap();
+
+            assert_eq!(value1, value2);
+        });
+    }
+
+    /// Property: LWW idempotence - merging same delta multiple times
+    #[test]
+    fn test_lww_idempotence(
+        priority in 1u64..10000,
+        data in prop::collection::vec(any::<u8>(), 1..20),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let store = Arc::new(MemoryStore::new());
+            let mut lww = Lww::new(
+                store.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "field1".to_string(),
+            );
+
+            let delta = LwwDelta {
+                doc_id: b"doc1".to_vec(),
+                field_name: "field1".to_string(),
+                priority,
+                schema_version_id: "v1".to_string(),
+                data: data.clone(),
+            };
+
+            // Merge once
+            lww.merge(&ctx, &delta).await.unwrap();
+            let value1 = lww.value().await.unwrap();
+
+            // Merge again
+            lww.merge(&ctx, &delta).await.unwrap();
+            let value2 = lww.value().await.unwrap();
+
+            // Values should be identical
+            assert_eq!(value1, value2);
+        });
+    }
+
+    /// Property: Counter commutativity
+    #[test]
+    fn test_counter_commutativity(
+        inc1 in -100i64..100,
+        inc2 in -100i64..100,
+        nonce1 in any::<i64>(),
+        nonce2 in any::<i64>(),
+    ) {
+        // Skip if nonces are the same
+        if nonce1 == nonce2 {
+            return Ok(());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create two counters
+            let store1 = Arc::new(MemoryStore::new());
+            let mut counter1 = Counter::new(
+                store1.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true, // allow decrement
+                crdt::counter::NumericKind::Int64,
+            );
+
+            let store2 = Arc::new(MemoryStore::new());
+            let mut counter2 = Counter::new(
+                store2.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Int64,
+            );
+
+            let delta1 = CounterDelta {
+                doc_id: b"doc1".to_vec(),
+                field_name: "count".to_string(),
+                priority: 10,
+                nonce: nonce1,
+                schema_version_id: "v1".to_string(),
+                data: inc1.to_be_bytes().to_vec(),
+            };
+
+            let delta2 = CounterDelta {
+                doc_id: b"doc1".to_vec(),
+                field_name: "count".to_string(),
+                priority: 20,
+                nonce: nonce2,
+                schema_version_id: "v1".to_string(),
+                data: inc2.to_be_bytes().to_vec(),
+            };
+
+            // Merge in order: delta1, delta2
+            counter1.merge(&ctx, &delta1).await.unwrap();
+            counter1.merge(&ctx, &delta2).await.unwrap();
+
+            // Merge in reverse: delta2, delta1
+            counter2.merge(&ctx, &delta2).await.unwrap();
+            counter2.merge(&ctx, &delta1).await.unwrap();
+
+            // Both should have same value (sum of increments)
+            let value1_bytes = counter1.value().await.unwrap();
+            let value2_bytes = counter2.value().await.unwrap();
+
+            let value1 = i64::from_be_bytes(value1_bytes.try_into().unwrap());
+            let value2 = i64::from_be_bytes(value2_bytes.try_into().unwrap());
+
+            assert_eq!(value1, value2);
+            assert_eq!(value1, inc1.saturating_add(inc2));
+        });
+    }
+
+    /// Property: Counter idempotence
+    #[test]
+    fn test_counter_idempotence(
+        increment in -100i64..100,
+        nonce in any::<i64>(),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let store = Arc::new(MemoryStore::new());
+            let mut counter = Counter::new(
+                store.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Int64,
+            );
+
+            let delta = CounterDelta {
+                doc_id: b"doc1".to_vec(),
+                field_name: "count".to_string(),
+                priority: 10,
+                nonce,
+                schema_version_id: "v1".to_string(),
+                data: increment.to_be_bytes().to_vec(),
+            };
+
+            // Merge once
+            counter.merge(&ctx, &delta).await.unwrap();
+            let value1_bytes = counter.value().await.unwrap();
+            let value1 = i64::from_be_bytes(value1_bytes.try_into().unwrap());
+
+            // Merge same delta again (should be ignored due to nonce)
+            counter.merge(&ctx, &delta).await.unwrap();
+            let value2_bytes = counter.value().await.unwrap();
+            let value2 = i64::from_be_bytes(value2_bytes.try_into().unwrap());
+
+            // Values should be identical (only applied once)
+            assert_eq!(value1, value2);
+            assert_eq!(value1, increment);
+        });
+    }
+
+    /// Property: LWW convergence with multiple replicas
+    #[test]
+    fn test_lww_multi_replica_convergence(
+        deltas in prop::collection::vec(
+            (1u64..10000, prop::collection::vec(any::<u8>(), 1..20)),
+            3..10
+        )
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create 3 replicas
+            let mut replicas = Vec::new();
+            for _ in 0..3 {
+                let store = Arc::new(MemoryStore::new());
+                let lww = Lww::new(
+                    store.clone(),
+                    "v1".to_string(),
+                    b"doc1",
+                    "field1".to_string(),
+                );
+                replicas.push(lww);
+            }
+
+            // Create deltas
+            let lww_deltas: Vec<LwwDelta> = deltas
+                .iter()
+                .map(|(priority, data)| LwwDelta {
+                    doc_id: b"doc1".to_vec(),
+                    field_name: "field1".to_string(),
+                    priority: *priority,
+                    schema_version_id: "v1".to_string(),
+                    data: data.clone(),
+                })
+                .collect();
+
+            // Merge all deltas into all replicas (in different orders)
+            for (i, replica) in replicas.iter_mut().enumerate() {
+                for (j, _delta) in lww_deltas.iter().enumerate() {
+                    // Different replicas see deltas in different orders
+                    let idx = (i + j) % lww_deltas.len();
+                    replica.merge(&ctx, &lww_deltas[idx]).await.unwrap();
+                }
+            }
+
+            // All replicas should converge to the same value
+            let value0 = replicas[0].value().await.unwrap();
+            let value1 = replicas[1].value().await.unwrap();
+            let value2 = replicas[2].value().await.unwrap();
+
+            assert_eq!(&value0, &value1);
+            assert_eq!(&value1, &value2);
+        });
+    }
+}

@@ -8,3 +8,19 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+defra-core = { path = "../defra-core" }
+
+# Async
+async-trait.workspace = true
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
