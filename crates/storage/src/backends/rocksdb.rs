@@ -419,6 +419,14 @@ impl Txn for RocksDBTxn {
         self.on_discard_async.lock().unwrap().push(callback);
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn is_readonly(&self) -> bool {
         self.readonly
     }

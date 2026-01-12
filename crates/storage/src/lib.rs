@@ -70,11 +70,15 @@
 /// - Key encoding/decoding with CockroachDB-style varint
 /// - Hierarchical organization with prefixes
 ///
-/// ## Phase 3: Store Implementations (Pending)
-/// - Namespace isolation
-/// - Seven specialized stores
-/// - Multistore coordinator
-/// - Chunking for large values
+/// ## Phase 3: Store Implementations ⚠️ (Implementation Complete, Tests Pending)
+/// - Namespace isolation ✅
+/// - RootStore foundation ✅
+/// - Datastore with automatic chunking (>1MB) ✅
+/// - Blockstore with merge tracking for CRDTs ✅
+/// - Headstore, Systemstore, Peerstore ✅
+/// - Multistore coordinator ✅
+/// - Transaction downcasting support ✅
+/// - Note: Store-specific tests need updates for transaction wrapper pattern
 ///
 /// ## Phase 4: Transaction System (Pending)
 /// - DefraDB transaction wrapper
@@ -94,11 +98,11 @@
 pub mod backends;
 pub mod corekv;
 pub mod keys;
+pub mod namespace;
+pub mod stores;
 
-// Phase 3+ modules (to be implemented)
-// pub mod stores;
+// Phase 4+ modules (to be implemented)
 // pub mod transaction;
-// pub mod namespace;
 
 // Re-export commonly used types for convenience
 pub use backends::{MemoryStore, RocksDBStore};

@@ -247,6 +247,12 @@ pub trait Txn: ReaderWriter {
     /// Multiple callbacks can be registered and will be executed concurrently.
     fn on_discard_async(&mut self, callback: AsyncTxnCallback);
 
+    /// Downcast to concrete type (for internal use in tests)
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Downcast to concrete type (for internal use in tests)
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     /// Check if this is a read-only transaction.
     fn is_readonly(&self) -> bool;
 }
