@@ -1,0 +1,23 @@
+[package]
+name = "defra-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Async
+async-trait.workspace = true
+
+# Logging
+tracing.workspace = true

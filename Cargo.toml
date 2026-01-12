@@ -1,0 +1,90 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/defra-core",
+    "crates/crdt",
+    "crates/storage",
+    "crates/blockstore",
+    "crates/schema",
+    "crates/query",
+    "crates/p2p",
+    "crates/crypto",
+    "crates/http",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Source Network <contact@source.network>"]
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/sourcenetwork/defradb.rs"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_cbor = "0.11"
+
+# P2P networking
+libp2p = { version = "0.54", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns"] }
+multiaddr = "0.18"
+
+# Storage
+rocksdb = "0.22"
+
+# Cryptography
+ed25519-dalek = { version = "2.1", features = ["serde"] }
+k256 = { version = "0.13", features = ["ecdsa", "serde"] }
+sha2 = "0.10"
+aes-gcm = "0.10"
+
+# IPLD
+cid = "0.11"
+multihash = { version = "0.19", features = ["sha2"] }
+
+# GraphQL
+graphql-parser = "0.4"
+
+# HTTP
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Testing
+proptest = "1.4"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.test]
+opt-level = 1
+
+[profile.bench]
+opt-level = 3
