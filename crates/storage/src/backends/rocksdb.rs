@@ -115,6 +115,7 @@ impl Store for RocksDBStore {
         Ok(Box::new(RocksDBTxn {
             db: Arc::clone(&self.db),
             batch: Mutex::new(WriteBatch::default()),
+            pending: Mutex::new(std::collections::HashMap::new()),
             readonly,
             discarded: Mutex::new(false),
             on_success: Mutex::new(Vec::new()),
@@ -145,6 +146,10 @@ struct RocksDBTxn {
 
     /// Write batch for pending changes
     batch: Mutex<WriteBatch>,
+
+    /// Pending writes tracker for read-your-writes support
+    /// (Some(value) = set, None = delete)
+    pending: Mutex<std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>>,
 
     /// Whether this is a read-only transaction
     readonly: bool,
@@ -189,7 +194,7 @@ impl RocksDBTxn {
 #[async_trait]
 impl Reader for RocksDBTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -197,7 +202,14 @@ impl Reader for RocksDBTxn {
             return Err(Error::EmptyKey);
         }
 
-        // Read directly from DB
+        // Check pending writes first (read-your-writes)
+        let pending = self.pending.lock().unwrap();
+        if let Some(pending_value) = pending.get(key) {
+            return Ok(pending_value.clone());
+        }
+        drop(pending);
+
+        // Read from DB
         match self.db.get(key)? {
             Some(value) => Ok(Some(value.to_vec())),
             None => Ok(None),
@@ -205,7 +217,7 @@ impl Reader for RocksDBTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -213,11 +225,18 @@ impl Reader for RocksDBTxn {
             return Err(Error::EmptyKey);
         }
 
+        // Check pending writes first
+        let pending = self.pending.lock().unwrap();
+        if let Some(pending_value) = pending.get(key) {
+            return Ok(pending_value.is_some());
+        }
+        drop(pending);
+
         Ok(self.db.get(key)?.is_some())
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -284,7 +303,7 @@ impl Reader for RocksDBTxn {
 #[async_trait]
 impl Writer for RocksDBTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -296,12 +315,16 @@ impl Writer for RocksDBTxn {
             return Err(Error::EmptyKey);
         }
 
-        self.batch.put(key, value);
+        // Track in pending for read-your-writes
+        self.pending.lock().unwrap().insert(key.to_vec(), Some(value.to_vec()));
+
+        // Add to batch
+        self.batch.lock().unwrap().put(key, value);
         Ok(())
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -313,15 +336,19 @@ impl Writer for RocksDBTxn {
             return Err(Error::EmptyKey);
         }
 
-        self.batch.delete(key);
+        // Track in pending (None = deleted)
+        self.pending.lock().unwrap().insert(key.to_vec(), None);
+
+        // Add to batch
+        self.batch.lock().unwrap().delete(key);
         Ok(())
     }
 }
 
 #[async_trait]
 impl Txn for RocksDBTxn {
-    async fn commit(mut self: Box<Self>) -> Result<()> {
-        if self.discarded {
+    async fn commit(self: Box<Self>) -> Result<()> {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -329,19 +356,22 @@ impl Txn for RocksDBTxn {
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false); // Use WAL without fsync for better performance
 
-        match self.db.write_opt(self.batch, &write_opts) {
+        // Take ownership of the batch
+        let batch = std::mem::replace(&mut *self.batch.lock().unwrap(), WriteBatch::default());
+
+        match self.db.write_opt(batch, &write_opts) {
             Ok(_) => {
                 // Execute success callbacks
-                let on_success = std::mem::take(&mut self.on_success);
-                let on_success_async = std::mem::take(&mut self.on_success_async);
+                let on_success = std::mem::take(&mut *self.on_success.lock().unwrap());
+                let on_success_async = std::mem::take(&mut *self.on_success_async.lock().unwrap());
                 Self::execute_callbacks(on_success);
                 Self::execute_async_callbacks(on_success_async).await;
                 Ok(())
             }
             Err(e) => {
                 // Execute error callbacks
-                let on_error = std::mem::take(&mut self.on_error);
-                let on_error_async = std::mem::take(&mut self.on_error_async);
+                let on_error = std::mem::take(&mut *self.on_error.lock().unwrap());
+                let on_error_async = std::mem::take(&mut *self.on_error_async.lock().unwrap());
                 Self::execute_callbacks(on_error);
                 Self::execute_async_callbacks(on_error_async).await;
                 Err(e.into())
@@ -349,15 +379,16 @@ impl Txn for RocksDBTxn {
         }
     }
 
-    fn discard(mut self: Box<Self>) {
-        self.discarded = true;
+    fn discard(self: Box<Self>) {
+        *self.discarded.lock().unwrap() = true;
 
         // Execute discard callbacks
-        let on_discard = std::mem::take(&mut self.on_discard);
+        let on_discard = std::mem::take(&mut *self.on_discard.lock().unwrap());
         Self::execute_callbacks(on_discard);
 
         // Note: We can't execute async callbacks in a sync method
-        if !self.on_discard_async.is_empty() {
+        let async_callbacks = self.on_discard_async.lock().unwrap();
+        if !async_callbacks.is_empty() {
             tracing::warn!(
                 "Async discard callbacks cannot be executed in sync discard method"
             );
@@ -365,27 +396,27 @@ impl Txn for RocksDBTxn {
     }
 
     fn on_success(&mut self, callback: TxnCallback) {
-        self.on_success.push(callback);
+        self.on_success.lock().unwrap().push(callback);
     }
 
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_success_async.push(callback);
+        self.on_success_async.lock().unwrap().push(callback);
     }
 
     fn on_error(&mut self, callback: TxnCallback) {
-        self.on_error.push(callback);
+        self.on_error.lock().unwrap().push(callback);
     }
 
     fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_error_async.push(callback);
+        self.on_error_async.lock().unwrap().push(callback);
     }
 
     fn on_discard(&mut self, callback: TxnCallback) {
-        self.on_discard.push(callback);
+        self.on_discard.lock().unwrap().push(callback);
     }
 
     fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_discard_async.push(callback);
+        self.on_discard_async.lock().unwrap().push(callback);
     }
 
     fn is_readonly(&self) -> bool {

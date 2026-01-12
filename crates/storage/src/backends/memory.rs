@@ -34,7 +34,7 @@
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::ops::Bound;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use crate::corekv::{
@@ -86,15 +86,15 @@ impl Store for MemoryStore {
         Ok(Box::new(MemoryTxn {
             store: Arc::clone(&self.data),
             snapshot,
-            pending: BTreeMap::new(),
+            pending: Mutex::new(BTreeMap::new()),
             readonly,
-            discarded: false,
-            on_success: Vec::new(),
-            on_success_async: Vec::new(),
-            on_error: Vec::new(),
-            on_error_async: Vec::new(),
-            on_discard: Vec::new(),
-            on_discard_async: Vec::new(),
+            discarded: Mutex::new(false),
+            on_success: Mutex::new(Vec::new()),
+            on_success_async: Mutex::new(Vec::new()),
+            on_error: Mutex::new(Vec::new()),
+            on_error_async: Mutex::new(Vec::new()),
+            on_discard: Mutex::new(Vec::new()),
+            on_discard_async: Mutex::new(Vec::new()),
         }))
     }
 
@@ -117,32 +117,33 @@ struct MemoryTxn {
     snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
 
     /// Pending changes (Some(value) = set, None = delete)
-    pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
 
     /// Whether this is a read-only transaction
     readonly: bool,
 
     /// Whether the transaction has been discarded
-    discarded: bool,
+    discarded: Mutex<bool>,
 
     /// Callbacks for successful commit
-    on_success: Vec<TxnCallback>,
-    on_success_async: Vec<AsyncTxnCallback>,
+    on_success: Mutex<Vec<TxnCallback>>,
+    on_success_async: Mutex<Vec<AsyncTxnCallback>>,
 
     /// Callbacks for failed commit
-    on_error: Vec<TxnCallback>,
-    on_error_async: Vec<AsyncTxnCallback>,
+    on_error: Mutex<Vec<TxnCallback>>,
+    on_error_async: Mutex<Vec<AsyncTxnCallback>>,
 
     /// Callbacks for discard
-    on_discard: Vec<TxnCallback>,
-    on_discard_async: Vec<AsyncTxnCallback>,
+    on_discard: Mutex<Vec<TxnCallback>>,
+    on_discard_async: Mutex<Vec<AsyncTxnCallback>>,
 }
 
 impl MemoryTxn {
     /// Get a value, checking pending changes first, then snapshot.
     fn get_internal(&self, key: &[u8]) -> Option<Vec<u8>> {
         // Check pending changes first
-        if let Some(pending_value) = self.pending.get(key) {
+        let pending = self.pending.lock().unwrap();
+        if let Some(pending_value) = pending.get(key) {
             return pending_value.clone();
         }
 
@@ -153,7 +154,8 @@ impl MemoryTxn {
     /// Check if a key exists.
     fn has_internal(&self, key: &[u8]) -> bool {
         // Check pending changes first
-        if let Some(pending_value) = self.pending.get(key) {
+        let pending = self.pending.lock().unwrap();
+        if let Some(pending_value) = pending.get(key) {
             return pending_value.is_some();
         }
 
@@ -184,7 +186,7 @@ impl MemoryTxn {
 #[async_trait]
 impl Reader for MemoryTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -196,7 +198,7 @@ impl Reader for MemoryTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -208,13 +210,14 @@ impl Reader for MemoryTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
         // Merge snapshot and pending changes
         let mut merged = self.snapshot.clone();
-        for (key, value) in &self.pending {
+        let pending = self.pending.lock().unwrap();
+        for (key, value) in pending.iter() {
             match value {
                 Some(v) => {
                     merged.insert(key.clone(), v.clone());
@@ -232,7 +235,7 @@ impl Reader for MemoryTxn {
 #[async_trait]
 impl Writer for MemoryTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -244,12 +247,12 @@ impl Writer for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
-        self.pending.insert(key.to_vec(), Some(value.to_vec()));
+        self.pending.lock().unwrap().insert(key.to_vec(), Some(value.to_vec()));
         Ok(())
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if self.discarded {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -261,23 +264,26 @@ impl Writer for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
-        self.pending.insert(key.to_vec(), None);
+        self.pending.lock().unwrap().insert(key.to_vec(), None);
         Ok(())
     }
 }
 
 #[async_trait]
 impl Txn for MemoryTxn {
-    async fn commit(mut self: Box<Self>) -> Result<()> {
-        if self.discarded {
+    async fn commit(self: Box<Self>) -> Result<()> {
+        if *self.discarded.lock().unwrap() {
             return Err(Error::DiscardedTxn);
         }
 
+        // Clone pending changes before awaiting (can't hold MutexGuard across await)
+        let pending = self.pending.lock().unwrap().clone();
+
         // Apply pending changes to store
-        if !self.pending.is_empty() {
+        if !pending.is_empty() {
             let mut store = self.store.write().await;
 
-            for (key, value) in &self.pending {
+            for (key, value) in pending.iter() {
                 match value {
                     Some(v) => {
                         store.insert(key.clone(), v.clone());
@@ -290,24 +296,25 @@ impl Txn for MemoryTxn {
         }
 
         // Execute success callbacks
-        let on_success = std::mem::take(&mut self.on_success);
-        let on_success_async = std::mem::take(&mut self.on_success_async);
+        let on_success = std::mem::take(&mut *self.on_success.lock().unwrap());
+        let on_success_async = std::mem::take(&mut *self.on_success_async.lock().unwrap());
         Self::execute_callbacks(on_success);
         Self::execute_async_callbacks(on_success_async).await;
 
         Ok(())
     }
 
-    fn discard(mut self: Box<Self>) {
-        self.discarded = true;
+    fn discard(self: Box<Self>) {
+        *self.discarded.lock().unwrap() = true;
 
         // Execute discard callbacks
-        let on_discard = std::mem::take(&mut self.on_discard);
+        let on_discard = std::mem::take(&mut *self.on_discard.lock().unwrap());
         Self::execute_callbacks(on_discard);
 
         // Note: We can't execute async callbacks in a sync method
         // Async discard callbacks will be dropped
-        if !self.on_discard_async.is_empty() {
+        let async_callbacks = self.on_discard_async.lock().unwrap();
+        if !async_callbacks.is_empty() {
             tracing::warn!(
                 "Async discard callbacks cannot be executed in sync discard method"
             );
@@ -315,27 +322,27 @@ impl Txn for MemoryTxn {
     }
 
     fn on_success(&mut self, callback: TxnCallback) {
-        self.on_success.push(callback);
+        self.on_success.lock().unwrap().push(callback);
     }
 
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_success_async.push(callback);
+        self.on_success_async.lock().unwrap().push(callback);
     }
 
     fn on_error(&mut self, callback: TxnCallback) {
-        self.on_error.push(callback);
+        self.on_error.lock().unwrap().push(callback);
     }
 
     fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_error_async.push(callback);
+        self.on_error_async.lock().unwrap().push(callback);
     }
 
     fn on_discard(&mut self, callback: TxnCallback) {
-        self.on_discard.push(callback);
+        self.on_discard.lock().unwrap().push(callback);
     }
 
     fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_discard_async.push(callback);
+        self.on_discard_async.lock().unwrap().push(callback);
     }
 
     fn is_readonly(&self) -> bool {
