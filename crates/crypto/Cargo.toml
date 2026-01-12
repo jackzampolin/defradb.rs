@@ -23,6 +23,7 @@ x25519-dalek = { version = "2.0", features = ["static_secrets"] }     # X25519 E
 hkdf = "0.12"             # HKDF key derivation for ECIES
 hmac = "0.12"             # HMAC authentication for ECIES
 rand = "0.8"              # Random number generation for keys and nonces
+subtle = "2.5"            # Constant-time operations for key comparison
 
 # Encoding and serialization
 hex = "0.4"               # Hex encoding/decoding

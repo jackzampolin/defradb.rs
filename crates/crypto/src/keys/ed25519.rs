@@ -7,6 +7,7 @@
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 use defra_core::Result;
 
@@ -18,6 +19,25 @@ use crate::types::KeyType;
 #[derive(Clone)]
 pub struct Ed25519PrivateKey {
     key: SigningKey,
+}
+
+impl PartialEq for Ed25519PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare private keys using constant-time comparison to prevent timing attacks
+        // Compare the 32-byte seed (not the full 64-byte representation which includes public key)
+        self.key.to_bytes().ct_eq(&other.key.to_bytes()).into()
+    }
+}
+
+impl Eq for Ed25519PrivateKey {}
+
+impl std::fmt::Debug for Ed25519PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Don't print key material for security
+        f.debug_struct("Ed25519PrivateKey")
+            .field("key_type", &KeyType::Ed25519)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Ed25519PrivateKey {
@@ -34,8 +54,10 @@ impl Ed25519PrivateKey {
             return None;
         }
 
-        // Ed25519 private keys are 64 bytes (32-byte seed + 32-byte public key)
-        // to match the Go implementation format
+        // Ed25519 private keys stored as 64 bytes (32-byte seed + 32-byte public key)
+        // NOTE: RFC 8032 defines Ed25519 private keys as 32 bytes (just the seed).
+        // We use 64-byte format for compatibility with DefraDB Go implementation,
+        // which stores both seed and derived public key together.
         if bytes.len() != 64 {
             return None;
         }
@@ -63,7 +85,8 @@ impl Key for Ed25519PrivateKey {
     }
 
     fn raw(&self) -> Vec<u8> {
-        // Return 64 bytes: 32-byte seed + 32-byte public key (to match Go implementation)
+        // Return 64 bytes: 32-byte seed + 32-byte public key
+        // DefraDB format (not RFC 8032 standard) for Go compatibility
         let seed = self.key.to_bytes();
         let public = self.key.verifying_key().to_bytes();
         let mut result = Vec::with_capacity(64);
@@ -148,6 +171,8 @@ impl Key for Ed25519PublicKey {
 impl PublicKey for Ed25519PublicKey {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
         if signature.len() != 64 {
+            // Log invalid signature length for security monitoring
+            eprintln!("SECURITY: Ed25519 signature verification failed - invalid signature length: {} (expected 64)", signature.len());
             return Ok(false);
         }
 
@@ -159,7 +184,12 @@ impl PublicKey for Ed25519PublicKey {
 
         match self.key.verify(data, &signature) {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => {
+                // Log verification failures for security auditing
+                // Note: This could be a legitimate wrong signature, not necessarily an attack
+                eprintln!("SECURITY: Ed25519 signature verification failed: {:?}", e);
+                Ok(false)
+            }
         }
     }
 
@@ -282,5 +312,23 @@ mod tests {
 
         let key3 = Ed25519PrivateKey::from_bytes(&[7u8; 64]).unwrap();
         assert!(!key1.equal(&key3 as &dyn Key));
+    }
+
+    #[test]
+    fn test_ed25519_partial_eq() {
+        // Test PartialEq implementation for private keys
+        let key1 = Ed25519PrivateKey::from_bytes(&[8u8; 64]).unwrap();
+        let key2 = Ed25519PrivateKey::from_bytes(&[8u8; 64]).unwrap();
+        assert_eq!(key1, key2, "Same keys should be equal");
+
+        let key3 = Ed25519PrivateKey::from_bytes(&[9u8; 64]).unwrap();
+        assert_ne!(key1, key3, "Different keys should not be equal");
+
+        // Test PartialEq for public keys (already derived)
+        let pub1 = key1.public_key();
+        let pub2 = key2.public_key();
+        let pub1_concrete = Ed25519PublicKey::from_bytes(&pub1.raw()).unwrap();
+        let pub2_concrete = Ed25519PublicKey::from_bytes(&pub2.raw()).unwrap();
+        assert_eq!(pub1_concrete, pub2_concrete, "Public keys from same private key should be equal");
     }
 }

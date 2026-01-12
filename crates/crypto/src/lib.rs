@@ -92,4 +92,56 @@ mod tests {
         let did = public_key.did().unwrap();
         assert!(did.starts_with("did:key:"));
     }
+
+    #[test]
+    fn test_cross_key_type_signature_verification_fails() {
+        let message = b"test message";
+
+        // Sign with Ed25519
+        let ed25519_key = generate_ed25519().unwrap();
+        let ed25519_signature = ed25519_key.sign(message).unwrap();
+
+        // Sign with secp256k1
+        let secp256k1_key = generate_secp256k1().unwrap();
+        let secp256k1_signature = secp256k1_key.sign(message).unwrap();
+
+        // Try to verify Ed25519 signature with secp256k1 public key (should fail)
+        let secp256k1_pub = secp256k1_key.public_key();
+        let result = secp256k1_pub.verify(message, &ed25519_signature);
+        assert!(result.is_ok(), "Should return Ok with false, not error");
+        assert!(!result.unwrap(), "Cross-key-type verification should fail");
+
+        // Try to verify secp256k1 signature with Ed25519 public key (should fail)
+        let ed25519_pub = ed25519_key.public_key();
+        let result = ed25519_pub.verify(message, &secp256k1_signature);
+        assert!(result.is_ok(), "Should return Ok with false, not error");
+        assert!(!result.unwrap(), "Cross-key-type verification should fail");
+    }
+
+    #[test]
+    fn test_wrong_key_same_type_verification_fails() {
+        let message = b"test message";
+
+        // Two different Ed25519 keys
+        let key1 = generate_ed25519().unwrap();
+        let key2 = generate_ed25519().unwrap();
+
+        let signature1 = key1.sign(message).unwrap();
+        let pub2 = key2.public_key();
+
+        // Verify signature from key1 with public key from key2 (should fail)
+        let valid = pub2.verify(message, &signature1).unwrap();
+        assert!(!valid, "Signature from different key should not verify");
+
+        // Two different secp256k1 keys
+        let key1 = generate_secp256k1().unwrap();
+        let key2 = generate_secp256k1().unwrap();
+
+        let signature1 = key1.sign(message).unwrap();
+        let pub2 = key2.public_key();
+
+        // Verify signature from key1 with public key from key2 (should fail)
+        let valid = pub2.verify(message, &signature1).unwrap();
+        assert!(!valid, "Signature from different key should not verify");
+    }
 }

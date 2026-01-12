@@ -9,6 +9,7 @@ use k256::ecdsa::{signature::Signer, signature::Verifier, Signature, SigningKey,
 use k256::EncodedPoint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use defra_core::Result;
 
@@ -19,6 +20,24 @@ use crate::types::{KeyType, SECP256K1_PRIVATE_KEY_SIZE};
 #[derive(Clone)]
 pub struct Secp256k1PrivateKey {
     key: SigningKey,
+}
+
+impl PartialEq for Secp256k1PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare private keys using constant-time comparison to prevent timing attacks
+        self.key.to_bytes().ct_eq(&other.key.to_bytes()).into()
+    }
+}
+
+impl Eq for Secp256k1PrivateKey {}
+
+impl std::fmt::Debug for Secp256k1PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Don't print key material for security
+        f.debug_struct("Secp256k1PrivateKey")
+            .field("key_type", &KeyType::Secp256k1)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Secp256k1PrivateKey {
@@ -74,7 +93,11 @@ impl PrivateKey for Secp256k1PrivateKey {
         // Sign the hash
         let signature: Signature = self.key.sign(&hash);
 
-        // Return DER-encoded signature (critical for compatibility with Go implementation)
+        // Return DER-encoded signature (X.690 Distinguished Encoding Rules)
+        // DER is the standard format for Bitcoin/blockchain ECDSA signatures because:
+        // 1. Self-describing format with type and length fields
+        // 2. Deterministic serialization (unlike raw r,s which have variable length)
+        // 3. Required for DefraDB Go implementation compatibility
         Ok(signature.to_der().as_bytes().to_vec())
     }
 
@@ -145,7 +168,11 @@ impl PublicKey for Secp256k1PublicKey {
         // Parse DER-encoded signature
         let sig = match Signature::from_der(signature) {
             Ok(s) => s,
-            Err(_) => return Ok(false),
+            Err(e) => {
+                // Log DER parsing failures for security monitoring
+                eprintln!("SECURITY: secp256k1 signature verification failed - invalid DER encoding: {:?}", e);
+                return Ok(false);
+            }
         };
 
         // Hash the message with SHA-256
@@ -154,7 +181,12 @@ impl PublicKey for Secp256k1PublicKey {
         // Verify signature
         match self.key.verify(&hash, &sig) {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => {
+                // Log verification failures for security auditing
+                // Note: This could be a legitimate wrong signature, not necessarily an attack
+                eprintln!("SECURITY: secp256k1 ECDSA signature verification failed: {:?}", e);
+                Ok(false)
+            }
         }
     }
 
@@ -297,5 +329,110 @@ mod tests {
         // Should be able to parse compressed format
         let public_key = Secp256k1PublicKey::from_bytes(&compressed);
         assert!(public_key.is_some());
+    }
+
+    #[test]
+    fn test_secp256k1_partial_eq() {
+        // Test PartialEq implementation for private keys
+        let key1 = Secp256k1PrivateKey::from_bytes(&[10u8; 32]).unwrap();
+        let key2 = Secp256k1PrivateKey::from_bytes(&[10u8; 32]).unwrap();
+        assert_eq!(key1, key2, "Same keys should be equal");
+
+        let key3 = Secp256k1PrivateKey::from_bytes(&[11u8; 32]).unwrap();
+        assert_ne!(key1, key3, "Different keys should not be equal");
+
+        // Test PartialEq for public keys (already derived)
+        let pub1 = key1.public_key();
+        let pub2 = key2.public_key();
+        let pub1_concrete = Secp256k1PublicKey::from_bytes(&pub1.raw()).unwrap();
+        let pub2_concrete = Secp256k1PublicKey::from_bytes(&pub2.raw()).unwrap();
+        assert_eq!(pub1_concrete, pub2_concrete, "Public keys from same private key should be equal");
+    }
+
+    #[test]
+    fn test_secp256k1_uncompressed_format() {
+        let private_key = Secp256k1PrivateKey::from_bytes(&[12u8; 32]).unwrap();
+        let public_key = private_key.public_key();
+
+        // Get uncompressed format (65 bytes: 0x04 + 32-byte X + 32-byte Y)
+        let compressed = public_key.raw();
+        let verifying_key = private_key.key.verifying_key();
+        let uncompressed_point = verifying_key.to_encoded_point(false);
+        let uncompressed = uncompressed_point.as_bytes();
+
+        // Verify uncompressed format
+        assert_eq!(uncompressed.len(), 65, "Uncompressed key should be 65 bytes");
+        assert_eq!(uncompressed[0], 0x04, "Uncompressed key should start with 0x04");
+
+        // Should be able to parse uncompressed format
+        let parsed = Secp256k1PublicKey::from_bytes(uncompressed);
+        assert!(parsed.is_some(), "Should parse uncompressed format");
+
+        // Parsed key should produce same compressed output
+        let parsed_compressed = parsed.unwrap().raw();
+        assert_eq!(compressed, parsed_compressed, "Parsed key should match original compressed");
+    }
+
+    #[test]
+    fn test_secp256k1_key_equality_through_trait_objects() {
+        use crate::keys::Key;
+
+        // Create two keys with same bytes
+        let key1 = Secp256k1PrivateKey::from_bytes(&[13u8; 32]).unwrap();
+        let key2 = Secp256k1PrivateKey::from_bytes(&[13u8; 32]).unwrap();
+
+        // Test equality through trait objects
+        let key1_trait: &dyn Key = &key1;
+        let key2_trait: &dyn Key = &key2;
+        assert!(key1_trait.equal(key2_trait), "Keys should be equal through trait objects");
+
+        // Test inequality
+        let key3 = Secp256k1PrivateKey::from_bytes(&[14u8; 32]).unwrap();
+        let key3_trait: &dyn Key = &key3;
+        assert!(!key1_trait.equal(key3_trait), "Different keys should not be equal through trait objects");
+    }
+
+    #[test]
+    fn test_secp256k1_invalid_der_signatures() {
+        let private_key = Secp256k1PrivateKey::from_bytes(&[1u8; 32]).unwrap();
+        let public_key = private_key.public_key();
+        let message = b"test";
+
+        // Empty signature
+        let result = public_key.verify(message, &[]);
+        assert!(result.is_ok() && !result.unwrap(), "Empty signature should return false");
+
+        // Invalid DER: wrong sequence tag (should be 0x30)
+        let invalid_der = vec![0xFF, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(result.is_ok() && !result.unwrap(), "Invalid DER tag should return false");
+
+        // Invalid DER: length exceeds data
+        let invalid_der = vec![0x30, 0xFF, 0x02, 0x01, 0x01];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(result.is_ok() && !result.unwrap(), "Invalid DER length should return false");
+
+        // Too short to be valid DER
+        let invalid_der = vec![0x30, 0x02];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(result.is_ok() && !result.unwrap(), "Truncated DER should return false");
+
+        // Single byte (not valid DER)
+        let invalid_der = vec![0x30];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(result.is_ok() && !result.unwrap(), "Single byte should return false");
+    }
+
+    #[test]
+    fn test_secp256k1_signature_with_empty_message() {
+        let private_key = Secp256k1PrivateKey::from_bytes(&[2u8; 32]).unwrap();
+        let empty_message = b"";
+
+        let signature = private_key.sign(empty_message).unwrap();
+        assert!(signature.len() >= 8 && signature.len() <= 73, "DER signature should be 8-73 bytes");
+
+        let public_key = private_key.public_key();
+        let valid = public_key.verify(empty_message, &signature).unwrap();
+        assert!(valid, "Empty message signature should verify");
     }
 }

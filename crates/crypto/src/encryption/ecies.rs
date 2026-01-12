@@ -15,7 +15,7 @@ use defra_core::Result;
 
 use crate::encryption::aes::{decrypt_aes, encrypt_aes};
 use crate::error::{
-    ciphertext_too_short, crypto_error, failed_to_parse_ephemeral_public_key,
+    crypto_error, failed_to_parse_ephemeral_public_key,
     verification_with_hmac_failed,
 };
 use crate::types::{AES_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
@@ -122,16 +122,22 @@ pub fn encrypt_ecies(
     // 2. ECDH: compute shared secret
     let shared_secret = ephemeral_private.diffie_hellman(public_key);
 
-    // 3. HKDF: derive AES and HMAC keys
-    let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+    // 3. HKDF-SHA256: derive separate AES and HMAC keys (RFC 5869)
+    // HKDF (HMAC-based Key Derivation Function) expands the shared secret into
+    // cryptographically independent keys. Using different 'info' parameters ensures:
+    // - AES encryption key and HMAC authentication key are cryptographically separated
+    // - Even if one key is compromised, the other remains secure
+    // - Follows best practice of key separation for different cryptographic purposes
+    // Salt provides additional domain separation and defense-in-depth
+    let hkdf = Hkdf::<Sha256>::new(Some(b"defradb-ecies-v1"), shared_secret.as_bytes());
 
     let mut aes_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut aes_key)
-        .map_err(|e| crypto_error(format!("KDF failed for AES key: {:?}", e)))?;
+    hkdf.expand(b"ecies-aes-key", &mut aes_key)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed for AES key (size: {}): {}", AES_KEY_SIZE, e)))?;
 
     let mut hmac_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut hmac_key)
-        .map_err(|e| crypto_error(format!("KDF failed for HMAC key: {:?}", e)))?;
+    hkdf.expand(b"ecies-hmac-key", &mut hmac_key)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed for HMAC key (size: {}): {}", AES_KEY_SIZE, e)))?;
 
     // 4. Build AAD: ephemeral public key + optional additional data
     let mut aad = ephemeral_public.as_bytes().to_vec();
@@ -189,7 +195,13 @@ pub fn decrypt_ecies(
     } else {
         // Public key prepended to ciphertext
         if ciphertext.len() < X25519_PUBLIC_KEY_SIZE + HMAC_SIZE {
-            return Err(ciphertext_too_short());
+            return Err(crypto_error(format!(
+                "ciphertext too short: got {} bytes, expected at least {} bytes (ephemeral_pub: {} + hmac: {} + encrypted data)",
+                ciphertext.len(),
+                X25519_PUBLIC_KEY_SIZE + HMAC_SIZE,
+                X25519_PUBLIC_KEY_SIZE,
+                HMAC_SIZE
+            )));
         }
         let (pub_bytes, rest) = ciphertext.split_at(X25519_PUBLIC_KEY_SIZE);
         (pub_bytes.to_vec(), rest)
@@ -206,23 +218,29 @@ pub fn decrypt_ecies(
 
     // 2. Extract HMAC and encrypted data
     if remaining.len() < HMAC_SIZE {
-        return Err(ciphertext_too_short());
+        return Err(crypto_error(format!(
+            "ciphertext too short for HMAC: got {} bytes after ephemeral key, expected at least {} bytes for HMAC",
+            remaining.len(),
+            HMAC_SIZE
+        )));
     }
     let (encrypted_data, received_mac) = remaining.split_at(remaining.len() - HMAC_SIZE);
 
     // 3. ECDH: compute shared secret
     let shared_secret = private_key.diffie_hellman(&ephemeral_public);
 
-    // 4. HKDF: derive AES and HMAC keys (same derivation as encryption)
-    let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+    // 4. HKDF-SHA256: derive same AES and HMAC keys as encryption (RFC 5869)
+    // Must use identical salt and 'info' parameters to ensure sender and receiver derive the same keys
+    // from the shared secret via ECDH. See encryption function for detailed HKDF explanation.
+    let hkdf = Hkdf::<Sha256>::new(Some(b"defradb-ecies-v1"), shared_secret.as_bytes());
 
     let mut aes_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut aes_key)
-        .map_err(|e| crypto_error(format!("KDF failed for AES key: {:?}", e)))?;
+    hkdf.expand(b"ecies-aes-key", &mut aes_key)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed for AES key (size: {}): {}", AES_KEY_SIZE, e)))?;
 
     let mut hmac_key = [0u8; AES_KEY_SIZE];
-    hkdf.expand(&[], &mut hmac_key)
-        .map_err(|e| crypto_error(format!("KDF failed for HMAC key: {:?}", e)))?;
+    hkdf.expand(b"ecies-hmac-key", &mut hmac_key)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed for HMAC key (size: {}): {}", AES_KEY_SIZE, e)))?;
 
     // 5. Verify HMAC
     let mut mac = Hmac::<Sha256>::new_from_slice(&hmac_key)
@@ -345,6 +363,7 @@ mod tests {
         let recipient_pub = PublicKey::from(&recipient_key);
 
         let sender_key = generate_x25519().unwrap();
+        let sender_pub = PublicKey::from(&sender_key);
         let plaintext = b"test message";
 
         // Encrypt with custom sender key, don't prepend public key
@@ -355,10 +374,70 @@ mod tests {
 
         let ciphertext = encrypt_ecies(plaintext, &recipient_pub, options_enc).unwrap();
 
-        // For decryption without prepended key, we need to provide it separately
-        // This test shows the non-prepended scenario needs key coordination
-        // Let's just test that it encrypts without the public key prepended
-        assert!(ciphertext.len() < 100); // Should be shorter without 32-byte public key prepended
+        // Should be shorter without 32-byte public key prepended
+        assert!(ciphertext.len() < 100);
+
+        // Now test decryption with separate public key
+        let options_dec = EciesOptions::builder()
+            .with_public_key_bytes(sender_pub.as_bytes().to_vec())
+            .build();
+
+        let decrypted = decrypt_ecies(&ciphertext, &recipient_key, options_dec).unwrap();
+        assert_eq!(plaintext, &decrypted[..]);
+    }
+
+    #[test]
+    fn test_ecies_tampered_hmac_fails() {
+        let private_key = generate_x25519().unwrap();
+        let public_key = PublicKey::from(&private_key);
+        let plaintext = b"test message";
+
+        let options_enc = EciesOptions::builder()
+            .prepend_public_key(true)
+            .build();
+
+        let mut ciphertext = encrypt_ecies(plaintext, &public_key, options_enc).unwrap();
+
+        // Tamper with HMAC (last 32 bytes)
+        let len = ciphertext.len();
+        if len > 32 {
+            ciphertext[len - 10] ^= 0xFF; // Flip a bit in the HMAC
+        }
+
+        let options_dec = EciesOptions::builder()
+            .prepend_public_key(true)
+            .build();
+
+        let result = decrypt_ecies(&ciphertext, &private_key, options_dec);
+        assert!(result.is_err(), "Tampered HMAC should cause decryption to fail");
+    }
+
+    #[test]
+    fn test_ecies_wrong_separate_public_key_fails() {
+        let recipient_key = generate_x25519().unwrap();
+        let recipient_pub = PublicKey::from(&recipient_key);
+
+        let sender_key = generate_x25519().unwrap();
+        let wrong_key = generate_x25519().unwrap();
+        let wrong_pub = PublicKey::from(&wrong_key);
+
+        let plaintext = b"test message";
+
+        // Encrypt without prepending public key
+        let options_enc = EciesOptions::builder()
+            .with_private_key(sender_key)
+            .prepend_public_key(false)
+            .build();
+
+        let ciphertext = encrypt_ecies(plaintext, &recipient_pub, options_enc).unwrap();
+
+        // Try to decrypt with wrong public key
+        let options_dec = EciesOptions::builder()
+            .with_public_key_bytes(wrong_pub.as_bytes().to_vec())
+            .build();
+
+        let result = decrypt_ecies(&ciphertext, &recipient_key, options_dec);
+        assert!(result.is_err(), "Wrong public key should cause decryption to fail");
     }
 
     #[test]
@@ -395,6 +474,84 @@ mod tests {
 
         let decrypted = decrypt_ecies(&ciphertext, &private_key, options_dec).unwrap();
         assert_eq!(plaintext, &decrypted[..]);
+    }
+
+    #[test]
+    fn test_ecies_ciphertext_only_public_key_no_data() {
+        let private_key = generate_x25519().unwrap();
+
+        // Ciphertext with only ephemeral public key (32 bytes), no encrypted data, no HMAC
+        let malformed_ct = vec![0u8; X25519_PUBLIC_KEY_SIZE];
+
+        let options = EciesOptions::builder().prepend_public_key(true).build();
+        let result = decrypt_ecies(&malformed_ct, &private_key, options);
+
+        assert!(result.is_err(), "Should fail: ciphertext too short (only ephemeral key)");
+    }
+
+    #[test]
+    fn test_ecies_ciphertext_no_hmac() {
+        let private_key = generate_x25519().unwrap();
+
+        // Ciphertext with ephemeral key + some data but no HMAC
+        let malformed_ct = vec![0u8; X25519_PUBLIC_KEY_SIZE + 16]; // Missing HMAC_SIZE bytes
+
+        let options = EciesOptions::builder().prepend_public_key(true).build();
+        let result = decrypt_ecies(&malformed_ct, &private_key, options);
+
+        assert!(result.is_err(), "Should fail: ciphertext too short (missing HMAC)");
+    }
+
+    #[test]
+    fn test_ecies_invalid_separate_public_key_sizes() {
+        let recipient_key = generate_x25519().unwrap();
+        let recipient_pub = PublicKey::from(&recipient_key);
+        let sender_key = generate_x25519().unwrap();
+        let plaintext = b"test";
+
+        // Encrypt without prepending key
+        let options_enc = EciesOptions::builder()
+            .with_private_key(sender_key)
+            .prepend_public_key(false)
+            .build();
+        let ciphertext = encrypt_ecies(plaintext, &recipient_pub, options_enc).unwrap();
+
+        // Try to decrypt with wrong-sized public key (31 bytes)
+        let wrong_size_key = vec![0u8; 31];
+        let options_dec = EciesOptions::builder()
+            .with_public_key_bytes(wrong_size_key)
+            .build();
+        let result = decrypt_ecies(&ciphertext, &recipient_key, options_dec);
+        assert!(result.is_err(), "31-byte ephemeral key should be rejected");
+
+        // Try with 33 bytes
+        let wrong_size_key = vec![0u8; 33];
+        let options_dec = EciesOptions::builder()
+            .with_public_key_bytes(wrong_size_key)
+            .build();
+        let result = decrypt_ecies(&ciphertext, &recipient_key, options_dec);
+        assert!(result.is_err(), "33-byte ephemeral key should be rejected");
+    }
+
+    #[test]
+    fn test_ecies_wrong_recipient_key_fails() {
+        let correct_key = generate_x25519().unwrap();
+        let correct_pub = PublicKey::from(&correct_key);
+        let wrong_key = generate_x25519().unwrap();
+        let plaintext = b"sensitive data";
+
+        let options_enc = EciesOptions::builder()
+            .prepend_public_key(true)
+            .build();
+        let ciphertext = encrypt_ecies(plaintext, &correct_pub, options_enc).unwrap();
+
+        // Try to decrypt with wrong recipient key
+        let options_dec = EciesOptions::builder()
+            .prepend_public_key(true)
+            .build();
+        let result = decrypt_ecies(&ciphertext, &wrong_key, options_dec);
+
+        assert!(result.is_err(), "Wrong recipient key should cause HMAC verification failure");
     }
 }
 

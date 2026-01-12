@@ -291,5 +291,86 @@ mod tests {
         let decrypted = decrypt_aes(None, &ciphertext_with_nonce, &key, &[]).unwrap();
         assert_eq!(plaintext, &decrypted[..]);
     }
+
+    #[test]
+    fn test_encrypt_decrypt_empty_plaintext() {
+        let key = generate_aes256().unwrap();
+        let plaintext = b"";
+        let aad = b"metadata";
+
+        // AES-GCM should handle empty plaintext (authentication only)
+        let (ciphertext, nonce) = encrypt_aes(plaintext, &key, aad, false).unwrap();
+
+        // Ciphertext should not be empty (contains authentication tag)
+        assert!(!ciphertext.is_empty(), "Ciphertext should contain auth tag even for empty plaintext");
+
+        let decrypted = decrypt_aes(Some(&nonce), &ciphertext, &key, aad).unwrap();
+        assert_eq!(plaintext, &decrypted[..], "Should decrypt empty plaintext correctly");
+    }
+
+    #[test]
+    fn test_decrypt_empty_ciphertext_fails() {
+        let key = generate_aes256().unwrap();
+        let empty_ciphertext = b"";
+
+        // Decrypting completely empty ciphertext should fail
+        let result = decrypt_aes(None, empty_ciphertext, &key, &[]);
+        assert!(result.is_err(), "Empty ciphertext should fail to decrypt");
+    }
+
+    #[test]
+    fn test_decrypt_only_nonce_fails() {
+        let key = generate_aes256().unwrap();
+        let only_nonce = vec![0u8; AES_NONCE_SIZE];
+
+        // Ciphertext containing only nonce (no encrypted data) should fail
+        let result = decrypt_aes(None, &only_nonce, &key, &[]);
+        assert!(result.is_err(), "Nonce without ciphertext should fail");
+    }
+
+    #[test]
+    fn test_decrypt_invalid_nonce_size() {
+        let key = generate_aes256().unwrap();
+        let ciphertext = vec![0u8; 20];
+        let wrong_size_nonce = vec![0u8; 16]; // Should be 12 bytes
+
+        let result = decrypt_aes(Some(&wrong_size_nonce), &ciphertext, &key, &[]);
+        assert!(result.is_err(), "Wrong nonce size should fail");
+    }
+
+    #[test]
+    fn test_aes_tampered_auth_tag_fails() {
+        let key = generate_aes256().unwrap();
+        let plaintext = b"sensitive message";
+        let aad = b"context";
+
+        let (mut ciphertext, nonce) = encrypt_aes(plaintext, &key, aad, false).unwrap();
+
+        // AES-GCM auth tag is the last 16 bytes of ciphertext
+        let ct_len = ciphertext.len();
+        assert!(ct_len >= 16, "Ciphertext should contain auth tag");
+
+        // Tamper with the last byte of auth tag
+        ciphertext[ct_len - 1] ^= 0x01;
+
+        let result = decrypt_aes(Some(&nonce), &ciphertext, &key, aad);
+        assert!(result.is_err(), "Tampered auth tag should cause decryption failure");
+    }
+
+    #[test]
+    fn test_aes_tampered_ciphertext_body_fails() {
+        let key = generate_aes256().unwrap();
+        let plaintext = b"sensitive message";
+        let aad = b"context";
+
+        let (mut ciphertext, nonce) = encrypt_aes(plaintext, &key, aad, false).unwrap();
+
+        // Tamper with the first byte of actual ciphertext (not the auth tag)
+        assert!(ciphertext.len() > 16, "Should have ciphertext before auth tag");
+        ciphertext[0] ^= 0x01;
+
+        let result = decrypt_aes(Some(&nonce), &ciphertext, &key, aad);
+        assert!(result.is_err(), "Tampered ciphertext body should cause auth failure");
+    }
 }
 

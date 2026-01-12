@@ -4,11 +4,11 @@
 //! In production, nonces are generated using cryptographically secure random numbers.
 //! In tests, deterministic nonces can be used for reproducibility.
 
+use rand::rngs::OsRng;
 use rand::RngCore;
 
 use defra_core::Result;
 
-use crate::error::failed_to_generate_random;
 use crate::types::AES_NONCE_SIZE;
 
 /// Generate a cryptographically secure random nonce for AES-GCM
@@ -36,9 +36,13 @@ pub fn generate_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
 /// Generate a random nonce using cryptographically secure RNG
 fn generate_random_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     let mut nonce = [0u8; AES_NONCE_SIZE];
-    rand::thread_rng()
+    OsRng
         .try_fill_bytes(&mut nonce)
-        .map_err(|_| failed_to_generate_random())?;
+        .map_err(|e| {
+            // CRITICAL: Log RNG failures - this is a security event
+            eprintln!("CRITICAL: RNG failure in nonce generation: {}", e);
+            crate::error::crypto_error(format!("RNG failure in nonce generation: {}", e))
+        })?;
     Ok(nonce)
 }
 
@@ -108,6 +112,33 @@ mod tests {
     fn test_nonce_size() {
         let nonce = generate_random_nonce().unwrap();
         assert_eq!(nonce.len(), 12);
+    }
+
+    #[test]
+    fn test_nonce_randomness() {
+        // Ensure deterministic mode is off
+        USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Generate multiple nonces
+        let mut nonces = Vec::new();
+        for _ in 0..10 {
+            let nonce = generate_nonce().unwrap();
+            nonces.push(nonce);
+        }
+
+        // Check that not all nonces are identical (basic randomness check)
+        let first = &nonces[0];
+        let all_same = nonces.iter().all(|n| n == first);
+        assert!(!all_same, "Nonces should be different (random)");
+
+        // Check that we have at least several unique nonces
+        use std::collections::HashSet;
+        let unique_nonces: HashSet<_> = nonces.iter().collect();
+        assert!(
+            unique_nonces.len() >= 8,
+            "Expected at least 8 unique nonces out of 10, got {}",
+            unique_nonces.len()
+        );
     }
 }
 
