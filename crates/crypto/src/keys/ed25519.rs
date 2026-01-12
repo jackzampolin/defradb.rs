@@ -100,7 +100,13 @@ impl Key for Ed25519PrivateKey {
         if other.key_type() != KeyType::Ed25519 {
             return false;
         }
-        self.raw() == other.raw()
+        // Use constant-time comparison to prevent timing attacks
+        let self_raw = self.raw();
+        let other_raw = other.raw();
+        if self_raw.len() != other_raw.len() {
+            return false;
+        }
+        self_raw.ct_eq(&other_raw).into()
     }
 
     fn raw(&self) -> Vec<u8> {
@@ -175,7 +181,13 @@ impl Key for Ed25519PublicKey {
         if other.key_type() != KeyType::Ed25519 {
             return false;
         }
-        self.raw() == other.raw()
+        // Use constant-time comparison to prevent timing attacks
+        let self_raw = self.raw();
+        let other_raw = other.raw();
+        if self_raw.len() != other_raw.len() {
+            return false;
+        }
+        self_raw.ct_eq(&other_raw).into()
     }
 
     fn raw(&self) -> Vec<u8> {
@@ -465,5 +477,75 @@ mod tests {
         let empty_sig = vec![];
         let result = public_key.verify(message, &empty_sig).unwrap();
         assert!(!result, "Empty signature should fail");
+    }
+
+    #[test]
+    fn test_ed25519_rejects_invalid_points() {
+        // Test that ed25519-dalek validates public key bytes represent valid curve points
+        // The library rejects bytes that don't decompress to valid Ed25519 points
+
+        // Test that random invalid bytes are rejected
+        // Most random 32-byte sequences are not valid Ed25519 public keys
+        let invalid_bytes: [u8; 32] = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+        ];
+        let result = Ed25519PublicKey::from_bytes(&invalid_bytes);
+        assert!(result.is_none(), "Random invalid bytes should be rejected");
+
+        // Note: all-zeros (identity point) is accepted by ed25519-dalek as it's
+        // technically a valid curve point, though useless for signatures
+    }
+
+    #[test]
+    fn test_ed25519_rejects_point_not_on_curve() {
+        // Test specific bytes that are deterministically invalid curve points
+        // These bytes fail decompression because no valid y² exists for the x coordinate
+
+        // Pattern 1: specific bytes known to fail decompression
+        let invalid_pattern1: [u8; 32] = [
+            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        ];
+        assert!(
+            Ed25519PublicKey::from_bytes(&invalid_pattern1).is_none(),
+            "Invalid pattern 1 should be rejected"
+        );
+
+        // Pattern 2: alternating bits - fails decompression
+        let invalid_pattern2: [u8; 32] = [
+            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
+            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
+            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
+            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
+        ];
+        assert!(
+            Ed25519PublicKey::from_bytes(&invalid_pattern2).is_none(),
+            "Invalid pattern 2 should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_ed25519_valid_key_is_accepted() {
+        // Verify that valid Ed25519 public keys are accepted
+        // Generate a valid key and verify it can be reconstructed from bytes
+        let private_key = generate_ed25519().unwrap();
+        let public_key = private_key.public_key();
+        let public_bytes = public_key.raw();
+
+        let reconstructed = Ed25519PublicKey::from_bytes(&public_bytes);
+        assert!(
+            reconstructed.is_some(),
+            "Valid public key bytes should be accepted"
+        );
+        assert_eq!(
+            reconstructed.unwrap().raw(),
+            public_bytes,
+            "Reconstructed key should match original"
+        );
     }
 }

@@ -73,7 +73,13 @@ impl Key for Secp256k1PrivateKey {
         if other.key_type() != KeyType::Secp256k1 {
             return false;
         }
-        self.raw() == other.raw()
+        // Use constant-time comparison to prevent timing attacks
+        let self_raw = self.raw();
+        let other_raw = other.raw();
+        if self_raw.len() != other_raw.len() {
+            return false;
+        }
+        self_raw.ct_eq(&other_raw).into()
     }
 
     fn raw(&self) -> Vec<u8> {
@@ -150,7 +156,13 @@ impl Key for Secp256k1PublicKey {
         if other.key_type() != KeyType::Secp256k1 {
             return false;
         }
-        self.raw() == other.raw()
+        // Use constant-time comparison to prevent timing attacks
+        let self_raw = self.raw();
+        let other_raw = other.raw();
+        if self_raw.len() != other_raw.len() {
+            return false;
+        }
+        self_raw.ct_eq(&other_raw).into()
     }
 
     fn raw(&self) -> Vec<u8> {
@@ -528,5 +540,71 @@ mod tests {
         // Signature for message1 should not verify for message2
         let result = public_key.verify(message2, &signature1).unwrap();
         assert!(!result, "Signature should not verify for different message");
+    }
+
+    #[test]
+    fn test_secp256k1_invalid_curve_point() {
+        // Test that invalid curve points are rejected
+
+        // Valid length (33 bytes) but all zeros with a 0x02 prefix - invalid point
+        let mut invalid_point = vec![0x02u8];
+        invalid_point.extend_from_slice(&[0u8; 32]);
+        let result = Secp256k1PublicKey::from_bytes(&invalid_point);
+        assert!(result.is_none(), "All-zero X coordinate should be rejected");
+
+        // Valid length with 0x03 prefix and all zeros - also invalid
+        let mut invalid_point2 = vec![0x03u8];
+        invalid_point2.extend_from_slice(&[0u8; 32]);
+        let result = Secp256k1PublicKey::from_bytes(&invalid_point2);
+        assert!(result.is_none(), "All-zero X coordinate with 0x03 prefix should be rejected");
+
+        // Valid length but X coordinate larger than field prime - invalid
+        let mut invalid_point3 = vec![0x02u8];
+        invalid_point3.extend_from_slice(&[0xFFu8; 32]); // All 0xFF exceeds field prime
+        let result = Secp256k1PublicKey::from_bytes(&invalid_point3);
+        assert!(result.is_none(), "X coordinate exceeding field prime should be rejected");
+
+        // Invalid prefix bytes that k256 rejects
+        // 0x00 is invalid
+        let mut invalid_prefix_00 = vec![0x00u8];
+        invalid_prefix_00.extend_from_slice(&[1u8; 32]);
+        let result = Secp256k1PublicKey::from_bytes(&invalid_prefix_00);
+        assert!(result.is_none(), "Prefix 0x00 should be rejected");
+
+        // 0x01 is invalid
+        let mut invalid_prefix_01 = vec![0x01u8];
+        invalid_prefix_01.extend_from_slice(&[1u8; 32]);
+        let result = Secp256k1PublicKey::from_bytes(&invalid_prefix_01);
+        assert!(result.is_none(), "Prefix 0x01 should be rejected");
+
+        // 0x06 is invalid (0x06 and 0x07 are hybrid formats not supported)
+        let mut invalid_prefix_06 = vec![0x06u8];
+        invalid_prefix_06.extend_from_slice(&[1u8; 64]);
+        let result = Secp256k1PublicKey::from_bytes(&invalid_prefix_06);
+        assert!(result.is_none(), "Prefix 0x06 should be rejected");
+
+        // Uncompressed format (65 bytes) but all zeros - invalid point at infinity
+        let mut invalid_uncompressed = vec![0x04u8];
+        invalid_uncompressed.extend_from_slice(&[0u8; 64]); // Both X and Y are zero
+        let result = Secp256k1PublicKey::from_bytes(&invalid_uncompressed);
+        assert!(result.is_none(), "Point at infinity should be rejected");
+    }
+
+    #[test]
+    fn test_secp256k1_point_not_on_curve() {
+        // Generate valid point and corrupt Y coordinate in uncompressed form
+        let private_key = Secp256k1PrivateKey::from_bytes(&[7u8; 32]).unwrap();
+        let _public_key = private_key.public_key();
+
+        // Get uncompressed format and corrupt last byte (Y coordinate)
+        let verifying_key = private_key.key.verifying_key();
+        let mut uncompressed = verifying_key.to_encoded_point(false).as_bytes().to_vec();
+        assert_eq!(uncompressed.len(), 65, "Uncompressed should be 65 bytes");
+
+        // Flip last byte to make Y invalid for this X
+        uncompressed[64] ^= 0xFF;
+
+        let result = Secp256k1PublicKey::from_bytes(&uncompressed);
+        assert!(result.is_none(), "Point with invalid Y for given X should be rejected");
     }
 }

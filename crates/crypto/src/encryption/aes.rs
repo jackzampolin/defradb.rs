@@ -372,5 +372,132 @@ mod tests {
         let result = decrypt_aes(Some(&nonce), &ciphertext, &key, aad);
         assert!(result.is_err(), "Tampered ciphertext body should cause auth failure");
     }
+
+    #[test]
+    fn test_encrypt_decrypt_large_plaintext_1mb() {
+        // Test with 1MB plaintext to verify large data handling
+        let key = generate_aes256().unwrap();
+        let large_plaintext = vec![0xABu8; 1024 * 1024]; // 1MB
+        let aad = b"context for large data";
+
+        let (ciphertext, nonce) = encrypt_aes(&large_plaintext, &key, aad, false).unwrap();
+
+        // Ciphertext should be plaintext + 16 bytes auth tag
+        assert_eq!(
+            ciphertext.len(),
+            large_plaintext.len() + 16,
+            "Ciphertext should be plaintext length + 16 byte auth tag"
+        );
+
+        let decrypted = decrypt_aes(Some(&nonce), &ciphertext, &key, aad).unwrap();
+        assert_eq!(
+            large_plaintext.len(),
+            decrypted.len(),
+            "Decrypted length should match original"
+        );
+        assert_eq!(large_plaintext, decrypted, "Decrypted data should match original");
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_large_plaintext_10mb() {
+        // Test with 10MB plaintext for memory/performance verification
+        let key = generate_aes256().unwrap();
+        let large_plaintext = vec![0xCDu8; 10 * 1024 * 1024]; // 10MB
+        let aad = b"large data context";
+
+        let (ciphertext, _nonce) = encrypt_aes(&large_plaintext, &key, aad, true).unwrap();
+
+        // With prepended nonce: nonce (12) + ciphertext (10MB + 16 auth tag)
+        assert_eq!(
+            ciphertext.len(),
+            12 + large_plaintext.len() + 16,
+            "Ciphertext with nonce should be 12 + plaintext + 16"
+        );
+
+        let decrypted = decrypt_aes(None, &ciphertext, &key, aad).unwrap();
+        assert_eq!(large_plaintext, decrypted, "Large plaintext should decrypt correctly");
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_varied_byte_patterns() {
+        // Test with varied byte patterns to ensure no pattern-dependent bugs
+        let key = generate_aes256().unwrap();
+        let aad = b"varied pattern test";
+
+        // Pattern 1: Sequential bytes (0, 1, 2, ..., 255, 0, 1, ...)
+        let sequential: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
+        let (ct1, _) = encrypt_aes(&sequential, &key, aad, true).unwrap();
+        let dec1 = decrypt_aes(None, &ct1, &key, aad).unwrap();
+        assert_eq!(sequential, dec1, "Sequential pattern should round-trip");
+
+        // Pattern 2: Alternating high/low bytes
+        let alternating: Vec<u8> = (0..100_000).map(|i| if i % 2 == 0 { 0x00 } else { 0xFF }).collect();
+        let (ct2, _) = encrypt_aes(&alternating, &key, aad, true).unwrap();
+        let dec2 = decrypt_aes(None, &ct2, &key, aad).unwrap();
+        assert_eq!(alternating, dec2, "Alternating pattern should round-trip");
+
+        // Pattern 3: Pseudo-random from seed (deterministic)
+        let mut prng_data: Vec<u8> = Vec::with_capacity(100_000);
+        let mut seed: u32 = 0xDEADBEEF;
+        for _ in 0..100_000 {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            prng_data.push((seed >> 16) as u8);
+        }
+        let (ct3, _) = encrypt_aes(&prng_data, &key, aad, true).unwrap();
+        let dec3 = decrypt_aes(None, &ct3, &key, aad).unwrap();
+        assert_eq!(prng_data, dec3, "Pseudo-random pattern should round-trip");
+
+        // Pattern 4: Repeated blocks (compression-like pattern)
+        let block = b"ABCDEFGH12345678"; // 16-byte AES block size
+        let repeated: Vec<u8> = block.iter().cycle().take(100_000).cloned().collect();
+        let (ct4, _) = encrypt_aes(&repeated, &key, aad, true).unwrap();
+        let dec4 = decrypt_aes(None, &ct4, &key, aad).unwrap();
+        assert_eq!(repeated, dec4, "Repeated block pattern should round-trip");
+    }
+
+    #[test]
+    fn test_aes_gcm_auth_tag_size() {
+        // Verify AES-GCM produces expected ciphertext size with 16-byte auth tag
+        let key = generate_aes256().unwrap();
+
+        let test_sizes = [0, 1, 15, 16, 17, 100, 1000];
+
+        for size in test_sizes {
+            let plaintext = vec![0x42u8; size];
+            let (ciphertext, _nonce) = encrypt_aes(&plaintext, &key, &[], false).unwrap();
+
+            assert_eq!(
+                ciphertext.len(),
+                size + 16,
+                "Ciphertext for {} byte plaintext should be {} bytes (+ 16 byte auth tag)",
+                size,
+                size + 16
+            );
+        }
+    }
+
+    #[test]
+    fn test_nonce_uniqueness_per_encryption() {
+        // Verify that random nonces are unique per encryption call
+        // Use 100 samples to better verify PRNG quality
+        USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let key = generate_aes256().unwrap();
+        let plaintext = b"same message for all encryptions";
+        let aad = b"context";
+
+        // Collect nonces using HashSet for O(1) collision detection
+        let mut nonces: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        for i in 0..100 {
+            let (_ciphertext, nonce) = encrypt_aes(plaintext, &key, aad, false).unwrap();
+            assert!(
+                nonces.insert(nonce),
+                "Nonce collision detected at iteration {} - PRNG may be weak",
+                i
+            );
+        }
+
+        assert_eq!(nonces.len(), 100, "Should have 100 unique nonces");
+    }
 }
 

@@ -549,15 +549,25 @@ mod tests {
     }
 
     #[test]
-    fn test_public_key_from_bytes_valid_secp256r1() {
-        // secp256r1 public keys should work (even though private keys don't)
-        // Create a valid compressed secp256r1 public key (33 bytes with 0x02/0x03 prefix)
-        let mut key_bytes = vec![0x02u8; 33]; // 0x02 prefix + 32 bytes
-        key_bytes[1] = 0x01; // Make it non-zero
+    fn test_public_key_from_bytes_secp256r1_rejects_invalid() {
+        // secp256r1 rejects bytes that don't represent valid curve points
 
-        let result = public_key_from_bytes(KeyType::Secp256r1, &key_bytes);
-        // This might fail due to invalid curve point, but it should be attempting to parse
-        assert!(result.is_ok() || result.is_err(), "Should attempt to parse secp256r1 public key");
+        // All 0xFF with 0x02 prefix - X coordinate exceeds field prime
+        let mut invalid_all_ff = vec![0x02u8; 33];
+        invalid_all_ff[1..].fill(0xFF);
+        let result = public_key_from_bytes(KeyType::Secp256r1, &invalid_all_ff);
+        assert!(result.is_err(), "X coordinate exceeding field prime should be rejected");
+
+        // Invalid prefix byte (0x05 is not valid)
+        let mut invalid_prefix = vec![0x05u8; 33];
+        invalid_prefix[1..].fill(0x01);
+        let result = public_key_from_bytes(KeyType::Secp256r1, &invalid_prefix);
+        assert!(result.is_err(), "Invalid prefix 0x05 should be rejected");
+
+        // Wrong length (32 bytes instead of 33 for compressed)
+        let wrong_length = vec![0x02u8; 32];
+        let result = public_key_from_bytes(KeyType::Secp256r1, &wrong_length);
+        assert!(result.is_err(), "Wrong length should be rejected");
     }
 
     #[test]
