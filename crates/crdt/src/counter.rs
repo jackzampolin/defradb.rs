@@ -269,14 +269,7 @@ impl Counter {
                 let arr: [u8; 8] = bytes[..8].try_into().unwrap();
                 Ok(i64::from_be_bytes(arr))
             }
-            None => {
-                eprintln!(
-                    "INFO: Counter value not found for field '{}' in schema '{}'. \
-                     Returning default value 0.",
-                    self.field_name, self.schema_version_id
-                );
-                Ok(0)
-            }
+            None => Ok(0),
         }
     }
 
@@ -301,14 +294,7 @@ impl Counter {
                 let arr: [u8; 8] = bytes[..8].try_into().unwrap();
                 Ok(f64::from_be_bytes(arr))
             }
-            None => {
-                eprintln!(
-                    "INFO: Counter value not found for field '{}' in schema '{}'. \
-                     Returning default value 0.0.",
-                    self.field_name, self.schema_version_id
-                );
-                Ok(0.0)
-            }
+            None => Ok(0.0),
         }
     }
 
@@ -319,12 +305,14 @@ impl Counter {
 
     /// Apply an increment/decrement
     ///
-    /// WARNING: This implementation does NOT provide atomic updates across storage operations.
-    /// If the process crashes between updating the value and marking the nonce, the same delta
-    /// may be applied multiple times, violating CRDT idempotency guarantees.
+    /// # Warning
     ///
-    /// For production use, the Store implementation MUST guarantee atomicity across multiple
-    /// operations or provide a transaction API.
+    /// Value updates and nonce marking are not atomic. If the process crashes between
+    /// updating the value (line 344/383) and marking the nonce (line 388), the nonce
+    /// will not be marked. On replay, has_nonce() returns false, so the delta is
+    /// re-applied correctly maintaining the count. The actual risk is partial state
+    /// if the Store implementation doesn't provide atomicity within individual set()
+    /// operations. Use with Store implementations that guarantee atomic set().
     async fn apply_delta(&mut self, delta: &CounterDelta) -> Result<()> {
         // Check if nonce already applied (idempotency)
         if self.has_nonce(delta.nonce).await? {
@@ -398,7 +386,11 @@ impl ReplicatedData for Counter {
         let counter_delta = delta
             .as_any()
             .downcast_ref::<CounterDelta>()
-            .ok_or_else(|| Error::MergeError("invalid delta type".into()))?;
+            .ok_or_else(|| {
+                Error::MergeError(
+                    "invalid delta type for Counter merge: expected CounterDelta".into(),
+                )
+            })?;
 
         // Validate field name
         if counter_delta.field_name != self.field_name {
@@ -1029,5 +1021,61 @@ mod tests {
         // Value should be finite and very small (not exactly 1e-308 due to FP precision)
         assert!(value.is_finite());
         assert!(value.abs() < 1e-100); // Should be very small
+    }
+
+    #[test]
+    fn test_counter_delta_int64_empty_field_name() {
+        let result =
+            CounterDelta::new_int64(b"doc1".to_vec(), "".to_string(), 10, 1, "v1".to_string(), 5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+    }
+
+    #[test]
+    fn test_counter_delta_int64_empty_schema_version() {
+        let result = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            1,
+            "".to_string(),
+            5,
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version_id"));
+    }
+
+    #[test]
+    fn test_counter_delta_float64_empty_field_name() {
+        let result = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "".to_string(),
+            10,
+            1,
+            "v1".to_string(),
+            5.0,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+    }
+
+    #[test]
+    fn test_counter_delta_float64_empty_schema_version() {
+        let result = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            1,
+            "".to_string(),
+            5.0,
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version_id"));
     }
 }

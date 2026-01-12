@@ -229,15 +229,8 @@ impl Lww {
         match self.store.get(&self.priority_key).await? {
             Some(bytes) => decode_priority(&bytes),
             None => {
-                // WARNING: Missing priority should only occur on uninitialized state
-                // If value exists but priority doesn't, this indicates data corruption
-                // or partial write failure
-                eprintln!(
-                    "WARNING: Priority key not found for field '{}' in schema '{}'. \
-                     Returning default priority 0. This may indicate storage corruption \
-                     if the value key exists.",
-                    self.field_name, self.schema_version_id
-                );
+                // Missing priority indicates uninitialized state
+                // Returning default priority 0
                 Ok(0)
             }
         }
@@ -248,10 +241,9 @@ impl Lww {
 impl ReplicatedData for Lww {
     async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<()> {
         // Downcast to LwwDelta
-        let lww_delta = delta
-            .as_any()
-            .downcast_ref::<LwwDelta>()
-            .ok_or_else(|| Error::MergeError("invalid delta type".into()))?;
+        let lww_delta = delta.as_any().downcast_ref::<LwwDelta>().ok_or_else(|| {
+            Error::MergeError("invalid delta type for LWW merge: expected LwwDelta".into())
+        })?;
 
         // Validate field name matches
         if lww_delta.field_name != self.field_name {
@@ -561,5 +553,51 @@ mod tests {
 
         // Value should now be resurrected
         assert_eq!(lww.value().await.unwrap(), b"Bob");
+    }
+
+    #[test]
+    fn test_lww_delta_empty_field_name() {
+        let result = LwwDelta::new(
+            b"doc1".to_vec(),
+            "".to_string(),
+            10,
+            "v1".to_string(),
+            b"value".to_vec(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+    }
+
+    #[test]
+    fn test_lww_delta_empty_schema_version() {
+        let result = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "".to_string(),
+            b"value".to_vec(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version_id"));
+    }
+
+    #[test]
+    fn test_lww_delta_delete_empty_field_name() {
+        let result = LwwDelta::delete(b"doc1".to_vec(), "".to_string(), 10, "v1".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+    }
+
+    #[test]
+    fn test_lww_delta_delete_empty_schema_version() {
+        let result = LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 10, "".to_string());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version_id"));
     }
 }

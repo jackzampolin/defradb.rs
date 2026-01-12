@@ -268,7 +268,11 @@ impl ReplicatedData for CompositeDAG {
         let composite_delta = delta
             .as_any()
             .downcast_ref::<CompositeDelta>()
-            .ok_or_else(|| Error::MergeError("invalid delta type".into()))?;
+            .ok_or_else(|| {
+                Error::MergeError(
+                    "invalid delta type for Composite merge: expected CompositeDelta".into(),
+                )
+            })?;
 
         // Validate doc ID
         if composite_delta.doc_id != self.doc_id.as_str().as_bytes() {
@@ -281,10 +285,11 @@ impl ReplicatedData for CompositeDAG {
         }
 
         // Apply each field delta
-        // WARNING: No rollback support. If one field fails midway, previous fields remain
-        // updated, leaving the document in a partial state. This violates atomicity of
-        // delta application. For production use, implement validation of all fields before
-        // applying any changes, or add transaction support to the Store trait.
+        // WARNING: Fields are applied sequentially without transaction boundaries. If one
+        // field fails midway (e.g., validation error), previous fields remain updated while
+        // later fields are skipped. Each field's CRDT semantics remain correct, but
+        // business-level atomicity across multiple fields is not guaranteed. Validate all
+        // fields before applying any changes to minimize risk.
         for (field_name, field_delta) in &composite_delta.field_deltas {
             self.apply_field_delta(field_name, field_delta).await?;
         }
