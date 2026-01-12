@@ -532,4 +532,239 @@ proptest! {
             assert_eq!(value1, expected);
         });
     }
+
+    /// Property: Float64 Counter commutativity
+    #[test]
+    fn test_counter_float64_commutativity(
+        inc1 in -1000.0f64..1000.0,
+        inc2 in -1000.0f64..1000.0,
+        nonce1 in any::<i64>(),
+        nonce2 in any::<i64>(),
+    ) {
+        // Skip if nonces are the same or if values are not finite
+        if nonce1 == nonce2 || !inc1.is_finite() || !inc2.is_finite() {
+            return Ok(());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create two counters
+            let store1 = Arc::new(MemoryStore::new());
+            let mut counter1 = Counter::new(
+                store1.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true, // allow decrement
+                crdt::counter::NumericKind::Float64,
+            );
+
+            let store2 = Arc::new(MemoryStore::new());
+            let mut counter2 = Counter::new(
+                store2.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            );
+
+            let delta1 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            )
+            .unwrap();
+
+            let delta2 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            )
+            .unwrap();
+
+            // Merge in order: delta1, delta2
+            counter1.merge(&ctx, &delta1).await.unwrap();
+            counter1.merge(&ctx, &delta2).await.unwrap();
+
+            // Merge in reverse: delta2, delta1
+            counter2.merge(&ctx, &delta2).await.unwrap();
+            counter2.merge(&ctx, &delta1).await.unwrap();
+
+            // Both should have same value (sum of increments)
+            let value1_bytes = counter1.value().await.unwrap();
+            let value2_bytes = counter2.value().await.unwrap();
+
+            let value1 = f64::from_be_bytes(value1_bytes.try_into().unwrap());
+            let value2 = f64::from_be_bytes(value2_bytes.try_into().unwrap());
+
+            // Use approximate comparison for floating point
+            assert!((value1 - value2).abs() < 1e-10, "values should be equal: {} vs {}", value1, value2);
+
+            // Should be approximately equal to sum
+            let expected = inc1 + inc2;
+            assert!((value1 - expected).abs() < 1e-10, "value {} should be approximately {}", value1, expected);
+        });
+    }
+
+    /// Property: Float64 Counter idempotence
+    #[test]
+    fn test_counter_float64_idempotence(
+        increment in -1000.0f64..1000.0,
+        nonce in any::<i64>(),
+    ) {
+        // Skip if value is not finite
+        if !increment.is_finite() {
+            return Ok(());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let store = Arc::new(MemoryStore::new());
+            let mut counter = Counter::new(
+                store.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            );
+
+            let delta = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce,
+                "v1".to_string(),
+                increment,
+            )
+            .unwrap();
+
+            // Merge once
+            counter.merge(&ctx, &delta).await.unwrap();
+            let value1_bytes = counter.value().await.unwrap();
+            let value1 = f64::from_be_bytes(value1_bytes.try_into().unwrap());
+
+            // Merge same delta again (should be ignored due to nonce)
+            counter.merge(&ctx, &delta).await.unwrap();
+            let value2_bytes = counter.value().await.unwrap();
+            let value2 = f64::from_be_bytes(value2_bytes.try_into().unwrap());
+
+            // Values should be identical (only applied once)
+            assert!((value1 - value2).abs() < 1e-10);
+            assert!((value1 - increment).abs() < 1e-10);
+        });
+    }
+
+    /// Property: Float64 Counter associativity
+    #[test]
+    fn test_counter_float64_associativity(
+        inc1 in -100.0f64..100.0,
+        inc2 in -100.0f64..100.0,
+        inc3 in -100.0f64..100.0,
+        nonce1 in 1i64..1000000,
+        nonce2 in 1000001i64..2000000,
+        nonce3 in 2000001i64..3000000,
+    ) {
+        // Skip if any values are not finite
+        if !inc1.is_finite() || !inc2.is_finite() || !inc3.is_finite() {
+            return Ok(());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Counter 1: (A + B) + C
+            let store1 = Arc::new(MemoryStore::new());
+            let mut counter1 = Counter::new(
+                store1.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            );
+
+            // Counter 2: A + (B + C)
+            let store2 = Arc::new(MemoryStore::new());
+            let mut counter2 = Counter::new(
+                store2.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            );
+
+            let delta_a = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            ).unwrap();
+
+            let delta_b = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            ).unwrap();
+
+            let delta_c = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                30,
+                nonce3,
+                "v1".to_string(),
+                inc3,
+            ).unwrap();
+
+            // Counter 1: (A + B) + C
+            counter1.merge(&ctx, &delta_a).await.unwrap();
+            counter1.merge(&ctx, &delta_b).await.unwrap();
+            counter1.merge(&ctx, &delta_c).await.unwrap();
+
+            // Counter 2: A + (B + C)
+            counter2.merge(&ctx, &delta_a).await.unwrap();
+            counter2.merge(&ctx, &delta_b).await.unwrap();
+            counter2.merge(&ctx, &delta_c).await.unwrap();
+
+            // Both should have the same value (sum of all increments)
+            let value1_bytes = counter1.value().await.unwrap();
+            let value2_bytes = counter2.value().await.unwrap();
+
+            let value1 = f64::from_be_bytes(value1_bytes.try_into().unwrap());
+            let value2 = f64::from_be_bytes(value2_bytes.try_into().unwrap());
+
+            assert!((value1 - value2).abs() < 1e-10);
+
+            // Should equal the sum of all increments
+            let expected = inc1 + inc2 + inc3;
+            assert!((value1 - expected).abs() < 1e-10);
+        });
+    }
 }

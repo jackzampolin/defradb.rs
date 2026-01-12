@@ -329,6 +329,14 @@ impl Counter {
     /// implementation doesn't provide atomicity within individual set() operations.
     /// Use with Store implementations that guarantee atomic set().
     async fn apply_delta(&mut self, delta: &CounterDelta) -> Result<MergeResult> {
+        // Validate numeric kind matches
+        if delta.kind() != self.kind {
+            return Err(Error::MergeError(format!(
+                "numeric kind mismatch for field '{}': counter is {:?}, delta is {:?}",
+                self.field_name, self.kind, delta.kind()
+            )));
+        }
+
         // Check if nonce already applied (idempotency)
         if self.has_nonce(delta.nonce).await? {
             return Ok(MergeResult::SkippedAlreadyApplied { nonce: delta.nonce });
@@ -1251,5 +1259,158 @@ mod tests {
         let value_bytes = counter.value().await.unwrap();
         let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
         assert!((value - 7.0).abs() < 0.0001);
+    }
+
+    #[tokio::test]
+    async fn test_counter_numeric_kind_mismatch() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64, // Int64 counter
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to apply a Float64 delta to an Int64 counter
+        let delta = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            5.0,
+        )
+        .unwrap();
+
+        let result = counter.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("numeric kind mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_counter_underflow_saturating() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true, // Allow decrement
+            NumericKind::Int64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Set counter to near minimum
+        let delta1 = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            1,
+            "v1".to_string(),
+            i64::MIN + 10,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta1).await.unwrap();
+
+        // Try to decrement beyond minimum - should saturate
+        let delta2 = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            20,
+            2,
+            "v1".to_string(),
+            -20,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta2).await.unwrap();
+
+        // Should saturate at i64::MIN
+        let value_bytes = counter.value().await.unwrap();
+        let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+        assert_eq!(value, i64::MIN);
+    }
+
+    #[tokio::test]
+    async fn test_counter_merge_result_applied() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        let delta = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            5,
+        )
+        .unwrap();
+
+        let result = counter.merge(&ctx, &delta).await.unwrap();
+        assert!(matches!(result, MergeResult::Applied));
+    }
+
+    #[tokio::test]
+    async fn test_counter_merge_result_skipped_already_applied() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        let delta = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            5,
+        )
+        .unwrap();
+
+        // First merge should apply
+        let result1 = counter.merge(&ctx, &delta).await.unwrap();
+        assert!(matches!(result1, MergeResult::Applied));
+
+        // Second merge with same nonce should be skipped
+        let result2 = counter.merge(&ctx, &delta).await.unwrap();
+        assert!(matches!(
+            result2,
+            MergeResult::SkippedAlreadyApplied { nonce: 12345 }
+        ));
     }
 }

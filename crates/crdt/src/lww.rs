@@ -192,7 +192,9 @@ impl Lww {
                 // Same priority - use lexicographic tie-breaking
                 // On exact equality (data == current), current value wins (reject incoming)
                 // This ensures deterministic convergence across replicas
-                let current_value = self.get_value_internal().await.unwrap_or_default();
+                // Note: Store errors propagate via ?, None (uninitialized) treated as empty
+                let current_value: Vec<u8> =
+                    self.store.get(&self.value_key).await?.unwrap_or_default();
                 if data <= &current_value[..] {
                     // Current value wins or equal - ignore
                     return Ok(MergeResult::RejectedTieBreak);
@@ -648,5 +650,180 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid delta type for LWW"));
+    }
+
+    #[tokio::test]
+    async fn test_lww_merge_result_applied() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        let delta = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
+
+        let result = lww.merge(&ctx, &delta).await.unwrap();
+        assert!(matches!(result, MergeResult::Applied));
+    }
+
+    #[tokio::test]
+    async fn test_lww_merge_result_rejected_lower_priority() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // First write with priority 20
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            20,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
+        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        assert!(matches!(result1, MergeResult::Applied));
+
+        // Second write with lower priority 10 - should be rejected
+        let delta2 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            b"Bob".to_vec(),
+        )
+        .unwrap();
+        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        assert!(matches!(
+            result2,
+            MergeResult::RejectedLowerPriority {
+                current: 20,
+                incoming: 10
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_lww_merge_result_rejected_tie_break() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // First write: "Bob" with priority 10
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            b"Bob".to_vec(),
+        )
+        .unwrap();
+        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        assert!(matches!(result1, MergeResult::Applied));
+
+        // Second write: "Alice" with same priority 10
+        // "Alice" < "Bob" lexicographically, so should be rejected
+        let delta2 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
+        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        assert!(matches!(result2, MergeResult::RejectedTieBreak));
+    }
+
+    #[tokio::test]
+    async fn test_lww_priority_zero() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Write with priority 0 (lowest possible)
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            0,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
+        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        assert!(matches!(result1, MergeResult::Applied));
+        assert_eq!(lww.value().await.unwrap(), b"Alice");
+
+        // Second write with priority 0 should use tie-breaking
+        // "Bob" > "Alice" so Bob should win
+        let delta2 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            0,
+            "v1".to_string(),
+            b"Bob".to_vec(),
+        )
+        .unwrap();
+        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        assert!(matches!(result2, MergeResult::Applied));
+        assert_eq!(lww.value().await.unwrap(), b"Bob");
+    }
+
+    #[tokio::test]
+    async fn test_lww_priority_max() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Write with priority u64::MAX (highest possible)
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            u64::MAX,
+            "v1".to_string(),
+            b"Alice".to_vec(),
+        )
+        .unwrap();
+        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        assert!(matches!(result1, MergeResult::Applied));
+        assert_eq!(lww.value().await.unwrap(), b"Alice");
+
+        // Any subsequent write with lower priority should be rejected
+        let delta2 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            u64::MAX - 1,
+            "v1".to_string(),
+            b"Bob".to_vec(),
+        )
+        .unwrap();
+        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        assert!(matches!(result2, MergeResult::RejectedLowerPriority { .. }));
+        assert_eq!(lww.value().await.unwrap(), b"Alice");
     }
 }
