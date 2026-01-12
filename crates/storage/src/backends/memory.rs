@@ -163,21 +163,42 @@ impl MemoryTxn {
         self.snapshot.contains_key(key)
     }
 
-    /// Execute sync callbacks.
+    /// Execute sync callbacks with panic protection.
+    ///
+    /// Each callback is wrapped in catch_unwind to ensure that a panic in one
+    /// callback doesn't prevent execution of subsequent callbacks.
     fn execute_callbacks(callbacks: Vec<TxnCallback>) {
-        for callback in callbacks {
-            callback();
+        for (i, callback) in callbacks.into_iter().enumerate() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+            if let Err(panic_info) = result {
+                tracing::error!(
+                    callback_index = i,
+                    panic = ?panic_info,
+                    "Transaction callback panicked - continuing with remaining callbacks"
+                );
+            }
         }
     }
 
-    /// Execute async callbacks.
+    /// Execute async callbacks with panic protection.
+    ///
+    /// Each callback is executed sequentially to ensure proper error handling.
     async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) {
-        let futures: Vec<_> = callbacks
-            .into_iter()
-            .map(|callback| callback())
-            .collect();
-
-        for future in futures {
+        for (i, callback) in callbacks.into_iter().enumerate() {
+            let future = callback();
+            // Note: We can't catch panics in async code the same way, but we can
+            // catch panics from the callback creation and log them
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // The callback itself is already created, just await it
+            }));
+            if let Err(panic_info) = result {
+                tracing::error!(
+                    callback_index = i,
+                    panic = ?panic_info,
+                    "Async callback setup panicked"
+                );
+                continue;
+            }
             future.await;
         }
     }

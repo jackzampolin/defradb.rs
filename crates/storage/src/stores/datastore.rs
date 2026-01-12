@@ -12,8 +12,6 @@ use std::sync::Arc;
 /// Chunk size for large values (1MB)
 pub const CHUNK_SIZE: usize = 1_048_576;
 
-/// Chunk suffix marker - single byte appended to key for each chunk
-const CHUNK_SUFFIX_START: u8 = 0x00;
 
 /// Datastore provides storage for documents and collection data
 pub struct Datastore<S: Store> {
@@ -26,19 +24,6 @@ impl<S: Store> Datastore<S> {
         Self {
             store: NamespacedStore::new(store, Namespace::Datastore),
         }
-    }
-
-    /// Check if a value needs chunking
-    fn needs_chunking(value: &[u8]) -> bool {
-        value.len() > CHUNK_SIZE
-    }
-
-    /// Generate chunk key by appending a single-byte suffix
-    fn chunk_key(base_key: &[u8], chunk_index: u8) -> Vec<u8> {
-        let mut key = Vec::with_capacity(base_key.len() + 1);
-        key.extend_from_slice(base_key);
-        key.push(chunk_index);
-        key
     }
 }
 
@@ -60,53 +45,72 @@ pub struct DatastoreTxn {
 }
 
 impl DatastoreTxn {
+    /// Check if a value needs chunking (> 1MB)
+    fn needs_chunking(value: &[u8]) -> bool {
+        value.len() > CHUNK_SIZE
+    }
+
+    /// Generate chunk key by appending a single-byte suffix
+    fn chunk_key(base_key: &[u8], chunk_index: u8) -> Vec<u8> {
+        let mut key = Vec::with_capacity(base_key.len() + 1);
+        key.extend_from_slice(base_key);
+        key.push(chunk_index);
+        key
+    }
+
     /// Put a value with automatic chunking if needed
+    ///
+    /// Values larger than CHUNK_SIZE (1MB) are automatically split into chunks.
+    /// The maximum supported value size is 256MB (256 chunks).
     pub async fn put<K: Key>(&mut self, key: &K, value: &[u8]) -> Result<()> {
         let key_bytes = key.bytes();
 
-        if Datastore::<crate::backends::MemoryStore>::needs_chunking(value) {
+        if Self::needs_chunking(value) {
             // Split into chunks
             self.put_chunked(&key_bytes, value).await
         } else {
-            // Single value
+            // Single value - store directly at base key
             self.set(&key_bytes, value).await
         }
     }
 
     /// Get a value, reassembling chunks if needed
+    ///
+    /// This method automatically handles both chunked and non-chunked values:
+    /// - Chunked values are stored at chunk_key(base, 0), chunk_key(base, 1), etc.
+    /// - Non-chunked values are stored directly at the base key
     pub async fn get_value<K: Key>(&self, key: &K) -> Result<Option<Vec<u8>>> {
         let key_bytes = key.bytes();
 
-        // Try to get the base value first
-        match self.get(&key_bytes).await? {
-            Some(value) => {
-                // Check if this might be chunked by looking for chunk 1
-                let chunk1_key = Datastore::<crate::backends::MemoryStore>::chunk_key(&key_bytes, 1);
-                if self.has(&chunk1_key).await? {
-                    // This is chunked, reassemble
-                    self.get_chunked(&key_bytes).await
-                } else {
-                    // Single value
-                    Ok(Some(value))
-                }
-            }
-            None => Ok(None),
+        // Check if this is a chunked value by looking for chunk 0
+        let chunk0_key = Self::chunk_key(&key_bytes, 0);
+        if self.has(&chunk0_key).await? {
+            // This is chunked, reassemble from chunks
+            self.get_chunked(&key_bytes).await
+        } else {
+            // Not chunked, try to get the base key directly
+            self.get(&key_bytes).await
         }
     }
 
     /// Delete a value, including all chunks if present
+    ///
+    /// This method handles both chunked and non-chunked values:
+    /// - Deletes the base key (for non-chunked values)
+    /// - Deletes all chunk keys (for chunked values)
     pub async fn delete_value<K: Key>(&mut self, key: &K) -> Result<()> {
         let key_bytes = key.bytes();
 
-        // Delete base key
-        self.delete(&key_bytes).await?;
+        // Delete base key (for non-chunked values)
+        // Note: This is a no-op if the key doesn't exist
+        let _ = self.delete(&key_bytes).await;
 
         // Try to delete chunks (if they exist)
         let mut deleted_chunks = 0;
         let mut last_error: Option<Error> = None;
 
-        for i in 0..=255 {
-            let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(&key_bytes, i);
+        for i in 0..=255u8 {
+            let chunk_key = Self::chunk_key(&key_bytes, i);
             match self.has(&chunk_key).await {
                 Ok(true) => {
                     match self.delete(&chunk_key).await {
@@ -156,7 +160,7 @@ impl DatastoreTxn {
 
     /// Put a chunked value (internal)
     async fn put_chunked(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        let num_chunks = (value.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let num_chunks = value.len().div_ceil(CHUNK_SIZE);
 
         // Validate size before processing
         if num_chunks > 256 {
@@ -170,8 +174,8 @@ impl DatastoreTxn {
 
         // Delete any existing chunks first
         let mut deleted_count = 0;
-        for i in 0..=255 {
-            let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(key, i);
+        for i in 0..=255u8 {
+            let chunk_key = Self::chunk_key(key, i);
             if self.has(&chunk_key).await? {
                 self.delete(&chunk_key).await?;
                 deleted_count += 1;
@@ -189,7 +193,7 @@ impl DatastoreTxn {
 
         // Write new chunks
         for (i, chunk) in value.chunks(CHUNK_SIZE).enumerate() {
-            let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(key, i as u8);
+            let chunk_key = Self::chunk_key(key, i as u8);
             self.set(&chunk_key, chunk).await?;
         }
 
@@ -207,8 +211,8 @@ impl DatastoreTxn {
         let mut result = Vec::new();
         let mut chunks_found = 0;
 
-        for i in 0..=255 {
-            let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(key, i);
+        for i in 0..=255u8 {
+            let chunk_key = Self::chunk_key(key, i);
             match self.get(&chunk_key).await? {
                 Some(chunk) => {
                     result.extend_from_slice(&chunk);

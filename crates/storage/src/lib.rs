@@ -4,9 +4,9 @@
 /// - CoreKV abstraction layer for key-value operations
 /// - Multiple backend implementations (Memory, RocksDB)
 /// - MVCC transactions with snapshot isolation
-/// - Seven specialized stores with namespace isolation
-/// - 34 key types for hierarchical organization
-/// - Chunking support for large values
+/// - Six specialized stores with namespace isolation (plus RootStore foundation)
+/// - 27 key types for hierarchical organization across 6 stores
+/// - Chunking support for large values (>1MB, up to 256MB)
 /// - Merge tracking for CRDT operations
 ///
 /// # Architecture
@@ -14,7 +14,8 @@
 /// ```text
 /// Application Layer
 ///     ↓
-/// Multistore (7 specialized stores)
+/// Multistore (6 specialized stores + RootStore)
+///     ├── RootStore (foundation, no namespace)
 ///     ├── Datastore (documents)
 ///     ├── Blockstore (IPLD blocks)
 ///     ├── Headstore (document heads)

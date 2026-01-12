@@ -1,12 +1,12 @@
 /// Key hierarchy for DefraDB storage
 ///
-/// This module provides all 34 key types organized across 7 stores:
+/// This module provides 27 key types organized across 6 stores:
 /// - Datastore (5 keys): Document and collection data
 /// - Headstore (5 keys): Merkle tree heads and definitions
 /// - Systemstore (10 keys): Metadata and configuration
 /// - Peerstore (4 keys): Peer and replication metadata
 /// - Blockstore (2 keys): IPLD blocks and merge tracking
-/// - Encstore (1 key): Encrypted blocks
+/// - Encstore (1 key): Encrypted blocks (shares implementation with Blockstore)
 ///
 /// Each key type implements the Key trait, providing:
 /// - bytes(): Serialize to byte representation for storage

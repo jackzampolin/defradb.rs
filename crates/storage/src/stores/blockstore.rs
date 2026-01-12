@@ -98,17 +98,39 @@ impl BlockstoreTxn {
     }
 
     /// Get all unmerged block CIDs
+    ///
+    /// Returns a list of CIDs for blocks that have not yet been merged.
+    /// Any keys that fail to parse are logged as errors but do not stop iteration.
     pub async fn get_unmerged_cids(&self) -> Result<Vec<Cid>> {
         let mut cids = Vec::new();
+        let mut parse_errors = 0;
 
         let opts = IterOptions::new().with_prefix(ToMergeIndexKey::merge_prefix());
 
         let mut iter = self.iterator(opts).await?;
         while let Some(pair) = iter.next().await? {
             // Parse the key to extract CID
-            if let Ok(merge_key) = ToMergeIndexKey::from_bytes(&pair.key) {
-                cids.push(merge_key.cid);
+            match ToMergeIndexKey::from_bytes(&pair.key) {
+                Ok(merge_key) => {
+                    cids.push(merge_key.cid);
+                }
+                Err(e) => {
+                    parse_errors += 1;
+                    tracing::error!(
+                        key_bytes = ?pair.key,
+                        error = %e,
+                        "Failed to parse merge index key - possible data corruption"
+                    );
+                }
             }
+        }
+
+        if parse_errors > 0 {
+            tracing::warn!(
+                parse_errors = parse_errors,
+                successful_cids = cids.len(),
+                "Some merge index keys could not be parsed"
+            );
         }
 
         Ok(cids)
