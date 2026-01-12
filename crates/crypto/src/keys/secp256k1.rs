@@ -191,7 +191,10 @@ impl PublicKey for Secp256k1PublicKey {
     }
 
     fn did(&self) -> Result<String> {
-        crate::did::create_did_key(KeyType::Secp256k1, &self.raw())
+        // Use uncompressed format (65 bytes) for DID generation to match Go implementation
+        // Go uses SerializeUncompressed() which produces the full [0x04 | x | y] format
+        let uncompressed = self.key.to_encoded_point(false);
+        crate::did::create_did_key(KeyType::Secp256k1, uncompressed.as_bytes())
     }
 }
 
@@ -224,6 +227,7 @@ mod secp256k1_public_key_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::generation::generate_secp256k1;
 
     #[test]
     fn test_secp256k1_key_type() {
@@ -434,5 +438,104 @@ mod tests {
         let public_key = private_key.public_key();
         let valid = public_key.verify(empty_message, &signature).unwrap();
         assert!(valid, "Empty message signature should verify");
+    }
+
+    // ===== Signature Tests (ported from Go signature_test.go) =====
+
+    #[test]
+    fn test_sign_verify_round_trip() {
+        // TestSignECDSA_WithPrivateKeyStruct + TestVerifyECDSA_WithPublicKeyStruct
+        let private_key = generate_secp256k1().unwrap();
+        let message = b"test message";
+
+        let signature = private_key.sign(message).unwrap();
+        let public_key = private_key.public_key();
+
+        let verified = public_key.verify(message, &signature).unwrap();
+        assert!(verified, "Signature should verify with correct key and message");
+    }
+
+    #[test]
+    fn test_verify_tampered_message() {
+        // TestVerifyECDSA_TamperedMessage
+        let private_key = generate_secp256k1().unwrap();
+        let public_key = private_key.public_key();
+
+        let original_message = b"original message";
+        let signature = private_key.sign(original_message).unwrap();
+
+        let tampered_message = b"tampered message";
+        let result = public_key.verify(tampered_message, &signature).unwrap();
+
+        assert!(!result, "Verification should fail with tampered message");
+    }
+
+    #[test]
+    fn test_verify_tampered_signature() {
+        // TestVerifyECDSA_TamperedSignature
+        let private_key = generate_secp256k1().unwrap();
+        let public_key = private_key.public_key();
+        let message = b"test message";
+
+        let mut signature = private_key.sign(message).unwrap();
+
+        // Tamper with signature by flipping bits in the middle
+        if signature.len() > 10 {
+            let mid = signature.len() / 2;
+            signature[mid] ^= 0xFF;
+        }
+
+        let result = public_key.verify(message, &signature).unwrap();
+        assert!(!result, "Verification should fail with tampered signature");
+    }
+
+    #[test]
+    fn test_verify_wrong_public_key() {
+        // TestVerifyECDSA_WrongPublicKey
+        let correct_private = generate_secp256k1().unwrap();
+        let wrong_private = generate_secp256k1().unwrap();
+        let wrong_public = wrong_private.public_key();
+
+        let message = b"test message";
+        let signature = correct_private.sign(message).unwrap();
+
+        let result = wrong_public.verify(message, &signature).unwrap();
+        assert!(!result, "Verification should fail with wrong public key");
+    }
+
+    #[test]
+    fn test_sign_verify_multiple_messages() {
+        // Additional test: verify multiple different messages
+        let private_key = generate_secp256k1().unwrap();
+        let public_key = private_key.public_key();
+
+        let messages = vec![
+            b"message 1".as_slice(),
+            b"message 2".as_slice(),
+            b"a longer message with more content".as_slice(),
+            b"".as_slice(), // empty message
+        ];
+
+        for message in messages {
+            let signature = private_key.sign(message).unwrap();
+            let verified = public_key.verify(message, &signature).unwrap();
+            assert!(verified, "Signature should verify for message: {:?}", std::str::from_utf8(message));
+        }
+    }
+
+    #[test]
+    fn test_signature_not_reusable_across_messages() {
+        // Verify that a signature for one message doesn't verify for another
+        let private_key = generate_secp256k1().unwrap();
+        let public_key = private_key.public_key();
+
+        let message1 = b"first message";
+        let message2 = b"second message";
+
+        let signature1 = private_key.sign(message1).unwrap();
+
+        // Signature for message1 should not verify for message2
+        let result = public_key.verify(message2, &signature1).unwrap();
+        assert!(!result, "Signature should not verify for different message");
     }
 }

@@ -50,10 +50,16 @@ fn generate_random_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
 ///
 /// This should NEVER be used in production. It's only for testing purposes
 /// to ensure reproducible test results.
+///
+/// Uses the same deterministic value as the Go implementation:
+/// "deterministic nonce for testing" (first 12 bytes)
 #[cfg(test)]
 pub fn generate_deterministic_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
-    // Return a fixed nonce that matches Go test behavior
-    Ok(*b"deterministi")
+    // Match Go's generateTestNonce(): []byte("deterministic nonce for testing")[:12]
+    let full_nonce = b"deterministic nonce for testing";
+    let mut nonce = [0u8; AES_NONCE_SIZE];
+    nonce.copy_from_slice(&full_nonce[..AES_NONCE_SIZE]);
+    Ok(nonce)
 }
 
 /// Control whether to use deterministic nonces in tests
@@ -90,7 +96,10 @@ mod tests {
 
         // Deterministic nonces should be identical
         assert_eq!(nonce1, nonce2);
-        assert_eq!(&nonce1, b"deterministi");
+
+        // Should match Go's generateTestNonce(): first 12 bytes of "deterministic nonce for testing"
+        let expected = b"deterministi"; // First 12 bytes
+        assert_eq!(&nonce1, expected);
     }
 
     #[test]

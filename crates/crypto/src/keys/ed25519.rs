@@ -16,6 +16,25 @@ use crate::keys::{Key, PrivateKey, PublicKey};
 use crate::types::KeyType;
 
 /// Ed25519 private key wrapper
+///
+/// # Private Key Format
+///
+/// Ed25519 private keys in this implementation use a **64-byte representation**:
+/// - **Bytes 0-31**: 32-byte seed (the actual private scalar)
+/// - **Bytes 32-63**: 32-byte public key (derived from the seed)
+///
+/// This format matches the Go implementation and is compatible with many Ed25519
+/// libraries. The 64-byte format allows storing both the private seed and public
+/// key together for efficient operations.
+///
+/// When creating a key from bytes using `from_bytes()`, exactly 64 bytes must be
+/// provided. The first 32 bytes are used as the seed to reconstruct the signing key.
+///
+/// # Compatibility Note
+///
+/// This 64-byte format is standard in many implementations including Go's `crypto/ed25519`,
+/// libsodium's `crypto_sign_keypair`, and PyNaCl. Some libraries use only 32-byte seeds;
+/// when interoperating with those, use only the first 32 bytes of this format.
 #[derive(Clone)]
 pub struct Ed25519PrivateKey {
     key: SigningKey,
@@ -228,6 +247,7 @@ mod ed25519_public_key_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::generation::generate_ed25519;
 
     #[test]
     fn test_ed25519_key_generation() {
@@ -330,5 +350,127 @@ mod tests {
         let pub1_concrete = Ed25519PublicKey::from_bytes(&pub1.raw()).unwrap();
         let pub2_concrete = Ed25519PublicKey::from_bytes(&pub2.raw()).unwrap();
         assert_eq!(pub1_concrete, pub2_concrete, "Public keys from same private key should be equal");
+    }
+
+    // ===== Signature Tests (ported from Go signature_test.go) =====
+
+    #[test]
+    fn test_sign_verify_round_trip() {
+        // TestSignEd25519_WithPrivateKeyStruct + TestVerifyEd25519_WithPublicKeyStruct
+        let private_key = generate_ed25519().unwrap();
+        let message = b"test message";
+
+        let signature = private_key.sign(message).unwrap();
+        assert_eq!(signature.len(), 64, "Ed25519 signature should be 64 bytes");
+
+        let public_key = private_key.public_key();
+        let verified = public_key.verify(message, &signature).unwrap();
+        assert!(verified, "Signature should verify with correct key and message");
+    }
+
+    #[test]
+    fn test_verify_tampered_message() {
+        // TestVerifyEd25519_TamperedMessage
+        let private_key = generate_ed25519().unwrap();
+        let public_key = private_key.public_key();
+
+        let original_message = b"original message";
+        let signature = private_key.sign(original_message).unwrap();
+
+        let tampered_message = b"tampered message";
+        let result = public_key.verify(tampered_message, &signature).unwrap();
+
+        assert!(!result, "Verification should fail with tampered message");
+    }
+
+    #[test]
+    fn test_verify_tampered_signature() {
+        // TestVerifyEd25519_TamperedSignature
+        let private_key = generate_ed25519().unwrap();
+        let public_key = private_key.public_key();
+        let message = b"test message";
+
+        let mut signature = private_key.sign(message).unwrap();
+
+        // Tamper with signature by flipping bits in first byte
+        signature[0] ^= 0xFF;
+
+        let result = public_key.verify(message, &signature).unwrap();
+        assert!(!result, "Verification should fail with tampered signature");
+    }
+
+    #[test]
+    fn test_verify_wrong_public_key() {
+        // TestVerifyEd25519_WrongPublicKey
+        let correct_private = generate_ed25519().unwrap();
+        let wrong_private = generate_ed25519().unwrap();
+        let wrong_public = wrong_private.public_key();
+
+        let message = b"test message";
+        let signature = correct_private.sign(message).unwrap();
+
+        let result = wrong_public.verify(message, &signature).unwrap();
+        assert!(!result, "Verification should fail with wrong public key");
+    }
+
+    #[test]
+    fn test_sign_verify_multiple_messages() {
+        // Verify multiple different messages
+        let private_key = generate_ed25519().unwrap();
+        let public_key = private_key.public_key();
+
+        let messages = vec![
+            b"message 1".as_slice(),
+            b"message 2".as_slice(),
+            b"a longer message with more content".as_slice(),
+            b"".as_slice(), // empty message
+        ];
+
+        for message in messages {
+            let signature = private_key.sign(message).unwrap();
+            assert_eq!(signature.len(), 64, "Ed25519 signature should be 64 bytes");
+
+            let verified = public_key.verify(message, &signature).unwrap();
+            assert!(verified, "Signature should verify for message: {:?}", std::str::from_utf8(message));
+        }
+    }
+
+    #[test]
+    fn test_signature_not_reusable_across_messages() {
+        // Verify that a signature for one message doesn't verify for another
+        let private_key = generate_ed25519().unwrap();
+        let public_key = private_key.public_key();
+
+        let message1 = b"first message";
+        let message2 = b"second message";
+
+        let signature1 = private_key.sign(message1).unwrap();
+
+        // Signature for message1 should not verify for message2
+        let result = public_key.verify(message2, &signature1).unwrap();
+        assert!(!result, "Signature should not verify for different message");
+    }
+
+    #[test]
+    fn test_verify_invalid_signature_lengths() {
+        // Ed25519 signatures must be exactly 64 bytes
+        let private_key = generate_ed25519().unwrap();
+        let public_key = private_key.public_key();
+        let message = b"test message";
+
+        // Too short
+        let short_sig = vec![0u8; 63];
+        let result = public_key.verify(message, &short_sig).unwrap();
+        assert!(!result, "Signature with wrong length (63 bytes) should fail");
+
+        // Too long
+        let long_sig = vec![0u8; 65];
+        let result = public_key.verify(message, &long_sig).unwrap();
+        assert!(!result, "Signature with wrong length (65 bytes) should fail");
+
+        // Empty
+        let empty_sig = vec![];
+        let result = public_key.verify(message, &empty_sig).unwrap();
+        assert!(!result, "Empty signature should fail");
     }
 }
