@@ -4,6 +4,39 @@ use async_trait::async_trait;
 use defra_core::{types::DocId, Result};
 use std::any::Any;
 
+/// Result of a merge operation, providing visibility into what happened
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeResult {
+    /// Delta was applied and state was updated
+    Applied,
+    /// Delta was rejected because its priority was lower than current
+    RejectedLowerPriority { current: u64, incoming: u64 },
+    /// Delta was rejected due to lexicographic tie-breaking (same priority, current value wins)
+    RejectedTieBreak,
+    /// Delta was skipped because it was already applied (idempotency via nonce)
+    SkippedAlreadyApplied { nonce: i64 },
+}
+
+impl MergeResult {
+    /// Returns true if the delta was applied
+    pub fn was_applied(&self) -> bool {
+        matches!(self, MergeResult::Applied)
+    }
+
+    /// Returns true if the delta was rejected (not applied due to conflict resolution)
+    pub fn was_rejected(&self) -> bool {
+        matches!(
+            self,
+            MergeResult::RejectedLowerPriority { .. } | MergeResult::RejectedTieBreak
+        )
+    }
+
+    /// Returns true if the delta was skipped due to idempotency
+    pub fn was_skipped(&self) -> bool {
+        matches!(self, MergeResult::SkippedAlreadyApplied { .. })
+    }
+}
+
 /// Context for CRDT operations
 pub struct Context {
     /// Document identifier
@@ -49,9 +82,9 @@ pub trait ReplicatedData: Send + Sync {
     /// * `delta` - The delta to merge
     ///
     /// # Returns
-    /// * `Ok(())` if merge successful
+    /// * `Ok(MergeResult)` indicating what happened (applied, rejected, or skipped)
     /// * `Err(...)` if merge failed (invalid delta, storage error, etc.)
-    async fn merge(&mut self, ctx: &Context, delta: &dyn Delta) -> Result<()>;
+    async fn merge(&mut self, ctx: &Context, delta: &dyn Delta) -> Result<MergeResult>;
 
     /// Get the headstore key prefix for this CRDT
     ///

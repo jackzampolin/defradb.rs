@@ -3,7 +3,8 @@
 //! The Composite CRDT manages document-level state by coordinating
 //! multiple field-level CRDTs (LWW, Counter, etc).
 
-use crate::traits::{Context, Delta, ReplicatedData};
+use crate::priority::{decode_priority, encode_priority};
+use crate::traits::{Context, Delta, MergeResult, ReplicatedData};
 use async_trait::async_trait;
 use defra_core::{store::Store, types::DocId, Error, Result};
 use serde::{Deserialize, Serialize};
@@ -154,36 +155,92 @@ impl CompositeDAG {
             .insert(field_name, FieldCrdtType::Counter);
     }
 
-    /// Apply field-level delta
+    /// Build the value key for a field
+    fn build_value_key(&self, field_name: &str) -> Vec<u8> {
+        let mut key = Vec::new();
+        key.extend_from_slice(b"/data/");
+        key.extend_from_slice(self.schema_version_id.as_bytes());
+        key.push(b'/');
+        key.extend_from_slice(self.doc_id.as_str().as_bytes());
+        key.push(b'/');
+        key.extend_from_slice(field_name.as_bytes());
+        key
+    }
+
+    /// Build the priority key for a field
+    fn build_priority_key(&self, field_name: &str) -> Vec<u8> {
+        let mut key = self.build_value_key(field_name);
+        key.extend_from_slice(b"/priority");
+        key
+    }
+
+    /// Get the current priority for a field (0 if not set)
+    async fn get_field_priority(&self, field_name: &str) -> Result<u64> {
+        let priority_key = self.build_priority_key(field_name);
+        match self.store.get(&priority_key).await? {
+            Some(bytes) => decode_priority(&bytes),
+            None => Ok(0),
+        }
+    }
+
+    /// Set the priority for a field
+    async fn set_field_priority(&self, field_name: &str, priority: u64) -> Result<()> {
+        let priority_key = self.build_priority_key(field_name);
+        let priority_bytes = encode_priority(priority);
+        self.store.set(&priority_key, &priority_bytes).await
+    }
+
+    /// Apply field-level delta with proper CRDT conflict resolution
     ///
-    /// WARNING: Counter operations involve multiple storage writes (value + nonce) without
+    /// # Warning
+    ///
+    /// Counter operations involve multiple storage writes (value + nonce) without
     /// transaction support. If the process crashes between these operations, state may become
     /// inconsistent and violate CRDT idempotency guarantees.
-    async fn apply_field_delta(&self, field_name: &str, field_delta: &FieldDelta) -> Result<()> {
+    async fn apply_field_delta(
+        &self,
+        field_name: &str,
+        field_delta: &FieldDelta,
+    ) -> Result<MergeResult> {
         let crdt_type = self
             .field_managers
             .get(field_name)
             .ok_or_else(|| Error::MergeError(format!("unknown field: {}", field_name)))?;
 
         match (crdt_type, field_delta) {
-            (FieldCrdtType::Lww, FieldDelta::Lww { priority: _, data }) => {
-                // Apply LWW merge logic
-                let mut value_key = Vec::new();
-                value_key.extend_from_slice(b"/data/");
-                value_key.extend_from_slice(self.schema_version_id.as_bytes());
-                value_key.push(b'/');
-                value_key.extend_from_slice(self.doc_id.as_str().as_bytes());
-                value_key.push(b'/');
-                value_key.extend_from_slice(field_name.as_bytes());
+            (FieldCrdtType::Lww, FieldDelta::Lww { priority, data }) => {
+                let value_key = self.build_value_key(field_name);
+                let current_priority = self.get_field_priority(field_name).await?;
 
-                // Simple implementation - should use Lww::merge
+                // LWW conflict resolution: higher priority wins
+                match priority.cmp(&current_priority) {
+                    std::cmp::Ordering::Less => {
+                        return Ok(MergeResult::RejectedLowerPriority {
+                            current: current_priority,
+                            incoming: *priority,
+                        });
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // Same priority - use lexicographic tie-breaking
+                        let current_value = self.store.get(&value_key).await?.unwrap_or_default();
+                        if data.as_slice() <= current_value.as_slice() {
+                            return Ok(MergeResult::RejectedTieBreak);
+                        }
+                    }
+                    std::cmp::Ordering::Greater => {
+                        // Higher priority - proceed to update
+                    }
+                }
+
+                // Apply the update
                 if data.is_empty() {
                     self.store.delete(&value_key).await?;
                 } else {
                     self.store.set(&value_key, data).await?;
                 }
+                self.set_field_priority(field_name, *priority).await?;
 
-                Ok(())
+                Ok(MergeResult::Applied)
             }
             (
                 FieldCrdtType::Counter,
@@ -193,22 +250,15 @@ impl CompositeDAG {
                     data,
                 },
             ) => {
-                // Apply counter merge logic
-                let mut value_key = Vec::new();
-                value_key.extend_from_slice(b"/data/");
-                value_key.extend_from_slice(self.schema_version_id.as_bytes());
-                value_key.push(b'/');
-                value_key.extend_from_slice(self.doc_id.as_str().as_bytes());
-                value_key.push(b'/');
-                value_key.extend_from_slice(field_name.as_bytes());
+                let value_key = self.build_value_key(field_name);
 
-                // Check nonce idempotency
+                // Check nonce idempotency (counters are commutative, no priority comparison needed)
                 let mut nonce_key = value_key.clone();
                 nonce_key.extend_from_slice(b"/nonces/");
                 nonce_key.extend_from_slice(&nonce.to_be_bytes());
 
                 if self.store.has(&nonce_key).await? {
-                    return Ok(()); // Already applied
+                    return Ok(MergeResult::SkippedAlreadyApplied { nonce: *nonce });
                 }
 
                 // Apply increment
@@ -238,20 +288,38 @@ impl CompositeDAG {
                 self.store.set(&value_key, &new_value.to_be_bytes()).await?;
                 self.store.set(&nonce_key, &[1]).await?;
 
-                Ok(())
+                Ok(MergeResult::Applied)
             }
-            (_, FieldDelta::Delete { priority: _ }) => {
-                // Apply deletion
-                let mut value_key = Vec::new();
-                value_key.extend_from_slice(b"/data/");
-                value_key.extend_from_slice(self.schema_version_id.as_bytes());
-                value_key.push(b'/');
-                value_key.extend_from_slice(self.doc_id.as_str().as_bytes());
-                value_key.push(b'/');
-                value_key.extend_from_slice(field_name.as_bytes());
+            (_, FieldDelta::Delete { priority }) => {
+                let value_key = self.build_value_key(field_name);
+                let current_priority = self.get_field_priority(field_name).await?;
 
+                // Delete conflict resolution: higher priority wins
+                // On tie, non-empty value wins over deletion (empty < any value lexicographically)
+                match priority.cmp(&current_priority) {
+                    std::cmp::Ordering::Less => {
+                        return Ok(MergeResult::RejectedLowerPriority {
+                            current: current_priority,
+                            incoming: *priority,
+                        });
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // Same priority - deletion (empty) loses to any existing value
+                        let current_value = self.store.get(&value_key).await?;
+                        if current_value.is_some() && !current_value.as_ref().unwrap().is_empty() {
+                            return Ok(MergeResult::RejectedTieBreak);
+                        }
+                    }
+                    std::cmp::Ordering::Greater => {
+                        // Higher priority - proceed to delete
+                    }
+                }
+
+                // Apply deletion
                 self.store.delete(&value_key).await?;
-                Ok(())
+                self.set_field_priority(field_name, *priority).await?;
+
+                Ok(MergeResult::Applied)
             }
             _ => Err(Error::MergeError(format!(
                 "field type mismatch for field: {}",
@@ -263,7 +331,7 @@ impl CompositeDAG {
 
 #[async_trait]
 impl ReplicatedData for CompositeDAG {
-    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<()> {
+    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<MergeResult> {
         // Downcast to CompositeDelta
         let composite_delta = delta
             .as_any()
@@ -290,11 +358,22 @@ impl ReplicatedData for CompositeDAG {
         // later fields are skipped. Each field's CRDT semantics remain correct, but
         // business-level atomicity across multiple fields is not guaranteed. Validate all
         // fields before applying any changes to minimize risk.
+        let mut any_applied = false;
         for (field_name, field_delta) in &composite_delta.field_deltas {
-            self.apply_field_delta(field_name, field_delta).await?;
+            let result = self.apply_field_delta(field_name, field_delta).await?;
+            if result.was_applied() {
+                any_applied = true;
+            }
         }
 
-        Ok(())
+        // Return Applied if at least one field was applied, or if delta is empty (no-op)
+        // Otherwise all fields were rejected or skipped
+        if any_applied || composite_delta.field_deltas.is_empty() {
+            Ok(MergeResult::Applied)
+        } else {
+            // All fields were rejected or skipped - return a generic rejection
+            Ok(MergeResult::RejectedTieBreak)
+        }
     }
 
     fn headstore_prefix(&self) -> Vec<u8> {

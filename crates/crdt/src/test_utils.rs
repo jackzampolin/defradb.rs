@@ -22,6 +22,12 @@ impl MemoryStore {
     }
 }
 
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Store for MemoryStore {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

@@ -3,7 +3,7 @@
 //! Supports both increment and decrement operations with commutative merge semantics.
 //! Counters use nonces to ensure unique DAG blocks for idempotent delivery.
 
-use crate::traits::{Context, Delta, ReplicatedData, ValueReader};
+use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
 use defra_core::{store::Store, Error, Result};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,8 @@ pub struct CounterDelta {
     schema_version_id: String,
     /// The increment/decrement value (can be negative)
     data: Vec<u8>,
+    /// Numeric kind (Int64 or Float64)
+    kind: NumericKind,
 }
 
 impl CounterDelta {
@@ -44,6 +46,9 @@ impl CounterDelta {
         schema_version_id: String,
         increment: i64,
     ) -> Result<Self> {
+        if doc_id.is_empty() {
+            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        }
         if field_name.is_empty() {
             return Err(Error::MergeError("field_name cannot be empty".into()));
         }
@@ -59,6 +64,7 @@ impl CounterDelta {
             nonce,
             schema_version_id,
             data: increment.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         })
     }
 
@@ -71,6 +77,9 @@ impl CounterDelta {
         schema_version_id: String,
         increment: f64,
     ) -> Result<Self> {
+        if doc_id.is_empty() {
+            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        }
         if field_name.is_empty() {
             return Err(Error::MergeError("field_name cannot be empty".into()));
         }
@@ -92,6 +101,7 @@ impl CounterDelta {
             nonce,
             schema_version_id,
             data: increment.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         })
     }
 
@@ -123,6 +133,11 @@ impl CounterDelta {
     /// Get the raw data bytes
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    /// Get the numeric kind
+    pub fn kind(&self) -> NumericKind {
+        self.kind
     }
 
     /// Decode the increment value as i64
@@ -308,15 +323,15 @@ impl Counter {
     /// # Warning
     ///
     /// Value updates and nonce marking are not atomic. If the process crashes between
-    /// updating the value (line 344/383) and marking the nonce (line 388), the nonce
-    /// will not be marked. On replay, has_nonce() returns false, so the delta is
-    /// re-applied correctly maintaining the count. The actual risk is partial state
-    /// if the Store implementation doesn't provide atomicity within individual set()
-    /// operations. Use with Store implementations that guarantee atomic set().
-    async fn apply_delta(&mut self, delta: &CounterDelta) -> Result<()> {
+    /// updating the value and marking the nonce, the nonce will not be marked.
+    /// On replay, has_nonce() returns false, so the delta is re-applied correctly
+    /// maintaining the count. The actual risk is partial state if the Store
+    /// implementation doesn't provide atomicity within individual set() operations.
+    /// Use with Store implementations that guarantee atomic set().
+    async fn apply_delta(&mut self, delta: &CounterDelta) -> Result<MergeResult> {
         // Check if nonce already applied (idempotency)
         if self.has_nonce(delta.nonce).await? {
-            return Ok(()); // Already applied
+            return Ok(MergeResult::SkippedAlreadyApplied { nonce: delta.nonce });
         }
 
         // Decode and apply based on kind
@@ -375,13 +390,13 @@ impl Counter {
         // Mark nonce as applied
         self.mark_nonce(delta.nonce).await?;
 
-        Ok(())
+        Ok(MergeResult::Applied)
     }
 }
 
 #[async_trait]
 impl ReplicatedData for Counter {
-    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<()> {
+    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<MergeResult> {
         // Downcast to CounterDelta
         let counter_delta = delta
             .as_any()
@@ -476,6 +491,7 @@ mod tests {
             nonce: 12346,
             schema_version_id: "v1".to_string(),
             data: 3i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
         counter.merge(&ctx, &delta2).await.unwrap();
 
@@ -510,6 +526,7 @@ mod tests {
             nonce: 12345,
             schema_version_id: "v1".to_string(),
             data: 5i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
 
         counter.merge(&ctx, &delta).await.unwrap();
@@ -546,6 +563,7 @@ mod tests {
             nonce: 12345,
             schema_version_id: "v1".to_string(),
             data: (-5i64).to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
 
         let result = counter.merge(&ctx, &delta).await;
@@ -577,6 +595,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v1".to_string(),
             data: (i64::MAX - 10).to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
         counter.merge(&ctx, &delta1).await.unwrap();
 
@@ -588,6 +607,7 @@ mod tests {
             nonce: 2,
             schema_version_id: "v1".to_string(),
             data: 20i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
         counter.merge(&ctx, &delta2).await.unwrap();
 
@@ -622,6 +642,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v1".to_string(),
             data: 5i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
 
         let result = counter.merge(&ctx, &delta).await;
@@ -657,6 +678,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v2".to_string(),
             data: 5i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
 
         let result = counter.merge(&ctx, &delta).await;
@@ -692,6 +714,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v1".to_string(),
             data: f64::NAN.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         };
 
         let result = counter.merge(&ctx, &delta).await;
@@ -727,6 +750,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v1".to_string(),
             data: f64::INFINITY.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         };
 
         let result = counter.merge(&ctx, &delta).await;
@@ -762,6 +786,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v1".to_string(),
             data: f64::NEG_INFINITY.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         };
 
         let result = counter.merge(&ctx, &delta).await;
@@ -797,6 +822,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v1".to_string(),
             data: f64::MAX.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         };
         counter.merge(&ctx, &delta1).await.unwrap();
 
@@ -808,6 +834,7 @@ mod tests {
             nonce: 2,
             schema_version_id: "v1".to_string(),
             data: f64::MAX.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         };
 
         let result = counter.merge(&ctx, &delta2).await;
@@ -840,6 +867,7 @@ mod tests {
             nonce: 1,
             schema_version_id: "v1".to_string(),
             data: 5.5f64.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         };
         counter.merge(&ctx, &delta1).await.unwrap();
 
@@ -851,6 +879,7 @@ mod tests {
             nonce: 2,
             schema_version_id: "v1".to_string(),
             data: 3.2f64.to_be_bytes().to_vec(),
+            kind: NumericKind::Float64,
         };
         counter.merge(&ctx, &delta2).await.unwrap();
 
@@ -885,6 +914,7 @@ mod tests {
             nonce: 12345,
             schema_version_id: "v1".to_string(),
             data: 5i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
         counter.merge(&ctx, &delta).await.unwrap();
 
@@ -901,6 +931,7 @@ mod tests {
             nonce: 12345, // Same nonce
             schema_version_id: "v1".to_string(),
             data: 5i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
         counter.merge(&ctx, &delta2).await.unwrap();
 
@@ -943,6 +974,7 @@ mod tests {
             nonce: 999,
             schema_version_id: "v1".to_string(),
             data: 7i64.to_be_bytes().to_vec(),
+            kind: NumericKind::Int64,
         };
 
         // Apply to both counters
@@ -1077,5 +1109,147 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("schema_version_id"));
+    }
+
+    #[test]
+    fn test_counter_delta_int64_empty_doc_id() {
+        let result =
+            CounterDelta::new_int64(Vec::new(), "count".to_string(), 10, 1, "v1".to_string(), 5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("doc_id"));
+    }
+
+    #[test]
+    fn test_counter_delta_float64_empty_doc_id() {
+        let result = CounterDelta::new_float64(
+            Vec::new(),
+            "count".to_string(),
+            10,
+            1,
+            "v1".to_string(),
+            5.0,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("doc_id"));
+    }
+
+    #[tokio::test]
+    async fn test_counter_wrong_delta_type() {
+        use crate::LwwDelta;
+
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to merge an LwwDelta into a Counter
+        let wrong_delta = LwwDelta::new(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            "v1".to_string(),
+            b"value".to_vec(),
+        )
+        .unwrap();
+
+        let result = counter.merge(&ctx, &wrong_delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid delta type for Counter"));
+    }
+
+    #[tokio::test]
+    async fn test_counter_float64_decrement_not_allowed() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            false, // Decrement not allowed
+            NumericKind::Float64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to decrement with float64
+        let delta = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            -5.0,
+        )
+        .unwrap();
+
+        let result = counter.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("decrement not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_counter_float64_successful_decrement() {
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true, // Decrement allowed
+            NumericKind::Float64,
+        );
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // First increment
+        let delta1 = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            1,
+            "v1".to_string(),
+            10.0,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta1).await.unwrap();
+
+        // Then decrement
+        let delta2 = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            20,
+            2,
+            "v1".to_string(),
+            -3.0,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta2).await.unwrap();
+
+        // Should be 7.0
+        let value_bytes = counter.value().await.unwrap();
+        let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+        assert!((value - 7.0).abs() < 0.0001);
     }
 }

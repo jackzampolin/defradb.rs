@@ -5,7 +5,7 @@
 //! On tie, lexicographic comparison of values provides deterministic resolution.
 
 use crate::priority::{decode_priority, encode_priority};
-use crate::traits::{Context, Delta, PriorityReader, ReplicatedData, ValueReader};
+use crate::traits::{Context, Delta, MergeResult, PriorityReader, ReplicatedData, ValueReader};
 use async_trait::async_trait;
 use defra_core::{store::Store, Error, Result};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,9 @@ impl LwwDelta {
         schema_version_id: String,
         data: Vec<u8>,
     ) -> Result<Self> {
+        if doc_id.is_empty() {
+            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        }
         if field_name.is_empty() {
             return Err(Error::MergeError("field_name cannot be empty".into()));
         }
@@ -172,7 +175,7 @@ impl Lww {
     }
 
     /// Set a value with priority, implementing LWW merge logic
-    async fn set_value(&mut self, data: &[u8], incoming_priority: u64) -> Result<()> {
+    async fn set_value(&mut self, data: &[u8], incoming_priority: u64) -> Result<MergeResult> {
         // Get current priority
         let current_priority = self.get_priority_internal().await?;
 
@@ -180,17 +183,19 @@ impl Lww {
         match incoming_priority.cmp(&current_priority) {
             std::cmp::Ordering::Less => {
                 // LWW semantics: Reject updates with lower priority
-                // This is not an error - it's correct CRDT behavior
-                return Ok(());
+                return Ok(MergeResult::RejectedLowerPriority {
+                    current: current_priority,
+                    incoming: incoming_priority,
+                });
             }
             std::cmp::Ordering::Equal => {
                 // Same priority - use lexicographic tie-breaking
                 // On exact equality (data == current), current value wins (reject incoming)
                 // This ensures deterministic convergence across replicas
-                let current_value = self.get_value_internal().await?;
+                let current_value = self.get_value_internal().await.unwrap_or_default();
                 if data <= &current_value[..] {
                     // Current value wins or equal - ignore
-                    return Ok(());
+                    return Ok(MergeResult::RejectedTieBreak);
                 }
                 // Otherwise fall through to update
             }
@@ -210,7 +215,7 @@ impl Lww {
         let priority_bytes = encode_priority(incoming_priority);
         self.store.set(&self.priority_key, &priority_bytes).await?;
 
-        Ok(())
+        Ok(MergeResult::Applied)
     }
 
     /// Internal method to get current value
@@ -239,7 +244,7 @@ impl Lww {
 
 #[async_trait]
 impl ReplicatedData for Lww {
-    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<()> {
+    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<MergeResult> {
         // Downcast to LwwDelta
         let lww_delta = delta.as_any().downcast_ref::<LwwDelta>().ok_or_else(|| {
             Error::MergeError("invalid delta type for LWW merge: expected LwwDelta".into())
@@ -599,5 +604,49 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("schema_version_id"));
+    }
+
+    #[test]
+    fn test_lww_delta_empty_doc_id() {
+        let result = LwwDelta::new(
+            Vec::new(),
+            "name".to_string(),
+            10,
+            "v1".to_string(),
+            b"value".to_vec(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("doc_id"));
+    }
+
+    #[tokio::test]
+    async fn test_lww_wrong_delta_type() {
+        use crate::CounterDelta;
+
+        let store = Arc::new(MemoryStore::new());
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to merge a CounterDelta into an LWW register
+        let wrong_delta = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            5,
+        )
+        .unwrap();
+
+        let result = lww.merge(&ctx, &wrong_delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid delta type for LWW"));
     }
 }
