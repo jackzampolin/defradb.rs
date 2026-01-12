@@ -16,6 +16,10 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# IPLD
+cid.workspace = true
+multihash.workspace = true
+
 # Async
 async-trait.workspace = true
 
