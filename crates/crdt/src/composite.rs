@@ -352,12 +352,44 @@ impl ReplicatedData for CompositeDAG {
             return Err(Error::MergeError("schema version mismatch".into()));
         }
 
-        // Apply each field delta
-        // WARNING: Fields are applied sequentially without transaction boundaries. If one
-        // field fails midway (e.g., validation error), previous fields remain updated while
-        // later fields are skipped. Each field's CRDT semantics remain correct, but
-        // business-level atomicity across multiple fields is not guaranteed. Validate all
-        // fields before applying any changes to minimize risk.
+        // Pre-validation phase: Check all fields exist and types match before applying any changes.
+        // This minimizes the risk of partial application on validation errors.
+        for (field_name, field_delta) in &composite_delta.field_deltas {
+            let crdt_type = self
+                .field_managers
+                .get(field_name)
+                .ok_or_else(|| Error::MergeError(format!("unknown field: {}", field_name)))?;
+
+            // Validate field type matches delta type
+            match (crdt_type, field_delta) {
+                (FieldCrdtType::Lww, FieldDelta::Lww { .. })
+                | (FieldCrdtType::Lww, FieldDelta::Delete { .. })
+                | (FieldCrdtType::Counter, FieldDelta::Counter { .. })
+                | (FieldCrdtType::Counter, FieldDelta::Delete { .. }) => {
+                    // Types match
+                }
+                _ => {
+                    return Err(Error::MergeError(format!(
+                        "field type mismatch for field: {}",
+                        field_name
+                    )));
+                }
+            }
+
+            // Validate Counter data length if applicable
+            if let FieldDelta::Counter { data, .. } = field_delta {
+                if data.len() != 8 {
+                    return Err(Error::MergeError(format!(
+                        "invalid counter increment data for field '{}': expected 8 bytes, got {}",
+                        field_name,
+                        data.len()
+                    )));
+                }
+            }
+        }
+
+        // Apply each field delta (now that all fields are pre-validated)
+        // Note: Storage operations still not atomic, but validation errors won't cause partial state.
         let mut any_applied = false;
         for (field_name, field_delta) in &composite_delta.field_deltas {
             let result = self.apply_field_delta(field_name, field_delta).await?;
@@ -610,5 +642,79 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("field type mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_composite_doc_id_mismatch() {
+        let store = Arc::new(MemoryStore::new());
+        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+
+        composite.register_lww_field("name".to_string());
+
+        let ctx = Context {
+            doc_id: DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Delta with wrong doc ID
+        let mut field_deltas = HashMap::new();
+        field_deltas.insert(
+            "name".to_string(),
+            FieldDelta::Lww {
+                priority: 10,
+                data: b"Alice".to_vec(),
+            },
+        );
+
+        let delta = CompositeDelta {
+            doc_id: b"wrong_doc".to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 10,
+            field_deltas,
+        };
+
+        let result = composite.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("document ID mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_composite_schema_version_mismatch() {
+        let store = Arc::new(MemoryStore::new());
+        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+
+        composite.register_lww_field("name".to_string());
+
+        let ctx = Context {
+            doc_id: DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Delta with wrong schema version
+        let mut field_deltas = HashMap::new();
+        field_deltas.insert(
+            "name".to_string(),
+            FieldDelta::Lww {
+                priority: 10,
+                data: b"Alice".to_vec(),
+            },
+        );
+
+        let delta = CompositeDelta {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "v2".to_string(),
+            priority: 10,
+            field_deltas,
+        };
+
+        let result = composite.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema version mismatch"));
     }
 }

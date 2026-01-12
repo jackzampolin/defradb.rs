@@ -142,15 +142,30 @@ impl Lww {
     ///
     /// # Arguments
     /// * `store` - Storage backend
-    /// * `schema_version_id` - Schema version identifier
-    /// * `doc_id` - Document identifier
-    /// * `field_name` - Field name
+    /// * `schema_version_id` - Schema version identifier (must not be empty)
+    /// * `doc_id` - Document identifier (must not be empty)
+    /// * `field_name` - Field name (must not be empty)
+    ///
+    /// # Errors
+    /// Returns an error if schema_version_id, doc_id, or field_name is empty.
     pub fn new(
         store: Arc<dyn Store>,
         schema_version_id: String,
         doc_id: &[u8],
         field_name: String,
-    ) -> Self {
+    ) -> Result<Self> {
+        if schema_version_id.is_empty() {
+            return Err(Error::MergeError(
+                "schema_version_id cannot be empty".into(),
+            ));
+        }
+        if doc_id.is_empty() {
+            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        }
+        if field_name.is_empty() {
+            return Err(Error::MergeError("field_name cannot be empty".into()));
+        }
+
         // Construct storage keys
         // Format: /data/<schema_version>/<doc_id>/<field_name>
         let mut value_key = Vec::new();
@@ -165,13 +180,13 @@ impl Lww {
         let mut priority_key = value_key.clone();
         priority_key.extend_from_slice(b"/priority");
 
-        Self {
+        Ok(Self {
             store,
             value_key,
             priority_key,
             schema_version_id,
             field_name,
-        }
+        })
     }
 
     /// Set a value with priority, implementing LWW merge logic
@@ -189,17 +204,16 @@ impl Lww {
                 });
             }
             std::cmp::Ordering::Equal => {
-                // Same priority - use lexicographic tie-breaking
-                // On exact equality (data == current), current value wins (reject incoming)
-                // This ensures deterministic convergence across replicas
+                // Same priority - use lexicographic tie-breaking for deterministic convergence
+                // Current value wins if incoming data <= current (lexicographically)
+                // This means: incoming data must be strictly greater to win
                 // Note: Store errors propagate via ?, None (uninitialized) treated as empty
                 let current_value: Vec<u8> =
                     self.store.get(&self.value_key).await?.unwrap_or_default();
                 if data <= &current_value[..] {
-                    // Current value wins or equal - ignore
                     return Ok(MergeResult::RejectedTieBreak);
                 }
-                // Otherwise fall through to update
+                // Incoming data is lexicographically greater - fall through to update
             }
             std::cmp::Ordering::Greater => {
                 // Incoming priority is higher - fall through to update
@@ -304,7 +318,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_higher_priority_wins() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -338,7 +353,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_lower_priority_ignored() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -370,7 +386,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_same_priority_lexicographic() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -403,7 +420,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_deletion() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -437,7 +455,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_empty_data_tie_breaking() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -489,7 +508,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_deletion_resurrection_with_priority() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -626,7 +646,8 @@ mod tests {
         use crate::CounterDelta;
 
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -655,7 +676,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_merge_result_applied() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -678,7 +700,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_merge_result_rejected_lower_priority() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -719,7 +742,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_merge_result_rejected_tie_break() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -755,7 +779,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_priority_zero() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -793,7 +818,8 @@ mod tests {
     #[tokio::test]
     async fn test_lww_priority_max() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -825,5 +851,92 @@ mod tests {
         let result2 = lww.merge(&ctx, &delta2).await.unwrap();
         assert!(matches!(result2, MergeResult::RejectedLowerPriority { .. }));
         assert_eq!(lww.value().await.unwrap(), b"Alice");
+    }
+
+    #[tokio::test]
+    async fn test_lww_field_name_mismatch() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Delta with wrong field name
+        let delta = LwwDelta::new(
+            b"doc1".to_vec(),
+            "wrong_field".to_string(),
+            10,
+            "v1".to_string(),
+            b"value".to_vec(),
+        )
+        .unwrap();
+
+        let result = lww.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("field name mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_lww_schema_version_mismatch() {
+        let store = Arc::new(MemoryStore::new());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Delta with wrong schema version
+        let delta = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "v2".to_string(),
+            b"value".to_vec(),
+        )
+        .unwrap();
+
+        let result = lww.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema version mismatch"));
+    }
+
+    #[test]
+    fn test_lww_constructor_empty_schema_version() {
+        let store = Arc::new(MemoryStore::new());
+        let result = Lww::new(store, "".to_string(), b"doc1", "name".to_string());
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err
+            .to_string()
+            .contains("schema_version_id cannot be empty"));
+    }
+
+    #[test]
+    fn test_lww_constructor_empty_doc_id() {
+        let store = Arc::new(MemoryStore::new());
+        let result = Lww::new(store, "v1".to_string(), b"", "name".to_string());
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("doc_id cannot be empty"));
+    }
+
+    #[test]
+    fn test_lww_constructor_empty_field_name() {
+        let store = Arc::new(MemoryStore::new());
+        let result = Lww::new(store, "v1".to_string(), b"doc1", "".to_string());
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("field_name cannot be empty"));
     }
 }

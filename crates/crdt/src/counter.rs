@@ -1,7 +1,9 @@
-//! Counter CRDT implementation (PN-Counter)
+//! Counter CRDT implementation
 //!
-//! Supports both increment and decrement operations with commutative merge semantics.
-//! Counters use nonces to ensure unique DAG blocks for idempotent delivery.
+//! Supports increment and decrement operations with nonce-based idempotent delivery.
+//! Uses commutative addition with saturation on overflow for Int64, and error on
+//! overflow for Float64. This is not a traditional PN-Counter (which uses separate
+//! per-replica counters); instead it uses a single value with nonce tracking.
 
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
@@ -15,6 +17,12 @@ use std::sync::Arc;
 pub enum NumericKind {
     Int64,
     Float64,
+}
+
+/// Internal helper for computed new values (used in apply_delta)
+enum NewValue {
+    Int64(i64),
+    Float64(f64),
 }
 
 /// Counter Delta - represents an increment/decrement operation
@@ -211,6 +219,17 @@ pub struct Counter {
 
 impl Counter {
     /// Create a new Counter CRDT
+    ///
+    /// # Arguments
+    /// * `store` - Storage backend
+    /// * `schema_version_id` - Schema version identifier (must not be empty)
+    /// * `doc_id` - Document identifier (must not be empty)
+    /// * `field_name` - Field name (must not be empty)
+    /// * `allow_decrement` - Whether negative increments are allowed
+    /// * `kind` - Numeric type (Int64 or Float64)
+    ///
+    /// # Errors
+    /// Returns an error if schema_version_id, doc_id, or field_name is empty.
     pub fn new(
         store: Arc<dyn Store>,
         schema_version_id: String,
@@ -218,7 +237,19 @@ impl Counter {
         field_name: String,
         allow_decrement: bool,
         kind: NumericKind,
-    ) -> Self {
+    ) -> Result<Self> {
+        if schema_version_id.is_empty() {
+            return Err(Error::MergeError(
+                "schema_version_id cannot be empty".into(),
+            ));
+        }
+        if doc_id.is_empty() {
+            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        }
+        if field_name.is_empty() {
+            return Err(Error::MergeError("field_name cannot be empty".into()));
+        }
+
         // Construct storage keys
         let mut value_key = Vec::new();
         value_key.extend_from_slice(b"/data/");
@@ -232,7 +263,7 @@ impl Counter {
         let mut nonce_prefix = value_key.clone();
         nonce_prefix.extend_from_slice(b"/nonces/");
 
-        Self {
+        Ok(Self {
             store,
             value_key,
             nonce_prefix,
@@ -240,7 +271,7 @@ impl Counter {
             field_name,
             allow_decrement,
             kind,
-        }
+        })
     }
 
     /// Check if a nonce has been applied
@@ -320,20 +351,26 @@ impl Counter {
 
     /// Apply an increment/decrement
     ///
-    /// # Warning
+    /// # Crash Recovery Semantics
     ///
-    /// Value updates and nonce marking are not atomic. If the process crashes between
-    /// updating the value and marking the nonce, the nonce will not be marked.
-    /// On replay, has_nonce() returns false, so the delta is re-applied correctly
-    /// maintaining the count. The actual risk is partial state if the Store
-    /// implementation doesn't provide atomicity within individual set() operations.
-    /// Use with Store implementations that guarantee atomic set().
+    /// Nonce marking and value updates are not atomic. To ensure safety:
+    /// - Nonce is marked FIRST, then value is updated
+    /// - If crash occurs after nonce but before value update: delta is lost (under-count)
+    /// - If crash occurred with old ordering (value then nonce): would double-count
+    ///
+    /// Under-counting on crash is safer than over-counting because:
+    /// 1. It's easier to detect missing deltas than duplicate applications
+    /// 2. Over-counting violates CRDT idempotency guarantees
+    ///
+    /// For true atomicity, use a Store implementation with transaction support.
     async fn apply_delta(&mut self, delta: &CounterDelta) -> Result<MergeResult> {
         // Validate numeric kind matches
         if delta.kind() != self.kind {
             return Err(Error::MergeError(format!(
                 "numeric kind mismatch for field '{}': counter is {:?}, delta is {:?}",
-                self.field_name, self.kind, delta.kind()
+                self.field_name,
+                self.kind,
+                delta.kind()
             )));
         }
 
@@ -342,8 +379,8 @@ impl Counter {
             return Ok(MergeResult::SkippedAlreadyApplied { nonce: delta.nonce });
         }
 
-        // Decode and apply based on kind
-        match self.kind {
+        // Decode and validate based on kind BEFORE any state changes
+        let new_value = match self.kind {
             NumericKind::Int64 => {
                 let increment = delta.decode_int64()?;
                 if !self.allow_decrement && increment < 0 {
@@ -351,8 +388,7 @@ impl Counter {
                 }
                 let current = self.get_int64().await?;
                 // Int64: Saturate on overflow to match Go DefraDB behavior
-                let new_value = current.saturating_add(increment);
-                self.set_int64(new_value).await?;
+                NewValue::Int64(current.saturating_add(increment))
             }
             NumericKind::Float64 => {
                 let increment = delta.decode_float64()?;
@@ -381,22 +417,28 @@ impl Counter {
 
                 // Float64: Reject overflow to infinity (different from int64 saturation)
                 // Rationale: NaN/infinity breaks CRDT convergence properties
-                let new_value = current + increment;
+                let result = current + increment;
 
                 // Validate result (check for overflow to infinity)
-                if !new_value.is_finite() {
+                if !result.is_finite() {
                     return Err(Error::MergeError(format!(
                         "float64 overflow: {} + {} = {}",
-                        current, increment, new_value
+                        current, increment, result
                     )));
                 }
 
-                self.set_float64(new_value).await?;
+                NewValue::Float64(result)
             }
-        }
+        };
 
-        // Mark nonce as applied
+        // Mark nonce FIRST to prevent double-counting on crash recovery
         self.mark_nonce(delta.nonce).await?;
+
+        // Then update value
+        match new_value {
+            NewValue::Int64(v) => self.set_int64(v).await?,
+            NewValue::Float64(v) => self.set_float64(v).await?,
+        }
 
         Ok(MergeResult::Applied)
     }
@@ -472,7 +514,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -519,7 +562,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -556,7 +600,8 @@ mod tests {
             "count".to_string(),
             false, // Decrement not allowed
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -588,7 +633,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -635,7 +681,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -671,7 +718,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -707,7 +755,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -743,7 +792,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -779,7 +829,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -815,7 +866,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -860,7 +912,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -907,7 +960,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -959,7 +1013,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
         let mut counter2 = Counter::new(
             store.clone(),
             "v1".to_string(),
@@ -967,7 +1022,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1009,7 +1065,8 @@ mod tests {
             "value".to_string(),
             true,
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1153,7 +1210,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1188,7 +1246,8 @@ mod tests {
             "count".to_string(),
             false, // Decrement not allowed
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1224,7 +1283,8 @@ mod tests {
             "count".to_string(),
             true, // Decrement allowed
             NumericKind::Float64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1271,7 +1331,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64, // Int64 counter
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1307,7 +1368,8 @@ mod tests {
             "count".to_string(),
             true, // Allow decrement
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1354,7 +1416,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1385,7 +1448,8 @@ mod tests {
             "count".to_string(),
             true,
             NumericKind::Int64,
-        );
+        )
+        .unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -1412,5 +1476,133 @@ mod tests {
             result2,
             MergeResult::SkippedAlreadyApplied { nonce: 12345 }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_counter_corrupted_storage_int64() {
+        let store = Arc::new(MemoryStore::new());
+
+        // Manually insert corrupted data (wrong length)
+        let value_key = b"/data/v1/doc1/count".to_vec();
+        store.set(&value_key, b"short").await.unwrap();
+
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        )
+        .unwrap();
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to apply a delta - should fail when reading corrupted current value
+        let delta = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            5,
+        )
+        .unwrap();
+
+        let result = counter.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected 8 bytes"));
+    }
+
+    #[tokio::test]
+    async fn test_counter_corrupted_storage_float64() {
+        let store = Arc::new(MemoryStore::new());
+
+        // Manually insert corrupted data (wrong length)
+        let value_key = b"/data/v1/doc1/count".to_vec();
+        store.set(&value_key, b"too_short").await.unwrap();
+
+        let mut counter = Counter::new(
+            store.clone(),
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Float64,
+        )
+        .unwrap();
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to apply a delta - should fail when reading corrupted current value
+        let delta = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            12345,
+            "v1".to_string(),
+            5.0,
+        )
+        .unwrap();
+
+        let result = counter.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected 8 bytes"));
+    }
+
+    #[test]
+    fn test_counter_constructor_empty_schema_version() {
+        let store = Arc::new(MemoryStore::new());
+        let result = Counter::new(
+            store,
+            "".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err
+            .to_string()
+            .contains("schema_version_id cannot be empty"));
+    }
+
+    #[test]
+    fn test_counter_constructor_empty_doc_id() {
+        let store = Arc::new(MemoryStore::new());
+        let result = Counter::new(
+            store,
+            "v1".to_string(),
+            b"",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("doc_id cannot be empty"));
+    }
+
+    #[test]
+    fn test_counter_constructor_empty_field_name() {
+        let store = Arc::new(MemoryStore::new());
+        let result = Counter::new(
+            store,
+            "v1".to_string(),
+            b"doc1",
+            "".to_string(),
+            true,
+            NumericKind::Int64,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("field_name cannot be empty"));
     }
 }

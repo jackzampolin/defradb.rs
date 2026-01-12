@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use crdt::{
+    composite::{CompositeDAG, CompositeDelta, FieldDelta},
     traits::{Context, ReplicatedData, ValueReader},
     Counter, CounterDelta, Lww, LwwDelta,
 };
@@ -82,7 +83,7 @@ proptest! {
                 "v1".to_string(),
                 b"doc1",
                 "field1".to_string(),
-            );
+            ).unwrap();
 
             let store2 = Arc::new(MemoryStore::new());
             let mut lww2 = Lww::new(
@@ -90,7 +91,7 @@ proptest! {
                 "v1".to_string(),
                 b"doc1",
                 "field1".to_string(),
-            );
+            ).unwrap();
 
             let delta1 = LwwDelta::new(
                 b"doc1".to_vec(),
@@ -145,7 +146,7 @@ proptest! {
                 "v1".to_string(),
                 b"doc1",
                 "field1".to_string(),
-            );
+            ).unwrap();
 
             let delta = LwwDelta::new(
                 b"doc1".to_vec(),
@@ -198,7 +199,7 @@ proptest! {
                 "count".to_string(),
                 true, // allow decrement
                 crdt::counter::NumericKind::Int64,
-            );
+            ).unwrap();
 
             let store2 = Arc::new(MemoryStore::new());
             let mut counter2 = Counter::new(
@@ -208,7 +209,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Int64,
-            );
+            ).unwrap();
 
             let delta1 = CounterDelta::new_int64(
                 b"doc1".to_vec(),
@@ -271,7 +272,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Int64,
-            );
+            ).unwrap();
 
             let delta = CounterDelta::new_int64(
                 b"doc1".to_vec(),
@@ -323,7 +324,7 @@ proptest! {
                     "v1".to_string(),
                     b"doc1",
                     "field1".to_string(),
-                );
+                ).unwrap();
                 replicas.push(lww);
             }
 
@@ -386,7 +387,7 @@ proptest! {
                 "v1".to_string(),
                 b"doc1",
                 "field1".to_string(),
-            );
+            ).unwrap();
 
             // Create LWW 2: apply A then (B + C)
             let store2 = Arc::new(MemoryStore::new());
@@ -395,7 +396,7 @@ proptest! {
                 "v1".to_string(),
                 b"doc1",
                 "field1".to_string(),
-            );
+            ).unwrap();
 
             let delta_a = LwwDelta::new(
                 b"doc1".to_vec(),
@@ -468,7 +469,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Int64,
-            );
+            ).unwrap();
 
             // Counter 2: A + (B + C)
             let store2 = Arc::new(MemoryStore::new());
@@ -479,7 +480,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Int64,
-            );
+            ).unwrap();
 
             let delta_a = CounterDelta::new_int64(
                 b"doc1".to_vec(),
@@ -562,7 +563,7 @@ proptest! {
                 "count".to_string(),
                 true, // allow decrement
                 crdt::counter::NumericKind::Float64,
-            );
+            ).unwrap();
 
             let store2 = Arc::new(MemoryStore::new());
             let mut counter2 = Counter::new(
@@ -572,7 +573,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Float64,
-            );
+            ).unwrap();
 
             let delta1 = CounterDelta::new_float64(
                 b"doc1".to_vec(),
@@ -644,7 +645,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Float64,
-            );
+            ).unwrap();
 
             let delta = CounterDelta::new_float64(
                 b"doc1".to_vec(),
@@ -703,7 +704,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Float64,
-            );
+            ).unwrap();
 
             // Counter 2: A + (B + C)
             let store2 = Arc::new(MemoryStore::new());
@@ -714,7 +715,7 @@ proptest! {
                 "count".to_string(),
                 true,
                 crdt::counter::NumericKind::Float64,
-            );
+            ).unwrap();
 
             let delta_a = CounterDelta::new_float64(
                 b"doc1".to_vec(),
@@ -765,6 +766,211 @@ proptest! {
             // Should equal the sum of all increments
             let expected = inc1 + inc2 + inc3;
             assert!((value1 - expected).abs() < 1e-10);
+        });
+    }
+
+    /// Property: Composite commutativity with mixed field types
+    #[test]
+    fn test_composite_commutativity(
+        lww_priority1 in 1u64..2000,
+        lww_priority2 in 1u64..2000,
+        lww_data1 in prop::collection::vec(any::<u8>(), 1..20),
+        lww_data2 in prop::collection::vec(any::<u8>(), 1..20),
+        counter_inc1 in -100i64..100,
+        counter_inc2 in -100i64..100,
+        counter_nonce1 in 1i64..1000000,
+        counter_nonce2 in 1000001i64..2000000,
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create two composite replicas
+            let store1 = Arc::new(MemoryStore::new());
+            let mut composite1 = CompositeDAG::new(store1.clone(), DocId::new("doc1"), "v1".to_string());
+            composite1.register_lww_field("name".to_string());
+            composite1.register_counter_field("count".to_string());
+
+            let store2 = Arc::new(MemoryStore::new());
+            let mut composite2 = CompositeDAG::new(store2.clone(), DocId::new("doc1"), "v1".to_string());
+            composite2.register_lww_field("name".to_string());
+            composite2.register_counter_field("count".to_string());
+
+            // Create first composite delta
+            let mut delta1 = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), lww_priority1).unwrap();
+            delta1.add_field_delta("name".to_string(), FieldDelta::Lww {
+                priority: lww_priority1,
+                data: lww_data1.clone(),
+            }).unwrap();
+            delta1.add_field_delta("count".to_string(), FieldDelta::Counter {
+                priority: 10,
+                nonce: counter_nonce1,
+                data: counter_inc1.to_be_bytes().to_vec(),
+            }).unwrap();
+
+            // Create second composite delta
+            let mut delta2 = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), lww_priority2).unwrap();
+            delta2.add_field_delta("name".to_string(), FieldDelta::Lww {
+                priority: lww_priority2,
+                data: lww_data2.clone(),
+            }).unwrap();
+            delta2.add_field_delta("count".to_string(), FieldDelta::Counter {
+                priority: 20,
+                nonce: counter_nonce2,
+                data: counter_inc2.to_be_bytes().to_vec(),
+            }).unwrap();
+
+            // Merge in order: delta1, delta2
+            composite1.merge(&ctx, &delta1).await.unwrap();
+            composite1.merge(&ctx, &delta2).await.unwrap();
+
+            // Merge in reverse order: delta2, delta1
+            composite2.merge(&ctx, &delta2).await.unwrap();
+            composite2.merge(&ctx, &delta1).await.unwrap();
+
+            // Both should converge to the same state for LWW field
+            let name1 = store1.get(b"/data/v1/doc1/name").await.unwrap();
+            let name2 = store2.get(b"/data/v1/doc1/name").await.unwrap();
+            assert_eq!(name1, name2);
+
+            // Both should converge to the same state for Counter field
+            let count1 = store1.get(b"/data/v1/doc1/count").await.unwrap().unwrap();
+            let count2 = store2.get(b"/data/v1/doc1/count").await.unwrap().unwrap();
+            assert_eq!(count1, count2);
+
+            // Counter should be sum of increments
+            let count_val = i64::from_be_bytes(count1.try_into().unwrap());
+            assert_eq!(count_val, counter_inc1.saturating_add(counter_inc2));
+        });
+    }
+
+    /// Property: Composite multi-replica convergence
+    #[test]
+    fn test_composite_multi_replica_convergence(
+        lww_deltas in prop::collection::vec(
+            (1u64..5000, prop::collection::vec(any::<u8>(), 1..20)),
+            2..5
+        ),
+        counter_increments in prop::collection::vec(-50i64..50, 2..5),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create 3 replicas
+            let mut replicas = Vec::new();
+            let mut stores = Vec::new();
+            for _ in 0..3 {
+                let store = Arc::new(MemoryStore::new());
+                let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+                composite.register_lww_field("name".to_string());
+                composite.register_counter_field("score".to_string());
+                stores.push(store);
+                replicas.push(composite);
+            }
+
+            // Create composite deltas
+            let mut composite_deltas = Vec::new();
+            for (idx, ((lww_priority, lww_data), counter_inc)) in
+                lww_deltas.iter().zip(counter_increments.iter()).enumerate()
+            {
+                let mut delta = CompositeDelta::new(
+                    b"doc1".to_vec(),
+                    "v1".to_string(),
+                    *lww_priority
+                ).unwrap();
+                delta.add_field_delta("name".to_string(), FieldDelta::Lww {
+                    priority: *lww_priority,
+                    data: lww_data.clone(),
+                }).unwrap();
+                delta.add_field_delta("score".to_string(), FieldDelta::Counter {
+                    priority: 10,
+                    nonce: idx as i64 + 1000,
+                    data: counter_inc.to_be_bytes().to_vec(),
+                }).unwrap();
+                composite_deltas.push(delta);
+            }
+
+            // Merge all deltas into all replicas (in different orders)
+            for (i, replica) in replicas.iter_mut().enumerate() {
+                for (j, _) in composite_deltas.iter().enumerate() {
+                    // Different replicas see deltas in different orders
+                    let idx = (i + j) % composite_deltas.len();
+                    replica.merge(&ctx, &composite_deltas[idx]).await.unwrap();
+                }
+            }
+
+            // All replicas should converge to the same state
+            let name0 = stores[0].get(b"/data/v1/doc1/name").await.unwrap();
+            let name1 = stores[1].get(b"/data/v1/doc1/name").await.unwrap();
+            let name2 = stores[2].get(b"/data/v1/doc1/name").await.unwrap();
+
+            assert_eq!(&name0, &name1, "Replica 0 and 1 should have same name");
+            assert_eq!(&name1, &name2, "Replica 1 and 2 should have same name");
+
+            let score0 = stores[0].get(b"/data/v1/doc1/score").await.unwrap().unwrap();
+            let score1 = stores[1].get(b"/data/v1/doc1/score").await.unwrap().unwrap();
+            let score2 = stores[2].get(b"/data/v1/doc1/score").await.unwrap().unwrap();
+
+            assert_eq!(&score0, &score1, "Replica 0 and 1 should have same score");
+            assert_eq!(&score1, &score2, "Replica 1 and 2 should have same score");
+        });
+    }
+
+    /// Property: Composite idempotence
+    #[test]
+    fn test_composite_idempotence(
+        lww_priority in 1u64..10000,
+        lww_data in prop::collection::vec(any::<u8>(), 1..20),
+        counter_inc in -100i64..100,
+        counter_nonce in any::<i64>(),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let store = Arc::new(MemoryStore::new());
+            let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+            composite.register_lww_field("name".to_string());
+            composite.register_counter_field("count".to_string());
+
+            let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), lww_priority).unwrap();
+            delta.add_field_delta("name".to_string(), FieldDelta::Lww {
+                priority: lww_priority,
+                data: lww_data.clone(),
+            }).unwrap();
+            delta.add_field_delta("count".to_string(), FieldDelta::Counter {
+                priority: 10,
+                nonce: counter_nonce,
+                data: counter_inc.to_be_bytes().to_vec(),
+            }).unwrap();
+
+            // Merge once
+            composite.merge(&ctx, &delta).await.unwrap();
+            let name1 = store.get(b"/data/v1/doc1/name").await.unwrap();
+            let count1 = store.get(b"/data/v1/doc1/count").await.unwrap();
+
+            // Merge again (should be idempotent)
+            composite.merge(&ctx, &delta).await.unwrap();
+            let name2 = store.get(b"/data/v1/doc1/name").await.unwrap();
+            let count2 = store.get(b"/data/v1/doc1/count").await.unwrap();
+
+            // Values should be identical
+            assert_eq!(name1, name2);
+            assert_eq!(count1, count2);
+
+            // Counter should only have been applied once
+            let count_val = i64::from_be_bytes(count1.unwrap().try_into().unwrap());
+            assert_eq!(count_val, counter_inc);
         });
     }
 }
