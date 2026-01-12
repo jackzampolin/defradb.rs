@@ -33,7 +33,7 @@
 
 use async_trait::async_trait;
 use rocksdb::{
-    DBWithThreadMode, MultiThreaded, Options, ReadOptions, WriteBatch, WriteOptions,
+    DBWithThreadMode, MultiThreaded, Options, WriteBatch, WriteOptions,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};

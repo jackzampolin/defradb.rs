@@ -33,6 +33,9 @@ anyhow.workspace = true
 # Logging
 tracing.workspace = true
 
+# Utilities
+hex = "0.4"
+
 [dev-dependencies]
 proptest.workspace = true
 criterion = "0.5"

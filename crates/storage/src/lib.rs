@@ -65,10 +65,10 @@
 /// - Iterators with filtering
 /// - Transaction callbacks
 ///
-/// ## Phase 2: Key Hierarchy (In Progress)
-/// - 34 key types across 7 stores
-/// - Key encoding/decoding
-/// - Hierarchical organization
+/// ## Phase 2: Key Hierarchy ✅ (Complete)
+/// - 27 key types across 6 stores
+/// - Key encoding/decoding with CockroachDB-style varint
+/// - Hierarchical organization with prefixes
 ///
 /// ## Phase 3: Store Implementations (Pending)
 /// - Namespace isolation
@@ -93,9 +93,9 @@
 
 pub mod backends;
 pub mod corekv;
+pub mod keys;
 
-// Phase 2+ modules (to be implemented)
-// pub mod keys;
+// Phase 3+ modules (to be implemented)
 // pub mod stores;
 // pub mod transaction;
 // pub mod namespace;
