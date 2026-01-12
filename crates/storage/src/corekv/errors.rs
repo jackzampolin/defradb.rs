@@ -130,8 +130,24 @@ impl From<rocksdb::Error> for Error {
     fn from(err: rocksdb::Error) -> Self {
         // Check for specific RocksDB errors that map to CoreKV errors
         let err_str = err.to_string();
-        if err_str.contains("Conflict") || err_str.contains("TryAgain") {
+
+        // Log the error for debugging if classification is unclear
+        tracing::debug!(
+            error = %err_str,
+            "Converting RocksDB error to CoreKV error"
+        );
+
+        // Use case-insensitive string matching as fallback
+        // TODO: Use RocksDB error kind/code when available in rust-rocksdb
+        let err_lower = err_str.to_lowercase();
+        if err_lower.contains("conflict")
+            || err_lower.contains("try again")
+            || err_lower.contains("tryagain")
+            || err_lower.contains("busy") {
+            tracing::debug!("Classified RocksDB error as TxnConflict");
             Error::TxnConflict
+        } else if err_lower.contains("not found") {
+            Error::NotFound
         } else {
             Error::Backend(err_str)
         }

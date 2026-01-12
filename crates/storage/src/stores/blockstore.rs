@@ -18,12 +18,17 @@ pub struct Blockstore<S: Store> {
 }
 
 impl<S: Store> Blockstore<S> {
-    /// Create a new Blockstore
-    pub fn new(store: Arc<S>, is_p2p: bool) -> Self {
+    /// Create a new Blockstore with specified namespace
+    pub fn new_with_namespace(store: Arc<S>, is_p2p: bool, namespace: Namespace) -> Self {
         Self {
-            store: NamespacedStore::new(store, Namespace::Blockstore),
+            store: NamespacedStore::new(store, namespace),
             is_p2p,
         }
+    }
+
+    /// Create a new Blockstore (uses Blockstore namespace by default)
+    pub fn new(store: Arc<S>, is_p2p: bool) -> Self {
+        Self::new_with_namespace(store, is_p2p, Namespace::Blockstore)
     }
 }
 
@@ -96,10 +101,7 @@ impl BlockstoreTxn {
     pub async fn get_unmerged_cids(&self) -> Result<Vec<Cid>> {
         let mut cids = Vec::new();
 
-        let opts = IterOptions {
-            prefix: Some(ToMergeIndexKey::merge_prefix()),
-            ..Default::default()
-        };
+        let opts = IterOptions::new().with_prefix(ToMergeIndexKey::merge_prefix());
 
         let mut iter = self.iterator(opts).await?;
         while let Some(pair) = iter.next().await? {
@@ -224,9 +226,11 @@ mod tests {
 
         // Put block
         let mut txn = blockstore.new_txn(false).await.unwrap();
-        let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
-        txn_bs.put_block(&cid, data).await.unwrap();
-        txn_bs.txn.commit().await.unwrap();
+        {
+            let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
+            txn_bs.put_block(&cid, data).await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Get block
         let txn = blockstore.new_txn(true).await.unwrap();
@@ -245,9 +249,11 @@ mod tests {
 
         // Put block (should be marked as unmerged in P2P mode)
         let mut txn = blockstore.new_txn(false).await.unwrap();
-        let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
-        txn_bs.put_block(&cid, data).await.unwrap();
-        txn_bs.txn.commit().await.unwrap();
+        {
+            let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
+            txn_bs.put_block(&cid, data).await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Check if merged (should be false)
         let txn = blockstore.new_txn(true).await.unwrap();
@@ -258,9 +264,11 @@ mod tests {
 
         // Mark as merged
         let mut txn = blockstore.new_txn(false).await.unwrap();
-        let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
-        txn_bs.mark_as_merged(&cid).await.unwrap();
-        txn_bs.txn.commit().await.unwrap();
+        {
+            let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
+            txn_bs.mark_as_merged(&cid).await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Check again (should be true now)
         let txn = blockstore.new_txn(true).await.unwrap();
@@ -279,10 +287,12 @@ mod tests {
 
         // Put two blocks
         let mut txn = blockstore.new_txn(false).await.unwrap();
-        let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
-        txn_bs.put_block(&cid1, b"data1").await.unwrap();
-        txn_bs.put_block(&cid2, b"data2").await.unwrap();
-        txn_bs.txn.commit().await.unwrap();
+        {
+            let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
+            txn_bs.put_block(&cid1, b"data1").await.unwrap();
+            txn_bs.put_block(&cid2, b"data2").await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Get unmerged CIDs
         let txn = blockstore.new_txn(true).await.unwrap();
@@ -295,9 +305,11 @@ mod tests {
 
         // Mark one as merged
         let mut txn = blockstore.new_txn(false).await.unwrap();
-        let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
-        txn_bs.mark_as_merged(&cid1).await.unwrap();
-        txn_bs.txn.commit().await.unwrap();
+        {
+            let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
+            txn_bs.mark_as_merged(&cid1).await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Get unmerged CIDs again
         let txn = blockstore.new_txn(true).await.unwrap();
@@ -316,9 +328,11 @@ mod tests {
 
         // Put block
         let mut txn = blockstore.new_txn(false).await.unwrap();
-        let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
-        txn_bs.put_block(&cid, b"data").await.unwrap();
-        txn_bs.txn.commit().await.unwrap();
+        {
+            let txn_bs = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
+            txn_bs.put_block(&cid, b"data").await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Should be immediately "merged" (no tracking in non-P2P mode)
         let txn = blockstore.new_txn(true).await.unwrap();

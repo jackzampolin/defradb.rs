@@ -48,7 +48,11 @@ impl<S: Store> Multistore<S> {
             headstore: Headstore::new(store.clone()),
             systemstore: Systemstore::new(store.clone()),
             peerstore: Peerstore::new(store.clone()),
-            encstore: Blockstore::new(store.clone(), false),
+            encstore: Blockstore::new_with_namespace(
+                store.clone(),
+                false,
+                crate::namespace::Namespace::Encstore,
+            ),
             store,
         }
     }
@@ -83,10 +87,10 @@ impl RocksDBMultistore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::corekv::{Reader, Writer};
+    use crate::corekv::{Key, Reader, Writer};
     use crate::keys::{
         blockstore::BlockstoreKey, datastore::DataStoreKey, headstore::HeadstoreDocKey,
-        peerstore::ReplicatorKey, systemstore::CollectionKey, utils::InstanceType, Key,
+        peerstore::ReplicatorKey, systemstore::CollectionKey, utils::InstanceType,
     };
     use cid::Cid;
     use std::str::FromStr;

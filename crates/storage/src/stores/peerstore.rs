@@ -37,9 +37,8 @@ impl<S: Store> Store for Peerstore<S> {
 mod tests {
     use super::*;
     use crate::backends::MemoryStore;
-    use crate::corekv::{Reader, Writer};
+    use crate::corekv::{Key, Reader, Writer};
     use crate::keys::peerstore::ReplicatorKey;
-    use crate::keys::Key;
 
     #[tokio::test]
     async fn test_peerstore_basic() {

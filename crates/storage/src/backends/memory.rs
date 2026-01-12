@@ -32,8 +32,9 @@
 /// ```
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::corekv::{
@@ -141,7 +142,7 @@ impl MemoryTxn {
     /// Get a value, checking pending changes first, then snapshot.
     fn get_internal(&self, key: &[u8]) -> Option<Vec<u8>> {
         // Check pending changes first
-        let pending = self.pending.lock().unwrap();
+        let pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
             return pending_value.clone();
         }
@@ -153,7 +154,7 @@ impl MemoryTxn {
     /// Check if a key exists.
     fn has_internal(&self, key: &[u8]) -> bool {
         // Check pending changes first
-        let pending = self.pending.lock().unwrap();
+        let pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
             return pending_value.is_some();
         }
@@ -185,7 +186,7 @@ impl MemoryTxn {
 #[async_trait]
 impl Reader for MemoryTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -197,7 +198,7 @@ impl Reader for MemoryTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -209,13 +210,13 @@ impl Reader for MemoryTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
         // Merge snapshot and pending changes
         let mut merged = self.snapshot.clone();
-        let pending = self.pending.lock().unwrap();
+        let pending = self.pending.lock();
         for (key, value) in pending.iter() {
             match value {
                 Some(v) => {
@@ -234,7 +235,7 @@ impl Reader for MemoryTxn {
 #[async_trait]
 impl Writer for MemoryTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -246,12 +247,12 @@ impl Writer for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
-        self.pending.lock().unwrap().insert(key.to_vec(), Some(value.to_vec()));
+        self.pending.lock().insert(key.to_vec(), Some(value.to_vec()));
         Ok(())
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -263,7 +264,7 @@ impl Writer for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
-        self.pending.lock().unwrap().insert(key.to_vec(), None);
+        self.pending.lock().insert(key.to_vec(), None);
         Ok(())
     }
 }
@@ -271,12 +272,12 @@ impl Writer for MemoryTxn {
 #[async_trait]
 impl Txn for MemoryTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
         // Clone pending changes before awaiting (can't hold MutexGuard across await)
-        let pending = self.pending.lock().unwrap().clone();
+        let pending = self.pending.lock().clone();
 
         // Apply pending changes to store
         if !pending.is_empty() {
@@ -295,8 +296,8 @@ impl Txn for MemoryTxn {
         }
 
         // Execute success callbacks
-        let on_success = std::mem::take(&mut *self.on_success.lock().unwrap());
-        let on_success_async = std::mem::take(&mut *self.on_success_async.lock().unwrap());
+        let on_success = std::mem::take(&mut *self.on_success.lock());
+        let on_success_async = std::mem::take(&mut *self.on_success_async.lock());
         Self::execute_callbacks(on_success);
         Self::execute_async_callbacks(on_success_async).await;
 
@@ -304,44 +305,50 @@ impl Txn for MemoryTxn {
     }
 
     fn discard(self: Box<Self>) {
-        *self.discarded.lock().unwrap() = true;
+        *self.discarded.lock() = true;
 
-        // Execute discard callbacks
-        let on_discard = std::mem::take(&mut *self.on_discard.lock().unwrap());
+        // Execute sync discard callbacks
+        let on_discard = std::mem::take(&mut *self.on_discard.lock());
         Self::execute_callbacks(on_discard);
 
-        // Note: We can't execute async callbacks in a sync method
-        // Async discard callbacks will be dropped
-        let async_callbacks = self.on_discard_async.lock().unwrap();
-        if !async_callbacks.is_empty() {
-            tracing::warn!(
-                "Async discard callbacks cannot be executed in sync discard method"
+        // Handle async callbacks: spawn them in background with warning
+        let on_discard_async = std::mem::take(&mut *self.on_discard_async.lock());
+        if !on_discard_async.is_empty() {
+            tracing::error!(
+                count = on_discard_async.len(),
+                "Transaction has async discard callbacks. Spawning in background - they may not complete if process exits. Consider using commit() instead of discard() when async callbacks are registered."
             );
+
+            // Spawn async callbacks in background
+            // NOTE: These may not complete if the process exits before they finish
+            tokio::spawn(async move {
+                Self::execute_async_callbacks(on_discard_async).await;
+            });
         }
     }
 
     fn on_success(&mut self, callback: TxnCallback) {
-        self.on_success.lock().unwrap().push(callback);
+        self.on_success.lock().push(callback);
     }
 
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_success_async.lock().unwrap().push(callback);
+        self.on_success_async.lock().push(callback);
     }
 
     fn on_error(&mut self, callback: TxnCallback) {
-        self.on_error.lock().unwrap().push(callback);
+        self.on_error.lock().push(callback);
     }
 
     fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_error_async.lock().unwrap().push(callback);
+        self.on_error_async.lock().push(callback);
     }
 
     fn on_discard(&mut self, callback: TxnCallback) {
-        self.on_discard.lock().unwrap().push(callback);
+        self.on_discard.lock().push(callback);
     }
 
     fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_discard_async.lock().unwrap().push(callback);
+        self.on_discard_async.lock().push(callback);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -379,22 +386,22 @@ impl MemoryIterator {
             .into_iter()
             .filter(|(k, _)| {
                 // Apply prefix filter
-                if let Some(ref prefix) = opts.prefix {
+                if let Some(prefix) = opts.prefix() {
                     if !k.starts_with(prefix) {
                         return false;
                     }
                 }
 
                 // Apply start filter
-                if let Some(ref start) = opts.start {
-                    if k < start {
+                if let Some(start) = opts.start() {
+                    if k.as_slice() < start {
                         return false;
                     }
                 }
 
                 // Apply end filter
-                if let Some(ref end) = opts.end {
-                    if k >= end {
+                if let Some(end) = opts.end() {
+                    if k.as_slice() >= end {
                         return false;
                     }
                 }
@@ -404,7 +411,7 @@ impl MemoryIterator {
             .collect();
 
         // Apply reverse ordering
-        if opts.reverse {
+        if opts.reverse() {
             filtered.reverse();
         }
 
@@ -412,7 +419,7 @@ impl MemoryIterator {
             data: filtered,
             position: 0,
             closed: false,
-            keys_only: opts.keys_only,
+            keys_only: opts.keys_only(),
         })
     }
 }

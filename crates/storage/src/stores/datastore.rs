@@ -102,13 +102,53 @@ impl DatastoreTxn {
         self.delete(&key_bytes).await?;
 
         // Try to delete chunks (if they exist)
+        let mut deleted_chunks = 0;
+        let mut last_error: Option<Error> = None;
+
         for i in 0..=255 {
             let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(&key_bytes, i);
-            if self.has(&chunk_key).await? {
-                self.delete(&chunk_key).await?;
-            } else {
-                break; // No more chunks
+            match self.has(&chunk_key).await {
+                Ok(true) => {
+                    match self.delete(&chunk_key).await {
+                        Ok(_) => deleted_chunks += 1,
+                        Err(e) => {
+                            tracing::error!(
+                                chunk_index = i,
+                                deleted_so_far = deleted_chunks,
+                                error = %e,
+                                "Failed to delete chunk during delete_value"
+                            );
+                            last_error = Some(e);
+                            // Continue trying to delete remaining chunks
+                        }
+                    }
+                }
+                Ok(false) => break, // No more chunks
+                Err(e) => {
+                    tracing::error!(
+                        chunk_index = i,
+                        error = %e,
+                        "Failed to check chunk existence during delete_value"
+                    );
+                    last_error = Some(e);
+                    break;
+                }
             }
+        }
+
+        if deleted_chunks > 0 {
+            tracing::debug!(
+                deleted_chunks = deleted_chunks,
+                "Deleted chunked value"
+            );
+        }
+
+        // Return error if any chunk deletion failed
+        if let Some(err) = last_error {
+            return Err(Error::Other(format!(
+                "Partial chunk deletion: deleted {} chunks before error: {}",
+                deleted_chunks, err
+            )));
         }
 
         Ok(())
@@ -116,26 +156,48 @@ impl DatastoreTxn {
 
     /// Put a chunked value (internal)
     async fn put_chunked(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let num_chunks = (value.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+        // Validate size before processing
+        if num_chunks > 256 {
+            return Err(Error::Other(format!(
+                "Value too large: {} bytes requires {} chunks (max 256 chunks = 256MB). Size: {:.2} MB",
+                value.len(),
+                num_chunks,
+                value.len() as f64 / 1_048_576.0
+            )));
+        }
+
         // Delete any existing chunks first
+        let mut deleted_count = 0;
         for i in 0..=255 {
             let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(key, i);
             if self.has(&chunk_key).await? {
                 self.delete(&chunk_key).await?;
+                deleted_count += 1;
             } else {
                 break;
             }
         }
 
+        if deleted_count > 0 {
+            tracing::debug!(
+                deleted_chunks = deleted_count,
+                "Deleted existing chunks before writing new chunked value"
+            );
+        }
+
         // Write new chunks
         for (i, chunk) in value.chunks(CHUNK_SIZE).enumerate() {
-            if i > 255 {
-                return Err(Error::Other(
-                    "Value too large: exceeds 256 chunks (256MB)".into(),
-                ));
-            }
             let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(key, i as u8);
             self.set(&chunk_key, chunk).await?;
         }
+
+        tracing::debug!(
+            chunks_written = num_chunks,
+            value_size = value.len(),
+            "Wrote chunked value"
+        );
 
         Ok(())
     }
@@ -143,19 +205,28 @@ impl DatastoreTxn {
     /// Get a chunked value (internal)
     async fn get_chunked(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let mut result = Vec::new();
+        let mut chunks_found = 0;
 
         for i in 0..=255 {
             let chunk_key = Datastore::<crate::backends::MemoryStore>::chunk_key(key, i);
             match self.get(&chunk_key).await? {
-                Some(chunk) => result.extend_from_slice(&chunk),
+                Some(chunk) => {
+                    result.extend_from_slice(&chunk);
+                    chunks_found += 1;
+                }
                 None => break,
             }
         }
 
-        if result.is_empty() {
-            Ok(None)
-        } else {
+        if chunks_found > 0 {
+            tracing::debug!(
+                chunks_found = chunks_found,
+                total_size = result.len(),
+                "Reconstructed chunked value"
+            );
             Ok(Some(result))
+        } else {
+            Ok(None)
         }
     }
 }
@@ -249,9 +320,11 @@ mod tests {
 
         // Write
         let mut txn = datastore.new_txn(false).await.unwrap();
-        let txn = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
-        txn.put(&key, b"value1").await.unwrap();
-        txn.txn.commit().await.unwrap();
+        {
+            let txn_ds = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
+            txn_ds.put(&key, b"value1").await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Read
         let txn = datastore.new_txn(true).await.unwrap();
@@ -272,9 +345,11 @@ mod tests {
 
         // Write
         let mut txn = datastore.new_txn(false).await.unwrap();
-        let txn = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
-        txn.put(&key, &large_value).await.unwrap();
-        txn.txn.commit().await.unwrap();
+        {
+            let txn_ds = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
+            txn_ds.put(&key, &large_value).await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Read back
         let txn = datastore.new_txn(true).await.unwrap();
@@ -295,9 +370,11 @@ mod tests {
 
         // Write
         let mut txn = datastore.new_txn(false).await.unwrap();
-        let txn = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
-        txn.put(&key, &large_value).await.unwrap();
-        txn.txn.commit().await.unwrap();
+        {
+            let txn_ds = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
+            txn_ds.put(&key, &large_value).await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Verify it exists
         let txn = datastore.new_txn(true).await.unwrap();
@@ -308,9 +385,11 @@ mod tests {
 
         // Delete
         let mut txn = datastore.new_txn(false).await.unwrap();
-        let txn = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
-        txn.delete_value(&key).await.unwrap();
-        txn.txn.commit().await.unwrap();
+        {
+            let txn_ds = txn.as_any_mut().downcast_mut::<DatastoreTxn>().unwrap();
+            txn_ds.delete_value(&key).await.unwrap();
+        }
+        txn.commit().await.unwrap();
 
         // Verify it's gone
         let txn = datastore.new_txn(true).await.unwrap();

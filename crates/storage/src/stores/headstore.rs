@@ -37,9 +37,8 @@ impl<S: Store> Store for Headstore<S> {
 mod tests {
     use super::*;
     use crate::backends::MemoryStore;
-    use crate::corekv::{Reader, Writer};
+    use crate::corekv::{Key, Reader, Writer};
     use crate::keys::headstore::HeadstoreDocKey;
-    use crate::keys::Key;
     use cid::Cid;
     use std::str::FromStr;
 

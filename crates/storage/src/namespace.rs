@@ -148,13 +148,20 @@ impl Reader for NamespacedTxn {
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         // Prefix the iterator options
-        let prefixed_opts = IterOptions {
-            prefix: opts.prefix.map(|p| self.namespace.prefix_key(&p)),
-            start: opts.start.map(|s| self.namespace.prefix_key(&s)),
-            end: opts.end.map(|e| self.namespace.prefix_key(&e)),
-            reverse: opts.reverse,
-            keys_only: opts.keys_only,
-        };
+        let mut prefixed_opts = IterOptions::new();
+
+        if let Some(prefix) = opts.prefix() {
+            prefixed_opts = prefixed_opts.with_prefix(self.namespace.prefix_key(prefix));
+        }
+        if let Some(start) = opts.start() {
+            prefixed_opts = prefixed_opts.with_start(self.namespace.prefix_key(start));
+        }
+        if let Some(end) = opts.end() {
+            prefixed_opts = prefixed_opts.with_end(self.namespace.prefix_key(end));
+        }
+        prefixed_opts = prefixed_opts
+            .with_reverse(opts.reverse())
+            .with_keys_only(opts.keys_only());
 
         let iter = self.txn.iterator(prefixed_opts).await?;
         Ok(Box::new(NamespacedIterator {
@@ -385,10 +392,7 @@ mod tests {
 
         // Iterate with prefix
         let txn = datastore.new_txn(true).await.unwrap();
-        let opts = IterOptions {
-            prefix: Some(b"user/".to_vec()),
-            ..Default::default()
-        };
+        let opts = IterOptions::new().with_prefix(b"user/".to_vec());
         let mut iter = txn.iterator(opts).await.unwrap();
 
         let mut count = 0;

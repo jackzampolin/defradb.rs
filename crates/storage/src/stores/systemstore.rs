@@ -37,9 +37,8 @@ impl<S: Store> Store for Systemstore<S> {
 mod tests {
     use super::*;
     use crate::backends::MemoryStore;
-    use crate::corekv::{Reader, Writer};
+    use crate::corekv::{Key, Reader, Writer};
     use crate::keys::systemstore::CollectionKey;
-    use crate::keys::Key;
 
     #[tokio::test]
     async fn test_systemstore_basic() {

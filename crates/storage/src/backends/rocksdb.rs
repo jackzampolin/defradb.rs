@@ -32,11 +32,12 @@
 /// ```
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use rocksdb::{
     DBWithThreadMode, MultiThreaded, Options, WriteBatch, WriteOptions,
 };
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::corekv::{
@@ -194,7 +195,7 @@ impl RocksDBTxn {
 #[async_trait]
 impl Reader for RocksDBTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -203,7 +204,7 @@ impl Reader for RocksDBTxn {
         }
 
         // Check pending writes first (read-your-writes)
-        let pending = self.pending.lock().unwrap();
+        let pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
             return Ok(pending_value.clone());
         }
@@ -217,7 +218,7 @@ impl Reader for RocksDBTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -226,7 +227,7 @@ impl Reader for RocksDBTxn {
         }
 
         // Check pending writes first
-        let pending = self.pending.lock().unwrap();
+        let pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
             return Ok(pending_value.is_some());
         }
@@ -236,14 +237,14 @@ impl Reader for RocksDBTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
         // Create a simple iterator over the DB
         // For now, we'll collect all matching keys into memory
         // This is not ideal for large datasets but works for MVP
-        let mode = if opts.reverse {
+        let mode = if opts.reverse() {
             rocksdb::IteratorMode::End
         } else {
             rocksdb::IteratorMode::Start
@@ -260,22 +261,22 @@ impl Reader for RocksDBTxn {
                 let k = key.as_ref();
 
                 // Check prefix
-                if let Some(ref prefix) = opts.prefix {
+                if let Some(prefix) = opts.prefix() {
                     if !k.starts_with(prefix) {
                         continue;
                     }
                 }
 
                 // Check start bound
-                if let Some(ref start) = opts.start {
-                    if k < start.as_slice() {
+                if let Some(start) = opts.start() {
+                    if k < start {
                         continue;
                     }
                 }
 
                 // Check end bound
-                if let Some(ref end) = opts.end {
-                    if k >= end.as_slice() {
+                if let Some(end) = opts.end() {
+                    if k >= end {
                         continue;
                     }
                 }
@@ -284,7 +285,7 @@ impl Reader for RocksDBTxn {
             };
 
             if key_matches {
-                if opts.keys_only {
+                if opts.keys_only() {
                     data.push(KvPair::key_only(key.to_vec()));
                 } else {
                     data.push(KvPair::new(key.to_vec(), value.to_vec()));
@@ -292,7 +293,7 @@ impl Reader for RocksDBTxn {
             }
         }
 
-        if opts.reverse {
+        if opts.reverse() {
             data.reverse();
         }
 
@@ -303,7 +304,7 @@ impl Reader for RocksDBTxn {
 #[async_trait]
 impl Writer for RocksDBTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -316,15 +317,15 @@ impl Writer for RocksDBTxn {
         }
 
         // Track in pending for read-your-writes
-        self.pending.lock().unwrap().insert(key.to_vec(), Some(value.to_vec()));
+        self.pending.lock().insert(key.to_vec(), Some(value.to_vec()));
 
         // Add to batch
-        self.batch.lock().unwrap().put(key, value);
+        self.batch.lock().put(key, value);
         Ok(())
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -337,10 +338,10 @@ impl Writer for RocksDBTxn {
         }
 
         // Track in pending (None = deleted)
-        self.pending.lock().unwrap().insert(key.to_vec(), None);
+        self.pending.lock().insert(key.to_vec(), None);
 
         // Add to batch
-        self.batch.lock().unwrap().delete(key);
+        self.batch.lock().delete(key);
         Ok(())
     }
 }
@@ -348,7 +349,7 @@ impl Writer for RocksDBTxn {
 #[async_trait]
 impl Txn for RocksDBTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
-        if *self.discarded.lock().unwrap() {
+        if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
         }
 
@@ -357,21 +358,21 @@ impl Txn for RocksDBTxn {
         write_opts.set_sync(false); // Use WAL without fsync for better performance
 
         // Take ownership of the batch
-        let batch = std::mem::replace(&mut *self.batch.lock().unwrap(), WriteBatch::default());
+        let batch = std::mem::replace(&mut *self.batch.lock(), WriteBatch::default());
 
         match self.db.write_opt(batch, &write_opts) {
             Ok(_) => {
                 // Execute success callbacks
-                let on_success = std::mem::take(&mut *self.on_success.lock().unwrap());
-                let on_success_async = std::mem::take(&mut *self.on_success_async.lock().unwrap());
+                let on_success = std::mem::take(&mut *self.on_success.lock());
+                let on_success_async = std::mem::take(&mut *self.on_success_async.lock());
                 Self::execute_callbacks(on_success);
                 Self::execute_async_callbacks(on_success_async).await;
                 Ok(())
             }
             Err(e) => {
                 // Execute error callbacks
-                let on_error = std::mem::take(&mut *self.on_error.lock().unwrap());
-                let on_error_async = std::mem::take(&mut *self.on_error_async.lock().unwrap());
+                let on_error = std::mem::take(&mut *self.on_error.lock());
+                let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
                 Self::execute_callbacks(on_error);
                 Self::execute_async_callbacks(on_error_async).await;
                 Err(e.into())
@@ -380,43 +381,50 @@ impl Txn for RocksDBTxn {
     }
 
     fn discard(self: Box<Self>) {
-        *self.discarded.lock().unwrap() = true;
+        *self.discarded.lock() = true;
 
-        // Execute discard callbacks
-        let on_discard = std::mem::take(&mut *self.on_discard.lock().unwrap());
+        // Execute sync discard callbacks
+        let on_discard = std::mem::take(&mut *self.on_discard.lock());
         Self::execute_callbacks(on_discard);
 
-        // Note: We can't execute async callbacks in a sync method
-        let async_callbacks = self.on_discard_async.lock().unwrap();
-        if !async_callbacks.is_empty() {
-            tracing::warn!(
-                "Async discard callbacks cannot be executed in sync discard method"
+        // Handle async callbacks: spawn them in background with warning
+        let on_discard_async = std::mem::take(&mut *self.on_discard_async.lock());
+        if !on_discard_async.is_empty() {
+            tracing::error!(
+                count = on_discard_async.len(),
+                "Transaction has async discard callbacks. Spawning in background - they may not complete if process exits. Consider using commit() instead of discard() when async callbacks are registered."
             );
+
+            // Spawn async callbacks in background
+            // NOTE: These may not complete if the process exits before they finish
+            tokio::spawn(async move {
+                Self::execute_async_callbacks(on_discard_async).await;
+            });
         }
     }
 
     fn on_success(&mut self, callback: TxnCallback) {
-        self.on_success.lock().unwrap().push(callback);
+        self.on_success.lock().push(callback);
     }
 
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_success_async.lock().unwrap().push(callback);
+        self.on_success_async.lock().push(callback);
     }
 
     fn on_error(&mut self, callback: TxnCallback) {
-        self.on_error.lock().unwrap().push(callback);
+        self.on_error.lock().push(callback);
     }
 
     fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_error_async.lock().unwrap().push(callback);
+        self.on_error_async.lock().push(callback);
     }
 
     fn on_discard(&mut self, callback: TxnCallback) {
-        self.on_discard.lock().unwrap().push(callback);
+        self.on_discard.lock().push(callback);
     }
 
     fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_discard_async.lock().unwrap().push(callback);
+        self.on_discard_async.lock().push(callback);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

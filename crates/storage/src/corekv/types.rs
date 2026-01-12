@@ -54,37 +54,39 @@ impl Key for &[u8] {
 /// - Range queries: Iterate keys within a lexicographic range
 /// - Reverse iteration: Iterate in descending order
 /// - Keys-only mode: Skip fetching values for performance
+///
+/// Use the builder methods to construct IterOptions instead of accessing fields directly.
 #[derive(Debug, Clone, Default)]
 pub struct IterOptions {
     /// Only iterate keys with this prefix.
     ///
     /// When set, only keys starting with this byte sequence will be returned.
     /// This is more efficient than filtering after iteration.
-    pub prefix: Option<Vec<u8>>,
+    prefix: Option<Vec<u8>>,
 
     /// Start iteration at this key (inclusive).
     ///
     /// Keys lexicographically less than this value will be skipped.
     /// Can be combined with `end` for range queries.
-    pub start: Option<Vec<u8>>,
+    start: Option<Vec<u8>>,
 
     /// End iteration before this key (exclusive).
     ///
     /// Keys lexicographically greater than or equal to this value will not be returned.
     /// Can be combined with `start` for range queries.
-    pub end: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
 
     /// Iterate in reverse (descending) order.
     ///
     /// When true, keys are returned in descending lexicographic order.
     /// This affects how `start` and `end` are interpreted.
-    pub reverse: bool,
+    reverse: bool,
 
     /// Only iterate keys without fetching values.
     ///
     /// When true, the iterator will not fetch values from storage,
     /// improving performance when only keys are needed.
-    pub keys_only: bool,
+    keys_only: bool,
 }
 
 impl IterOptions {
@@ -122,6 +124,31 @@ impl IterOptions {
         self.keys_only = keys_only;
         self
     }
+
+    /// Get the prefix filter, if set.
+    pub fn prefix(&self) -> Option<&[u8]> {
+        self.prefix.as_deref()
+    }
+
+    /// Get the start key, if set.
+    pub fn start(&self) -> Option<&[u8]> {
+        self.start.as_deref()
+    }
+
+    /// Get the end key, if set.
+    pub fn end(&self) -> Option<&[u8]> {
+        self.end.as_deref()
+    }
+
+    /// Check if reverse iteration is enabled.
+    pub fn reverse(&self) -> bool {
+        self.reverse
+    }
+
+    /// Check if keys-only mode is enabled.
+    pub fn keys_only(&self) -> bool {
+        self.keys_only
+    }
 }
 
 impl fmt::Display for IterOptions {
@@ -153,11 +180,11 @@ mod tests {
             .with_reverse(true)
             .with_keys_only(true);
 
-        assert_eq!(opts.prefix, Some(b"test".to_vec()));
-        assert_eq!(opts.start, Some(b"a".to_vec()));
-        assert_eq!(opts.end, Some(b"z".to_vec()));
-        assert!(opts.reverse);
-        assert!(opts.keys_only);
+        assert_eq!(opts.prefix(), Some(b"test".as_slice()));
+        assert_eq!(opts.start(), Some(b"a".as_slice()));
+        assert_eq!(opts.end(), Some(b"z".as_slice()));
+        assert!(opts.reverse());
+        assert!(opts.keys_only());
     }
 
     #[test]
