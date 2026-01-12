@@ -329,4 +329,190 @@ mod tests {
         let count = i64::from_be_bytes(count_bytes.try_into().unwrap());
         assert_eq!(count, 5);
     }
+
+    #[tokio::test]
+    async fn test_composite_field_type_mismatch_lww_to_counter() {
+        let store = Arc::new(MemoryStore::new());
+        let mut composite = CompositeDAG::new(
+            store.clone(),
+            DocId::new("doc1"),
+            "v1".to_string(),
+        );
+
+        // Register field as LWW
+        composite.register_lww_field("value".to_string());
+
+        let ctx = Context {
+            doc_id: DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to apply Counter delta to LWW field
+        let mut field_deltas = HashMap::new();
+        field_deltas.insert(
+            "value".to_string(),
+            FieldDelta::Counter {
+                priority: 10,
+                nonce: 12345,
+                data: 5i64.to_be_bytes().to_vec(),
+            },
+        );
+
+        let delta = CompositeDelta {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 10,
+            field_deltas,
+        };
+
+        let result = composite.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("field type mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_composite_field_type_mismatch_counter_to_lww() {
+        let store = Arc::new(MemoryStore::new());
+        let mut composite = CompositeDAG::new(
+            store.clone(),
+            DocId::new("doc1"),
+            "v1".to_string(),
+        );
+
+        // Register field as Counter
+        composite.register_counter_field("count".to_string());
+
+        let ctx = Context {
+            doc_id: DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to apply LWW delta to Counter field
+        let mut field_deltas = HashMap::new();
+        field_deltas.insert(
+            "count".to_string(),
+            FieldDelta::Lww {
+                priority: 10,
+                data: b"not_a_number".to_vec(),
+            },
+        );
+
+        let delta = CompositeDelta {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 10,
+            field_deltas,
+        };
+
+        let result = composite.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("field type mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_composite_unknown_field() {
+        let store = Arc::new(MemoryStore::new());
+        let mut composite = CompositeDAG::new(
+            store.clone(),
+            DocId::new("doc1"),
+            "v1".to_string(),
+        );
+
+        // Don't register any fields
+
+        let ctx = Context {
+            doc_id: DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Try to apply delta to unknown field
+        let mut field_deltas = HashMap::new();
+        field_deltas.insert(
+            "unknown_field".to_string(),
+            FieldDelta::Lww {
+                priority: 10,
+                data: b"value".to_vec(),
+            },
+        );
+
+        let delta = CompositeDelta {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 10,
+            field_deltas,
+        };
+
+        let result = composite.merge(&ctx, &delta).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown field"));
+    }
+
+    #[tokio::test]
+    async fn test_composite_schema_evolution_type_change() {
+        let store = Arc::new(MemoryStore::new());
+        let mut composite = CompositeDAG::new(
+            store.clone(),
+            DocId::new("doc1"),
+            "v1".to_string(),
+        );
+
+        // Register field as LWW in schema v1
+        composite.register_lww_field("score".to_string());
+
+        let ctx = Context {
+            doc_id: DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Apply LWW delta successfully
+        let mut field_deltas = HashMap::new();
+        field_deltas.insert(
+            "score".to_string(),
+            FieldDelta::Lww {
+                priority: 10,
+                data: b"100".to_vec(),
+            },
+        );
+
+        let delta1 = CompositeDelta {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 10,
+            field_deltas: field_deltas.clone(),
+        };
+
+        composite.merge(&ctx, &delta1).await.unwrap();
+
+        // Now simulate schema evolution where "score" becomes a Counter
+        // This should fail since the field is registered as LWW
+        let mut field_deltas2 = HashMap::new();
+        field_deltas2.insert(
+            "score".to_string(),
+            FieldDelta::Counter {
+                priority: 20,
+                nonce: 12345,
+                data: 50i64.to_be_bytes().to_vec(),
+            },
+        );
+
+        let delta2 = CompositeDelta {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 20,
+            field_deltas: field_deltas2,
+        };
+
+        let result = composite.merge(&ctx, &delta2).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("field type mismatch"));
+    }
 }
