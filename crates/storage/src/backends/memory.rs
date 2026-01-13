@@ -30,7 +30,6 @@
 /// txn.set(b"key", b"value").await?;
 /// txn.commit().await?;
 /// ```
-
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -38,7 +37,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::corekv::{
-    AsyncTxnCallback, Dropable, Error, Iterator, IterOptions, KvPair, Reader, Result, Store, Txn,
+    AsyncTxnCallback, Dropable, Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn,
     TxnCallback, Writer,
 };
 
@@ -291,7 +290,9 @@ impl Writer for MemoryTxn {
             return Err(Error::EmptyKey);
         }
 
-        self.pending.lock().insert(key.to_vec(), Some(value.to_vec()));
+        self.pending
+            .lock()
+            .insert(key.to_vec(), Some(value.to_vec()));
         Ok(())
     }
 
@@ -373,10 +374,7 @@ impl Txn for MemoryTxn {
             // NOTE: These may not complete if the process exits before they finish
             tokio::spawn(async move {
                 Self::execute_async_callbacks(on_discard_async).await;
-                tracing::debug!(
-                    count = callback_count,
-                    "Async discard callbacks completed"
-                );
+                tracing::debug!(count = callback_count, "Async discard callbacks completed");
             });
         }
     }
@@ -563,9 +561,9 @@ impl Iterator for MemoryIterator {
 #[cfg(test)]
 mod shared_tests {
     use super::*;
-    use crate::generate_backend_tests;
     use crate::generate_backend_concurrency_tests;
     use crate::generate_backend_dropable_tests;
+    use crate::generate_backend_tests;
 
     async fn create_store() -> MemoryStore {
         MemoryStore::new()

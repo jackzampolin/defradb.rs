@@ -9,7 +9,6 @@
 /// - TxnStore: Store that supports transactions
 ///
 /// All traits use async_trait to support asynchronous operations.
-
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
@@ -26,7 +25,8 @@ pub type TxnCallback = Box<dyn FnOnce() + Send + 'static>;
 /// Asynchronous callback function type for transaction lifecycle events.
 ///
 /// These callbacks are executed asynchronously when transaction events occur.
-pub type AsyncTxnCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
+pub type AsyncTxnCallback =
+    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
 
 /// Reader trait for read-only key-value operations.
 ///

@@ -37,7 +37,6 @@
 /// let bytes = key.bytes(); // Serialize for storage
 /// let string = key.to_string(); // Debug representation
 /// ```
-
 pub mod blockstore;
 pub mod datastore;
 pub mod encstore;
@@ -61,8 +60,7 @@ pub use peerstore::{
 };
 pub use systemstore::{
     CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
-    FieldID, FieldIDSequenceKey, IndexIDSequenceKey, NodeACPKey, P2PCollectionKey,
-    P2PDocumentKey,
+    FieldID, FieldIDSequenceKey, IndexIDSequenceKey, NodeACPKey, P2PCollectionKey, P2PDocumentKey,
 };
 pub use utils::{InstanceType, SEPARATOR};
 
@@ -80,12 +78,7 @@ mod tests {
     #[test]
     fn test_all_key_types_implement_key_trait() {
         // Datastore keys
-        let _: Box<dyn Key> = Box::new(DataStoreKey::new(
-            1,
-            InstanceType::Value,
-            "doc",
-            "field",
-        ));
+        let _: Box<dyn Key> = Box::new(DataStoreKey::new(1, InstanceType::Value, "doc", "field"));
         let _: Box<dyn Key> = Box::new(PrimaryDataStoreKey::new(1, "doc"));
         let _: Box<dyn Key> = Box::new(IndexDataStoreKey::new(1, 2, vec![]));
         let _: Box<dyn Key> = Box::new(DatastoreSE::new("col", "idx", vec![], "doc"));

@@ -8,7 +8,6 @@
 /// - Systemstore: Metadata and configuration
 /// - Peerstore: Peer and replication metadata
 /// - Encstore: Encrypted blocks (uses blockstore implementation)
-
 use crate::backends::{MemoryStore, RocksDBStore};
 use crate::corekv::{Result, Store};
 use crate::stores::{
@@ -113,8 +112,8 @@ mod tests {
         txn.commit().await.unwrap();
 
         // Blockstore
-        let cid = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
-            .unwrap();
+        let cid =
+            Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
         let bs_key = BlockstoreKey::new(cid);
         let mut txn = ms.blockstore.new_txn(false).await.unwrap();
         txn.set(&bs_key.bytes(), b"blockstore_value").await.unwrap();
@@ -193,34 +192,22 @@ mod tests {
         // Blockstore should NOT see the key (different namespace)
         let txn = ms.blockstore.new_txn(true).await.unwrap();
         let value = txn.get(b"shared_key").await.unwrap();
-        assert_eq!(
-            value, None,
-            "Blockstore should not see datastore's data"
-        );
+        assert_eq!(value, None, "Blockstore should not see datastore's data");
 
         // Headstore should NOT see it either
         let txn = ms.headstore.new_txn(true).await.unwrap();
         let value = txn.get(b"shared_key").await.unwrap();
-        assert_eq!(
-            value, None,
-            "Headstore should not see datastore's data"
-        );
+        assert_eq!(value, None, "Headstore should not see datastore's data");
 
         // Systemstore should NOT see it
         let txn = ms.systemstore.new_txn(true).await.unwrap();
         let value = txn.get(b"shared_key").await.unwrap();
-        assert_eq!(
-            value, None,
-            "Systemstore should not see datastore's data"
-        );
+        assert_eq!(value, None, "Systemstore should not see datastore's data");
 
         // Peerstore should NOT see it
         let txn = ms.peerstore.new_txn(true).await.unwrap();
         let value = txn.get(b"shared_key").await.unwrap();
-        assert_eq!(
-            value, None,
-            "Peerstore should not see datastore's data"
-        );
+        assert_eq!(value, None, "Peerstore should not see datastore's data");
     }
 
     #[tokio::test]
@@ -246,7 +233,10 @@ mod tests {
         assert_eq!(txn.get(b"key").await.unwrap(), Some(b"datastore".to_vec()));
 
         let txn = ms.systemstore.new_txn(true).await.unwrap();
-        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"systemstore".to_vec()));
+        assert_eq!(
+            txn.get(b"key").await.unwrap(),
+            Some(b"systemstore".to_vec())
+        );
 
         let txn = ms.peerstore.new_txn(true).await.unwrap();
         assert_eq!(txn.get(b"key").await.unwrap(), Some(b"peerstore".to_vec()));
@@ -417,7 +407,10 @@ mod tests {
 
         // Iterate over datastore - keys should NOT have 'd' prefix
         let txn = ms.datastore.new_txn(true).await.unwrap();
-        let mut iter = txn.iterator(crate::corekv::IterOptions::new()).await.unwrap();
+        let mut iter = txn
+            .iterator(crate::corekv::IterOptions::new())
+            .await
+            .unwrap();
 
         let mut keys = vec![];
         while let Some(kv) = iter.next().await.unwrap() {
@@ -508,7 +501,10 @@ mod tests {
 
         // Rootstore should see both with their prefixes
         let txn = ms.root.new_txn(true).await.unwrap();
-        let mut iter = txn.iterator(crate::corekv::IterOptions::new()).await.unwrap();
+        let mut iter = txn
+            .iterator(crate::corekv::IterOptions::new())
+            .await
+            .unwrap();
 
         let mut keys = vec![];
         while let Some(kv) = iter.next().await.unwrap() {
@@ -516,8 +512,14 @@ mod tests {
         }
 
         // Should see "dmykey" and "smykey" (with namespace prefixes)
-        assert!(keys.contains(&"dmykey".to_string()), "Should see datastore key with 'd' prefix");
-        assert!(keys.contains(&"smykey".to_string()), "Should see systemstore key with 's' prefix");
+        assert!(
+            keys.contains(&"dmykey".to_string()),
+            "Should see datastore key with 'd' prefix"
+        );
+        assert!(
+            keys.contains(&"smykey".to_string()),
+            "Should see systemstore key with 's' prefix"
+        );
     }
 
     #[tokio::test]

@@ -3,7 +3,6 @@
 /// This module provides the iterator abstraction for scanning through
 /// key-value pairs in storage, with support for various filtering and
 /// ordering options.
-
 use async_trait::async_trait;
 
 use super::errors::Result;

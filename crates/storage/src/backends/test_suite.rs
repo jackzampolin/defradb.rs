@@ -19,10 +19,9 @@
 ///     // Then invoke the test macros or call test functions
 /// }
 /// ```
-
 use crate::corekv::{Error, IterOptions, Store};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 
 // ============================================================================
 // BASIC OPERATIONS
@@ -56,7 +55,10 @@ pub async fn test_delete<S: Store>(store: &S) {
 
     // Delete
     let mut txn = store.new_txn(false).await.unwrap();
-    assert_eq!(txn.get(b"to_delete").await.unwrap(), Some(b"value".to_vec()));
+    assert_eq!(
+        txn.get(b"to_delete").await.unwrap(),
+        Some(b"value".to_vec())
+    );
     txn.delete(b"to_delete").await.unwrap();
     assert_eq!(txn.get(b"to_delete").await.unwrap(), None);
     txn.commit().await.unwrap();
@@ -215,8 +217,8 @@ pub async fn test_binary_key_ordering<S: Store>(store: &S) {
     // Insert keys that would sort differently if treated as strings vs bytes
     // Byte order: 0x00 < 0x41 ('A') < 0x61 ('a') < 0xFF
     txn.set(b"\x00", b"first").await.unwrap();
-    txn.set(b"A", b"second").await.unwrap();  // 0x41
-    txn.set(b"a", b"third").await.unwrap();   // 0x61
+    txn.set(b"A", b"second").await.unwrap(); // 0x41
+    txn.set(b"a", b"third").await.unwrap(); // 0x61
     txn.set(b"\xff", b"fourth").await.unwrap();
 
     txn.commit().await.unwrap();
@@ -254,7 +256,10 @@ pub async fn test_empty_key_rejected<S: Store>(store: &S) {
 pub async fn test_readonly_transaction<S: Store>(store: &S) {
     let mut txn = store.new_txn(true).await.unwrap();
 
-    assert!(matches!(txn.set(b"key", b"value").await, Err(Error::ReadOnlyTxn)));
+    assert!(matches!(
+        txn.set(b"key", b"value").await,
+        Err(Error::ReadOnlyTxn)
+    ));
     assert!(matches!(txn.delete(b"key").await, Err(Error::ReadOnlyTxn)));
 
     // Read operations should work
@@ -302,7 +307,10 @@ pub async fn test_success_callback<S: Store>(store: &S) {
     txn.set(b"key", b"value").await.unwrap();
     txn.commit().await.unwrap();
 
-    assert!(called.load(Ordering::SeqCst), "Success callback should be invoked");
+    assert!(
+        called.load(Ordering::SeqCst),
+        "Success callback should be invoked"
+    );
 }
 
 /// Test discard callback is invoked
@@ -319,7 +327,10 @@ pub async fn test_discard_callback<S: Store>(store: &S) {
     txn.set(b"key", b"value").await.unwrap();
     txn.discard();
 
-    assert!(called.load(Ordering::SeqCst), "Discard callback should be invoked");
+    assert!(
+        called.load(Ordering::SeqCst),
+        "Discard callback should be invoked"
+    );
 }
 
 /// Test async success callback
@@ -340,7 +351,10 @@ pub async fn test_async_success_callback<S: Store>(store: &S) {
     txn.set(b"key", b"value").await.unwrap();
     txn.commit().await.unwrap();
 
-    assert!(called.load(Ordering::SeqCst), "Async callback should be awaited during commit");
+    assert!(
+        called.load(Ordering::SeqCst),
+        "Async callback should be awaited during commit"
+    );
 }
 
 // ============================================================================
@@ -389,17 +403,23 @@ pub async fn test_async_callback_panic_safety<S: Store>(store: &S) {
     let count1 = count.clone();
     txn.on_success_async(Box::new(move || {
         let c = count1.clone();
-        Box::pin(async move { c.fetch_add(1, Ordering::SeqCst); })
+        Box::pin(async move {
+            c.fetch_add(1, Ordering::SeqCst);
+        })
     }));
 
     txn.on_success_async(Box::new(|| {
-        Box::pin(async { panic!("Intentional async panic"); })
+        Box::pin(async {
+            panic!("Intentional async panic");
+        })
     }));
 
     let count3 = count.clone();
     txn.on_success_async(Box::new(move || {
         let c = count3.clone();
-        Box::pin(async move { c.fetch_add(1, Ordering::SeqCst); })
+        Box::pin(async move {
+            c.fetch_add(1, Ordering::SeqCst);
+        })
     }));
 
     txn.set(b"key", b"value").await.unwrap();
@@ -574,7 +594,10 @@ pub async fn test_iterator_start_equals_end<S: Store>(store: &S) {
         .with_end(b"b".to_vec());
     let mut iter = txn.iterator(opts).await.unwrap();
 
-    assert!(iter.next().await.unwrap().is_none(), "start == end should yield empty iterator");
+    assert!(
+        iter.next().await.unwrap().is_none(),
+        "start == end should yield empty iterator"
+    );
 }
 
 /// Test prefix with no matches
@@ -671,7 +694,7 @@ pub async fn test_iterator_reverse_with_bounds<S: Store>(store: &S) {
     let txn = store.new_txn(true).await.unwrap();
     let opts = IterOptions::new()
         .with_start(b"d".to_vec())
-        .with_end(b"n".to_vec())  // exclusive
+        .with_end(b"n".to_vec()) // exclusive
         .with_reverse(true);
     let mut iter = txn.iterator(opts).await.unwrap();
 
@@ -714,7 +737,7 @@ pub async fn test_iterator_item_at_end_excluded<S: Store>(store: &S) {
     let txn = store.new_txn(true).await.unwrap();
     let opts = IterOptions::new()
         .with_start(b"a".to_vec())
-        .with_end(b"c".to_vec());  // c should be excluded
+        .with_end(b"c".to_vec()); // c should be excluded
     let mut iter = txn.iterator(opts).await.unwrap();
 
     let mut keys = vec![];
@@ -749,7 +772,7 @@ pub async fn test_iterator_empty_prefix<S: Store>(store: &S) {
     txn.commit().await.unwrap();
 
     let txn = store.new_txn(true).await.unwrap();
-    let opts = IterOptions::new().with_prefix(vec![]);  // Empty prefix
+    let opts = IterOptions::new().with_prefix(vec![]); // Empty prefix
     let mut iter = txn.iterator(opts).await.unwrap();
 
     let mut count = 0;
@@ -771,7 +794,7 @@ pub async fn test_iterator_prefix_with_start<S: Store>(store: &S) {
     let txn = store.new_txn(true).await.unwrap();
     let opts = IterOptions::new()
         .with_prefix(b"pre/".to_vec())
-        .with_start(b"pre/b".to_vec());  // Start at b within prefix
+        .with_start(b"pre/b".to_vec()); // Start at b within prefix
     let mut iter = txn.iterator(opts).await.unwrap();
 
     let mut keys = vec![];
@@ -794,7 +817,10 @@ pub async fn test_multiple_iterators<S: Store>(store: &S) {
 
     // Create two iterators on the same transaction
     let mut iter1 = txn.iterator(IterOptions::new()).await.unwrap();
-    let mut iter2 = txn.iterator(IterOptions::new().with_reverse(true)).await.unwrap();
+    let mut iter2 = txn
+        .iterator(IterOptions::new().with_reverse(true))
+        .await
+        .unwrap();
 
     // iter1 should go forward
     let kv1 = iter1.next().await.unwrap().unwrap();
@@ -831,7 +857,10 @@ pub async fn test_iterator_seek<S: Store>(store: &S) {
     let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
 
     // Seek to 'c'
-    assert!(iter.seek(b"c").await.unwrap(), "Seek to existing key should return true");
+    assert!(
+        iter.seek(b"c").await.unwrap(),
+        "Seek to existing key should return true"
+    );
 
     // Next should return 'c'
     let kv = iter.next().await.unwrap().unwrap();
@@ -860,10 +889,17 @@ pub async fn test_iterator_seek_between_keys<S: Store>(store: &S) {
     let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
 
     // Seek to 'bb' (doesn't exist, should position at 'cc')
-    assert!(iter.seek(b"bb").await.unwrap(), "Seek to non-existing key should find next");
+    assert!(
+        iter.seek(b"bb").await.unwrap(),
+        "Seek to non-existing key should find next"
+    );
 
     let kv = iter.next().await.unwrap().unwrap();
-    assert_eq!(kv.key_bytes(), b"cc", "Should be positioned at next key >= seek target");
+    assert_eq!(
+        kv.key_bytes(),
+        b"cc",
+        "Should be positioned at next key >= seek target"
+    );
 }
 
 /// Test iterator seek past all keys
@@ -877,7 +913,10 @@ pub async fn test_iterator_seek_past_end<S: Store>(store: &S) {
     let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
 
     // Seek past all keys
-    assert!(!iter.seek(b"z").await.unwrap(), "Seek past end should return false");
+    assert!(
+        !iter.seek(b"z").await.unwrap(),
+        "Seek past end should return false"
+    );
 
     // Iterator should be exhausted
     assert!(iter.next().await.unwrap().is_none());
@@ -981,7 +1020,11 @@ pub async fn test_iterator_reverse_start_only<S: Store>(store: &S) {
         keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
     }
 
-    assert_eq!(keys, vec!["k4", "k3", "k2"], "Reverse with start should exclude keys below start");
+    assert_eq!(
+        keys,
+        vec!["k4", "k3", "k2"],
+        "Reverse with start should exclude keys below start"
+    );
 }
 
 /// Test reverse iterator with end bound only.
@@ -997,7 +1040,7 @@ pub async fn test_iterator_reverse_end_only<S: Store>(store: &S) {
     let txn = store.new_txn(true).await.unwrap();
     let opts = IterOptions::new()
         .with_reverse(true)
-        .with_end(b"k3".to_vec());  // k3 and k4 should be excluded
+        .with_end(b"k3".to_vec()); // k3 and k4 should be excluded
     let mut iter = txn.iterator(opts).await.unwrap();
 
     let mut keys = vec![];
@@ -1005,20 +1048,24 @@ pub async fn test_iterator_reverse_end_only<S: Store>(store: &S) {
         keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
     }
 
-    assert_eq!(keys, vec!["k2", "k1"], "Reverse with end should exclude keys >= end");
+    assert_eq!(
+        keys,
+        vec!["k2", "k1"],
+        "Reverse with end should exclude keys >= end"
+    );
 }
 
 /// Test reverse iterator with single item at/above end bound (should yield nothing).
 /// This is a known edge case from Go implementation - single item >= end should not be yielded.
 pub async fn test_iterator_reverse_end_single_item_out_of_bounds<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
-    txn.set(b"k3", b"v3").await.unwrap();  // Only item, at the end bound
+    txn.set(b"k3", b"v3").await.unwrap(); // Only item, at the end bound
     txn.commit().await.unwrap();
 
     let txn = store.new_txn(true).await.unwrap();
     let opts = IterOptions::new()
         .with_reverse(true)
-        .with_end(b"k3".to_vec());  // k3 is exactly at end, should be excluded
+        .with_end(b"k3".to_vec()); // k3 is exactly at end, should be excluded
     let mut iter = txn.iterator(opts).await.unwrap();
 
     assert!(
@@ -1038,7 +1085,7 @@ pub async fn test_iterator_reverse_start_end_no_items_in_range<S: Store>(store: 
     let opts = IterOptions::new()
         .with_reverse(true)
         .with_start(b"k2".to_vec())
-        .with_end(b"k4".to_vec());  // Range [k2, k4) has no items
+        .with_end(b"k4".to_vec()); // Range [k2, k4) has no items
     let mut iter = txn.iterator(opts).await.unwrap();
 
     assert!(
@@ -1115,13 +1162,17 @@ pub async fn test_iterator_reverse_end_seek<S: Store>(store: &S) {
     let txn = store.new_txn(true).await.unwrap();
     let opts = IterOptions::new()
         .with_reverse(true)
-        .with_end(b"k3".to_vec());  // Excludes k3 and k4
+        .with_end(b"k3".to_vec()); // Excludes k3 and k4
     let mut iter = txn.iterator(opts).await.unwrap();
 
     // Seek to k4 (which is outside bounds) should find k2 (highest in bounds)
     assert!(iter.seek(b"k4").await.unwrap());
     let kv = iter.next().await.unwrap().unwrap();
-    assert_eq!(kv.key_bytes(), b"k2", "Seek outside end bound should find highest in-bounds key");
+    assert_eq!(
+        kv.key_bytes(),
+        b"k2",
+        "Seek outside end bound should find highest in-bounds key"
+    );
 }
 
 /// Test reverse iterator with prefix.
@@ -1210,7 +1261,7 @@ pub async fn test_iterator_reset_after_exhaustion<S: Store>(store: &S) {
     assert_eq!(kv.value_bytes(), b"v1");
     let kv = iter.next().await.unwrap().unwrap();
     assert_eq!(kv.value_bytes(), b"v2");
-    assert!(iter.next().await.unwrap().is_none());  // Exhausted
+    assert!(iter.next().await.unwrap().is_none()); // Exhausted
 
     // Reset
     iter.reset().await.unwrap();
@@ -1274,7 +1325,11 @@ pub async fn test_iterator_seek_respects_start_bound<S: Store>(store: &S) {
     assert!(iter.seek(b"k1").await.unwrap());
 
     let kv = iter.next().await.unwrap().unwrap();
-    assert_eq!(kv.key_bytes(), b"k2", "Seek before start should position at start");
+    assert_eq!(
+        kv.key_bytes(),
+        b"k2",
+        "Seek before start should position at start"
+    );
 }
 
 /// Test multiple resets in sequence.
@@ -1326,7 +1381,7 @@ pub async fn test_empty_value_handling<S: Store>(store: &S) {
 pub async fn test_iterator_empty_values<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
     txn.set(b"k1", b"v1").await.unwrap();
-    txn.set(b"k2", b"").await.unwrap();  // Empty value
+    txn.set(b"k2", b"").await.unwrap(); // Empty value
     txn.set(b"k3", b"v3").await.unwrap();
     txn.commit().await.unwrap();
 
@@ -1339,7 +1394,11 @@ pub async fn test_iterator_empty_values<S: Store>(store: &S) {
 
     let kv = iter.next().await.unwrap().unwrap();
     assert_eq!(kv.key_bytes(), b"k2");
-    assert_eq!(kv.value_bytes(), b"", "Empty value should be empty slice, not skipped");
+    assert_eq!(
+        kv.value_bytes(),
+        b"",
+        "Empty value should be empty slice, not skipped"
+    );
 
     let kv = iter.next().await.unwrap().unwrap();
     assert_eq!(kv.key_bytes(), b"k3");
@@ -1370,9 +1429,18 @@ pub async fn test_drop_all<S: Store + crate::corekv::Dropable>(store: &S) {
 
     // Verify data is gone
     let txn = store.new_txn(true).await.unwrap();
-    assert!(!txn.has(b"key1").await.unwrap(), "key1 should be deleted after drop_all");
-    assert!(!txn.has(b"key2").await.unwrap(), "key2 should be deleted after drop_all");
-    assert!(!txn.has(b"key3").await.unwrap(), "key3 should be deleted after drop_all");
+    assert!(
+        !txn.has(b"key1").await.unwrap(),
+        "key1 should be deleted after drop_all"
+    );
+    assert!(
+        !txn.has(b"key2").await.unwrap(),
+        "key2 should be deleted after drop_all"
+    );
+    assert!(
+        !txn.has(b"key3").await.unwrap(),
+        "key3 should be deleted after drop_all"
+    );
 }
 
 /// Test drop_all followed by new writes
@@ -1392,7 +1460,10 @@ pub async fn test_drop_all_then_write<S: Store + crate::corekv::Dropable>(store:
 
     // Verify old is gone, new exists
     let txn = store.new_txn(true).await.unwrap();
-    assert!(!txn.has(b"old_key").await.unwrap(), "old_key should be deleted");
+    assert!(
+        !txn.has(b"old_key").await.unwrap(),
+        "old_key should be deleted"
+    );
     assert_eq!(
         txn.get(b"new_key").await.unwrap(),
         Some(b"new_value".to_vec()),
@@ -1428,7 +1499,9 @@ pub async fn test_concurrent_writes_different_keys<S: Store + 'static>(store: Ar
         let commit_count = commit_count.clone();
         handles.push(tokio::spawn(async move {
             let mut txn = store.new_txn(false).await.unwrap();
-            txn.set(format!("key_{}", i).as_bytes(), b"value").await.unwrap();
+            txn.set(format!("key_{}", i).as_bytes(), b"value")
+                .await
+                .unwrap();
             txn.commit().await.unwrap();
             commit_count.fetch_add(1, Ordering::SeqCst);
         }));
@@ -1623,7 +1696,10 @@ pub async fn test_snapshot_isolation_concurrent<S: Store + 'static>(store: Arc<S
             tokio::time::sleep(std::time::Duration::from_millis(i * 5)).await;
 
             let mut writer = store.new_txn(false).await.unwrap();
-            writer.set(b"snapshot_key", format!("writer_{}", i).as_bytes()).await.unwrap();
+            writer
+                .set(b"snapshot_key", format!("writer_{}", i).as_bytes())
+                .await
+                .unwrap();
             writer.commit().await.unwrap();
         }));
     }
@@ -1641,7 +1717,11 @@ pub async fn test_snapshot_isolation_concurrent<S: Store + 'static>(store: Arc<S
         0,
         "Snapshot isolation violated: readers saw different values within same transaction"
     );
-    assert_eq!(total_checks.load(Ordering::SeqCst), 10, "All readers should complete");
+    assert_eq!(
+        total_checks.load(Ordering::SeqCst),
+        10,
+        "All readers should complete"
+    );
 }
 
 /// Test that long-running readers maintain isolation despite many writes.
@@ -1662,7 +1742,10 @@ pub async fn test_snapshot_isolation_long_running_reader<S: Store + 'static>(sto
     // Perform 100 rapid writes
     for i in 0..100 {
         let mut writer = store.new_txn(false).await.unwrap();
-        writer.set(b"long_read_key", format!("write_{}", i).as_bytes()).await.unwrap();
+        writer
+            .set(b"long_read_key", format!("write_{}", i).as_bytes())
+            .await
+            .unwrap();
         writer.commit().await.unwrap();
     }
 
@@ -1765,7 +1848,10 @@ pub async fn test_snapshot_isolation_iterator<S: Store + 'static>(store: Arc<S>)
     // Setup: write 5 keys
     let mut setup = store.new_txn(false).await.unwrap();
     for i in 0..5 {
-        setup.set(format!("iter_key_{}", i).as_bytes(), b"original").await.unwrap();
+        setup
+            .set(format!("iter_key_{}", i).as_bytes(), b"original")
+            .await
+            .unwrap();
     }
     setup.commit().await.unwrap();
 
@@ -1775,7 +1861,10 @@ pub async fn test_snapshot_isolation_iterator<S: Store + 'static>(store: Arc<S>)
     // Concurrent writer adds more keys and modifies existing
     let mut writer = store.new_txn(false).await.unwrap();
     for i in 5..10 {
-        writer.set(format!("iter_key_{}", i).as_bytes(), b"new").await.unwrap();
+        writer
+            .set(format!("iter_key_{}", i).as_bytes(), b"new")
+            .await
+            .unwrap();
     }
     writer.set(b"iter_key_0", b"modified").await.unwrap();
     writer.commit().await.unwrap();
@@ -2250,6 +2339,6 @@ macro_rules! generate_backend_dropable_tests {
     };
 }
 
-pub use generate_backend_tests;
 pub use generate_backend_concurrency_tests;
 pub use generate_backend_dropable_tests;
+pub use generate_backend_tests;

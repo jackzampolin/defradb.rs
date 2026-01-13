@@ -3,7 +3,6 @@
 /// The Datastore handles storage of document field values, primary keys,
 /// secondary indexes, search engine artifacts, and view caching. It includes
 /// automatic chunking for values larger than 1MB.
-
 use crate::corekv::{Error, IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
@@ -11,7 +10,6 @@ use std::sync::Arc;
 
 /// Chunk size for large values (1MB)
 pub const CHUNK_SIZE: usize = 1_048_576;
-
 
 /// Datastore provides storage for documents and collection data
 pub struct Datastore<S: Store> {
@@ -142,10 +140,7 @@ impl DatastoreTxn {
         }
 
         if deleted_chunks > 0 {
-            tracing::debug!(
-                deleted_chunks = deleted_chunks,
-                "Deleted chunked value"
-            );
+            tracing::debug!(deleted_chunks = deleted_chunks, "Deleted chunked value");
         }
 
         // Return error if any chunk deletion failed, including all failures
@@ -520,7 +515,10 @@ mod tests {
         let txn = datastore.new_txn(true).await.unwrap();
         let txn_ds = txn.as_any().downcast_ref::<DatastoreTxn>().unwrap();
         let chunk2_key = DatastoreTxn::chunk_key(&key.bytes(), 2);
-        assert!(txn_ds.has(&chunk2_key).await.unwrap(), "Chunk 2 should exist");
+        assert!(
+            txn_ds.has(&chunk2_key).await.unwrap(),
+            "Chunk 2 should exist"
+        );
         drop(txn);
 
         // Now update with a 1-chunk value (1.5 MB - just over CHUNK_SIZE)
@@ -549,7 +547,13 @@ mod tests {
         // Verify chunks 0 and 1 exist (for the 2-chunk value)
         let chunk0_key = DatastoreTxn::chunk_key(&key.bytes(), 0);
         let chunk1_key = DatastoreTxn::chunk_key(&key.bytes(), 1);
-        assert!(txn_ds.has(&chunk0_key).await.unwrap(), "Chunk 0 should exist");
-        assert!(txn_ds.has(&chunk1_key).await.unwrap(), "Chunk 1 should exist");
+        assert!(
+            txn_ds.has(&chunk0_key).await.unwrap(),
+            "Chunk 0 should exist"
+        );
+        assert!(
+            txn_ds.has(&chunk1_key).await.unwrap(),
+            "Chunk 1 should exist"
+        );
     }
 }

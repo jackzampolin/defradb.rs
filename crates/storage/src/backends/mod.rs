@@ -38,7 +38,6 @@
 /// // For production
 /// let rocksdb_store = RocksDBStore::open("/path/to/db")?;
 /// ```
-
 pub mod memory;
 pub mod rocksdb;
 

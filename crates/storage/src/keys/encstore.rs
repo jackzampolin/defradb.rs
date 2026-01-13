@@ -2,7 +2,6 @@
 ///
 /// These keys are prefixed with 'e' at the store level and handle:
 /// - Encrypted block storage (CID-based, via IPLD)
-
 use crate::corekv::Key;
 use cid::Cid;
 
@@ -83,7 +82,8 @@ mod tests {
     #[test]
     fn test_encstore_key_different_cids() {
         let cid1 = test_cid();
-        let cid2 = Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+        let cid2 =
+            Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
 
         let key1 = EncstoreKey::new(cid1);
         let key2 = EncstoreKey::new(cid2);

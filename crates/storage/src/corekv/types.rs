@@ -2,7 +2,6 @@
 ///
 /// This module provides the foundational abstractions for key-value storage,
 /// including the Key trait for typed keys and iteration options.
-
 use std::fmt;
 
 /// Trait for keys that can be serialized to bytes.
@@ -163,7 +162,11 @@ impl fmt::Display for IterOptions {
         if let Some(ref end) = self.end {
             write!(f, "end: {:?}, ", String::from_utf8_lossy(end))?;
         }
-        write!(f, "reverse: {}, keys_only: {} }}", self.reverse, self.keys_only)
+        write!(
+            f,
+            "reverse: {}, keys_only: {} }}",
+            self.reverse, self.keys_only
+        )
     }
 }
 

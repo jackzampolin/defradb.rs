@@ -10,7 +10,6 @@
 /// - Encstore: Encrypted blocks (uses blockstore implementation)
 ///
 /// The Multistore coordinator provides unified access to all stores.
-
 pub mod blockstore;
 pub mod datastore;
 pub mod headstore;

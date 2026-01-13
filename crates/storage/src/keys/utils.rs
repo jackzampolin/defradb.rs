@@ -2,7 +2,6 @@
 ///
 /// This module provides CockroachDB-style encoding functions that maintain
 /// sort order and are compatible with the Go DefraDB implementation.
-
 use crate::corekv::{Error, Result};
 
 /// Key separator character
@@ -35,7 +34,10 @@ impl InstanceType {
             b'v' => Ok(InstanceType::Value),
             b'p' => Ok(InstanceType::Priority),
             b'd' => Ok(InstanceType::Deleted),
-            _ => Err(Error::Other(format!("Invalid instance type: {}", b as char))),
+            _ => Err(Error::Other(format!(
+                "Invalid instance type: {}",
+                b as char
+            ))),
         }
     }
 
@@ -366,8 +368,14 @@ mod tests {
         assert_eq!(InstanceType::Deleted.as_byte(), b'd');
 
         assert_eq!(InstanceType::from_byte(b'v').unwrap(), InstanceType::Value);
-        assert_eq!(InstanceType::from_byte(b'p').unwrap(), InstanceType::Priority);
-        assert_eq!(InstanceType::from_byte(b'd').unwrap(), InstanceType::Deleted);
+        assert_eq!(
+            InstanceType::from_byte(b'p').unwrap(),
+            InstanceType::Priority
+        );
+        assert_eq!(
+            InstanceType::from_byte(b'd').unwrap(),
+            InstanceType::Deleted
+        );
     }
 
     #[test]
@@ -379,12 +387,12 @@ mod tests {
             1,
             127,
             128,
-            239,      // boundary between 1-byte and 2-byte
-            240,      // first 2-byte value
+            239, // boundary between 1-byte and 2-byte
+            240, // first 2-byte value
             255,
             256,
-            2287,     // boundary between 2-byte and 3-byte
-            2288,     // first 3-byte value
+            2287, // boundary between 2-byte and 3-byte
+            2288, // first 3-byte value
             10000,
             100000,
             1000000,

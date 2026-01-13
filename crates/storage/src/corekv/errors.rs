@@ -2,7 +2,6 @@
 ///
 /// These errors represent the various failure modes that can occur
 /// in key-value storage operations, transactions, and iteration.
-
 use thiserror::Error;
 
 /// Result type alias for CoreKV operations.
@@ -191,7 +190,10 @@ mod tests {
         assert_eq!(Error::NotFound.to_string(), "key not found");
         assert_eq!(Error::EmptyKey.to_string(), "empty key");
         assert_eq!(Error::ValueNil.to_string(), "value is nil");
-        assert_eq!(Error::TxnConflict.to_string(), "transaction conflict, retry required");
+        assert_eq!(
+            Error::TxnConflict.to_string(),
+            "transaction conflict, retry required"
+        );
     }
 
     #[test]

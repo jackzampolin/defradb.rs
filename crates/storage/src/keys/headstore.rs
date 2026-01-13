@@ -135,11 +135,18 @@ impl HeadstoreFieldDefinition {
 
 impl Key for HeadstoreFieldDefinition {
     fn bytes(&self) -> Vec<u8> {
-        format!("/f/{}/{}/{}", self.collection_name, self.field_name, self.cid).into_bytes()
+        format!(
+            "/f/{}/{}/{}",
+            self.collection_name, self.field_name, self.cid
+        )
+        .into_bytes()
     }
 
     fn to_string(&self) -> String {
-        format!("/f/{}/{}/{}", self.collection_name, self.field_name, self.cid)
+        format!(
+            "/f/{}/{}/{}",
+            self.collection_name, self.field_name, self.cid
+        )
     }
 }
 

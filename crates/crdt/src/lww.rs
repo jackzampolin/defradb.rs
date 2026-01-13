@@ -664,11 +664,17 @@ mod tests {
             b"value".to_vec(),
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version_id"));
 
         let result = LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 10, "".to_string());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version_id"));
     }
 
     #[tokio::test]

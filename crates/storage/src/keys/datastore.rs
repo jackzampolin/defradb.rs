@@ -6,10 +6,7 @@
 /// - Secondary indexes
 /// - Search engine artifacts
 /// - View caching
-
-use super::utils::{
-    encode_uvarint_ascending, InstanceType, SEPARATOR,
-};
+use super::utils::{encode_uvarint_ascending, InstanceType, SEPARATOR};
 use crate::corekv::Key;
 
 /// DataStoreKey: Main key for storing field values in documents
