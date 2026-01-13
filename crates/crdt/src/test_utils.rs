@@ -102,29 +102,6 @@ impl FailingStore {
         }
     }
 
-    /// Update the failure configuration
-    pub async fn set_config(&self, config: FailureConfig) {
-        *self.config.lock().await = config;
-    }
-
-    /// Reset all operation counts
-    pub fn reset_counts(&self) {
-        self.get_count.store(0, Ordering::SeqCst);
-        self.set_count.store(0, Ordering::SeqCst);
-        self.delete_count.store(0, Ordering::SeqCst);
-        self.has_count.store(0, Ordering::SeqCst);
-    }
-
-    /// Get the number of set operations performed
-    pub fn set_count(&self) -> usize {
-        self.set_count.load(Ordering::SeqCst)
-    }
-
-    /// Get the number of get operations performed
-    pub fn get_count(&self) -> usize {
-        self.get_count.load(Ordering::SeqCst)
-    }
-
     fn should_fail_for_key(&self, key: &[u8], prefix: &Option<Vec<u8>>) -> bool {
         match prefix {
             Some(p) => key.starts_with(p),

@@ -156,7 +156,9 @@ impl CounterDelta {
                 self.field_name, self.data.len()
             )));
         }
-        let bytes: [u8; 8] = self.data[..8].try_into().unwrap();
+        let bytes: [u8; 8] = self.data[..8]
+            .try_into()
+            .expect("length already validated as 8 bytes");
         Ok(i64::from_be_bytes(bytes))
     }
 
@@ -168,7 +170,9 @@ impl CounterDelta {
                 self.field_name, self.data.len()
             )));
         }
-        let bytes: [u8; 8] = self.data[..8].try_into().unwrap();
+        let bytes: [u8; 8] = self.data[..8]
+            .try_into()
+            .expect("length already validated as 8 bytes");
         Ok(f64::from_be_bytes(bytes))
     }
 }
@@ -312,7 +316,9 @@ impl Counter {
                         bytes.len()
                     )));
                 }
-                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                let arr: [u8; 8] = bytes[..8]
+                    .try_into()
+                    .expect("length already validated as 8 bytes");
                 Ok(i64::from_be_bytes(arr))
             }
             None => Ok(0),
@@ -337,7 +343,9 @@ impl Counter {
                         bytes.len()
                     )));
                 }
-                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                let arr: [u8; 8] = bytes[..8]
+                    .try_into()
+                    .expect("length already validated as 8 bytes");
                 Ok(f64::from_be_bytes(arr))
             }
             None => Ok(0.0),

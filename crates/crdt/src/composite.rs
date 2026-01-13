@@ -28,6 +28,9 @@ pub struct CompositeDelta {
 impl CompositeDelta {
     /// Create a new composite delta
     pub fn new(doc_id: Vec<u8>, schema_version_id: String, priority: u64) -> Result<Self> {
+        if doc_id.is_empty() {
+            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        }
         if schema_version_id.is_empty() {
             return Err(Error::MergeError(
                 "schema_version_id cannot be empty".into(),
@@ -716,5 +719,33 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("schema version mismatch"));
+    }
+
+    #[test]
+    fn test_composite_delta_empty_doc_id_rejected() {
+        let result = CompositeDelta::new(vec![], "v1".to_string(), 10);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("doc_id cannot be empty"));
+    }
+
+    #[test]
+    fn test_composite_delta_empty_schema_version_rejected() {
+        let result = CompositeDelta::new(b"doc1".to_vec(), "".to_string(), 10);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version_id cannot be empty"));
+    }
+
+    #[test]
+    fn test_composite_delta_empty_field_name_rejected() {
+        let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
+        let result = delta.add_field_delta("".to_string(), FieldDelta::Lww {
+            priority: 10,
+            data: b"value".to_vec(),
+        });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name cannot be empty"));
     }
 }
