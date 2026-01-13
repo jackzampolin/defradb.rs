@@ -1635,7 +1635,11 @@ mod tests {
         // all_cids should skip the malformed key and return only valid CIDs
         // (matching Go behavior of logging error and continuing)
         let cids = blockstore.all_cids().await.unwrap();
-        assert_eq!(cids.len(), 2, "Should return only valid CIDs, skipping malformed key");
+        assert_eq!(
+            cids.len(),
+            2,
+            "Should return only valid CIDs, skipping malformed key"
+        );
         assert!(cids.contains(&cid1));
         assert!(cids.contains(&cid2));
     }
@@ -1658,7 +1662,11 @@ mod tests {
         // Block key: raw CID bytes (no prefix)
         let block_key = BlockstoreKey::new(cid);
         let block_bytes = block_key.bytes();
-        assert_eq!(block_bytes, cid.to_bytes(), "Block key should be raw CID bytes");
+        assert_eq!(
+            block_bytes,
+            cid.to_bytes(),
+            "Block key should be raw CID bytes"
+        );
 
         // Merge key: 'm' prefix + CID bytes
         let merge_key = ToMergeIndexKey::new(cid);
@@ -1702,7 +1710,10 @@ mod tests {
             cidv1_bytes[0], b'm',
             "CIDv1 should not start with 'm' - would break is_merge_key filtering"
         );
-        assert_eq!(cidv1_bytes[0], 0x01, "CIDv1 should start with version byte 0x01");
+        assert_eq!(
+            cidv1_bytes[0], 0x01,
+            "CIDv1 should start with version byte 0x01"
+        );
         assert!(!ToMergeIndexKey::is_merge_key(&cidv1_bytes));
 
         // CIDv0 test (Qm... format)
@@ -1713,7 +1724,10 @@ mod tests {
             "CIDv0 should not start with 'm' - would break is_merge_key filtering"
         );
         // CIDv0 starts with the multihash directly (0x12 for sha2-256)
-        assert_eq!(cidv0_bytes[0], 0x12, "CIDv0 should start with sha2-256 code 0x12");
+        assert_eq!(
+            cidv0_bytes[0], 0x12,
+            "CIDv0 should start with sha2-256 code 0x12"
+        );
         assert!(!ToMergeIndexKey::is_merge_key(&cidv0_bytes));
 
         // Edge case: raw codec CIDv1

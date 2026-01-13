@@ -398,7 +398,9 @@ mod tests {
             let mut corrupted_merge_key = vec![Namespace::Blockstore.prefix()]; // 'b'
             corrupted_merge_key.push(MERGE_PREFIX); // 'm'
             corrupted_merge_key.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // Invalid CID bytes
-            txn.set(&corrupted_merge_key, &[OBJECT_MARKER]).await.unwrap();
+            txn.set(&corrupted_merge_key, &[OBJECT_MARKER])
+                .await
+                .unwrap();
             txn.commit().await.unwrap();
         }
 
@@ -407,7 +409,10 @@ mod tests {
         let txn_bs = txn.as_any().downcast_ref::<BlockstoreTxn>().unwrap();
         let result = txn_bs.get_unmerged_cids().await;
 
-        assert!(result.is_err(), "Should return error on corrupted merge key");
+        assert!(
+            result.is_err(),
+            "Should return error on corrupted merge key"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Data corruption detected") || err_msg.contains("could not be parsed"),
@@ -455,6 +460,9 @@ mod tests {
         // is_merged returns true when marker doesn't exist, but block also doesn't exist
         // The important thing is the CID doesn't appear in unmerged list
         let unmerged = txn_bs.get_unmerged_cids().await.unwrap();
-        assert!(!unmerged.contains(&cid), "Deleted block should not be in unmerged list");
+        assert!(
+            !unmerged.contains(&cid),
+            "Deleted block should not be in unmerged list"
+        );
     }
 }

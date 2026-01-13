@@ -19,6 +19,10 @@ serde_json.workspace = true
 # IPLD
 cid.workspace = true
 multihash.workspace = true
+serde_ipld_dagcbor.workspace = true
+
+# Cryptography (for CID generation)
+sha2.workspace = true
 
 # Async
 async-trait.workspace = true
