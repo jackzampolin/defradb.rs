@@ -91,6 +91,16 @@ impl Ed25519PrivateKey {
             .map_err(|_| crypto_error("failed to extract Ed25519 seed from key bytes"))?;
         let key = SigningKey::from_bytes(&seed);
 
+        // Validate that the provided public key (bytes 32-63) matches the derived public key
+        // This catches malformed keys where the public key portion doesn't match the seed
+        let derived_public = key.verifying_key().to_bytes();
+        let provided_public = &bytes[32..64];
+        if derived_public != provided_public {
+            return Err(crypto_error(
+                "Ed25519 public key portion does not match derived key from seed",
+            ));
+        }
+
         Ok(Self { key })
     }
 
@@ -268,15 +278,27 @@ mod tests {
     use super::*;
     use crate::keys::generation::generate_ed25519;
 
+    /// Create a valid 64-byte Ed25519 private key from a 32-byte seed
+    fn make_valid_key_bytes(seed: &[u8; 32]) -> [u8; 64] {
+        let key = SigningKey::from_bytes(seed);
+        let public = key.verifying_key().to_bytes();
+        let mut result = [0u8; 64];
+        result[..32].copy_from_slice(seed);
+        result[32..].copy_from_slice(&public);
+        result
+    }
+
     #[test]
     fn test_ed25519_key_generation() {
-        let private_key = Ed25519PrivateKey::from_bytes(&[0u8; 64]);
+        let key_bytes = make_valid_key_bytes(&[0u8; 32]);
+        let private_key = Ed25519PrivateKey::from_bytes(&key_bytes);
         assert!(private_key.is_ok());
     }
 
     #[test]
     fn test_ed25519_key_type() {
-        let private_key = Ed25519PrivateKey::from_bytes(&[1u8; 64]).unwrap();
+        let key_bytes = make_valid_key_bytes(&[1u8; 32]);
+        let private_key = Ed25519PrivateKey::from_bytes(&key_bytes).unwrap();
         assert_eq!(private_key.key_type(), KeyType::Ed25519);
 
         let public_key = private_key.public_key();
@@ -285,14 +307,16 @@ mod tests {
 
     #[test]
     fn test_ed25519_raw_bytes() {
-        let private_key = Ed25519PrivateKey::from_bytes(&[2u8; 64]).unwrap();
+        let key_bytes = make_valid_key_bytes(&[2u8; 32]);
+        let private_key = Ed25519PrivateKey::from_bytes(&key_bytes).unwrap();
         let raw = private_key.raw();
         assert_eq!(raw.len(), 64);
     }
 
     #[test]
     fn test_ed25519_public_key_from_private() {
-        let private_key = Ed25519PrivateKey::from_bytes(&[3u8; 64]).unwrap();
+        let key_bytes = make_valid_key_bytes(&[3u8; 32]);
+        let private_key = Ed25519PrivateKey::from_bytes(&key_bytes).unwrap();
         let public_key = private_key.public_key();
         let raw = public_key.raw();
         assert_eq!(raw.len(), 32);
@@ -300,7 +324,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_sign_verify() {
-        let private_key = Ed25519PrivateKey::from_bytes(&[4u8; 64]).unwrap();
+        let key_bytes = make_valid_key_bytes(&[4u8; 32]);
+        let private_key = Ed25519PrivateKey::from_bytes(&key_bytes).unwrap();
         let message = b"test message";
 
         let signature = private_key.sign(message).unwrap();
@@ -313,7 +338,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_verify_wrong_message() {
-        let private_key = Ed25519PrivateKey::from_bytes(&[5u8; 64]).unwrap();
+        let key_bytes = make_valid_key_bytes(&[5u8; 32]);
+        let private_key = Ed25519PrivateKey::from_bytes(&key_bytes).unwrap();
         let message = b"test message";
         let signature = private_key.sign(message).unwrap();
 
@@ -345,22 +371,26 @@ mod tests {
 
     #[test]
     fn test_ed25519_key_equality() {
-        let key1 = Ed25519PrivateKey::from_bytes(&[6u8; 64]).unwrap();
-        let key2 = Ed25519PrivateKey::from_bytes(&[6u8; 64]).unwrap();
+        let key_bytes1 = make_valid_key_bytes(&[6u8; 32]);
+        let key_bytes2 = make_valid_key_bytes(&[7u8; 32]);
+        let key1 = Ed25519PrivateKey::from_bytes(&key_bytes1).unwrap();
+        let key2 = Ed25519PrivateKey::from_bytes(&key_bytes1).unwrap();
         assert!(key1.equal(&key2 as &dyn Key));
 
-        let key3 = Ed25519PrivateKey::from_bytes(&[7u8; 64]).unwrap();
+        let key3 = Ed25519PrivateKey::from_bytes(&key_bytes2).unwrap();
         assert!(!key1.equal(&key3 as &dyn Key));
     }
 
     #[test]
     fn test_ed25519_partial_eq() {
         // Test PartialEq implementation for private keys
-        let key1 = Ed25519PrivateKey::from_bytes(&[8u8; 64]).unwrap();
-        let key2 = Ed25519PrivateKey::from_bytes(&[8u8; 64]).unwrap();
+        let key_bytes1 = make_valid_key_bytes(&[8u8; 32]);
+        let key_bytes2 = make_valid_key_bytes(&[9u8; 32]);
+        let key1 = Ed25519PrivateKey::from_bytes(&key_bytes1).unwrap();
+        let key2 = Ed25519PrivateKey::from_bytes(&key_bytes1).unwrap();
         assert_eq!(key1, key2, "Same keys should be equal");
 
-        let key3 = Ed25519PrivateKey::from_bytes(&[9u8; 64]).unwrap();
+        let key3 = Ed25519PrivateKey::from_bytes(&key_bytes2).unwrap();
         assert_ne!(key1, key3, "Different keys should not be equal");
 
         // Test PartialEq for public keys (already derived)
@@ -372,6 +402,26 @@ mod tests {
             pub1_concrete, pub2_concrete,
             "Public keys from same private key should be equal"
         );
+    }
+
+    #[test]
+    fn test_ed25519_mismatched_public_key_rejected() {
+        // Test that providing a 64-byte key with wrong public key portion is rejected
+        let seed = [10u8; 32];
+        let mut invalid_key = [0u8; 64];
+        invalid_key[..32].copy_from_slice(&seed);
+        // Put wrong public key bytes (all zeros instead of derived)
+        invalid_key[32..].copy_from_slice(&[0u8; 32]);
+
+        let result = Ed25519PrivateKey::from_bytes(&invalid_key);
+        assert!(
+            result.is_err(),
+            "Should reject key with mismatched public key portion"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not match derived key"));
     }
 
     // ===== Signature Tests (ported from Go signature_test.go) =====

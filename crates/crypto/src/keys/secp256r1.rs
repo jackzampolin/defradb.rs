@@ -22,7 +22,7 @@ use crate::types::KeyType;
 ///
 /// This implementation only supports public key operations (verification).
 /// Private keys are managed by JavaScript clients.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Secp256r1PublicKey {
     #[serde(with = "secp256r1_public_key_serde")]
     key: VerifyingKey,
@@ -30,6 +30,15 @@ pub struct Secp256r1PublicKey {
     #[serde(skip)]
     compressed_bytes: Vec<u8>,
 }
+
+impl PartialEq for Secp256r1PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare only the key, not the cached compressed_bytes which may be empty after deserialization
+        self.key == other.key
+    }
+}
+
+impl Eq for Secp256r1PublicKey {}
 
 impl Secp256r1PublicKey {
     /// Create a new secp256r1 public key from raw bytes

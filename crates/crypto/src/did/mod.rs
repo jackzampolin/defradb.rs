@@ -7,8 +7,6 @@ use defra_core::Result;
 use crate::error::crypto_error;
 use crate::types::KeyType;
 
-pub mod multicodec;
-
 /// Create a DID key representation of a public key
 ///
 /// # Parameters
@@ -334,7 +332,10 @@ mod tests {
         let result = parse_did_key(&did);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("unknown multicodec"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown multicodec"),
             "Error should mention unknown multicodec"
         );
     }
