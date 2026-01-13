@@ -6,5 +6,28 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "IPFS-compatible blockstore with merge tracking for DefraDB"
 
 [dependencies]
+# Internal dependencies
+storage = { path = "../storage" }
+
+# IPLD
+cid = { workspace = true }
+multihash = { workspace = true }
+
+# Crypto (for hash verification)
+sha2 = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
