@@ -163,19 +163,6 @@ impl Block {
     pub fn is_signed(&self) -> bool {
         self.signature.is_some()
     }
-
-    /// Clone the block (shallow copy of links, deep copy of delta)
-    ///
-    /// Matches Go's `Clone()` behavior.
-    pub fn clone_block(&self) -> Self {
-        Self {
-            delta: self.delta.clone(),
-            heads: self.heads.clone(),
-            links: self.links.clone(),
-            encryption: self.encryption,
-            signature: self.signature,
-        }
-    }
 }
 
 // ============================================================================
@@ -730,6 +717,50 @@ mod tests {
             assert_eq!(c.priority, 5);
         } else {
             panic!("Expected Composite delta");
+        }
+    }
+
+    #[test]
+    fn test_counter_delta_roundtrip() {
+        let delta = CrdtDelta::Counter(CounterDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            field_name: "counter_field".to_string(),
+            priority: 3,
+            nonce: -42,
+            schema_version_id: "v1".to_string(),
+            data: vec![1, 2, 3, 4],
+        });
+
+        let block = Block::new(delta, vec![], vec![]);
+        let bytes = block.to_dag_cbor().unwrap();
+        let restored = Block::from_dag_cbor(&bytes).unwrap();
+
+        if let CrdtDelta::Counter(c) = &restored.delta {
+            assert_eq!(c.nonce, -42);
+            assert_eq!(c.field_name, "counter_field");
+            assert_eq!(c.data, vec![1, 2, 3, 4]);
+        } else {
+            panic!("Expected Counter delta");
+        }
+    }
+
+    #[test]
+    fn test_collection_delta_roundtrip() {
+        let delta = CrdtDelta::Collection(CollectionDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "v2".to_string(),
+            priority: 10,
+        });
+
+        let block = Block::new(delta, vec![], vec![]);
+        let bytes = block.to_dag_cbor().unwrap();
+        let restored = Block::from_dag_cbor(&bytes).unwrap();
+
+        if let CrdtDelta::Collection(c) = &restored.delta {
+            assert_eq!(c.priority, 10);
+            assert_eq!(c.schema_version_id, "v2");
+        } else {
+            panic!("Expected Collection delta");
         }
     }
 
