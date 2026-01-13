@@ -577,8 +577,14 @@ async fn test_counter_multiple_nonces() {
     };
 
     let store = MemoryStore::new();
-    let counter =
-        Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Int64,
+    )
+    .unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     // Apply multiple different nonces
@@ -609,8 +615,14 @@ async fn test_counter_nonce_replay_protection() {
     };
 
     let store = MemoryStore::new();
-    let counter =
-        Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Int64,
+    )
+    .unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
 
     let delta = CounterDelta::new_int64(
@@ -696,8 +708,8 @@ async fn test_lww_empty_value_handling() {
     assert_eq!(lww.value(&*txn).await.unwrap(), b"value");
 
     // Delete (empty value)
-    let delete = LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 20, "v1".to_string())
-        .unwrap();
+    let delete =
+        LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 20, "v1".to_string()).unwrap();
     lww.merge(&mut *txn, &ctx, &delete).await.unwrap();
     assert!(lww.value(&*txn).await.is_err()); // Should be deleted
 }
@@ -800,7 +812,10 @@ async fn test_composite_doc_id_mismatch() {
 
     let result = composite.merge(&mut *txn, &ctx, &delta).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("document ID mismatch"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("document ID mismatch"));
 }
 
 #[tokio::test]
@@ -820,7 +835,10 @@ async fn test_composite_schema_version_mismatch() {
 
     let result = composite.merge(&mut *txn, &ctx, &delta).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("schema version mismatch"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("schema version mismatch"));
 }
 
 #[tokio::test]

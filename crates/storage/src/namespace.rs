@@ -11,7 +11,6 @@
 ///
 /// The NamespacedStore wraps any Store implementation and automatically
 /// prepends the prefix to all keys, ensuring complete isolation between stores.
-
 use crate::corekv::{Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn, Writer};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -434,7 +433,9 @@ mod tests {
         // This tests that namespace isolation prevents cross-namespace access
         let datastore = NamespacedStore::new(store.clone(), Namespace::Datastore);
         let mut txn = datastore.new_txn(false).await.unwrap();
-        txn.set(b"bmalicious_key", b"datastore_value").await.unwrap();
+        txn.set(b"bmalicious_key", b"datastore_value")
+            .await
+            .unwrap();
         txn.commit().await.unwrap();
 
         // Blockstore should NOT see this key, even though the key starts with 'b'
@@ -448,7 +449,10 @@ mod tests {
 
         // Also check the key with 'b' prefix doesn't exist in blockstore
         let value = txn.get(b"bmalicious_key").await.unwrap();
-        assert_eq!(value, None, "Blockstore should not see key starting with 'b' from datastore");
+        assert_eq!(
+            value, None,
+            "Blockstore should not see key starting with 'b' from datastore"
+        );
     }
 
     #[tokio::test]

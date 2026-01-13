@@ -64,7 +64,6 @@
 /// }
 /// iter.close().await?;
 /// ```
-
 pub mod errors;
 pub mod iterator;
 pub mod traits;
@@ -74,7 +73,7 @@ pub mod types;
 pub use errors::{Error, Result};
 pub use iterator::{Iterator, KvPair};
 pub use traits::{
-    make_async_callback, make_callback, AsyncTxnCallback, Dropable, Reader, ReaderWriter,
-    Store, Txn, TxnCallback, TxnStore, Writer,
+    make_async_callback, make_callback, AsyncTxnCallback, Dropable, Reader, ReaderWriter, Store,
+    Txn, TxnCallback, TxnStore, Writer,
 };
 pub use types::{IterOptions, Key};

@@ -6,7 +6,6 @@
 /// - Sequence counters
 /// - P2P tracking
 /// - Access control policies
-
 use crate::corekv::Key;
 
 /// CollectionKey: Maps collection ID to full collection definition (JSON)
@@ -144,11 +143,18 @@ impl CollectionVersionKey {
 
 impl Key for CollectionVersionKey {
     fn bytes(&self) -> Vec<u8> {
-        format!("/collection/version/{}/{}", self.collection_id, self.version_id).into_bytes()
+        format!(
+            "/collection/version/{}/{}",
+            self.collection_id, self.version_id
+        )
+        .into_bytes()
     }
 
     fn to_string(&self) -> String {
-        format!("/collection/version/{}/{}", self.collection_id, self.version_id)
+        format!(
+            "/collection/version/{}/{}",
+            self.collection_id, self.version_id
+        )
     }
 }
 
@@ -186,11 +192,18 @@ impl FieldID {
 
 impl Key for FieldID {
     fn bytes(&self) -> Vec<u8> {
-        format!("/field/shortID/{}/{}", self.collection_short_id, self.field_id).into_bytes()
+        format!(
+            "/field/shortID/{}/{}",
+            self.collection_short_id, self.field_id
+        )
+        .into_bytes()
     }
 
     fn to_string(&self) -> String {
-        format!("/field/shortID/{}/{}", self.collection_short_id, self.field_id)
+        format!(
+            "/field/shortID/{}/{}",
+            self.collection_short_id, self.field_id
+        )
     }
 }
 

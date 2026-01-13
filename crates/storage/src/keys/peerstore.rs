@@ -4,7 +4,6 @@
 /// - Replicator configuration and state
 /// - Replication retry tracking
 /// - Search engine retry tracking
-
 use crate::corekv::Key;
 
 /// ReplicatorKey: Stores replicator configuration and state
@@ -170,11 +169,18 @@ impl PeerstoreSERetry {
 
 impl Key for PeerstoreSERetry {
     fn bytes(&self) -> Vec<u8> {
-        format!("/se-retry/{}/{}/{}", self.peer_id, self.collection_id, self.doc_id).into_bytes()
+        format!(
+            "/se-retry/{}/{}/{}",
+            self.peer_id, self.collection_id, self.doc_id
+        )
+        .into_bytes()
     }
 
     fn to_string(&self) -> String {
-        format!("/se-retry/{}/{}/{}", self.peer_id, self.collection_id, self.doc_id)
+        format!(
+            "/se-retry/{}/{}/{}",
+            self.peer_id, self.collection_id, self.doc_id
+        )
     }
 }
 
@@ -185,10 +191,7 @@ mod tests {
     #[test]
     fn test_replicator_key() {
         let key = ReplicatorKey::new("replicator_user_collection_peer1");
-        assert_eq!(
-            key.to_string(),
-            "/rep/id/replicator_user_collection_peer1"
-        );
+        assert_eq!(key.to_string(), "/rep/id/replicator_user_collection_peer1");
         assert_eq!(key.bytes(), key.to_string().as_bytes());
 
         let prefix = ReplicatorKey::replicator_prefix();

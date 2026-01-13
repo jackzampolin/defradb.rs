@@ -3,7 +3,6 @@
 /// The RootStore provides direct access to the underlying store without
 /// namespace prefixing. It serves as the foundation for all other stores
 /// and is used for operations that need to span multiple namespaces.
-
 use crate::corekv::{Result, Store, Txn};
 use async_trait::async_trait;
 use std::sync::Arc;

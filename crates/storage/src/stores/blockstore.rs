@@ -2,9 +2,8 @@
 ///
 /// The Blockstore handles storage of IPLD blocks with merge tracking for CRDT operations.
 /// It tracks which blocks have been merged into the permanent store vs. pending merge.
-
 use crate::corekv::{IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
-use crate::keys::blockstore::{BlockstoreKey, ToMergeIndexKey};
+use crate::keys::blockstore::{BlockstoreKey, ToMergeIndexKey, OBJECT_MARKER};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
 use cid::Cid;
@@ -64,8 +63,8 @@ impl BlockstoreTxn {
         // If this is a P2P store, track it as unmerged
         if self.is_p2p {
             let merge_key = ToMergeIndexKey::new(*cid);
-            // Empty value - we just need the key to exist
-            self.set(&merge_key.bytes(), b"").await?;
+            // Use 0xff marker value to match Go implementation for cross-impl compatibility
+            self.set(&merge_key.bytes(), &[OBJECT_MARKER]).await?;
         }
 
         Ok(())

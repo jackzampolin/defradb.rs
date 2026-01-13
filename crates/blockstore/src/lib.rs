@@ -81,8 +81,19 @@ impl<S: Store + 'static> DefraBlockstore<S> {
 
     /// Verify that data matches the CID hash
     ///
-    /// This implementation supports SHA2-256 (code 0x12), which is the most common
-    /// hash algorithm used in IPFS/IPLD.
+    /// # Supported Algorithms
+    ///
+    /// Currently supports SHA2-256 (code 0x12), which is the most common hash
+    /// algorithm used in IPFS/IPLD and DefraDB.
+    ///
+    /// # Go Compatibility Note
+    ///
+    /// The Go implementation uses `cid.Prefix().Sum(data)` which delegates to the
+    /// go-multihash library and supports all registered hash algorithms. This Rust
+    /// implementation explicitly handles SHA2-256 only. Unsupported algorithms are
+    /// logged and skipped (verification passes) rather than erroring, matching the
+    /// principle of being permissive on read. If DefraDB ever uses non-SHA256 hashes,
+    /// this function should be extended to support them.
     fn verify_hash(&self, cid: &Cid, data: &[u8]) -> Result<()> {
         use sha2::{Digest, Sha256};
 
@@ -722,6 +733,122 @@ mod tests {
     }
 
     // ==================== Go Compatibility Tests ====================
+
+    #[tokio::test]
+    async fn test_get_with_default_cid_returns_none() {
+        // Go implementation checks `!k.Defined()` and returns ErrNotFound
+        // Rust CID library doesn't have a "defined" concept the same way,
+        // but we should handle edge cases gracefully
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        // CIDv0 with all zeros - this is technically parseable but represents
+        // an invalid/empty multihash
+        let zero_bytes = vec![0x12, 0x20]; // SHA2-256 code + 32 byte length, but no digest
+        let result = Cid::try_from(zero_bytes.as_slice());
+        // This should fail to parse (incomplete multihash)
+        assert!(result.is_err());
+
+        // A properly formed but "empty content" CID (hash of empty data)
+        // This is valid and should return None when not stored
+        let empty_data_cid = cid_from_data(b"");
+        let result = blockstore.get(&empty_data_cid).await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_operations_with_cidv0() {
+        // CIDv0 is the legacy format used by IPFS - ensure compatibility
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        // CIDv0 example (Qm... format, base58btc encoded)
+        let cidv0 = Cid::from_str("QmdfTbBqBPQ7VNxZEYEj14VmRuZBkqFbiwReogJgS1zR1n").unwrap();
+        let data = b"cidv0 test data";
+
+        // All operations should work with CIDv0
+        blockstore.put(&cidv0, data).await.unwrap();
+        assert!(blockstore.has(&cidv0).await.unwrap());
+        assert_eq!(blockstore.get(&cidv0).await.unwrap(), Some(data.to_vec()));
+        assert_eq!(blockstore.get_size(&cidv0).await.unwrap(), Some(data.len()));
+
+        let cids = blockstore.all_cids().await.unwrap();
+        assert!(cids.contains(&cidv0));
+
+        blockstore.delete(&cidv0).await.unwrap();
+        assert!(!blockstore.has(&cidv0).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_put_already_merged_block_stays_merged() {
+        // Critical Go compatibility test:
+        // When a block is put, merged, then put again, it should stay merged
+        // Go skips put entirely if block exists, so no new merge marker is created
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        let cid = test_cid();
+        let data = b"original data";
+
+        // Step 1: Put block (creates merge marker)
+        blockstore.put(&cid, data).await.unwrap();
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+
+        // Step 2: Mark as merged (removes marker)
+        blockstore.mark_as_merged(&cid).await.unwrap();
+        assert!(blockstore.is_merged(&cid).await.unwrap());
+
+        // Step 3: Put same block again
+        blockstore.put(&cid, data).await.unwrap();
+
+        // Step 4: Should STILL be merged (put was no-op because block existed)
+        assert!(
+            blockstore.is_merged(&cid).await.unwrap(),
+            "Re-putting an already-merged block should not create a new merge marker"
+        );
+
+        // Unmerged list should be empty
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert!(
+            !unmerged.contains(&cid),
+            "Re-put block should not appear in unmerged list"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_many_with_existing_merged_block() {
+        // Same test but for put_many - existing merged blocks should stay merged
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        let cid1 = test_cid();
+        let cid2 = test_cid2();
+        let data1 = b"data one";
+        let data2 = b"data two";
+
+        // Put and merge cid1
+        blockstore.put(&cid1, data1).await.unwrap();
+        blockstore.mark_as_merged(&cid1).await.unwrap();
+        assert!(blockstore.is_merged(&cid1).await.unwrap());
+
+        // Now put_many with cid1 (existing merged) and cid2 (new)
+        let blocks: Vec<(&Cid, &[u8])> = vec![(&cid1, data1.as_slice()), (&cid2, data2.as_slice())];
+        blockstore.put_many(&blocks).await.unwrap();
+
+        // cid1 should still be merged
+        assert!(
+            blockstore.is_merged(&cid1).await.unwrap(),
+            "Existing merged block should stay merged after put_many"
+        );
+
+        // cid2 should be unmerged (newly added)
+        assert!(!blockstore.is_merged(&cid2).await.unwrap());
+
+        // Only cid2 should be in unmerged list
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert!(!unmerged.contains(&cid1));
+        assert!(unmerged.contains(&cid2));
+    }
 
     #[tokio::test]
     async fn test_put_same_cid_different_data_no_overwrite() {

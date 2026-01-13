@@ -3,12 +3,17 @@
 /// These keys are prefixed with 'b' at the store level and handle:
 /// - Block storage (CID-based)
 /// - Block merge tracking (for CRDT operations)
-
 use crate::corekv::Key;
 use cid::Cid;
 
 /// Merge marker prefix byte
 pub const MERGE_PREFIX: u8 = b'm';
+
+/// Object marker value for merge tracking entries
+/// This matches the Go implementation which uses 0xff as the marker value.
+/// The value itself is not used for logic (only key existence matters),
+/// but using the same value ensures cross-implementation database compatibility.
+pub const OBJECT_MARKER: u8 = 0xff;
 
 /// BlockstoreKey: Maps CID to block data
 ///

@@ -2,7 +2,6 @@
 ///
 /// The Systemstore handles storage of collection metadata, field metadata,
 /// sequence counters, P2P tracking, and access control policies.
-
 use crate::corekv::{Result, Store, Txn};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;

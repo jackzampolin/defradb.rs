@@ -37,19 +37,16 @@
 /// txn.set(b"key", b"value").await?;
 /// txn.commit().await?;
 /// ```
-
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use rocksdb::{
-    DBWithThreadMode, MultiThreaded, Options, Snapshot, WriteBatch, WriteOptions,
-};
+use rocksdb::{DBWithThreadMode, MultiThreaded, Options, Snapshot, WriteBatch, WriteOptions};
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::corekv::{
-    AsyncTxnCallback, Error, Iterator, IterOptions, KvPair, Reader, Result, Store, Txn,
+    AsyncTxnCallback, Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn,
     TxnCallback, Writer,
 };
 
@@ -328,7 +325,8 @@ impl Reader for RocksDBTxn {
 
         // Use a BTreeMap to merge DB data with pending writes
         // Only collect keys that match the filter criteria to avoid loading entire DB
-        let mut merged: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = std::collections::BTreeMap::new();
+        let mut merged: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
+            std::collections::BTreeMap::new();
 
         // Determine iteration bounds based on options
         let (start_bound, end_bound) = if let Some(prefix) = opts.prefix() {
@@ -351,7 +349,10 @@ impl Reader for RocksDBTxn {
             }
             (Some(start), Some(end))
         } else if opts.start().is_some() || opts.end().is_some() {
-            (opts.start().map(|s| s.to_vec()), opts.end().map(|e| e.to_vec()))
+            (
+                opts.start().map(|s| s.to_vec()),
+                opts.end().map(|e| e.to_vec()),
+            )
         } else {
             (None, None)
         };
@@ -359,11 +360,17 @@ impl Reader for RocksDBTxn {
         // Use appropriate iterator mode based on bounds
         // Use snapshot iterator for consistent reads (snapshot isolation)
         let db_iter = match (&start_bound, opts.reverse()) {
-            (Some(start), false) => self.snapshot.iterator(rocksdb::IteratorMode::From(start, rocksdb::Direction::Forward)),
+            (Some(start), false) => self.snapshot.iterator(rocksdb::IteratorMode::From(
+                start,
+                rocksdb::Direction::Forward,
+            )),
             (Some(_), true) => {
                 // For reverse with start bound, we need to start from end_bound or prefix end
                 if let Some(ref end) = end_bound {
-                    self.snapshot.iterator(rocksdb::IteratorMode::From(end, rocksdb::Direction::Reverse))
+                    self.snapshot.iterator(rocksdb::IteratorMode::From(
+                        end,
+                        rocksdb::Direction::Reverse,
+                    ))
                 } else {
                     self.snapshot.iterator(rocksdb::IteratorMode::End)
                 }
@@ -381,11 +388,17 @@ impl Reader for RocksDBTxn {
             if let Some(prefix) = opts.prefix() {
                 if !key_vec.starts_with(prefix) {
                     // For forward iteration, if we've passed the prefix range, stop
-                    if !opts.reverse() && key_vec.as_slice() >= end_bound.as_ref().map(|e| e.as_slice()).unwrap_or(&[0xFF]) {
+                    if !opts.reverse()
+                        && key_vec.as_slice()
+                            >= end_bound.as_ref().map(|e| e.as_slice()).unwrap_or(&[0xFF])
+                    {
                         break;
                     }
                     // For reverse iteration, if we're before the prefix range, stop
-                    if opts.reverse() && key_vec.as_slice() < start_bound.as_ref().map(|s| s.as_slice()).unwrap_or(&[]) {
+                    if opts.reverse()
+                        && key_vec.as_slice()
+                            < start_bound.as_ref().map(|s| s.as_slice()).unwrap_or(&[])
+                    {
                         break;
                     }
                     continue;
@@ -468,7 +481,12 @@ impl Reader for RocksDBTxn {
             data.reverse();
         }
 
-        Ok(Box::new(SimpleIterator { data, position: 0, closed: false, reverse }))
+        Ok(Box::new(SimpleIterator {
+            data,
+            position: 0,
+            closed: false,
+            reverse,
+        }))
     }
 }
 
@@ -488,7 +506,9 @@ impl Writer for RocksDBTxn {
         }
 
         // Track in pending for read-your-writes
-        self.pending.lock().insert(key.to_vec(), Some(value.to_vec()));
+        self.pending
+            .lock()
+            .insert(key.to_vec(), Some(value.to_vec()));
 
         // Add to batch
         self.batch.lock().put(key, value);
@@ -571,10 +591,7 @@ impl Txn for RocksDBTxn {
             // NOTE: These may not complete if the process exits before they finish
             tokio::spawn(async move {
                 Self::execute_async_callbacks(on_discard_async).await;
-                tracing::debug!(
-                    count = callback_count,
-                    "Async discard callbacks completed"
-                );
+                tracing::debug!(count = callback_count, "Async discard callbacks completed");
             });
         }
     }
@@ -698,8 +715,8 @@ impl Iterator for SimpleIterator {
 #[cfg(test)]
 mod shared_tests {
     use super::*;
-    use crate::generate_backend_tests;
     use crate::generate_backend_concurrency_tests;
+    use crate::generate_backend_tests;
     use tempfile::TempDir;
 
     // Each test gets a fresh store - TempDir cleanup is automatic
@@ -707,7 +724,7 @@ mod shared_tests {
         let temp_dir = TempDir::new().unwrap();
         // Keep the TempDir so it lives for the duration of the test
         let path = temp_dir.path().to_path_buf();
-        std::mem::forget(temp_dir);  // Prevent cleanup until test ends
+        std::mem::forget(temp_dir); // Prevent cleanup until test ends
         RocksDBStore::open(&path).unwrap()
     }
 

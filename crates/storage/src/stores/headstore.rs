@@ -2,7 +2,6 @@
 ///
 /// The Headstore handles storage of document heads, collection heads,
 /// field definitions, collection definitions, and collection set definitions.
-
 use crate::corekv::{Result, Store, Txn};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
@@ -47,8 +46,8 @@ mod tests {
         let store = Arc::new(MemoryStore::new());
         let headstore = Headstore::new(store);
 
-        let cid = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
-            .unwrap();
+        let cid =
+            Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
         let key = HeadstoreDocKey::new("doc1", "field1", cid);
 
         // Write

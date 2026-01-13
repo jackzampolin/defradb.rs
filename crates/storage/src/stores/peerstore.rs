@@ -2,7 +2,6 @@
 ///
 /// The Peerstore handles storage of replicator configuration, replication
 /// retry tracking, and search engine retry tracking for P2P operations.
-
 use crate::corekv::{Result, Store, Txn};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
