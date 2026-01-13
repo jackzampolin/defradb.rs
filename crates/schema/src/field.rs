@@ -6,35 +6,46 @@ use serde::{Deserialize, Serialize};
 /// Describes a field within a collection schema.
 ///
 /// This matches Go's CollectionFieldDescription struct.
+/// Field names use serde rename to match Go's JSON format (PascalCase).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDescription {
     /// Immutable field ID (stable across schema versions).
     /// Only fields persisted in the DAG will have a value.
+    #[serde(rename = "FieldID")]
     pub id: String,
 
     /// Human-readable field name. Must contain a valid value.
+    #[serde(rename = "Name")]
     pub name: String,
 
     /// The data type this field holds.
+    #[serde(rename = "Kind")]
     pub kind: FieldKind,
 
     /// Which CRDT to use (defaults to LwwRegister).
-    #[serde(default)]
+    /// Go uses "Typ" as the JSON key.
+    #[serde(rename = "Typ", default)]
     pub crdt_type: CType,
 
     /// Name of the relation (for relation fields).
+    /// Go serializes this as null when None, so we include it always.
+    #[serde(rename = "RelationName", default)]
     pub relation_name: Option<String>,
 
     /// For relations: which side holds the foreign key.
-    #[serde(default)]
+    #[serde(rename = "IsPrimary", default)]
     pub is_primary: bool,
 
     /// Default value for this field.
+    /// Go serializes this as null when None, so we include it always.
+    #[serde(rename = "DefaultValue", default)]
     pub default_value: Option<serde_json::Value>,
 
     /// Size constraint for array fields.
     /// Has no effect on non-array fields.
-    pub size: Option<usize>,
+    /// Go uses int with 0 meaning no constraint.
+    #[serde(rename = "Size", default)]
+    pub size: usize,
 }
 
 impl FieldDescription {
@@ -48,7 +59,7 @@ impl FieldDescription {
             relation_name: None,
             is_primary: false,
             default_value: None,
-            size: None,
+            size: 0, // 0 means no constraint (matches Go)
         }
     }
 
@@ -76,9 +87,9 @@ impl FieldDescription {
         self
     }
 
-    /// Set size constraint for array fields
+    /// Set size constraint for array fields (0 means no constraint)
     pub fn with_size(mut self, size: usize) -> Self {
-        self.size = Some(size);
+        self.size = size;
         self
     }
 
@@ -114,7 +125,7 @@ mod tests {
         assert_eq!(field.kind, FieldKind::string());
         assert_eq!(field.crdt_type, CType::LwwRegister);
         assert!(!field.is_primary);
-        assert!(field.size.is_none());
+        assert_eq!(field.size, 0); // 0 means no constraint
     }
 
     #[test]
@@ -131,7 +142,7 @@ mod tests {
     fn test_array_with_size() {
         let field = FieldDescription::new("1", "tags", FieldKind::string_array()).with_size(10);
 
-        assert_eq!(field.size, Some(10));
+        assert_eq!(field.size, 10);
         assert!(field.kind.is_array());
     }
 

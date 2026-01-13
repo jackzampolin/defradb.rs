@@ -395,10 +395,7 @@ impl<'de> Deserialize<'de> for FieldKind {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let is_array = map
-                        .get("Array")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let is_array = map.get("Array").and_then(|v| v.as_bool()).unwrap_or(false);
                     return Ok(FieldKind::Relation {
                         collection_id,
                         is_array,
@@ -412,10 +409,7 @@ impl<'de> Deserialize<'de> for FieldKind {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let is_array = map
-                        .get("Array")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let is_array = map.get("Array").and_then(|v| v.as_bool()).unwrap_or(false);
                     return Ok(FieldKind::SelfRef {
                         relative_id,
                         is_array,
@@ -429,10 +423,7 @@ impl<'de> Deserialize<'de> for FieldKind {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let is_array = map
-                        .get("Array")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let is_array = map.get("Array").and_then(|v| v.as_bool()).unwrap_or(false);
                     return Ok(FieldKind::Named { name, is_array });
                 }
 
@@ -500,20 +491,22 @@ fn parse_string_kind(s: &str) -> Result<FieldKind, String> {
         "[Boolean!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::BoolArray)),
         "[Int]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray)),
         "[Int!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::IntArray)),
-        "[Float]" | "[Float64]" => {
-            Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array))
-        }
+        "[Float]" | "[Float64]" => Ok(FieldKind::ScalarArray(
+            ScalarArrayKind::NillableFloat64Array,
+        )),
         "[Float!]" | "[Float64!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::Float64Array)),
-        "[Float32]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array)),
+        "[Float32]" => Ok(FieldKind::ScalarArray(
+            ScalarArrayKind::NillableFloat32Array,
+        )),
         "[Float32!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::Float32Array)),
         "[String]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray)),
         "[String!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::StringArray)),
-        // Self reference
-        "__Self" => Ok(FieldKind::SelfRef {
+        // Self reference (Go uses "Self" from request.SelfTypeName)
+        "Self" => Ok(FieldKind::SelfRef {
             relative_id: String::new(),
             is_array: false,
         }),
-        "[__Self]" => Ok(FieldKind::SelfRef {
+        "[Self]" => Ok(FieldKind::SelfRef {
             relative_id: String::new(),
             is_array: true,
         }),
@@ -668,7 +661,10 @@ mod tests {
     #[test]
     fn test_go_compat_array_serializes_as_integer() {
         // Go serializes ScalarArrayKind as just the integer value
-        assert_eq!(serde_json::to_string(&FieldKind::bool_array()).unwrap(), "3");
+        assert_eq!(
+            serde_json::to_string(&FieldKind::bool_array()).unwrap(),
+            "3"
+        );
         assert_eq!(serde_json::to_string(&FieldKind::int_array()).unwrap(), "5");
         assert_eq!(
             serde_json::to_string(&FieldKind::float64_array()).unwrap(),
@@ -768,8 +764,8 @@ mod tests {
 
     #[test]
     fn test_go_compat_deserialize_self_string() {
-        // Go's __Self type
-        let result: FieldKind = serde_json::from_str(r#""__Self""#).unwrap();
+        // Go uses "Self" from request.SelfTypeName
+        let result: FieldKind = serde_json::from_str(r#""Self""#).unwrap();
         assert_eq!(
             result,
             FieldKind::SelfRef {
@@ -778,7 +774,7 @@ mod tests {
             }
         );
 
-        let result_array: FieldKind = serde_json::from_str(r#""[__Self]""#).unwrap();
+        let result_array: FieldKind = serde_json::from_str(r#""[Self]""#).unwrap();
         assert_eq!(
             result_array,
             FieldKind::SelfRef {
@@ -885,8 +881,14 @@ mod tests {
             (FieldKind::ScalarArray(ScalarArrayKind::Float64Array), 7),
             (FieldKind::ScalarArray(ScalarArrayKind::Float32Array), 9),
             (FieldKind::ScalarArray(ScalarArrayKind::StringArray), 12),
-            (FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray), 18),
-            (FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray), 19),
+            (
+                FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray),
+                18,
+            ),
+            (
+                FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray),
+                19,
+            ),
             (
                 FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array),
                 20,

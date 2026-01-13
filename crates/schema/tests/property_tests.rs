@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 use schema::{
-    validate_schema, CollectionBuilder, CollectionVersion, CType, FieldDescription, FieldKind,
+    validate_schema, CType, CollectionBuilder, CollectionVersion, FieldDescription, FieldKind,
     ScalarArrayKind, ScalarKind,
 };
 use std::collections::HashMap;
@@ -56,10 +56,8 @@ fn arb_field_kind() -> impl Strategy<Value = FieldKind> {
             relative_id: id,
             is_array
         }),
-        ("[A-Z][a-z]{1,15}", any::<bool>()).prop_map(|(name, is_array)| FieldKind::Named {
-            name,
-            is_array
-        }),
+        ("[A-Z][a-z]{1,15}", any::<bool>())
+            .prop_map(|(name, is_array)| FieldKind::Named { name, is_array }),
     ]
 }
 

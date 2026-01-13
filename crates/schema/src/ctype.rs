@@ -52,9 +52,10 @@ impl<'de> Deserialize<'de> for CType {
         match &value {
             // Integer format (Go's default)
             serde_json::Value::Number(n) => {
-                let kind = n.as_u64().ok_or_else(|| {
-                    de::Error::custom("CType must be a positive integer")
-                })? as u8;
+                let kind = n
+                    .as_u64()
+                    .ok_or_else(|| de::Error::custom("CType must be a positive integer"))?
+                    as u8;
                 Ok(match kind {
                     0 => CType::None,
                     1 => CType::LwwRegister,

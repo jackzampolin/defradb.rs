@@ -7,18 +7,23 @@ use std::collections::{HashMap, HashSet};
 /// A versioned collection schema.
 ///
 /// This matches Go's CollectionVersion struct.
+/// Field names use serde rename to match Go's JSON format (PascalCase).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionVersion {
     /// Human-readable collection name
+    #[serde(rename = "Name")]
     pub name: String,
     /// Content hash of this version (immutable)
+    #[serde(rename = "VersionID")]
     pub version_id: String,
     /// Stable collection ID across versions
+    #[serde(rename = "CollectionID")]
     pub collection_id: String,
     /// Fields in this collection
+    #[serde(rename = "Fields")]
     pub fields: Vec<FieldDescription>,
     /// Whether this is the active version
-    #[serde(default = "default_active")]
+    #[serde(rename = "IsActive", default = "default_active")]
     pub is_active: bool,
 }
 
