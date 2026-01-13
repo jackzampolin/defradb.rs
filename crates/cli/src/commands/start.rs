@@ -225,6 +225,18 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_to_config_badger_store_succeeds() {
+        let mut config = Config::default();
+        config.datastore.store = DatastoreType::Memory; // Start with non-default
+        let mut args = default_start_args();
+        args.store = Some("badger".to_string());
+
+        let result = args.apply_to_config(&mut config);
+        assert!(result.is_ok());
+        assert_eq!(config.datastore.store, DatastoreType::Badger);
+    }
+
+    #[test]
     fn test_apply_to_config_rocksdb_alias_succeeds() {
         let mut config = Config::default();
         let mut args = default_start_args();
@@ -255,7 +267,7 @@ mod tests {
             no_signing: Some(true),
             default_key_type: Some("ed25519".to_string()),
             no_searchable_encryption: Some(true),
-            identity: Some("0x1234".to_string()),
+            identity: None, // identity is handled separately, not in apply_to_config
             replicator_retry_intervals: Some(vec![10, 20, 30]),
         };
 
