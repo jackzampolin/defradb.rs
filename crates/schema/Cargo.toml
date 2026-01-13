@@ -8,3 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+defra-core = { path = "../defra-core" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
