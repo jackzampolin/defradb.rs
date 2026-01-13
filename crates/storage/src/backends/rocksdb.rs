@@ -1,29 +1,30 @@
-/// RocksDB backend implementation with write batch atomicity.
+/// RocksDB backend implementation with write batch atomicity and snapshot isolation.
 ///
 /// This backend provides a production-ready persistent key-value store using
-/// RocksDB. It uses write batches for atomic commits with read-your-writes
-/// consistency within transactions.
+/// RocksDB. It uses write batches for atomic commits, read-your-writes
+/// consistency within transactions, and snapshot isolation for reads.
 ///
 /// # Features
 ///
 /// - Persistent storage with LSM-tree architecture
 /// - Atomic writes via write batches
 /// - Read-your-writes consistency within transactions
+/// - **Snapshot isolation**: Readers see a consistent view of data from transaction start
 /// - High performance with configurable caching and compaction
 /// - Crash recovery with write-ahead logging (WAL)
 ///
-/// # Limitations
+/// # MVCC Behavior
 ///
-/// - No full snapshot isolation (reads may see concurrent writes)
-/// - No optimistic concurrency control (conflicts not detected)
-/// - Future versions will add proper MVCC support
+/// When a transaction is created, it captures a RocksDB snapshot. All reads
+/// within the transaction see the database state as it was at that moment,
+/// regardless of concurrent writes by other transactions.
 ///
 /// # Use Cases
 ///
 /// - Production deployments
 /// - Large datasets that don't fit in memory
 /// - Applications requiring persistence
-/// - High-throughput workloads
+/// - High-throughput workloads with concurrent readers/writers
 ///
 /// # Example
 ///
@@ -40,8 +41,9 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rocksdb::{
-    DBWithThreadMode, MultiThreaded, Options, WriteBatch, WriteOptions,
+    DBWithThreadMode, MultiThreaded, Options, Snapshot, WriteBatch, WriteOptions,
 };
+use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -119,8 +121,18 @@ impl Store for RocksDBStore {
             return Err(Error::DBClosed);
         }
 
+        let db = Arc::clone(&self.db);
+
+        // Create a snapshot for read isolation.
+        // SAFETY: We transmute the snapshot lifetime to 'static because:
+        // 1. The db Arc is stored in the same struct as the snapshot
+        // 2. We implement Drop to ensure snapshot is dropped first
+        // 3. The Arc ensures the DB won't be dropped while we hold a reference
+        let snapshot: Snapshot<'static> = unsafe { std::mem::transmute(db.snapshot()) };
+
         Ok(Box::new(RocksDBTxn {
-            db: Arc::clone(&self.db),
+            db,
+            snapshot: ManuallyDrop::new(snapshot),
             batch: Mutex::new(WriteBatch::default()),
             pending: Mutex::new(std::collections::HashMap::new()),
             readonly,
@@ -142,14 +154,27 @@ impl Store for RocksDBStore {
     }
 }
 
-/// RocksDB transaction with write batching.
+/// RocksDB transaction with write batching and snapshot isolation.
 ///
-/// Transactions use RocksDB write batches for atomic writes.
-/// Note: This is a simplified implementation without full snapshot isolation.
-/// Future versions will add proper MVCC support.
+/// Transactions use RocksDB write batches for atomic writes and snapshots
+/// for consistent reads. The snapshot captures the database state at
+/// transaction creation time, providing true MVCC isolation.
+///
+/// # Safety
+///
+/// The snapshot holds a reference to the database. We use ManuallyDrop
+/// and implement Drop to ensure the snapshot is released before the db
+/// Arc could potentially drop the database.
 struct RocksDBTxn {
     /// Reference to the RocksDB database
     db: Arc<DBWithThreadMode<MultiThreaded>>,
+
+    /// Snapshot for read isolation - captures DB state at transaction start.
+    ///
+    /// SAFETY: The lifetime is transmuted to 'static, but the snapshot is
+    /// always dropped before the db Arc in our Drop implementation.
+    /// ManuallyDrop ensures we control the drop order.
+    snapshot: ManuallyDrop<Snapshot<'static>>,
 
     /// Write batch for pending changes
     batch: Mutex<WriteBatch>,
@@ -175,6 +200,18 @@ struct RocksDBTxn {
     /// Callbacks for discard
     on_discard: Mutex<Vec<TxnCallback>>,
     on_discard_async: Mutex<Vec<AsyncTxnCallback>>,
+}
+
+impl Drop for RocksDBTxn {
+    fn drop(&mut self) {
+        // SAFETY: We must drop the snapshot before the db Arc could drop the DB.
+        // ManuallyDrop ensures we control this ordering.
+        // The snapshot was created from self.db and must be released first.
+        unsafe {
+            ManuallyDrop::drop(&mut self.snapshot);
+        }
+        // Now db Arc can safely drop (though it likely won't since other refs exist)
+    }
 }
 
 impl RocksDBTxn {
@@ -234,8 +271,8 @@ impl Reader for RocksDBTxn {
         }
         drop(pending);
 
-        // Read from DB
-        match self.db.get(key)? {
+        // Read from snapshot for isolation (sees DB state at txn start)
+        match self.snapshot.get(key)? {
             Some(value) => Ok(Some(value.to_vec())),
             None => Ok(None),
         }
@@ -257,7 +294,8 @@ impl Reader for RocksDBTxn {
         }
         drop(pending);
 
-        Ok(self.db.get(key)?.is_some())
+        // Read from snapshot for isolation
+        Ok(self.snapshot.get(key)?.is_some())
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
@@ -296,18 +334,19 @@ impl Reader for RocksDBTxn {
         };
 
         // Use appropriate iterator mode based on bounds
+        // Use snapshot iterator for consistent reads (snapshot isolation)
         let db_iter = match (&start_bound, opts.reverse()) {
-            (Some(start), false) => self.db.iterator(rocksdb::IteratorMode::From(start, rocksdb::Direction::Forward)),
+            (Some(start), false) => self.snapshot.iterator(rocksdb::IteratorMode::From(start, rocksdb::Direction::Forward)),
             (Some(_), true) => {
                 // For reverse with start bound, we need to start from end_bound or prefix end
                 if let Some(ref end) = end_bound {
-                    self.db.iterator(rocksdb::IteratorMode::From(end, rocksdb::Direction::Reverse))
+                    self.snapshot.iterator(rocksdb::IteratorMode::From(end, rocksdb::Direction::Reverse))
                 } else {
-                    self.db.iterator(rocksdb::IteratorMode::End)
+                    self.snapshot.iterator(rocksdb::IteratorMode::End)
                 }
             }
-            (None, false) => self.db.iterator(rocksdb::IteratorMode::Start),
-            (None, true) => self.db.iterator(rocksdb::IteratorMode::End),
+            (None, false) => self.snapshot.iterator(rocksdb::IteratorMode::Start),
+            (None, true) => self.snapshot.iterator(rocksdb::IteratorMode::End),
         };
 
         // Collect from DB with early termination based on bounds
@@ -591,42 +630,65 @@ impl Iterator for SimpleIterator {
     }
 }
 
+// ============================================================================
+// SHARED TEST SUITE - Run same tests against all backends
+// ============================================================================
 #[cfg(test)]
-mod tests {
+mod shared_tests {
+    use super::*;
+    use crate::generate_backend_tests;
+    use crate::generate_backend_concurrency_tests;
+    use tempfile::TempDir;
+
+    // Each test gets a fresh store - TempDir cleanup is automatic
+    async fn create_store() -> RocksDBStore {
+        let temp_dir = TempDir::new().unwrap();
+        // Keep the TempDir so it lives for the duration of the test
+        let path = temp_dir.path().to_path_buf();
+        std::mem::forget(temp_dir);  // Prevent cleanup until test ends
+        RocksDBStore::open(&path).unwrap()
+    }
+
+    async fn create_arc_store() -> std::sync::Arc<RocksDBStore> {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_path_buf();
+        std::mem::forget(temp_dir);
+        std::sync::Arc::new(RocksDBStore::open(&path).unwrap())
+    }
+
+    // Generate all standard backend tests
+    generate_backend_tests!(create_store);
+
+    // Generate concurrency tests
+    generate_backend_concurrency_tests!(create_arc_store);
+}
+
+// ============================================================================
+// ROCKSDB-SPECIFIC TESTS - Persistence and known limitations
+// ============================================================================
+#[cfg(test)]
+mod rocksdb_specific_tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn create_test_store() -> (RocksDBStore, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
-        let store = RocksDBStore::open(temp_dir.path()).unwrap();
-        (store, temp_dir)
-    }
+    // =========================================================================
+    // PERSISTENCE TESTS - RocksDB-specific durability (Memory doesn't have this)
+    // =========================================================================
 
     #[tokio::test]
-    async fn test_rocksdb_store_basic() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        txn.set(b"key1", b"value1").await.unwrap();
-        txn.set(b"key2", b"value2").await.unwrap();
-
-        assert_eq!(txn.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
-        assert_eq!(txn.get(b"key2").await.unwrap(), Some(b"value2".to_vec()));
-
-        txn.commit().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_persistence() {
+    async fn test_rocksdb_data_survives_close_reopen() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().to_path_buf();
 
-        // Write and close
+        // Write data and close
         {
             let store = RocksDBStore::open(&path).unwrap();
             let mut txn = store.new_txn(false).await.unwrap();
-            txn.set(b"persistent", b"data").await.unwrap();
+            txn.set(b"persistent_key", b"persistent_value")
+                .await
+                .unwrap();
             txn.commit().await.unwrap();
+            store.close().await.unwrap();
         }
 
         // Reopen and verify
@@ -634,305 +696,193 @@ mod tests {
             let store = RocksDBStore::open(&path).unwrap();
             let txn = store.new_txn(true).await.unwrap();
             assert_eq!(
-                txn.get(b"persistent").await.unwrap(),
-                Some(b"data".to_vec())
+                txn.get(b"persistent_key").await.unwrap(),
+                Some(b"persistent_value".to_vec()),
+                "Data should survive close/reopen"
             );
         }
     }
 
     #[tokio::test]
-    async fn test_rocksdb_delete() {
-        let (store, _temp_dir) = create_test_store().await;
+    async fn test_rocksdb_uncommitted_data_lost_on_reopen() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_path_buf();
 
-        // Set a value
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"key", b"value").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Delete it
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.delete(b"key").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Verify deletion
-        let txn = store.new_txn(true).await.unwrap();
-        assert_eq!(txn.get(b"key").await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_readonly() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(true).await.unwrap();
-
-        let result = txn.set(b"key", b"value").await;
-        assert!(matches!(result, Err(Error::ReadOnlyTxn)));
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_discard() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        txn.set(b"key", b"value").await.unwrap();
-        txn.discard();
-
-        // Value shouldn't be persisted
-        let txn = store.new_txn(true).await.unwrap();
-        assert_eq!(txn.get(b"key").await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_iterator() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        txn.set(b"key1", b"value1").await.unwrap();
-        txn.set(b"key2", b"value2").await.unwrap();
-        txn.set(b"key3", b"value3").await.unwrap();
-        txn.commit().await.unwrap();
-
-        let txn = store.new_txn(true).await.unwrap();
-        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
-
-        let mut count = 0;
-        while let Some(_kv) = iter.next().await.unwrap() {
-            count += 1;
-        }
-        assert_eq!(count, 3);
-
-        iter.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_empty_key_rejected() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        // Empty key should be rejected for set
-        let result = txn.set(b"", b"value").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-
-        // Empty key should be rejected for get
-        let result = txn.get(b"").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-
-        // Empty key should be rejected for delete
-        let result = txn.delete(b"").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-
-        // Empty key should be rejected for has
-        let result = txn.has(b"").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_closed_store_rejected() {
-        let (store, _temp_dir) = create_test_store().await;
-
-        // Close the store
-        store.close().await.unwrap();
-
-        // Attempting to create a transaction on closed store should fail
-        let result = store.new_txn(false).await;
-        assert!(matches!(result, Err(Error::DBClosed)));
-
-        // Read-only transaction should also fail
-        let result = store.new_txn(true).await;
-        assert!(matches!(result, Err(Error::DBClosed)));
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_has_operation() {
-        let (store, _temp_dir) = create_test_store().await;
-
-        // has() should return false for non-existent key
-        let txn = store.new_txn(true).await.unwrap();
-        assert!(!txn.has(b"nonexistent").await.unwrap());
-        drop(txn);
-
-        // Set a key and verify has() returns true
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"test_key", b"test_value").await.unwrap();
-        assert!(txn.has(b"test_key").await.unwrap());
-        txn.commit().await.unwrap();
-
-        // Verify has() returns true after commit
-        let txn = store.new_txn(true).await.unwrap();
-        assert!(txn.has(b"test_key").await.unwrap());
-        drop(txn);
-
-        // Delete the key and verify has() returns false
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.delete(b"test_key").await.unwrap();
-        assert!(!txn.has(b"test_key").await.unwrap());
-        txn.commit().await.unwrap();
-
-        // Verify has() returns false after delete
-        let txn = store.new_txn(true).await.unwrap();
-        assert!(!txn.has(b"test_key").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_read_your_writes() {
-        let (store, _temp_dir) = create_test_store().await;
-
-        // Test read-your-writes consistency within a transaction
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        // Write a value
-        txn.set(b"key", b"value1").await.unwrap();
-
-        // Should be able to read the uncommitted value
-        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value1".to_vec()));
-
-        // Update the value
-        txn.set(b"key", b"value2").await.unwrap();
-
-        // Should see the updated value
-        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value2".to_vec()));
-
-        // Delete the key
-        txn.delete(b"key").await.unwrap();
-
-        // Should see deletion
-        assert_eq!(txn.get(b"key").await.unwrap(), None);
-
-        txn.commit().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_callbacks() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        let success_called = Arc::new(AtomicBool::new(false));
-        let success_called_clone = Arc::clone(&success_called);
-
-        txn.on_success(Box::new(move || {
-            success_called_clone.store(true, Ordering::SeqCst);
-        }));
-
-        txn.set(b"key", b"value").await.unwrap();
-        txn.commit().await.unwrap();
-
-        assert!(success_called.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_iterator_closed_returns_error() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"key1", b"value1").await.unwrap();
-        txn.commit().await.unwrap();
-
-        let txn = store.new_txn(true).await.unwrap();
-        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
-
-        // Close the iterator
-        iter.close().await.unwrap();
-
-        // Using closed iterator should return an error
-        let result = iter.next().await;
-        assert!(matches!(result, Err(Error::Iterator(_))));
-
-        // is_valid should return false
-        assert!(!iter.is_valid());
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_async_callback_execution() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        let async_success_called = Arc::new(AtomicBool::new(false));
-        let async_success_called_clone = Arc::clone(&async_success_called);
-
-        txn.on_success_async(Box::new(move || {
-            let flag = Arc::clone(&async_success_called_clone);
-            Box::pin(async move {
-                // Simulate async work
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                flag.store(true, Ordering::SeqCst);
-            })
-        }));
-
-        txn.set(b"key", b"value").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Async callback should have been awaited during commit
-        assert!(async_success_called.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_iterator_prefix_filtering() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        // Insert keys with different prefixes
-        txn.set(b"user/1", b"alice").await.unwrap();
-        txn.set(b"user/2", b"bob").await.unwrap();
-        txn.set(b"post/1", b"hello").await.unwrap();
-        txn.set(b"post/2", b"world").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Iterate with user/ prefix
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new().with_prefix(b"user/".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let mut user_keys: Vec<String> = vec![];
-        while let Some(kv) = iter.next().await.unwrap() {
-            user_keys.push(kv.key_str());
+        // Write data but DON'T commit
+        {
+            let store = RocksDBStore::open(&path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"uncommitted_key", b"value").await.unwrap();
+            // No commit! Discard.
+            txn.discard();
+            store.close().await.unwrap();
         }
 
-        assert_eq!(user_keys.len(), 2);
-        assert!(user_keys.contains(&"user/1".to_string()));
-        assert!(user_keys.contains(&"user/2".to_string()));
-
-        // Iterate with post/ prefix
-        let opts = IterOptions::new().with_prefix(b"post/".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let mut post_keys: Vec<String> = vec![];
-        while let Some(kv) = iter.next().await.unwrap() {
-            post_keys.push(kv.key_str());
+        // Reopen - uncommitted data should be gone
+        {
+            let store = RocksDBStore::open(&path).unwrap();
+            let txn = store.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"uncommitted_key").await.unwrap(),
+                None,
+                "Uncommitted data should not survive reopen"
+            );
         }
-
-        assert_eq!(post_keys.len(), 2);
-        assert!(post_keys.contains(&"post/1".to_string()));
-        assert!(post_keys.contains(&"post/2".to_string()));
     }
 
     #[tokio::test]
-    async fn test_rocksdb_iterator_start_end_range() {
-        let (store, _temp_dir) = create_test_store().await;
-        let mut txn = store.new_txn(false).await.unwrap();
+    async fn test_rocksdb_persistence_through_multiple_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_path_buf();
 
-        // Insert keys: a, b, c, d, e
-        for key in [b"a", b"b", b"c", b"d", b"e"] {
-            txn.set(key, b"value").await.unwrap();
-        }
-        txn.commit().await.unwrap();
-
-        // Test start and end bounds
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new()
-            .with_start(b"b".to_vec())
-            .with_end(b"e".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let mut keys: Vec<String> = vec![];
-        while let Some(kv) = iter.next().await.unwrap() {
-            keys.push(kv.key_str());
+        // Session 1: Write keys
+        {
+            let store = RocksDBStore::open(&path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"key1", b"value1").await.unwrap();
+            txn.set(b"key2", b"value2").await.unwrap();
+            txn.commit().await.unwrap();
         }
 
-        assert_eq!(keys, vec!["b", "c", "d"]);
+        // Session 2: Modify and add
+        {
+            let store = RocksDBStore::open(&path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"key1", b"modified").await.unwrap();
+            txn.set(b"key3", b"value3").await.unwrap();
+            txn.delete(b"key2").await.unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        // Session 3: Verify all changes
+        {
+            let store = RocksDBStore::open(&path).unwrap();
+            let txn = store.new_txn(true).await.unwrap();
+            assert_eq!(txn.get(b"key1").await.unwrap(), Some(b"modified".to_vec()));
+            assert_eq!(txn.get(b"key2").await.unwrap(), None);
+            assert_eq!(txn.get(b"key3").await.unwrap(), Some(b"value3".to_vec()));
+        }
+    }
+
+    // =========================================================================
+    // SNAPSHOT ISOLATION TESTS
+    // Verify RocksDB transactions provide proper MVCC isolation
+    // =========================================================================
+
+    /// Test that RocksDB transactions have snapshot isolation.
+    /// Readers see a consistent view from transaction start, not concurrent commits.
+    #[tokio::test]
+    async fn test_rocksdb_snapshot_isolation() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RocksDBStore::open(temp_dir.path()).unwrap());
+
+        // Setup initial value
+        let mut setup = store.new_txn(false).await.unwrap();
+        setup.set(b"key", b"initial").await.unwrap();
+        setup.commit().await.unwrap();
+
+        // Start a reader BEFORE the write
+        let reader = store.new_txn(true).await.unwrap();
+
+        // Concurrent writer commits
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(b"key", b"modified").await.unwrap();
+        writer.commit().await.unwrap();
+
+        // Reader should see the ORIGINAL value (snapshot isolation)
+        let value = reader.get(b"key").await.unwrap();
+        assert_eq!(
+            value,
+            Some(b"initial".to_vec()),
+            "Reader should see original value (snapshot isolation)"
+        );
+
+        // A new reader should see the modified value
+        let new_reader = store.new_txn(true).await.unwrap();
+        let new_value = new_reader.get(b"key").await.unwrap();
+        assert_eq!(
+            new_value,
+            Some(b"modified".to_vec()),
+            "New reader should see committed changes"
+        );
+    }
+
+    /// Test snapshot isolation with multiple concurrent writers
+    #[tokio::test]
+    async fn test_rocksdb_snapshot_isolation_multiple_writers() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RocksDBStore::open(temp_dir.path()).unwrap());
+
+        // Setup
+        let mut setup = store.new_txn(false).await.unwrap();
+        setup.set(b"key", b"v0").await.unwrap();
+        setup.commit().await.unwrap();
+
+        // Reader starts - sees v0
+        let reader = store.new_txn(true).await.unwrap();
+
+        // Writer 1 changes to v1
+        let mut w1 = store.new_txn(false).await.unwrap();
+        w1.set(b"key", b"v1").await.unwrap();
+        w1.commit().await.unwrap();
+
+        // Writer 2 changes to v2
+        let mut w2 = store.new_txn(false).await.unwrap();
+        w2.set(b"key", b"v2").await.unwrap();
+        w2.commit().await.unwrap();
+
+        // Original reader still sees v0
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(b"v0".to_vec()),
+            "Original reader should still see v0"
+        );
+
+        // New reader sees v2
+        let new_reader = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            new_reader.get(b"key").await.unwrap(),
+            Some(b"v2".to_vec()),
+            "New reader should see latest value v2"
+        );
+    }
+
+    /// Test that snapshot isolation works correctly with deletes
+    #[tokio::test]
+    async fn test_rocksdb_snapshot_isolation_with_deletes() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RocksDBStore::open(temp_dir.path()).unwrap());
+
+        // Setup
+        let mut setup = store.new_txn(false).await.unwrap();
+        setup.set(b"key", b"exists").await.unwrap();
+        setup.commit().await.unwrap();
+
+        // Reader starts - sees key exists
+        let reader = store.new_txn(true).await.unwrap();
+
+        // Writer deletes the key
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.delete(b"key").await.unwrap();
+        writer.commit().await.unwrap();
+
+        // Original reader still sees the key
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(b"exists".to_vec()),
+            "Reader should still see deleted key (snapshot isolation)"
+        );
+        assert!(
+            reader.has(b"key").await.unwrap(),
+            "Reader.has() should return true for deleted key"
+        );
+
+        // New reader sees key as deleted
+        let new_reader = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            new_reader.get(b"key").await.unwrap(),
+            None,
+            "New reader should not see deleted key"
+        );
     }
 }

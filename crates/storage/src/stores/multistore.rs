@@ -176,4 +176,224 @@ mod tests {
         let value = txn.get(b"dkey1").await.unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
     }
+
+    // =========================================================================
+    // NAMESPACE ISOLATION TESTS - Critical for data integrity
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_multistore_stores_cannot_see_each_others_data() {
+        let ms = MemoryMultistore::new_memory();
+
+        // Write to datastore
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"shared_key", b"datastore_value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Blockstore should NOT see the key (different namespace)
+        let txn = ms.blockstore.new_txn(true).await.unwrap();
+        let value = txn.get(b"shared_key").await.unwrap();
+        assert_eq!(
+            value, None,
+            "Blockstore should not see datastore's data"
+        );
+
+        // Headstore should NOT see it either
+        let txn = ms.headstore.new_txn(true).await.unwrap();
+        let value = txn.get(b"shared_key").await.unwrap();
+        assert_eq!(
+            value, None,
+            "Headstore should not see datastore's data"
+        );
+
+        // Systemstore should NOT see it
+        let txn = ms.systemstore.new_txn(true).await.unwrap();
+        let value = txn.get(b"shared_key").await.unwrap();
+        assert_eq!(
+            value, None,
+            "Systemstore should not see datastore's data"
+        );
+
+        // Peerstore should NOT see it
+        let txn = ms.peerstore.new_txn(true).await.unwrap();
+        let value = txn.get(b"shared_key").await.unwrap();
+        assert_eq!(
+            value, None,
+            "Peerstore should not see datastore's data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multistore_same_key_different_values() {
+        // Each store can have the same key with different values
+        let ms = MemoryMultistore::new_memory();
+
+        // Write same key to multiple stores with different values
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"key", b"datastore").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+        txn.set(b"key", b"systemstore").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.peerstore.new_txn(false).await.unwrap();
+        txn.set(b"key", b"peerstore").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Each store should have its own value
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"datastore".to_vec()));
+
+        let txn = ms.systemstore.new_txn(true).await.unwrap();
+        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"systemstore".to_vec()));
+
+        let txn = ms.peerstore.new_txn(true).await.unwrap();
+        assert_eq!(txn.get(b"key").await.unwrap(), Some(b"peerstore".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_multistore_raw_prefix_collision_prevented() {
+        // Test that writing raw bytes that happen to match another namespace's prefix
+        // doesn't cause data to leak between stores
+        let ms = MemoryMultistore::new_memory();
+
+        // Datastore uses prefix 'd', so let's write a key that starts with 'b'
+        // (blockstore prefix) to datastore
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"bfake_block", b"not_a_real_block").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Blockstore should NOT see this key because the namespace prefix
+        // is added BEFORE the key
+        let txn = ms.blockstore.new_txn(true).await.unwrap();
+        let value = txn.get(b"bfake_block").await.unwrap();
+        assert_eq!(
+            value, None,
+            "Blockstore should not see datastore key even if key starts with 'b'"
+        );
+
+        // The key should be at "d" + "bfake_block" in root
+        let txn = ms.root.new_txn(true).await.unwrap();
+        let value = txn.get(b"dbfake_block").await.unwrap();
+        assert_eq!(
+            value,
+            Some(b"not_a_real_block".to_vec()),
+            "Key should be prefixed with datastore namespace"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multistore_iterator_isolation() {
+        // Test that iterators only see data from their own namespace
+        use crate::corekv::IterOptions;
+
+        let ms = MemoryMultistore::new_memory();
+
+        // Write to multiple stores
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"d_key1", b"value1").await.unwrap();
+        txn.set(b"d_key2", b"value2").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.blockstore.new_txn(false).await.unwrap();
+        txn.set(b"b_key1", b"block1").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+        txn.set(b"s_key1", b"system1").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Iterate over datastore - should only see datastore keys
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+        let mut ds_keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            ds_keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+        }
+        assert_eq!(ds_keys.len(), 2);
+        assert!(ds_keys.contains(&"d_key1".to_string()));
+        assert!(ds_keys.contains(&"d_key2".to_string()));
+
+        // Iterate over blockstore - should only see blockstore keys
+        let txn = ms.blockstore.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+        let mut bs_keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            bs_keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+        }
+        assert_eq!(bs_keys.len(), 1);
+        assert!(bs_keys.contains(&"b_key1".to_string()));
+
+        // Iterate over systemstore - should only see systemstore keys
+        let txn = ms.systemstore.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+        let mut ss_keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            ss_keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+        }
+        assert_eq!(ss_keys.len(), 1);
+        assert!(ss_keys.contains(&"s_key1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_multistore_delete_isolation() {
+        // Test that deleting from one store doesn't affect others
+        let ms = MemoryMultistore::new_memory();
+
+        // Write same key to multiple stores
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"key", b"datastore").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+        txn.set(b"key", b"systemstore").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Delete from datastore only
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.delete(b"key").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Datastore should not have the key
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        assert_eq!(txn.get(b"key").await.unwrap(), None);
+
+        // Systemstore should still have its key
+        let txn = ms.systemstore.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"key").await.unwrap(),
+            Some(b"systemstore".to_vec()),
+            "Systemstore should be unaffected by datastore delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multistore_encstore_separate_from_blockstore() {
+        // Encstore uses blockstore implementation but different namespace
+        let ms = MemoryMultistore::new_memory();
+
+        // Write to blockstore
+        let mut txn = ms.blockstore.new_txn(false).await.unwrap();
+        txn.set(b"block", b"blockstore_data").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Write to encstore
+        let mut txn = ms.encstore.new_txn(false).await.unwrap();
+        txn.set(b"block", b"encstore_data").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Each should have its own data
+        let txn = ms.blockstore.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"block").await.unwrap(),
+            Some(b"blockstore_data".to_vec())
+        );
+
+        let txn = ms.encstore.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"block").await.unwrap(),
+            Some(b"encstore_data".to_vec())
+        );
+    }
 }

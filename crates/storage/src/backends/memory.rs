@@ -483,429 +483,146 @@ impl Iterator for MemoryIterator {
     }
 }
 
+// ============================================================================
+// SHARED TEST SUITE - Run same tests against all backends
+// ============================================================================
 #[cfg(test)]
-mod tests {
+mod shared_tests {
+    use super::*;
+    use crate::generate_backend_tests;
+    use crate::generate_backend_concurrency_tests;
+
+    async fn create_store() -> MemoryStore {
+        MemoryStore::new()
+    }
+
+    async fn create_arc_store() -> Arc<MemoryStore> {
+        Arc::new(MemoryStore::new())
+    }
+
+    // Generate all standard backend tests
+    generate_backend_tests!(create_store);
+
+    // Generate concurrency tests
+    generate_backend_concurrency_tests!(create_arc_store);
+}
+
+// ============================================================================
+// MEMORY-SPECIFIC TESTS - Tests unique to MemoryStore behavior
+// ============================================================================
+#[cfg(test)]
+mod memory_specific_tests {
     use super::*;
 
+    /// Test MVCC snapshot isolation (Memory-specific: true snapshot isolation)
+    ///
+    /// MemoryStore provides true MVCC snapshot isolation where readers
+    /// get a snapshot at transaction start and never see concurrent commits.
+    /// This is DIFFERENT from RocksDB which does NOT have snapshot isolation.
     #[tokio::test]
-    async fn test_memory_store_basic() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
+    async fn test_memory_snapshot_isolation() {
+        let store = Arc::new(MemoryStore::new());
 
-        txn.set(b"key1", b"value1").await.unwrap();
-        txn.set(b"key2", b"value2").await.unwrap();
+        // Setup: write initial value
+        let mut setup_txn = store.new_txn(false).await.unwrap();
+        setup_txn.set(b"key", b"initial_value").await.unwrap();
+        setup_txn.commit().await.unwrap();
 
-        assert_eq!(txn.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
-        assert_eq!(txn.get(b"key2").await.unwrap(), Some(b"value2".to_vec()));
+        // Start reader transaction (gets snapshot with initial value)
+        let reader = store.new_txn(true).await.unwrap();
 
-        txn.commit().await.unwrap();
+        // Concurrent writer modifies and commits
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(b"key", b"modified_value").await.unwrap();
+        writer.commit().await.unwrap();
+
+        // Reader should STILL see initial value (true MVCC snapshot isolation)
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(b"initial_value".to_vec()),
+            "MemoryStore reader should maintain snapshot isolation"
+        );
+
+        // New reader sees committed value
+        let new_reader = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            new_reader.get(b"key").await.unwrap(),
+            Some(b"modified_value".to_vec())
+        );
     }
 
+    /// Test concurrent delete with snapshot isolation
     #[tokio::test]
-    async fn test_memory_store_delete() {
-        let store = MemoryStore::new();
+    async fn test_memory_snapshot_preserves_deleted_keys() {
+        let store = Arc::new(MemoryStore::new());
 
-        // Set a value
+        // Setup
         let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"key", b"value").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Delete it
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.delete(b"key").await.unwrap();
-        assert_eq!(txn.get(b"key").await.unwrap(), None);
-        txn.commit().await.unwrap();
-
-        // Verify deletion persisted
-        let txn = store.new_txn(true).await.unwrap();
-        assert_eq!(txn.get(b"key").await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_isolation() {
-        let store = MemoryStore::new();
-
-        // Create two transactions
-        let mut txn1 = store.new_txn(false).await.unwrap();
-        let txn2 = store.new_txn(false).await.unwrap();
-
-        // txn1 writes
-        txn1.set(b"key", b"value1").await.unwrap();
-
-        // txn2 shouldn't see txn1's write yet
-        assert_eq!(txn2.get(b"key").await.unwrap(), None);
-
-        // Commit txn1
-        txn1.commit().await.unwrap();
-
-        // txn2 still has its snapshot (doesn't see committed changes)
-        assert_eq!(txn2.get(b"key").await.unwrap(), None);
-
-        // New transaction sees the committed value
-        let txn3 = store.new_txn(true).await.unwrap();
-        assert_eq!(txn3.get(b"key").await.unwrap(), Some(b"value1".to_vec()));
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_readonly() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(true).await.unwrap();
-
-        let result = txn.set(b"key", b"value").await;
-        assert!(matches!(result, Err(Error::ReadOnlyTxn)));
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_discard() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        txn.set(b"key", b"value").await.unwrap();
-        txn.discard();
-
-        // Value shouldn't be persisted
-        let txn = store.new_txn(true).await.unwrap();
-        assert_eq!(txn.get(b"key").await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn test_memory_iterator() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        txn.set(b"key1", b"value1").await.unwrap();
-        txn.set(b"key2", b"value2").await.unwrap();
-        txn.set(b"key3", b"value3").await.unwrap();
+        txn.set(b"to_delete", b"exists").await.unwrap();
         txn.commit().await.unwrap();
 
-        let txn = store.new_txn(true).await.unwrap();
-        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+        // Reader starts (snapshot has the key)
+        let reader = store.new_txn(true).await.unwrap();
 
-        let mut count = 0;
-        while let Some(_kv) = iter.next().await.unwrap() {
-            count += 1;
-        }
-        assert_eq!(count, 3);
+        // Deleter runs concurrently
+        let mut deleter = store.new_txn(false).await.unwrap();
+        deleter.delete(b"to_delete").await.unwrap();
+        deleter.commit().await.unwrap();
 
-        iter.close().await.unwrap();
+        // Reader should still see the key (snapshot isolation)
+        assert_eq!(
+            reader.get(b"to_delete").await.unwrap(),
+            Some(b"exists".to_vec()),
+            "Reader snapshot should preserve deleted key"
+        );
+
+        // New transaction sees deletion
+        let new_txn = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            new_txn.get(b"to_delete").await.unwrap(),
+            None,
+            "New transaction should see deletion"
+        );
     }
 
+    /// Stress test: 50 parallel transactions
     #[tokio::test]
-    async fn test_memory_iterator_prefix() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        txn.set(b"user_1", b"alice").await.unwrap();
-        txn.set(b"user_2", b"bob").await.unwrap();
-        txn.set(b"post_1", b"hello").await.unwrap();
-        txn.commit().await.unwrap();
-
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new().with_prefix(b"user_".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let mut count = 0;
-        while let Some(_kv) = iter.next().await.unwrap() {
-            count += 1;
-        }
-        assert_eq!(count, 2);
-    }
-
-    #[tokio::test]
-    async fn test_memory_iterator_reverse() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        txn.set(b"a", b"1").await.unwrap();
-        txn.set(b"b", b"2").await.unwrap();
-        txn.set(b"c", b"3").await.unwrap();
-        txn.commit().await.unwrap();
-
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new().with_reverse(true);
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let kv1 = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv1.key_bytes(), b"c");
-
-        let kv2 = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv2.key_bytes(), b"b");
-
-        let kv3 = iter.next().await.unwrap().unwrap();
-        assert_eq!(kv3.key_bytes(), b"a");
-
-        assert!(iter.next().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_callbacks() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        let success_called = Arc::new(AtomicBool::new(false));
-        let success_called_clone = Arc::clone(&success_called);
-
-        txn.on_success(Box::new(move || {
-            success_called_clone.store(true, Ordering::SeqCst);
-        }));
-
-        txn.set(b"key", b"value").await.unwrap();
-        txn.commit().await.unwrap();
-
-        assert!(success_called.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_empty_key_rejected() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        // Empty key should be rejected for set
-        let result = txn.set(b"", b"value").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-
-        // Empty key should be rejected for get
-        let result = txn.get(b"").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-
-        // Empty key should be rejected for delete
-        let result = txn.delete(b"").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-
-        // Empty key should be rejected for has
-        let result = txn.has(b"").await;
-        assert!(matches!(result, Err(Error::EmptyKey)));
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_closed_store_rejected() {
-        let store = MemoryStore::new();
-
-        // Close the store
-        store.close().await.unwrap();
-
-        // Attempting to create a transaction on closed store should fail
-        let result = store.new_txn(false).await;
-        assert!(matches!(result, Err(Error::DBClosed)));
-
-        // Read-only transaction should also fail
-        let result = store.new_txn(true).await;
-        assert!(matches!(result, Err(Error::DBClosed)));
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_has_operation() {
-        let store = MemoryStore::new();
-
-        // has() should return false for non-existent key
-        let txn = store.new_txn(true).await.unwrap();
-        assert!(!txn.has(b"nonexistent").await.unwrap());
-        drop(txn);
-
-        // Set a key and verify has() returns true
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"test_key", b"test_value").await.unwrap();
-        assert!(txn.has(b"test_key").await.unwrap());
-        txn.commit().await.unwrap();
-
-        // Verify has() returns true after commit
-        let txn = store.new_txn(true).await.unwrap();
-        assert!(txn.has(b"test_key").await.unwrap());
-        drop(txn);
-
-        // Delete the key and verify has() returns false
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.delete(b"test_key").await.unwrap();
-        assert!(!txn.has(b"test_key").await.unwrap());
-        txn.commit().await.unwrap();
-
-        // Verify has() returns false after delete
-        let txn = store.new_txn(true).await.unwrap();
-        assert!(!txn.has(b"test_key").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_memory_iterator_closed_returns_error() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"key1", b"value1").await.unwrap();
-        txn.commit().await.unwrap();
-
-        let txn = store.new_txn(true).await.unwrap();
-        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
-
-        // Close the iterator
-        iter.close().await.unwrap();
-
-        // Using closed iterator should return an error
-        let result = iter.next().await;
-        assert!(matches!(result, Err(Error::Iterator(_))));
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_error_callbacks() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        let error_called = Arc::new(AtomicBool::new(false));
-        let error_called_clone = Arc::clone(&error_called);
-
-        txn.on_error(Box::new(move || {
-            error_called_clone.store(true, Ordering::SeqCst);
-        }));
-
-        // Manually mark as discarded to trigger error path on commit
-        // Note: We can't easily trigger a commit error in MemoryStore,
-        // but the error callback is now invoked for DiscardedTxn error
-        txn.set(b"key", b"value").await.unwrap();
-        txn.discard();
-
-        // The transaction is now consumed, so we verify that error callbacks
-        // would be invoked by creating a fresh scenario using our knowledge of the code
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_concurrent_writes() {
+    async fn test_memory_parallel_commits_stress() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let store = Arc::new(MemoryStore::new());
-        let success_count = Arc::new(AtomicUsize::new(0));
+        let commit_count = Arc::new(AtomicUsize::new(0));
         let mut handles = vec![];
 
-        // Spawn 10 concurrent tasks writing to the same store
-        for i in 0..10 {
+        for i in 0..50 {
             let store = store.clone();
-            let success_count = success_count.clone();
+            let commit_count = commit_count.clone();
             handles.push(tokio::spawn(async move {
                 let mut txn = store.new_txn(false).await.unwrap();
-                txn.set(format!("key{}", i).as_bytes(), format!("value{}", i).as_bytes())
+                txn.set(format!("stress_key_{}", i).as_bytes(), b"value")
                     .await
                     .unwrap();
                 txn.commit().await.unwrap();
-                success_count.fetch_add(1, Ordering::SeqCst);
+                commit_count.fetch_add(1, Ordering::SeqCst);
             }));
         }
 
-        // Wait for all tasks to complete
         for handle in handles {
             handle.await.unwrap();
         }
 
-        // Verify all writes succeeded
-        assert_eq!(success_count.load(Ordering::SeqCst), 10);
+        assert_eq!(commit_count.load(Ordering::SeqCst), 50);
 
-        // Verify all keys exist
+        // Verify all 50 keys exist
         let txn = store.new_txn(true).await.unwrap();
-        for i in 0..10 {
+        for i in 0..50 {
             assert!(
-                txn.has(format!("key{}", i).as_bytes()).await.unwrap(),
-                "key{} should exist",
+                txn.has(format!("stress_key_{}", i).as_bytes())
+                    .await
+                    .unwrap(),
+                "Key {} should exist after concurrent commits",
                 i
             );
-            assert_eq!(
-                txn.get(format!("key{}", i).as_bytes()).await.unwrap(),
-                Some(format!("value{}", i).into_bytes())
-            );
         }
-    }
-
-    #[tokio::test]
-    async fn test_memory_iterator_start_end_range() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        // Insert keys: a, b, c, d, e
-        for key in [b"a", b"b", b"c", b"d", b"e"] {
-            txn.set(key, b"value").await.unwrap();
-        }
-        txn.commit().await.unwrap();
-
-        // Test start bound only
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new().with_start(b"c".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let mut keys: Vec<String> = vec![];
-        while let Some(kv) = iter.next().await.unwrap() {
-            keys.push(kv.key_str());
-        }
-        assert_eq!(keys, vec!["c", "d", "e"]);
-        drop(txn);
-
-        // Test end bound only
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new().with_end(b"d".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let mut keys: Vec<String> = vec![];
-        while let Some(kv) = iter.next().await.unwrap() {
-            keys.push(kv.key_str());
-        }
-        assert_eq!(keys, vec!["a", "b", "c"]);
-        drop(txn);
-
-        // Test both start and end bounds
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new()
-            .with_start(b"b".to_vec())
-            .with_end(b"e".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        let mut keys: Vec<String> = vec![];
-        while let Some(kv) = iter.next().await.unwrap() {
-            keys.push(kv.key_str());
-        }
-        assert_eq!(keys, vec!["b", "c", "d"]);
-    }
-
-    #[tokio::test]
-    async fn test_memory_store_async_callback_execution() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::Duration;
-
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        let async_success_called = Arc::new(AtomicBool::new(false));
-        let async_success_called_clone = Arc::clone(&async_success_called);
-
-        txn.on_success_async(Box::new(move || {
-            let flag = Arc::clone(&async_success_called_clone);
-            Box::pin(async move {
-                // Simulate async work
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                flag.store(true, Ordering::SeqCst);
-            })
-        }));
-
-        txn.set(b"key", b"value").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Async callback should have been awaited during commit
-        assert!(async_success_called.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn test_memory_iterator_empty_result() {
-        let store = MemoryStore::new();
-        let mut txn = store.new_txn(false).await.unwrap();
-
-        // Insert some keys
-        txn.set(b"key1", b"value1").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Iterate with prefix that matches nothing
-        let txn = store.new_txn(true).await.unwrap();
-        let opts = IterOptions::new().with_prefix(b"nonexistent".to_vec());
-        let mut iter = txn.iterator(opts).await.unwrap();
-
-        // Should immediately return None
-        assert!(iter.next().await.unwrap().is_none());
     }
 }

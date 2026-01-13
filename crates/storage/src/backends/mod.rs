@@ -23,6 +23,7 @@
 /// | Crash Recovery | No | Yes (WAL) |
 /// | Concurrent Access | Yes | Yes |
 /// | ACID Transactions | Yes | Yes |
+/// | Snapshot Isolation | Yes (MVCC) | Yes (RocksDB snapshots) |
 /// | Use Case | Testing, Dev | Production |
 ///
 /// # Example
@@ -40,6 +41,9 @@
 
 pub mod memory;
 pub mod rocksdb;
+
+#[cfg(test)]
+pub mod test_suite;
 
 pub use memory::MemoryStore;
 pub use rocksdb::RocksDBStore;
