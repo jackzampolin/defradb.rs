@@ -45,8 +45,8 @@ pub fn generate_collection_cid(name: &str, _field_cids: &[Cid]) -> crate::Result
 /// Generates a CID from a serializable block.
 fn generate_cid<T: Serialize>(block: &T) -> crate::Result<Cid> {
     // Serialize to CBOR
-    let cbor_bytes = serde_cbor::to_vec(block)
-        .map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
+    let cbor_bytes =
+        serde_cbor::to_vec(block).map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
 
     // Hash with SHA2-256
     let mut hasher = Sha256::new();
@@ -269,8 +269,10 @@ mod tests {
     const GO_CID_FIELD_DOCID: &str = "bafyreibmf7lqchqcal3j6zupiwo5fkn2ax7n25wszdygsibv7ybgdi6cny";
     const GO_CID_FIELD_STRING: &str = "bafyreiaezc5g33yzhyzcgbyiv476lovyztyoliotzksdfogoep5ktgpedq";
     const GO_CID_FIELD_INT: &str = "bafyreiefugdbpc563kqcjoe4pjrgavtv3ysbhpzp5smdwb4stxeldmronm";
-    const GO_CID_FIELD_RELATION: &str = "bafyreibzyoyhnkjp3byipqvvpplbgxq5c5aeiy5zdu773gb7zbxdmsvlym";
-    const GO_CID_COLLECTION_USERS: &str = "bafyreiazcyzp3lzapqxuf3b6pw6himmcun65ljkaxmgsbxngdfrcbcfg7e";
+    const GO_CID_FIELD_RELATION: &str =
+        "bafyreibzyoyhnkjp3byipqvvpplbgxq5c5aeiy5zdu773gb7zbxdmsvlym";
+    const GO_CID_COLLECTION_USERS: &str =
+        "bafyreiazcyzp3lzapqxuf3b6pw6himmcun65ljkaxmgsbxngdfrcbcfg7e";
 
     #[test]
     fn test_field_docid_cid_matches_go() {

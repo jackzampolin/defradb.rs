@@ -56,9 +56,7 @@ pub enum HostCommand {
     },
 
     /// Get the local peer ID.
-    LocalPeerId {
-        response: oneshot::Sender<PeerId>,
-    },
+    LocalPeerId { response: oneshot::Sender<PeerId> },
 
     /// Get listening addresses.
     ListenAddresses {
@@ -133,16 +131,10 @@ pub enum HostEvent {
     },
 
     /// A peer subscribed to a topic we're also subscribed to.
-    PeerSubscribed {
-        peer_id: PeerId,
-        topic: String,
-    },
+    PeerSubscribed { peer_id: PeerId, topic: String },
 
     /// A peer unsubscribed from a topic.
-    PeerUnsubscribed {
-        peer_id: PeerId,
-        topic: String,
-    },
+    PeerUnsubscribed { peer_id: PeerId, topic: String },
 }
 
 /// Opaque response channel for sending PushLog responses.
@@ -184,7 +176,11 @@ impl P2PHostHandle {
     }
 
     /// Send a PushLog request to a peer and wait for the response.
-    pub async fn send_pushlog(&self, peer_id: PeerId, request: PushLogRequest) -> Result<PushLogReply> {
+    pub async fn send_pushlog(
+        &self,
+        peer_id: PeerId,
+        request: PushLogRequest,
+    ) -> Result<PushLogReply> {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::SendPushLog {
@@ -310,7 +306,8 @@ pub struct P2PHost {
     keypair: Keypair,
     command_rx: mpsc::Receiver<HostCommand>,
     event_tx: mpsc::Sender<HostEvent>,
-    pending_requests: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<PushLogReply>>>,
+    pending_requests:
+        HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<PushLogReply>>>,
 }
 
 impl P2PHost {
@@ -321,7 +318,9 @@ impl P2PHost {
     }
 
     /// Create a new P2P host with the given keypair.
-    pub fn with_keypair(keypair: Keypair) -> Result<(Self, P2PHostHandle, mpsc::Receiver<HostEvent>)> {
+    pub fn with_keypair(
+        keypair: Keypair,
+    ) -> Result<(Self, P2PHostHandle, mpsc::Receiver<HostEvent>)> {
         let local_peer_id = keypair.public().to_peer_id();
         let local_public_key = keypair.public();
 
@@ -404,9 +403,11 @@ impl P2PHost {
     async fn handle_command(&mut self, command: HostCommand) -> bool {
         match command {
             HostCommand::Listen { addr, response } => {
-                let result = self.swarm.listen_on(addr).map(|_| ()).map_err(|e| {
-                    Error::Transport(e.to_string())
-                });
+                let result = self
+                    .swarm
+                    .listen_on(addr)
+                    .map(|_| ())
+                    .map_err(|e| Error::Transport(e.to_string()));
                 let _ = response.send(result);
             }
 
@@ -424,7 +425,10 @@ impl P2PHost {
                 request,
                 response,
             } => {
-                let request_id = self.swarm.behaviour_mut().send_pushlog_request(&peer_id, request);
+                let request_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .send_pushlog_request(&peer_id, request);
                 self.pending_requests.insert(request_id, response);
             }
 
@@ -529,7 +533,10 @@ impl P2PHost {
 
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 info!("Disconnected from peer: {}", peer_id);
-                let _ = self.event_tx.send(HostEvent::PeerDisconnected(peer_id)).await;
+                let _ = self
+                    .event_tx
+                    .send(HostEvent::PeerDisconnected(peer_id))
+                    .await;
             }
 
             SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Discovered(peers))) => {
@@ -596,9 +603,7 @@ impl P2PHost {
         match event {
             request_response::Event::Message { peer, message } => match message {
                 request_response::Message::Request {
-                    request,
-                    channel,
-                    ..
+                    request, channel, ..
                 } => {
                     debug!("Received PushLog request from {}", peer);
                     let _ = self
@@ -622,9 +627,7 @@ impl P2PHost {
             },
 
             request_response::Event::OutboundFailure {
-                request_id,
-                error,
-                ..
+                request_id, error, ..
             } => {
                 error!("Outbound request {:?} failed: {:?}", request_id, error);
                 if let Some(sender) = self.pending_requests.remove(&request_id) {
@@ -708,7 +711,11 @@ impl P2PHost {
 
     /// Send a PushLog response through the given channel.
     pub fn send_pushlog_response(&mut self, channel: ResponseChannel, response: PushLogReply) {
-        if let Err(resp) = self.swarm.behaviour_mut().send_pushlog_response(channel.0, response) {
+        if let Err(resp) = self
+            .swarm
+            .behaviour_mut()
+            .send_pushlog_response(channel.0, response)
+        {
             error!("Failed to send PushLog response: {:?}", resp.metadata);
         }
     }

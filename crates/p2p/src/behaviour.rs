@@ -124,11 +124,9 @@ impl DefraBehaviour {
         keypair: Keypair,
     ) -> Result<Self, std::io::Error> {
         // Configure identify behaviour
-        let identify_config = identify::Config::new(
-            "/defra/identify/0.0.1".to_string(),
-            local_public_key,
-        )
-        .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
+        let identify_config =
+            identify::Config::new("/defra/identify/0.0.1".to_string(), local_public_key)
+                .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
 
         let identify = identify::Behaviour::new(identify_config);
 
@@ -167,16 +165,14 @@ impl DefraBehaviour {
                 )
             })?;
 
-        let gossipsub = gossipsub::Behaviour::new(
-            MessageAuthenticity::Signed(keypair),
-            gossipsub_config,
-        )
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("gossipsub creation error: {}", e),
-            )
-        })?;
+        let gossipsub =
+            gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), gossipsub_config)
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("gossipsub creation error: {}", e),
+                    )
+                })?;
 
         Ok(Self {
             identify,
@@ -204,11 +200,9 @@ impl DefraBehaviour {
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
     ) -> Result<Self, std::io::Error> {
-        let identify_config = identify::Config::new(
-            "/defra/identify/0.0.1".to_string(),
-            local_public_key,
-        )
-        .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
+        let identify_config =
+            identify::Config::new("/defra/identify/0.0.1".to_string(), local_public_key)
+                .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
 
         let identify = identify::Behaviour::new(identify_config);
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
@@ -237,16 +231,14 @@ impl DefraBehaviour {
                 )
             })?;
 
-        let gossipsub = gossipsub::Behaviour::new(
-            MessageAuthenticity::RandomAuthor,
-            gossipsub_config,
-        )
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("gossipsub creation error: {}", e),
-            )
-        })?;
+        let gossipsub =
+            gossipsub::Behaviour::new(MessageAuthenticity::RandomAuthor, gossipsub_config)
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("gossipsub creation error: {}", e),
+                    )
+                })?;
 
         Ok(Self {
             identify,

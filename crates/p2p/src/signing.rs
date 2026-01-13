@@ -124,10 +124,7 @@ where
     let metadata = msg.metadata();
 
     // Check that signature exists
-    let signature = metadata
-        .signature
-        .as_ref()
-        .ok_or(Error::MissingSignature)?;
+    let signature = metadata.signature.as_ref().ok_or(Error::MissingSignature)?;
 
     // Decode public key from message
     let pubkey = PublicKey::try_decode_protobuf(&metadata.pubkey)

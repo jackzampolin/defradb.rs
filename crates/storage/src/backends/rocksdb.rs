@@ -389,15 +389,12 @@ impl Reader for RocksDBTxn {
                 if !key_vec.starts_with(prefix) {
                     // For forward iteration, if we've passed the prefix range, stop
                     if !opts.reverse()
-                        && key_vec.as_slice()
-                            >= end_bound.as_deref().unwrap_or(&[0xFF])
+                        && key_vec.as_slice() >= end_bound.as_deref().unwrap_or(&[0xFF])
                     {
                         break;
                     }
                     // For reverse iteration, if we're before the prefix range, stop
-                    if opts.reverse()
-                        && key_vec.as_slice()
-                            < start_bound.as_deref().unwrap_or(&[])
+                    if opts.reverse() && key_vec.as_slice() < start_bound.as_deref().unwrap_or(&[])
                     {
                         break;
                     }

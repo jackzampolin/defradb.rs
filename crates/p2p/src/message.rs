@@ -287,8 +287,7 @@ mod tests {
         );
 
         let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
-        let decoded: PushLogRequest =
-            serde_cbor::from_slice(&encoded).expect("failed to decode");
+        let decoded: PushLogRequest = serde_cbor::from_slice(&encoded).expect("failed to decode");
 
         assert_eq!(decoded.doc_id, "doc123");
         assert_eq!(decoded.cid, vec![1, 2, 3, 4]);
@@ -536,8 +535,7 @@ mod tests {
         );
 
         let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
-        let decoded: PushLogRequest =
-            serde_cbor::from_slice(&encoded).expect("failed to decode");
+        let decoded: PushLogRequest = serde_cbor::from_slice(&encoded).expect("failed to decode");
 
         assert!(decoded.doc_id.is_empty());
         assert!(decoded.cid.is_empty());
@@ -557,8 +555,7 @@ mod tests {
         );
 
         let encoded = serde_cbor::to_vec(&broadcast).expect("failed to encode");
-        let decoded: PushLogBroadcast =
-            serde_cbor::from_slice(&encoded).expect("failed to decode");
+        let decoded: PushLogBroadcast = serde_cbor::from_slice(&encoded).expect("failed to decode");
 
         assert_eq!(decoded.doc_id, "doc123");
         assert_eq!(decoded.cid, vec![1, 2, 3, 4]);
@@ -601,7 +598,10 @@ mod tests {
                 field_names.contains(&"CollectionID".to_string()),
                 "Missing CollectionID"
             );
-            assert!(field_names.contains(&"Creator".to_string()), "Missing Creator");
+            assert!(
+                field_names.contains(&"Creator".to_string()),
+                "Missing Creator"
+            );
             assert!(field_names.contains(&"Block".to_string()), "Missing Block");
 
             // Should NOT have MetaData fields (pubsub doesn't use them)
