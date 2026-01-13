@@ -14,7 +14,10 @@
 
 use std::time::Duration;
 
-use p2p::{Error, HostEvent, P2PHost, P2PHostHandle, PushLogRequest};
+use p2p::{
+    codec, Error, HostEvent, Message, P2PHost, P2PHostHandle, PushLogReply, PushLogRequest,
+    REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+};
 use tokio::time::timeout;
 
 /// Helper to create and start a P2P host, returning the handle and event receiver.
@@ -369,4 +372,237 @@ async fn test_two_hosts_pushlog_exchange() {
 
     handle1.shutdown().await.ok();
     handle2.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_send_to_disconnected_peer_returns_error() {
+    let (handle, mut events) = create_and_start_host().await;
+
+    handle
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events).await;
+
+    // Try to send to a random peer ID that we're not connected to
+    let fake_peer_id = libp2p::PeerId::random();
+    let request = PushLogRequest::new(
+        "doc123".to_string(),
+        vec![1, 2, 3],
+        "collection1".to_string(),
+        "creator1".to_string(),
+        vec![4, 5, 6],
+    );
+
+    // This should eventually return an error (not hang forever)
+    // The timeout ensures the test doesn't hang if the error isn't returned
+    let result = timeout(Duration::from_secs(5), handle.send_pushlog(fake_peer_id, request)).await;
+
+    // Either we get a timeout (acceptable) or we get an error (preferred)
+    match result {
+        Ok(Err(_)) => {
+            // Good - we got an error as expected
+        }
+        Err(_) => {
+            // Timeout - also acceptable, libp2p may retry in background
+        }
+        Ok(Ok(_)) => {
+            panic!("Should not have succeeded sending to disconnected peer")
+        }
+    }
+
+    handle.shutdown().await.ok();
+}
+
+#[test]
+fn test_protocol_ids_match_go() {
+    // Verify our protocol IDs match what Go expects
+    assert_eq!(REP_REQUEST_PROTOCOL, "/defradb/rep_req/0.0.1");
+    assert_eq!(REP_RESPONSE_PROTOCOL, "/defradb/rep_resp/0.0.1");
+}
+
+#[test]
+fn test_cbor_wire_compatibility_pushlog_request() {
+    // Test that our CBOR encoding produces the expected field names
+    // that Go can understand
+    let request = PushLogRequest::new(
+        "bafybeigdyrzt".to_string(),
+        vec![1, 2, 3, 4],
+        "col-123".to_string(),
+        "creator-xyz".to_string(),
+        vec![10, 20, 30],
+    );
+
+    // Encode to CBOR
+    let encoded = codec::encode(&request).expect("encoding should succeed");
+
+    // Decode as a generic CBOR value to inspect field names
+    let value: serde_cbor::Value =
+        serde_cbor::from_slice(&encoded).expect("should decode as Value");
+
+    if let serde_cbor::Value::Map(map) = value {
+        // Verify all expected Go field names are present
+        let field_names: Vec<String> = map
+            .iter()
+            .filter_map(|(k, _)| {
+                if let serde_cbor::Value::Text(s) = k {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // These are the field names Go expects (PascalCase)
+        assert!(
+            field_names.contains(&"Version".to_string()),
+            "Missing Version field"
+        );
+        assert!(
+            field_names.contains(&"MessageID".to_string()),
+            "Missing MessageID field"
+        );
+        assert!(
+            field_names.contains(&"SenderID".to_string()),
+            "Missing SenderID field"
+        );
+        assert!(
+            field_names.contains(&"Pubkey".to_string()),
+            "Missing Pubkey field"
+        );
+        assert!(
+            field_names.contains(&"DocID".to_string()),
+            "Missing DocID field"
+        );
+        assert!(field_names.contains(&"CID".to_string()), "Missing CID field");
+        assert!(
+            field_names.contains(&"CollectionID".to_string()),
+            "Missing CollectionID field"
+        );
+        assert!(
+            field_names.contains(&"Creator".to_string()),
+            "Missing Creator field"
+        );
+        assert!(
+            field_names.contains(&"Block".to_string()),
+            "Missing Block field"
+        );
+    } else {
+        panic!("Expected CBOR map, got {:?}", value);
+    }
+}
+
+#[test]
+fn test_cbor_wire_compatibility_pushlog_reply() {
+    // Test reply encoding
+    let reply = PushLogReply::success("msg-123");
+
+    let encoded = codec::encode(&reply).expect("encoding should succeed");
+    let value: serde_cbor::Value =
+        serde_cbor::from_slice(&encoded).expect("should decode as Value");
+
+    if let serde_cbor::Value::Map(map) = value {
+        let field_names: Vec<String> = map
+            .iter()
+            .filter_map(|(k, _)| {
+                if let serde_cbor::Value::Text(s) = k {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            field_names.contains(&"Version".to_string()),
+            "Missing Version field"
+        );
+        assert!(
+            field_names.contains(&"MessageID".to_string()),
+            "Missing MessageID field"
+        );
+    } else {
+        panic!("Expected CBOR map");
+    }
+}
+
+#[test]
+fn test_cbor_roundtrip_preserves_data() {
+    // Create a request with realistic data
+    let original = PushLogRequest::new(
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".to_string(),
+        vec![
+            0x01, 0x71, 0x12, 0x20, 0x7e, 0x7f, 0x0e, 0x5d, 0x94, 0x27, 0x11, 0x81, 0xb6, 0x81,
+            0xcc, 0x72, 0x59, 0x85, 0x72, 0x7e, 0x43, 0x6d, 0x74, 0xc1, 0x6a, 0x05, 0x91, 0x32,
+            0x5b, 0x8a, 0x60, 0x8a, 0xc5, 0x1e, 0x73, 0x6b,
+        ], // Real CID bytes
+        "bafkreih3x2qgxr4gpx7qd5kqj7gg6ukipvxc32e3ihdpkwmv5fvnz6wuui".to_string(),
+        "12D3KooWPJ4C8M6VzWv8NMf3s9ycqrTqJ8wM9PRQ3dP5gLwFvbZ7".to_string(),
+        vec![0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61], // CBOR-encoded block data
+    );
+
+    // Encode
+    let encoded = codec::encode(&original).expect("encoding should succeed");
+
+    // Decode
+    let decoded: PushLogRequest = codec::decode(&encoded).expect("decoding should succeed");
+
+    // Verify all fields match
+    assert_eq!(decoded.doc_id, original.doc_id);
+    assert_eq!(decoded.cid, original.cid);
+    assert_eq!(decoded.collection_id, original.collection_id);
+    assert_eq!(decoded.creator, original.creator);
+    assert_eq!(decoded.block, original.block);
+}
+
+#[test]
+fn test_message_trait_accessors() {
+    let request = PushLogRequest::new(
+        "doc".to_string(),
+        vec![1],
+        "col".to_string(),
+        "creator".to_string(),
+        vec![2],
+    );
+
+    // Test Message trait accessors
+    assert!(request.message_id().is_empty()); // Not set yet
+    assert!(request.version().is_empty() || request.version() == "/defradb/0.0.1");
+    assert!(request.sender_id().is_empty());
+    assert!(request.pubkey().is_empty());
+    assert!(request.signature().is_none());
+    assert!(request.err_message().is_none());
+}
+
+#[test]
+fn test_signed_message_has_required_fields() {
+    use libp2p::identity::Keypair;
+    use p2p::sign_message;
+
+    let keypair = Keypair::generate_ed25519();
+    let mut request = PushLogRequest::new(
+        "doc123".to_string(),
+        vec![1, 2, 3, 4],
+        "collection1".to_string(),
+        "creator1".to_string(),
+        vec![5, 6, 7, 8],
+    );
+
+    // Sign the message
+    sign_message(&keypair, &mut request).expect("signing should succeed");
+
+    // Verify all required fields are populated
+    assert!(!request.message_id().is_empty(), "message_id should be set");
+    assert_eq!(
+        request.version(),
+        "/defradb/0.0.1",
+        "version should be set"
+    );
+    assert!(!request.sender_id().is_empty(), "sender_id should be set");
+    assert!(!request.pubkey().is_empty(), "pubkey should be set");
+    assert!(request.signature().is_some(), "signature should be set");
+
+    // Verify sender_id matches the keypair's peer ID
+    let expected_peer_id = keypair.public().to_peer_id().to_string();
+    assert_eq!(request.sender_id(), expected_peer_id);
 }

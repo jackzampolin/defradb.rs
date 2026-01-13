@@ -28,6 +28,9 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_cbor = { workspace = true }
 
+# UUID for message IDs
+uuid = { workspace = true }
+
 # Errors
 thiserror = { workspace = true }
 tracing = { workspace = true }

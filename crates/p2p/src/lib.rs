@@ -61,15 +61,23 @@ pub mod error;
 pub mod host;
 pub mod message;
 pub mod protocol;
+pub mod signing;
 
 // Re-export main types for convenience
 pub use error::{Error, Result};
 pub use host::{HostCommand, HostEvent, P2PHost, P2PHostHandle, ResponseChannel};
 pub use message::{Message, MetaData, PushLogReply, PushLogRequest};
 pub use protocol::{
-    BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, PUSHLOG_REQUEST_PROTOCOL,
-    PUSHLOG_RESPONSE_PROTOCOL, VERSION,
+    BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, REP_REQUEST_PROTOCOL,
+    REP_RESPONSE_PROTOCOL, VERSION,
 };
+
+// Re-export deprecated aliases for backwards compatibility
+#[allow(deprecated)]
+pub use protocol::{PUSHLOG_REQUEST_PROTOCOL, PUSHLOG_RESPONSE_PROTOCOL};
+
+// Re-export signing functions
+pub use signing::{sign_message, sign_message_cloned, verify_message};
 
 // Re-export commonly used libp2p types
 pub use libp2p::{Multiaddr, PeerId};
@@ -82,8 +90,8 @@ mod tests {
     fn test_exports() {
         // Verify key constants are accessible
         assert_eq!(BASE_PROTOCOL_ID, "/defra/0.0.1");
-        assert_eq!(PUSHLOG_REQUEST_PROTOCOL, "/defradb/pushlog_req/0.0.1");
-        assert_eq!(PUSHLOG_RESPONSE_PROTOCOL, "/defradb/pushlog_resp/0.0.1");
+        assert_eq!(REP_REQUEST_PROTOCOL, "/defradb/rep_req/0.0.1");
+        assert_eq!(REP_RESPONSE_PROTOCOL, "/defradb/rep_resp/0.0.1");
         assert_eq!(CODE, 961);
         assert_eq!(NAME, "defra");
         assert_eq!(VERSION, "0.0.1");

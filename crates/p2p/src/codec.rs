@@ -20,14 +20,17 @@
 //! ensure wire compatibility.
 
 use std::io;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::prelude::*;
+use libp2p::identity::Keypair;
 use libp2p::request_response;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::error::{Error, Result};
 use crate::message::{PushLogReply, PushLogRequest};
+use crate::signing::{sign_message, verify_message};
 
 /// Maximum message size (16 MB).
 /// This limit prevents memory exhaustion from malicious oversized messages.
@@ -90,12 +93,58 @@ where
 ///
 /// This codec implements the libp2p `request_response::Codec` trait for
 /// PushLog message exchange.
-#[derive(Debug, Clone, Default)]
-pub struct PushLogCodec;
+///
+/// # Message Signing
+///
+/// When constructed with a keypair (via `with_keypair`), the codec will:
+/// - Sign outgoing requests/responses before sending
+/// - Verify incoming requests/responses after receiving
+///
+/// This matches the Go implementation which signs all messages and verifies
+/// signatures on receipt.
+#[derive(Clone)]
+pub struct PushLogCodec {
+    /// Keypair for signing/verification. If None, signing is disabled.
+    keypair: Option<Arc<Keypair>>,
+}
+
+impl Default for PushLogCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for PushLogCodec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushLogCodec")
+            .field("signing_enabled", &self.keypair.is_some())
+            .finish()
+    }
+}
 
 impl PushLogCodec {
+    /// Create a new codec without signing/verification.
+    ///
+    /// Messages will be sent without signatures and incoming signatures
+    /// will not be verified. This is useful for testing but should not
+    /// be used in production.
     pub fn new() -> Self {
-        Self
+        Self { keypair: None }
+    }
+
+    /// Create a new codec with signing/verification enabled.
+    ///
+    /// All outgoing messages will be signed and all incoming messages
+    /// will have their signatures verified.
+    pub fn with_keypair(keypair: Keypair) -> Self {
+        Self {
+            keypair: Some(Arc::new(keypair)),
+        }
+    }
+
+    /// Check if signing is enabled.
+    pub fn signing_enabled(&self) -> bool {
+        self.keypair.is_some()
     }
 }
 
@@ -113,7 +162,16 @@ impl request_response::Codec for PushLogCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_message(io).await
+        let msg: Self::Request = read_message(io).await?;
+
+        // Verify signature if signing is enabled
+        if self.keypair.is_some() {
+            verify_message(&msg).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("signature verification failed: {}", e))
+            })?;
+        }
+
+        Ok(msg)
     }
 
     async fn read_response<T>(
@@ -124,18 +182,34 @@ impl request_response::Codec for PushLogCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_message(io).await
+        let msg: Self::Response = read_message(io).await?;
+
+        // Verify signature if signing is enabled
+        if self.keypair.is_some() {
+            verify_message(&msg).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("signature verification failed: {}", e))
+            })?;
+        }
+
+        Ok(msg)
     }
 
     async fn write_request<T>(
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
-        req: Self::Request,
+        mut req: Self::Request,
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
+        // Sign the message if signing is enabled
+        if let Some(keypair) = &self.keypair {
+            sign_message(keypair, &mut req).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("signing failed: {}", e))
+            })?;
+        }
+
         write_message(io, &req).await
     }
 
@@ -143,11 +217,18 @@ impl request_response::Codec for PushLogCodec {
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
-        res: Self::Response,
+        mut res: Self::Response,
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
+        // Sign the message if signing is enabled
+        if let Some(keypair) = &self.keypair {
+            sign_message(keypair, &mut res).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("signing failed: {}", e))
+            })?;
+        }
+
         write_message(io, &res).await
     }
 }
@@ -155,14 +236,14 @@ impl request_response::Codec for PushLogCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{pushlog_request_protocol, pushlog_response_protocol};
+    use crate::protocol::{rep_request_protocol, rep_response_protocol};
     use futures::io::Cursor;
     use libp2p::request_response::Codec;
 
     #[tokio::test]
     async fn test_codec_roundtrip_request() {
         let mut codec = PushLogCodec::new();
-        let protocol = pushlog_request_protocol();
+        let protocol = rep_request_protocol();
 
         let original = PushLogRequest::new(
             "doc123".to_string(),
@@ -194,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn test_codec_roundtrip_response() {
         let mut codec = PushLogCodec::new();
-        let protocol = pushlog_response_protocol();
+        let protocol = rep_response_protocol();
 
         let original = PushLogReply::success("msg123");
 
@@ -218,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn test_codec_invalid_cbor_request() {
         let mut codec = PushLogCodec::new();
-        let protocol = pushlog_request_protocol();
+        let protocol = rep_request_protocol();
 
         // Invalid CBOR data
         let mut read_buf = Cursor::new(vec![0xFF, 0xFF, 0xFF, 0xFF]);
@@ -233,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn test_codec_invalid_cbor_response() {
         let mut codec = PushLogCodec::new();
-        let protocol = pushlog_response_protocol();
+        let protocol = rep_response_protocol();
 
         // Invalid CBOR data
         let mut read_buf = Cursor::new(vec![0xFE, 0xFE, 0xFE]);
@@ -247,7 +328,7 @@ mod tests {
     #[tokio::test]
     async fn test_codec_empty_message() {
         let mut codec = PushLogCodec::new();
-        let protocol = pushlog_request_protocol();
+        let protocol = rep_request_protocol();
 
         // Empty data
         let mut read_buf = Cursor::new(Vec::new());
@@ -261,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn test_codec_truncated_cbor() {
         let mut codec = PushLogCodec::new();
-        let protocol = pushlog_request_protocol();
+        let protocol = rep_request_protocol();
 
         let original = PushLogRequest::new(
             "doc123".to_string(),

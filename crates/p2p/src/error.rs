@@ -47,6 +47,26 @@ pub enum Error {
     #[error("public key does not match peer ID")]
     PubkeyPeerIdMismatch,
 
+    /// Failed to generate message ID.
+    #[error("failed to generate message ID")]
+    MessageIdGeneration,
+
+    /// Failed to encode public key.
+    #[error("failed to encode public key: {0}")]
+    PublicKeyEncode(String),
+
+    /// Failed to decode public key.
+    #[error("failed to decode public key: {0}")]
+    PublicKeyDecode(String),
+
+    /// Signing operation failed.
+    #[error("signing failed: {0}")]
+    SigningFailed(String),
+
+    /// Message has no signature.
+    #[error("message has no signature")]
+    MissingSignature,
+
     /// Response timeout.
     #[error("response timeout")]
     ResponseTimeout,
@@ -158,6 +178,21 @@ mod tests {
 
         let pubkey_mismatch = Error::PubkeyPeerIdMismatch;
         assert!(pubkey_mismatch.to_string().contains("public key"));
+
+        let msg_id_gen = Error::MessageIdGeneration;
+        assert!(msg_id_gen.to_string().contains("message ID"));
+
+        let pubkey_encode = Error::PublicKeyEncode("encoding failed".to_string());
+        assert!(pubkey_encode.to_string().contains("encode public key"));
+
+        let pubkey_decode = Error::PublicKeyDecode("decoding failed".to_string());
+        assert!(pubkey_decode.to_string().contains("decode public key"));
+
+        let signing_failed = Error::SigningFailed("key unavailable".to_string());
+        assert!(signing_failed.to_string().contains("signing failed"));
+
+        let missing_sig = Error::MissingSignature;
+        assert!(missing_sig.to_string().contains("no signature"));
 
         let timeout = Error::ResponseTimeout;
         assert_eq!(timeout.to_string(), "response timeout");

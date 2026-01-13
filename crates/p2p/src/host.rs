@@ -216,7 +216,8 @@ impl P2PHost {
 
         info!("Local peer ID: {}", local_peer_id);
 
-        let behaviour = DefraBehaviour::new(local_peer_id, local_public_key)
+        // Pass keypair to behaviour for message signing/verification
+        let behaviour = DefraBehaviour::new(local_peer_id, local_public_key, keypair.clone())
             .map_err(|e| Error::Behaviour(e.to_string()))?;
 
         let swarm = SwarmBuilder::with_existing_identity(keypair.clone())

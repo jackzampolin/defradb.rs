@@ -51,22 +51,39 @@ pub const PROTOCOL_RESPONSE_SUFFIX: &str = "_resp/0.0.1";
 /// Matches Go's `messageVersion = "/defradb/0.0.1"`.
 pub const MESSAGE_VERSION: &str = "/defradb/0.0.1";
 
-/// PushLog request protocol ID.
-/// Go equivalent: `/defradb/pushlog_req/0.0.1`
-pub const PUSHLOG_REQUEST_PROTOCOL: &str = "/defradb/pushlog_req/0.0.1";
+/// Replicator request protocol ID.
+/// Go uses "rep" as the channel name: `/defradb/rep_req/0.0.1`
+pub const REP_REQUEST_PROTOCOL: &str = "/defradb/rep_req/0.0.1";
 
-/// PushLog response protocol ID.
-/// Go equivalent: `/defradb/pushlog_resp/0.0.1`
-pub const PUSHLOG_RESPONSE_PROTOCOL: &str = "/defradb/pushlog_resp/0.0.1";
+/// Replicator response protocol ID.
+/// Go uses "rep" as the channel name: `/defradb/rep_resp/0.0.1`
+pub const REP_RESPONSE_PROTOCOL: &str = "/defradb/rep_resp/0.0.1";
 
-/// StreamProtocol for the pushlog request protocol.
-pub fn pushlog_request_protocol() -> StreamProtocol {
-    StreamProtocol::new(PUSHLOG_REQUEST_PROTOCOL)
+// Legacy aliases for backwards compatibility with existing code
+#[deprecated(note = "Use REP_REQUEST_PROTOCOL instead")]
+pub const PUSHLOG_REQUEST_PROTOCOL: &str = REP_REQUEST_PROTOCOL;
+#[deprecated(note = "Use REP_RESPONSE_PROTOCOL instead")]
+pub const PUSHLOG_RESPONSE_PROTOCOL: &str = REP_RESPONSE_PROTOCOL;
+
+/// StreamProtocol for the replicator request protocol.
+pub fn rep_request_protocol() -> StreamProtocol {
+    StreamProtocol::new(REP_REQUEST_PROTOCOL)
 }
 
-/// StreamProtocol for the pushlog response protocol.
+/// StreamProtocol for the replicator response protocol.
+pub fn rep_response_protocol() -> StreamProtocol {
+    StreamProtocol::new(REP_RESPONSE_PROTOCOL)
+}
+
+// Legacy aliases
+#[deprecated(note = "Use rep_request_protocol instead")]
+pub fn pushlog_request_protocol() -> StreamProtocol {
+    rep_request_protocol()
+}
+
+#[deprecated(note = "Use rep_response_protocol instead")]
 pub fn pushlog_response_protocol() -> StreamProtocol {
-    StreamProtocol::new(PUSHLOG_RESPONSE_PROTOCOL)
+    rep_response_protocol()
 }
 
 /// StreamProtocol for identity exchange.
@@ -99,23 +116,17 @@ mod tests {
     }
 
     #[test]
-    fn test_pushlog_protocols() {
-        assert_eq!(
-            pushlog_request_protocol().as_ref(),
-            "/defradb/pushlog_req/0.0.1"
-        );
-        assert_eq!(
-            pushlog_response_protocol().as_ref(),
-            "/defradb/pushlog_resp/0.0.1"
-        );
+    fn test_rep_protocols() {
+        assert_eq!(rep_request_protocol().as_ref(), "/defradb/rep_req/0.0.1");
+        assert_eq!(rep_response_protocol().as_ref(), "/defradb/rep_resp/0.0.1");
     }
 
     #[test]
     fn test_protocol_builders() {
-        assert_eq!(request_protocol("pushlog"), "/defradb/pushlog_req/0.0.1");
-        assert_eq!(response_protocol("pushlog"), "/defradb/pushlog_resp/0.0.1");
         assert_eq!(request_protocol("rep"), "/defradb/rep_req/0.0.1");
         assert_eq!(response_protocol("rep"), "/defradb/rep_resp/0.0.1");
+        assert_eq!(request_protocol("ident"), "/defradb/ident_req/0.0.1");
+        assert_eq!(response_protocol("ident"), "/defradb/ident_resp/0.0.1");
     }
 
     #[test]

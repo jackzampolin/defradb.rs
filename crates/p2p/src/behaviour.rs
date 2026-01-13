@@ -19,8 +19,8 @@
 //! # Wire Compatibility with Go
 //!
 //! The Go implementation uses separate request/response protocol IDs:
-//! - Request: `/defradb/pushlog_req/0.0.1`
-//! - Response: `/defradb/pushlog_resp/0.0.1`
+//! - Request: `/defradb/rep_req/0.0.1`
+//! - Response: `/defradb/rep_resp/0.0.1`
 //!
 //! This Rust implementation uses libp2p's request-response protocol which
 //! handles both request and response on a single stream. For full Go
@@ -35,9 +35,11 @@ use libp2p::{
     PeerId,
 };
 
+use libp2p::identity::Keypair;
+
 use crate::codec::PushLogCodec;
 use crate::message::{PushLogReply, PushLogRequest};
-use crate::protocol::{pushlog_request_protocol, pushlog_response_protocol};
+use crate::protocol::{rep_request_protocol, rep_response_protocol};
 
 /// Timeout for PushLog requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -88,12 +90,13 @@ impl From<request_response::Event<PushLogRequest, PushLogReply>> for DefraEvent 
 }
 
 impl DefraBehaviour {
-    /// Create a new DefraDB network behaviour.
+    /// Create a new DefraDB network behaviour with message signing enabled.
     ///
     /// # Arguments
     ///
     /// * `local_peer_id` - The local peer's ID
     /// * `local_public_key` - The local peer's public key
+    /// * `keypair` - The keypair for message signing/verification
     ///
     /// # Returns
     ///
@@ -101,6 +104,7 @@ impl DefraBehaviour {
     pub fn new(
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
+        keypair: Keypair,
     ) -> Result<Self, std::io::Error> {
         // Configure identify behaviour
         let identify_config = identify::Config::new(
@@ -114,12 +118,57 @@ impl DefraBehaviour {
         // Configure mDNS for local network discovery
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
-        // Configure request-response for PushLog
+        // Configure request-response for PushLog (replicator protocol)
         // Support both request and response protocols for Go compatibility
+        // Use codec with keypair for message signing/verification
+        let codec = PushLogCodec::with_keypair(keypair);
+        let pushlog = request_response::Behaviour::with_codec(
+            codec,
+            [
+                (rep_request_protocol(), ProtocolSupport::Full),
+                (rep_response_protocol(), ProtocolSupport::Full),
+            ],
+            request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
+        );
+
+        Ok(Self {
+            identify,
+            mdns,
+            pushlog,
+        })
+    }
+
+    /// Create a new DefraDB network behaviour without message signing.
+    ///
+    /// This is useful for testing but should not be used in production
+    /// as messages will not be authenticated.
+    ///
+    /// # Arguments
+    ///
+    /// * `local_peer_id` - The local peer's ID
+    /// * `local_public_key` - The local peer's public key
+    ///
+    /// # Returns
+    ///
+    /// A new `DefraBehaviour` instance or an error if initialization fails.
+    #[cfg(test)]
+    pub fn new_without_signing(
+        local_peer_id: PeerId,
+        local_public_key: libp2p::identity::PublicKey,
+    ) -> Result<Self, std::io::Error> {
+        let identify_config = identify::Config::new(
+            "/defra/identify/0.0.1".to_string(),
+            local_public_key,
+        )
+        .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
+
+        let identify = identify::Behaviour::new(identify_config);
+        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+
         let pushlog = request_response::Behaviour::new(
             [
-                (pushlog_request_protocol(), ProtocolSupport::Full),
-                (pushlog_response_protocol(), ProtocolSupport::Full),
+                (rep_request_protocol(), ProtocolSupport::Full),
+                (rep_response_protocol(), ProtocolSupport::Full),
             ],
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
@@ -158,12 +207,22 @@ mod tests {
     use libp2p::identity::Keypair;
 
     #[test]
-    fn test_behaviour_creation() {
+    fn test_behaviour_creation_with_signing() {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let public_key = keypair.public();
 
-        let behaviour = DefraBehaviour::new(peer_id, public_key);
+        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair);
+        assert!(behaviour.is_ok());
+    }
+
+    #[test]
+    fn test_behaviour_creation_without_signing() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let public_key = keypair.public();
+
+        let behaviour = DefraBehaviour::new_without_signing(peer_id, public_key);
         assert!(behaviour.is_ok());
     }
 }
