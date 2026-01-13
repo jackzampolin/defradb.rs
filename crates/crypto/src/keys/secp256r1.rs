@@ -102,7 +102,10 @@ impl PublicKey for Secp256r1PublicKey {
     }
 
     fn did(&self) -> Result<String> {
-        crate::did::create_did_key(KeyType::Secp256r1, &self.raw())
+        // Use uncompressed format (65 bytes) for DID generation to match Go implementation
+        // Go uses ecdhPubKey.Bytes() which produces the full [0x04 | x | y] format
+        let uncompressed = self.key.to_encoded_point(false);
+        crate::did::create_did_key(KeyType::Secp256r1, uncompressed.as_bytes())
     }
 }
 

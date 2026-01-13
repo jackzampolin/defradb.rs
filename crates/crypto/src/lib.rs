@@ -17,6 +17,9 @@ pub mod keys;
 pub mod signature;
 pub mod types;
 
+#[cfg(test)]
+mod go_compat;
+
 // Re-export commonly used types
 pub use defra_core::{Error, Result};
 pub use types::KeyType;

@@ -5,7 +5,9 @@
 //! - Private keys: 32 bytes
 //! - Signatures: DER-encoded ECDSA signatures
 
-use k256::ecdsa::{signature::Signer, signature::Verifier, Signature, SigningKey, VerifyingKey};
+use k256::ecdsa::{
+    signature::DigestSigner, signature::DigestVerifier, Signature, SigningKey, VerifyingKey,
+};
 use k256::EncodedPoint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -94,10 +96,12 @@ impl Key for Secp256k1PrivateKey {
 impl PrivateKey for Secp256k1PrivateKey {
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
         // Hash the message with SHA-256 (required for ECDSA)
-        let hash = Sha256::digest(data);
+        // Use DigestSigner to sign pre-hashed data (matches Go behavior)
+        let mut hasher = Sha256::new();
+        hasher.update(data);
 
-        // Sign the hash
-        let signature: Signature = self.key.sign(&hash);
+        // Sign the pre-hashed digest using DigestSigner trait
+        let signature: Signature = self.key.sign_digest(hasher);
 
         // Return DER-encoded signature (X.690 Distinguished Encoding Rules)
         // DER is the standard format for Bitcoin/blockchain ECDSA signatures because:
@@ -183,11 +187,19 @@ impl PublicKey for Secp256k1PublicKey {
             Err(_) => return Ok(false),
         };
 
-        // Hash the message with SHA-256
-        let hash = Sha256::digest(data);
+        // Normalize S to low-S form if needed for Go compatibility
+        // ECDSA signatures have the property that both (r, s) and (r, n-s) are valid.
+        // Some implementations (like Go's dcrd) may produce high-S signatures,
+        // while k256 verification expects low-S. Normalizing ensures compatibility.
+        let sig = sig.normalize_s().unwrap_or(sig);
 
-        // Verify signature
-        match self.key.verify(&hash, &sig) {
+        // Hash the message with SHA-256 using DigestVerifier trait
+        // This matches Go behavior which signs/verifies against SHA256(message)
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+
+        // Verify signature against the pre-hashed digest
+        match self.key.verify_digest(hasher, &sig) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
