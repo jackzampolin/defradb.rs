@@ -10,7 +10,7 @@
 
 //! Document type for DefraDB
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use cid::Cid;
 use multihash::Multihash;
@@ -297,16 +297,28 @@ impl Document {
     /// Encode the document to CBOR bytes.
     ///
     /// This encodes only the values, not the metadata (id, head, dirty flag).
-    /// The CBOR encoding uses sorted keys for deterministic output.
+    /// Uses canonical CBOR ordering (RFC 7049 Section 3.9) for Go compatibility:
+    /// - Keys sorted by length first (shorter keys first)
+    /// - Then lexicographically (bytewise) within same length
     pub fn to_cbor(&self) -> Result<Vec<u8>> {
-        // Use BTreeMap for deterministic key ordering (lexicographic)
-        let mut map: BTreeMap<&str, &NormalValue> = BTreeMap::new();
-        for (key, fv) in &self.values {
-            map.insert(key, fv.value());
-        }
+        // Collect keys and sort using canonical CBOR ordering
+        let mut keys: Vec<&str> = self.values.keys().map(|k| k.as_str()).collect();
+        keys.sort_by(canonical_cbor_key_order);
+
+        // Build CBOR map using ciborium::Value for proper map encoding
+        let map_entries: Vec<(ciborium::Value, ciborium::Value)> = keys
+            .into_iter()
+            .map(|k| {
+                let key = ciborium::Value::Text(k.to_string());
+                let value = normal_value_to_cbor(self.values.get(k).unwrap().value());
+                (key, value)
+            })
+            .collect();
+
+        let cbor_map = ciborium::Value::Map(map_entries);
 
         let mut buf = Vec::new();
-        ciborium::into_writer(&map, &mut buf).map_err(|e| Error::CborEncode(e.to_string()))?;
+        ciborium::into_writer(&cbor_map, &mut buf).map_err(|e| Error::CborEncode(e.to_string()))?;
         Ok(buf)
     }
 
@@ -491,6 +503,295 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// Convert a NormalValue to a ciborium::Value for CBOR encoding.
+fn normal_value_to_cbor(value: &NormalValue) -> ciborium::Value {
+    match value {
+        NormalValue::Null => ciborium::Value::Null,
+        NormalValue::Bool(b) => ciborium::Value::Bool(*b),
+        NormalValue::Int(i) => ciborium::Value::Integer((*i).into()),
+        NormalValue::Float64(f) => ciborium::Value::Float(*f),
+        NormalValue::Float32(f) => ciborium::Value::Float(*f as f64),
+        NormalValue::String(s) => ciborium::Value::Text(s.clone()),
+        NormalValue::Bytes(b) => ciborium::Value::Bytes(b.clone()),
+        NormalValue::Time(t) => ciborium::Value::Text(t.to_rfc3339()),
+        NormalValue::Json(v) => json_to_cbor_value(v),
+        NormalValue::IntArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|i| ciborium::Value::Integer((*i).into()))
+                .collect(),
+        ),
+        NormalValue::StringArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|s| ciborium::Value::Text(s.clone()))
+                .collect(),
+        ),
+        NormalValue::BoolArray(arr) => {
+            ciborium::Value::Array(arr.iter().map(|b| ciborium::Value::Bool(*b)).collect())
+        }
+        NormalValue::Float64Array(arr) => {
+            ciborium::Value::Array(arr.iter().map(|f| ciborium::Value::Float(*f)).collect())
+        }
+        NormalValue::Float32Array(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|f| ciborium::Value::Float(*f as f64))
+                .collect(),
+        ),
+        NormalValue::JsonArray(arr) => {
+            ciborium::Value::Array(arr.iter().map(json_to_cbor_value).collect())
+        }
+        // Nillable variants - encode as value or null
+        NormalValue::NillableBool(opt) => opt
+            .map(ciborium::Value::Bool)
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableInt(opt) => opt
+            .map(|i| ciborium::Value::Integer(i.into()))
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableFloat64(opt) => opt
+            .map(ciborium::Value::Float)
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableFloat32(opt) => opt
+            .map(|f| ciborium::Value::Float(f as f64))
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableString(opt) => opt
+            .as_ref()
+            .map(|s| ciborium::Value::Text(s.clone()))
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableBytes(opt) => opt
+            .as_ref()
+            .map(|b| ciborium::Value::Bytes(b.clone()))
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableTime(opt) => opt
+            .map(|t| ciborium::Value::Text(t.to_rfc3339()))
+            .unwrap_or(ciborium::Value::Null),
+        // Document value
+        NormalValue::Document(doc) => {
+            // For nested documents, encode their values as a map
+            doc.to_cbor()
+                .ok()
+                .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
+                .unwrap_or(ciborium::Value::Null)
+        }
+        NormalValue::NillableDocument(opt) => opt
+            .as_ref()
+            .and_then(|doc| {
+                doc.to_cbor()
+                    .ok()
+                    .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
+            })
+            .unwrap_or(ciborium::Value::Null),
+        // Additional array types
+        NormalValue::BytesArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|b| ciborium::Value::Bytes(b.clone()))
+                .collect(),
+        ),
+        NormalValue::TimeArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|t| ciborium::Value::Text(t.to_rfc3339()))
+                .collect(),
+        ),
+        NormalValue::DocumentArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|doc| {
+                    doc.to_cbor()
+                        .ok()
+                        .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        // Nillable array types
+        NormalValue::NillableBoolArray(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(arr.iter().map(|b| ciborium::Value::Bool(*b)).collect())
+            })
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableIntArray(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|i| ciborium::Value::Integer((*i).into()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableFloat64Array(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(arr.iter().map(|f| ciborium::Value::Float(*f)).collect())
+            })
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableFloat32Array(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|f| ciborium::Value::Float(*f as f64))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableStringArray(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|s| ciborium::Value::Text(s.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableBytesArray(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|b| ciborium::Value::Bytes(b.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null),
+        NormalValue::NillableTimeArray(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|t| ciborium::Value::Text(t.to_rfc3339()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null),
+        // Arrays with nillable elements
+        NormalValue::NillableBoolElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(ciborium::Value::Bool)
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableIntElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(|i| ciborium::Value::Integer(i.into()))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableFloat64ElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(ciborium::Value::Float)
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableFloat32ElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(|f| ciborium::Value::Float(f as f64))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableStringElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.as_ref()
+                        .map(|s| ciborium::Value::Text(s.clone()))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableBytesElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.as_ref()
+                        .map(|b| ciborium::Value::Bytes(b.clone()))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableTimeElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(|t| ciborium::Value::Text(t.to_rfc3339()))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableDocumentElementArray(arr) => ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.as_ref()
+                        .and_then(|doc| {
+                            doc.to_cbor()
+                                .ok()
+                                .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
+                        })
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        ),
+        NormalValue::NillableDocumentArray(opt) => opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|doc| {
+                            doc.to_cbor()
+                                .ok()
+                                .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
+                                .unwrap_or(ciborium::Value::Null)
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null),
+    }
+}
+
+/// Convert a JSON value to a ciborium::Value.
+fn json_to_cbor_value(value: &serde_json::Value) -> ciborium::Value {
+    match value {
+        serde_json::Value::Null => ciborium::Value::Null,
+        serde_json::Value::Bool(b) => ciborium::Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                ciborium::Value::Integer(i.into())
+            } else if let Some(f) = n.as_f64() {
+                ciborium::Value::Float(f)
+            } else {
+                ciborium::Value::Null
+            }
+        }
+        serde_json::Value::String(s) => ciborium::Value::Text(s.clone()),
+        serde_json::Value::Array(arr) => {
+            ciborium::Value::Array(arr.iter().map(json_to_cbor_value).collect())
+        }
+        serde_json::Value::Object(obj) => {
+            let entries: Vec<(ciborium::Value, ciborium::Value)> = obj
+                .iter()
+                .map(|(k, v)| (ciborium::Value::Text(k.clone()), json_to_cbor_value(v)))
+                .collect();
+            ciborium::Value::Map(entries)
+        }
+    }
+}
+
+/// Canonical CBOR key ordering (RFC 7049 Section 3.9).
+/// Keys are sorted by:
+/// 1. Length first (shorter keys come first)
+/// 2. Lexicographically (bytewise) within same length
+fn canonical_cbor_key_order(a: &&str, b: &&str) -> std::cmp::Ordering {
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => a.cmp(b),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +944,12 @@ mod tests {
         // CBOR should be deterministic
         let cbor2 = doc.to_cbor().unwrap();
         assert_eq!(cbor, cbor2);
+
+        // Verify canonical CBOR ordering: shorter keys first
+        // "count" (5 chars) should come before "name" (4 chars)? No wait...
+        // "name" (4 chars) should come before "count" (5 chars)
+        // First byte should be 0xa2 (map with 2 entries)
+        assert_eq!(cbor[0], 0xa2, "CBOR should start with map marker");
     }
 
     #[test]
@@ -657,5 +964,148 @@ mod tests {
         let numbers = doc.get("numbers");
         assert!(numbers.is_some());
         assert!(numbers.unwrap().is_array());
+    }
+
+    // ==========================================================================
+    // Golden tests for Go wire compatibility
+    // Generated from Go DefraDB using: go test -v -run TestGenerateRustFixtures ./client/
+    // ==========================================================================
+
+    // SDN Namespace UUID for verification (must match Go's SDNNamespaceV0)
+    const GO_SDN_NAMESPACE: &str = "c94acbfa-dd53-40d0-97f3-29ce16c333fc";
+
+    // Test case 1: Simple document {"Name": "John", "Age": 26}
+    const GO_SIMPLE_DOC_CBOR: &[u8] = &[
+        0xa2, 0x63, 0x41, 0x67, 0x65, 0x18, 0x1a, 0x64, 0x4e, 0x61, 0x6d, 0x65, 0x64, 0x4a, 0x6f,
+        0x68, 0x6e,
+    ];
+
+    // Test case 2: String-only document {"Name": "Alice"}
+    const GO_STRING_DOC_CBOR: &[u8] = &[
+        0xa1, 0x64, 0x4e, 0x61, 0x6d, 0x65, 0x65, 0x41, 0x6c, 0x69, 0x63, 0x65,
+    ];
+
+    // Test case 3: Boolean document {"Active": true}
+    const GO_BOOL_DOC_CBOR: &[u8] = &[0xa1, 0x66, 0x41, 0x63, 0x74, 0x69, 0x76, 0x65, 0xf5];
+
+    // Test case 4: Empty document {}
+    const GO_EMPTY_DOC_CBOR: &[u8] = &[0xa0];
+
+    #[test]
+    fn test_sdn_namespace_matches_go() {
+        use crate::SDN_NAMESPACE_V0;
+        assert_eq!(
+            SDN_NAMESPACE_V0.to_string(),
+            GO_SDN_NAMESPACE,
+            "SDN namespace UUID must match Go's SDNNamespaceV0"
+        );
+    }
+
+    #[test]
+    fn test_cbor_matches_go_simple_doc() {
+        // Go test case: {"Name": "John", "Age": 26}
+        let mut doc = Document::new();
+        doc.set("Name", "John");
+        doc.set("Age", 26i64);
+
+        let cbor = doc.to_cbor().unwrap();
+        assert_eq!(
+            cbor, GO_SIMPLE_DOC_CBOR,
+            "CBOR encoding must match Go's output.\nRust: {:02x?}\nGo:   {:02x?}",
+            cbor, GO_SIMPLE_DOC_CBOR
+        );
+    }
+
+    #[test]
+    fn test_cbor_matches_go_string_doc() {
+        // Go test case: {"Name": "Alice"}
+        let mut doc = Document::new();
+        doc.set("Name", "Alice");
+
+        let cbor = doc.to_cbor().unwrap();
+        assert_eq!(
+            cbor, GO_STRING_DOC_CBOR,
+            "CBOR encoding must match Go's output.\nRust: {:02x?}\nGo:   {:02x?}",
+            cbor, GO_STRING_DOC_CBOR
+        );
+    }
+
+    #[test]
+    fn test_cbor_matches_go_bool_doc() {
+        // Go test case: {"Active": true}
+        let mut doc = Document::new();
+        doc.set("Active", true);
+
+        let cbor = doc.to_cbor().unwrap();
+        assert_eq!(
+            cbor, GO_BOOL_DOC_CBOR,
+            "CBOR encoding must match Go's output.\nRust: {:02x?}\nGo:   {:02x?}",
+            cbor, GO_BOOL_DOC_CBOR
+        );
+    }
+
+    #[test]
+    fn test_cbor_matches_go_empty_doc() {
+        // Go test case: {}
+        let doc = Document::new();
+
+        let cbor = doc.to_cbor().unwrap();
+        assert_eq!(
+            cbor, GO_EMPTY_DOC_CBOR,
+            "CBOR encoding must match Go's output.\nRust: {:02x?}\nGo:   {:02x?}",
+            cbor, GO_EMPTY_DOC_CBOR
+        );
+    }
+
+    #[test]
+    fn test_canonical_cbor_key_ordering() {
+        // Verify canonical CBOR ordering: shorter keys first, then lexicographic
+        // Keys: "z" (1 char), "aa" (2 chars), "ab" (2 chars)
+        let mut doc = Document::new();
+        doc.set("ab", 3i64);
+        doc.set("z", 1i64);
+        doc.set("aa", 2i64);
+
+        let cbor = doc.to_cbor().unwrap();
+
+        // Expected order: z (1 char), aa (2 chars), ab (2 chars)
+        // a3 = map with 3 entries
+        // 61 7a = "z"
+        // 01 = 1
+        // 62 61 61 = "aa"
+        // 02 = 2
+        // 62 61 62 = "ab"
+        // 03 = 3
+        let expected = &[
+            0xa3, 0x61, 0x7a, 0x01, 0x62, 0x61, 0x61, 0x02, 0x62, 0x61, 0x62, 0x03,
+        ];
+        assert_eq!(
+            cbor, expected,
+            "Keys should be sorted by length first, then lexicographically.\nGot: {:02x?}\nExpected: {:02x?}",
+            cbor, expected
+        );
+    }
+
+    #[test]
+    fn test_doc_id_string_format() {
+        // DocID string should start with "bae-" (base32 encoded version 0x01)
+        let mut doc = Document::new();
+        doc.set("test", "value");
+        doc.generate_and_set_doc_id().unwrap();
+
+        let doc_id_str = doc.id().unwrap().to_string();
+        assert!(
+            doc_id_str.starts_with("bae-"),
+            "DocID should start with 'bae-' prefix, got: {}",
+            doc_id_str
+        );
+
+        // Should contain a valid UUID after the prefix
+        let uuid_part = &doc_id_str[4..]; // Skip "bae-"
+        assert!(
+            uuid::Uuid::parse_str(uuid_part).is_ok(),
+            "DocID should contain valid UUID after prefix, got: {}",
+            uuid_part
+        );
     }
 }
