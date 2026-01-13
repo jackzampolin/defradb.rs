@@ -83,7 +83,9 @@ impl DocumentMapping {
 
     /// Get the first index for a field name, if it exists
     pub fn first_index_of_name(&self, name: &str) -> Option<usize> {
-        self.indexes_by_name.get(name).and_then(|v| v.first().copied())
+        self.indexes_by_name
+            .get(name)
+            .and_then(|v| v.first().copied())
     }
 
     /// Get all indexes for a field name
@@ -155,11 +157,9 @@ impl DocumentMapping {
         };
 
         for child in &self.child_mappings {
-            result.child_mappings.push(
-                child
-                    .as_ref()
-                    .map(|c| Box::new(c.clone_without_render())),
-            );
+            result
+                .child_mappings
+                .push(child.as_ref().map(|c| Box::new(c.clone_without_render())));
         }
 
         result

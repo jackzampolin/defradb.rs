@@ -1,5 +1,6 @@
 //! Dynamic GraphQL schema generation from CollectionVersion
 
+use crate::error::{QueryError, Result};
 use schema::{CollectionVersion, FieldKind, ScalarKind};
 
 /// GraphQL type representation
@@ -183,15 +184,18 @@ pub struct GeneratedSchema {
 }
 
 /// Convert a FieldKind to a GraphQL type
-pub fn field_kind_to_gql_type(kind: &FieldKind, collections: &[&CollectionVersion]) -> GqlType {
+pub fn field_kind_to_gql_type(
+    kind: &FieldKind,
+    collections: &[&CollectionVersion],
+) -> Result<GqlType> {
     match kind {
-        FieldKind::Scalar(scalar) => scalar_to_gql_type(scalar),
+        FieldKind::Scalar(scalar) => Ok(scalar_to_gql_type(scalar)),
         FieldKind::ScalarArray(array) => {
             let element_type = scalar_to_gql_type(&array.element_kind());
             if array.has_nillable_elements() {
-                GqlType::list(element_type)
+                Ok(GqlType::list(element_type))
             } else {
-                GqlType::list(GqlType::non_null(element_type))
+                Ok(GqlType::list(GqlType::non_null(element_type)))
             }
         }
         FieldKind::Relation {
@@ -203,28 +207,33 @@ pub fn field_kind_to_gql_type(kind: &FieldKind, collections: &[&CollectionVersio
                 .iter()
                 .find(|c| &c.collection_id == collection_id)
                 .map(|c| c.name.clone())
-                .unwrap_or_else(|| collection_id.clone());
+                .ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "relation references unknown collection: {}",
+                        collection_id
+                    ))
+                })?;
 
             if *is_array {
-                GqlType::list(GqlType::named(type_name))
+                Ok(GqlType::list(GqlType::named(type_name)))
             } else {
-                GqlType::named(type_name)
+                Ok(GqlType::named(type_name))
             }
         }
         FieldKind::SelfRef { is_array, .. } => {
             // Self references use the current type name
             // This should be resolved by the caller
             if *is_array {
-                GqlType::list(GqlType::named("Self"))
+                Ok(GqlType::list(GqlType::named("Self")))
             } else {
-                GqlType::named("Self")
+                Ok(GqlType::named("Self"))
             }
         }
         FieldKind::Named { name, is_array } => {
             if *is_array {
-                GqlType::list(GqlType::named(name.clone()))
+                Ok(GqlType::list(GqlType::named(name.clone())))
             } else {
-                GqlType::named(name.clone())
+                Ok(GqlType::named(name.clone()))
             }
         }
     }
@@ -246,7 +255,10 @@ pub fn scalar_to_gql_type(scalar: &ScalarKind) -> GqlType {
 }
 
 /// Generate a complete GraphQL schema from a collection
-pub fn generate_schema(collection: &CollectionVersion, all_collections: &[&CollectionVersion]) -> GeneratedSchema {
+pub fn generate_schema(
+    collection: &CollectionVersion,
+    all_collections: &[&CollectionVersion],
+) -> Result<GeneratedSchema> {
     let mut object_type = GqlObjectType::new(&collection.name)
         .with_description(format!("{} collection type", collection.name));
 
@@ -256,10 +268,7 @@ pub fn generate_schema(collection: &CollectionVersion, all_collections: &[&Colle
     let order_input = GqlInputType::new(format!("{}OrderInput", collection.name));
 
     // Add _docID field to object type
-    object_type = object_type.with_field(GqlField::new(
-        "_docID",
-        GqlType::non_null(GqlType::id()),
-    ));
+    object_type = object_type.with_field(GqlField::new("_docID", GqlType::non_null(GqlType::id())));
 
     // Process each field
     for field in &collection.fields {
@@ -268,7 +277,7 @@ pub fn generate_schema(collection: &CollectionVersion, all_collections: &[&Colle
             continue;
         }
 
-        let gql_type = field_kind_to_gql_type(&field.kind, all_collections);
+        let gql_type = field_kind_to_gql_type(&field.kind, all_collections)?;
 
         // Add to object type
         object_type = object_type.with_field(GqlField::new(&field.name, gql_type.clone()));
@@ -281,18 +290,19 @@ pub fn generate_schema(collection: &CollectionVersion, all_collections: &[&Colle
 
         // Add to filter input (only scalars)
         if field.kind.is_scalar() {
-            let filter_type = GqlType::named(format!("{}Filter", scalar_filter_type_name(&field.kind)));
+            let filter_type =
+                GqlType::named(format!("{}Filter", scalar_filter_type_name(&field.kind)));
             filter_input = filter_input.with_field(GqlField::new(&field.name, filter_type));
         }
     }
 
-    GeneratedSchema {
+    Ok(GeneratedSchema {
         object_type,
         create_input,
         update_input,
         filter_input,
         order_input,
-    }
+    })
 }
 
 fn scalar_filter_type_name(kind: &FieldKind) -> &'static str {
@@ -401,7 +411,7 @@ mod tests {
         let collection = make_test_collection();
         let collections: Vec<&CollectionVersion> = vec![&collection];
 
-        let schema = generate_schema(&collection, &collections);
+        let schema = generate_schema(&collection, &collections).unwrap();
 
         assert_eq!(schema.object_type.name, "User");
         assert!(!schema.object_type.fields.is_empty());
@@ -424,7 +434,7 @@ mod tests {
         let collection = make_test_collection();
         let collections: Vec<&CollectionVersion> = vec![&collection];
 
-        let schema = generate_schema(&collection, &collections);
+        let schema = generate_schema(&collection, &collections).unwrap();
         let sdl = schema.object_type.to_sdl();
 
         assert!(sdl.contains("type User"));
@@ -478,12 +488,22 @@ mod tests {
 
         // One-to-one relation
         let relation = FieldKind::relation("coll-users", false);
-        let gql_type = field_kind_to_gql_type(&relation, &collections);
+        let gql_type = field_kind_to_gql_type(&relation, &collections).unwrap();
         assert_eq!(gql_type, GqlType::named("User"));
 
         // One-to-many relation
         let relation_array = FieldKind::relation("coll-users", true);
-        let gql_type_array = field_kind_to_gql_type(&relation_array, &collections);
+        let gql_type_array = field_kind_to_gql_type(&relation_array, &collections).unwrap();
         assert_eq!(gql_type_array, GqlType::list(GqlType::named("User")));
+    }
+
+    #[test]
+    fn test_field_kind_to_gql_type_unknown_collection() {
+        let collections: Vec<&CollectionVersion> = vec![];
+
+        // Relation to unknown collection should error
+        let relation = FieldKind::relation("unknown-collection", false);
+        let result = field_kind_to_gql_type(&relation, &collections);
+        assert!(result.is_err());
     }
 }

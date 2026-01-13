@@ -205,8 +205,9 @@ impl Filter {
                 .ok_or_else(|| QueryError::invalid_filter("field condition must be object"))?;
 
             for (op_str, expected) in ops {
-                let op = FilterOp::parse(op_str)
-                    .ok_or_else(|| QueryError::invalid_filter(format!("unknown operator: {}", op_str)))?;
+                let op = FilterOp::parse(op_str).ok_or_else(|| {
+                    QueryError::invalid_filter(format!("unknown operator: {}", op_str))
+                })?;
 
                 if !self.eval_op(&field_value, op, expected)? {
                     return Ok(false);
@@ -238,9 +239,9 @@ impl Filter {
             }
             FilterOp::Like => self.like_match(actual, expected, false),
             FilterOp::Nlike => self.like_match(actual, expected, true),
-            FilterOp::And | FilterOp::Or | FilterOp::Not => {
-                Err(QueryError::internal("logical ops should be handled at top level"))
-            }
+            FilterOp::And | FilterOp::Or | FilterOp::Not => Err(QueryError::internal(
+                "logical ops should be handled at top level",
+            )),
         }
     }
 
@@ -269,9 +270,15 @@ impl Filter {
     fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<std::cmp::Ordering> {
         match (a, b) {
             (JsonValue::Number(a), JsonValue::Number(b)) => {
-                let a = a.as_f64().unwrap_or(0.0);
-                let b = b.as_f64().unwrap_or(0.0);
-                Ok(a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
+                let a_val = a.as_f64().ok_or_else(|| {
+                    QueryError::invalid_filter(format!("number {} cannot be compared", a))
+                })?;
+                let b_val = b.as_f64().ok_or_else(|| {
+                    QueryError::invalid_filter(format!("number {} cannot be compared", b))
+                })?;
+                a_val
+                    .partial_cmp(&b_val)
+                    .ok_or_else(|| QueryError::invalid_filter("cannot compare NaN values"))
             }
             (JsonValue::String(a), JsonValue::String(b)) => Ok(a.cmp(b)),
             _ => Err(QueryError::TypeMismatch {
@@ -289,21 +296,35 @@ impl Filter {
             .as_str()
             .ok_or_else(|| QueryError::invalid_filter("_like requires string pattern"))?;
 
-        // Convert SQL LIKE pattern to simple matching
-        // % = any characters, _ = single character
-        let regex_pattern = pattern_str
-            .replace('%', ".*")
-            .replace('_', ".");
+        // Validate pattern - only simple patterns are supported:
+        // - 'prefix%' (starts with)
+        // - '%suffix' (ends with)
+        // - '%contains%' (contains)
+        // - 'exact' (exact match)
+        if pattern_str.contains('_') {
+            return Err(QueryError::invalid_filter(
+                "_like with '_' wildcard is not yet supported",
+            ));
+        }
 
-        // Simple pattern matching (not full regex for performance)
-        let matches = if let Some(inner) = regex_pattern
-            .strip_prefix(".*")
-            .and_then(|s| s.strip_suffix(".*"))
+        let percent_count = pattern_str.matches('%').count();
+        if percent_count > 2
+            || (percent_count == 2 && !(pattern_str.starts_with('%') && pattern_str.ends_with('%')))
+        {
+            return Err(QueryError::invalid_filter(
+                "_like only supports: 'prefix%', '%suffix', '%contains%', or exact match",
+            ));
+        }
+
+        // Simple pattern matching
+        let matches = if let Some(inner) = pattern_str
+            .strip_prefix('%')
+            .and_then(|s| s.strip_suffix('%'))
         {
             actual_str.contains(inner)
-        } else if let Some(suffix) = regex_pattern.strip_prefix(".*") {
+        } else if let Some(suffix) = pattern_str.strip_prefix('%') {
             actual_str.ends_with(suffix)
-        } else if let Some(prefix) = regex_pattern.strip_suffix(".*") {
+        } else if let Some(prefix) = pattern_str.strip_suffix('%') {
             actual_str.starts_with(prefix)
         } else {
             actual_str == pattern_str
@@ -354,19 +375,15 @@ mod tests {
         let fields = make_fields();
         assert!(filter.matches(&fields, &mapping).unwrap());
 
-        let filter = Filter::from_conditions(HashMap::from([(
-            "name".to_string(),
-            json!({"_eq": "Bob"}),
-        )]));
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_eq": "Bob"}))]));
         assert!(!filter.matches(&fields, &mapping).unwrap());
     }
 
     #[test]
     fn test_ne_filter() {
-        let filter = Filter::from_conditions(HashMap::from([(
-            "name".to_string(),
-            json!({"_ne": "Bob"}),
-        )]));
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_ne": "Bob"}))]));
         let mapping = make_mapping();
         let fields = make_fields();
         assert!(filter.matches(&fields, &mapping).unwrap());
@@ -374,18 +391,14 @@ mod tests {
 
     #[test]
     fn test_gt_filter() {
-        let filter = Filter::from_conditions(HashMap::from([(
-            "age".to_string(),
-            json!({"_gt": 25}),
-        )]));
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
         let mapping = make_mapping();
         let fields = make_fields();
         assert!(filter.matches(&fields, &mapping).unwrap());
 
-        let filter = Filter::from_conditions(HashMap::from([(
-            "age".to_string(),
-            json!({"_gt": 35}),
-        )]));
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 35}))]));
         assert!(!filter.matches(&fields, &mapping).unwrap());
     }
 
@@ -485,5 +498,122 @@ mod tests {
         assert_eq!(FilterOp::parse("_eq"), Some(FilterOp::Eq));
         assert_eq!(FilterOp::parse("_and"), Some(FilterOp::And));
         assert_eq!(FilterOp::parse("invalid"), None);
+    }
+
+    #[test]
+    fn test_null_field_comparison() {
+        // When a field is null/None, comparisons should handle it gracefully
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_eq": null}))]));
+        let mapping = make_mapping();
+        // Field at index 2 (age) is None
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+            Some(json!(true)),
+        ];
+        // Null equals null
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_null_field_gt_comparison_error() {
+        // Comparing null with _gt should fail with type mismatch
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
+        let mapping = make_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+            Some(json!(true)),
+        ];
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nested_and_or_operators() {
+        // Test _and containing _or: match if (name=Alice OR name=Bob) AND age>=18
+        let filter = Filter::from_conditions(HashMap::from([(
+            "_and".to_string(),
+            json!([
+                {"_or": [
+                    {"name": {"_eq": "Alice"}},
+                    {"name": {"_eq": "Bob"}}
+                ]},
+                {"age": {"_gte": 18}}
+            ]),
+        )]));
+        let mapping = make_mapping();
+
+        // Alice, age 30 - should match
+        let fields_alice = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            Some(json!(30)),
+            Some(json!(true)),
+        ];
+        assert!(filter.matches(&fields_alice, &mapping).unwrap());
+
+        // Charlie, age 25 - should NOT match (name not Alice or Bob)
+        let fields_charlie = vec![
+            Some(json!("doc2")),
+            Some(json!("Charlie")),
+            Some(json!(25)),
+            Some(json!(true)),
+        ];
+        assert!(!filter.matches(&fields_charlie, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_nested_not_and_operators() {
+        // Test _not containing _and: match if NOT (name=Alice AND age<18)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "_not".to_string(),
+            json!({"_and": [
+                {"name": {"_eq": "Alice"}},
+                {"age": {"_lt": 18}}
+            ]}),
+        )]));
+        let mapping = make_mapping();
+
+        // Alice, age 30 - should match (Alice but NOT age<18)
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+
+        // Alice, age 15 - should NOT match
+        let fields_young = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            Some(json!(15)),
+            Some(json!(true)),
+        ];
+        assert!(!filter.matches(&fields_young, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_like_unsupported_underscore() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_like": "Al_ce"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_like_unsupported_complex_pattern() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_like": "%li%ce"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
     }
 }

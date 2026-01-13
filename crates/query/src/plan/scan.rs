@@ -210,10 +210,8 @@ mod tests {
         let mapping = make_test_mapping();
         let docs = make_test_docs();
 
-        let filter = Filter::from_conditions(HashMap::from([(
-            "age".to_string(),
-            json!({"_gte": 30}),
-        )]));
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gte": 30}))]));
 
         let mut scan = ScanNode::new(collection, mapping)
             .with_docs(docs)

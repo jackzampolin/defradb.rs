@@ -3,6 +3,6 @@
 mod generator;
 
 pub use generator::{
-    generate_mutation_type, generate_query_type, generate_schema, field_kind_to_gql_type,
+    field_kind_to_gql_type, generate_mutation_type, generate_query_type, generate_schema,
     scalar_to_gql_type, GeneratedSchema, GqlField, GqlInputType, GqlObjectType, GqlType,
 };
