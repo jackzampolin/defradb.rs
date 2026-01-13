@@ -1595,4 +1595,131 @@ mod tests {
             total_ops
         );
     }
+
+    // ==================== Error Path Tests ====================
+
+    #[tokio::test]
+    async fn test_all_cids_skips_malformed_keys_like_go() {
+        // Go implementation (corekv/blockstore/blockstore.go:163-167):
+        // k, err := cid.Cast(key)
+        // if err != nil {
+        //     log.ErrorContextE(ctx, "Error parsing key from binary", err)
+        //     continue  // Skips unparseable keys
+        // }
+        //
+        // This test verifies Rust matches Go's behavior of logging and skipping
+        // keys that cannot be parsed as CIDs.
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store.clone(), false);
+
+        // Add some valid blocks
+        let cid1 = test_cid();
+        let cid2 = test_cid2();
+        blockstore.put(&cid1, b"data1").await.unwrap();
+        blockstore.put(&cid2, b"data2").await.unwrap();
+
+        // Directly write a malformed key to the underlying store
+        // This simulates data corruption - a key that's neither a valid CID
+        // nor a merge marker. Use a key that won't parse as CID.
+        // CIDv1 starts with 0x01, CIDv0 with 0x12. Use 0xAA to guarantee failure.
+        let malformed_key = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        {
+            let mut txn = store.new_txn(false).await.unwrap();
+            // Write to blockstore namespace (prefix 'b')
+            let mut namespaced_key = vec![b'b'];
+            namespaced_key.extend_from_slice(&malformed_key);
+            txn.set(&namespaced_key, b"garbage").await.unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        // all_cids should skip the malformed key and return only valid CIDs
+        // (matching Go behavior of logging error and continuing)
+        let cids = blockstore.all_cids().await.unwrap();
+        assert_eq!(cids.len(), 2, "Should return only valid CIDs, skipping malformed key");
+        assert!(cids.contains(&cid1));
+        assert!(cids.contains(&cid2));
+    }
+
+    #[tokio::test]
+    async fn test_go_key_format_compatibility() {
+        // Verify our key encoding matches Go's format exactly.
+        // Go (defradb/internal/datastore/blockstore.go:54-59):
+        // func newToMergeKey(cid []byte) []byte {
+        //     l := len(cid)
+        //     key := make([]byte, l+1)
+        //     copy(key[1:], cid)
+        //     key[0] = toMergeIndexPrefix  // 'm' = 0x6D
+        //     return key
+        // }
+        use storage::keys::blockstore::{BlockstoreKey, ToMergeIndexKey, MERGE_PREFIX};
+
+        let cid = test_cid();
+
+        // Block key: raw CID bytes (no prefix)
+        let block_key = BlockstoreKey::new(cid);
+        let block_bytes = block_key.bytes();
+        assert_eq!(block_bytes, cid.to_bytes(), "Block key should be raw CID bytes");
+
+        // Merge key: 'm' prefix + CID bytes
+        let merge_key = ToMergeIndexKey::new(cid);
+        let merge_bytes = merge_key.bytes();
+
+        // First byte must be 'm' (0x6D)
+        assert_eq!(merge_bytes[0], MERGE_PREFIX);
+        assert_eq!(merge_bytes[0], b'm');
+        assert_eq!(merge_bytes[0], 0x6D);
+
+        // Rest must be exact CID bytes
+        assert_eq!(&merge_bytes[1..], cid.to_bytes().as_slice());
+
+        // Total length: 1 (prefix) + CID bytes
+        assert_eq!(merge_bytes.len(), 1 + cid.to_bytes().len());
+
+        // Verify CIDv0 format too (legacy IPFS)
+        let cidv0 = Cid::from_str("QmdfTbBqBPQ7VNxZEYEj14VmRuZBkqFbiwReogJgS1zR1n").unwrap();
+        let merge_key_v0 = ToMergeIndexKey::new(cidv0);
+        let merge_bytes_v0 = merge_key_v0.bytes();
+        assert_eq!(merge_bytes_v0[0], b'm');
+        assert_eq!(&merge_bytes_v0[1..], cidv0.to_bytes().as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_cid_bytes_cannot_start_with_merge_prefix() {
+        // Safety test: Verify that valid CID binary encodings cannot start
+        // with 'm' (0x6D = 109), which would cause false positives in
+        // is_merge_key() filtering.
+        //
+        // CIDv0: Starts with 0x12 (sha2-256 multihash code)
+        // CIDv1: Starts with 0x01 (version byte)
+        //
+        // 0x6D (109) is not a valid CID start byte.
+        use storage::keys::blockstore::ToMergeIndexKey;
+
+        // CIDv1 test
+        let cidv1 = test_cid();
+        let cidv1_bytes = cidv1.to_bytes();
+        assert_ne!(
+            cidv1_bytes[0], b'm',
+            "CIDv1 should not start with 'm' - would break is_merge_key filtering"
+        );
+        assert_eq!(cidv1_bytes[0], 0x01, "CIDv1 should start with version byte 0x01");
+        assert!(!ToMergeIndexKey::is_merge_key(&cidv1_bytes));
+
+        // CIDv0 test (Qm... format)
+        let cidv0 = Cid::from_str("QmdfTbBqBPQ7VNxZEYEj14VmRuZBkqFbiwReogJgS1zR1n").unwrap();
+        let cidv0_bytes = cidv0.to_bytes();
+        assert_ne!(
+            cidv0_bytes[0], b'm',
+            "CIDv0 should not start with 'm' - would break is_merge_key filtering"
+        );
+        // CIDv0 starts with the multihash directly (0x12 for sha2-256)
+        assert_eq!(cidv0_bytes[0], 0x12, "CIDv0 should start with sha2-256 code 0x12");
+        assert!(!ToMergeIndexKey::is_merge_key(&cidv0_bytes));
+
+        // Edge case: raw codec CIDv1
+        let raw_cid = cid_from_data(b"test data");
+        let raw_bytes = raw_cid.to_bytes();
+        assert_eq!(raw_bytes[0], 0x01, "Raw CIDv1 should start with 0x01");
+        assert!(!ToMergeIndexKey::is_merge_key(&raw_bytes));
+    }
 }
