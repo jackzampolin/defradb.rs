@@ -267,7 +267,7 @@ mod tests {
             no_signing: Some(true),
             default_key_type: Some("ed25519".to_string()),
             no_searchable_encryption: Some(true),
-            identity: None, // identity is handled separately, not in apply_to_config
+            identity: None, // not yet implemented, see issue #23
             replicator_retry_intervals: Some(vec![10, 20, 30]),
         };
 
@@ -433,16 +433,28 @@ impl Node {
                         info!("Received SIGTERM");
                     }
                 }
-                let _ = shutdown_tx.send(()).await;
+                if let Err(e) = shutdown_tx.send(()).await {
+                    error!("Failed to send shutdown signal: {}", e);
+                }
             });
         }
 
         #[cfg(not(unix))]
         {
             tokio::spawn(async move {
-                if let Ok(()) = tokio::signal::ctrl_c().await {
-                    info!("Received Ctrl+C");
-                    let _ = shutdown_tx.send(()).await;
+                match tokio::signal::ctrl_c().await {
+                    Ok(()) => {
+                        info!("Received Ctrl+C");
+                        if let Err(e) = shutdown_tx.send(()).await {
+                            error!("Failed to send shutdown signal: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to listen for Ctrl+C signal: {}. Node may not respond to interrupt signals.",
+                            e
+                        );
+                    }
                 }
             });
         }

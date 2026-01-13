@@ -94,7 +94,17 @@ impl Config {
         // Make relative paths absolute
         config.resolve_paths();
 
+        // Validate the final configuration
+        config.validate()?;
+
         Ok(config)
+    }
+
+    /// Validate the complete configuration
+    pub fn validate(&self) -> Result<()> {
+        self.api.validate()?;
+        self.net.validate()?;
+        Ok(())
     }
 
     /// Resolve the rootdir path

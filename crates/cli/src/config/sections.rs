@@ -10,9 +10,12 @@
 
 //! Configuration section structs
 
+use std::net::SocketAddr;
+
 use serde::{Deserialize, Serialize};
 
 use super::types::{DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput};
+use crate::error::{Error, Result};
 
 /// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +67,23 @@ impl Default for ApiConfig {
     }
 }
 
+impl ApiConfig {
+    /// Validate the API configuration
+    pub fn validate(&self) -> Result<()> {
+        self.address
+            .parse::<SocketAddr>()
+            .map_err(|e| Error::InvalidApiAddress(self.address.clone(), e.to_string()))?;
+
+        let has_pub = !self.pubkey_path.is_empty();
+        let has_priv = !self.privkey_path.is_empty();
+        if has_pub != has_priv {
+            return Err(Error::IncompleteTlsConfig);
+        }
+
+        Ok(())
+    }
+}
+
 /// Datastore configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatastoreConfig {
@@ -112,6 +132,23 @@ impl Default for NetConfig {
             pubsub_enabled: true,
             relay_enabled: false,
         }
+    }
+}
+
+impl NetConfig {
+    /// Validate the network configuration
+    pub fn validate(&self) -> Result<()> {
+        if self.p2p_disabled {
+            return Ok(());
+        }
+
+        for addr_str in &self.p2p_addresses {
+            addr_str
+                .parse::<p2p::Multiaddr>()
+                .map_err(|e| Error::InvalidMultiaddr(format!("{}: {}", addr_str, e)))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -189,5 +226,65 @@ mod tests {
         assert_eq!(config.path, "keys");
         assert_eq!(config.namespace, "defradb");
         assert!(!config.disabled);
+    }
+
+    #[test]
+    fn test_api_config_validate_valid_address() {
+        let config = ApiConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_api_config_validate_invalid_address() {
+        let mut config = ApiConfig::default();
+        config.address = "not-an-address".to_string();
+        let result = config.validate();
+        assert!(matches!(result, Err(Error::InvalidApiAddress(addr, _)) if addr == "not-an-address"));
+    }
+
+    #[test]
+    fn test_api_config_validate_incomplete_tls_pubkey_only() {
+        let mut config = ApiConfig::default();
+        config.pubkey_path = "/path/to/pub.key".to_string();
+        let result = config.validate();
+        assert!(matches!(result, Err(Error::IncompleteTlsConfig)));
+    }
+
+    #[test]
+    fn test_api_config_validate_incomplete_tls_privkey_only() {
+        let mut config = ApiConfig::default();
+        config.privkey_path = "/path/to/priv.key".to_string();
+        let result = config.validate();
+        assert!(matches!(result, Err(Error::IncompleteTlsConfig)));
+    }
+
+    #[test]
+    fn test_api_config_validate_complete_tls() {
+        let mut config = ApiConfig::default();
+        config.pubkey_path = "/path/to/pub.key".to_string();
+        config.privkey_path = "/path/to/priv.key".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_net_config_validate_valid_multiaddr() {
+        let config = NetConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_net_config_validate_invalid_multiaddr() {
+        let mut config = NetConfig::default();
+        config.p2p_addresses = vec!["not-a-multiaddr".to_string()];
+        let result = config.validate();
+        assert!(matches!(result, Err(Error::InvalidMultiaddr(_))));
+    }
+
+    #[test]
+    fn test_net_config_validate_skipped_when_p2p_disabled() {
+        let mut config = NetConfig::default();
+        config.p2p_disabled = true;
+        config.p2p_addresses = vec!["not-a-multiaddr".to_string()];
+        assert!(config.validate().is_ok());
     }
 }

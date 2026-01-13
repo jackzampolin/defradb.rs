@@ -88,4 +88,10 @@ pub enum Error {
 
     #[error("JSON serialization error: {0}")]
     JsonSerialization(#[from] serde_json::Error),
+
+    #[error("invalid API address '{0}': {1}")]
+    InvalidApiAddress(String, String),
+
+    #[error("incomplete TLS configuration: both pubkey_path and privkey_path must be set, or neither")]
+    IncompleteTlsConfig,
 }
