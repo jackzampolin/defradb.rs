@@ -8,3 +8,30 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Internal crates
+defra-core = { path = "../defra-core" }
+storage = { path = "../storage" }
+schema = { path = "../schema" }
+crdt = { path = "../crdt" }
+blockstore = { path = "../blockstore" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# GraphQL parsing
+graphql-parser.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

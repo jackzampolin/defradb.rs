@@ -84,7 +84,7 @@ impl Serialize for FieldBlock {
 /// Serializes to: {"fieldDefinition": {...}}
 struct FieldCrdtWrapper<'a>(&'a FieldDefinitionDelta);
 
-impl<'a> Serialize for FieldCrdtWrapper<'a> {
+impl Serialize for FieldCrdtWrapper<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -116,7 +116,7 @@ impl Serialize for CollectionBlock {
 /// Serializes to: {"collectionDefinition": {...}}
 struct CollectionCrdtWrapper<'a>(&'a CollectionDefinitionDelta);
 
-impl<'a> Serialize for CollectionCrdtWrapper<'a> {
+impl Serialize for CollectionCrdtWrapper<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

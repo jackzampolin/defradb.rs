@@ -390,14 +390,14 @@ impl Reader for RocksDBTxn {
                     // For forward iteration, if we've passed the prefix range, stop
                     if !opts.reverse()
                         && key_vec.as_slice()
-                            >= end_bound.as_ref().map(|e| e.as_slice()).unwrap_or(&[0xFF])
+                            >= end_bound.as_deref().unwrap_or(&[0xFF])
                     {
                         break;
                     }
                     // For reverse iteration, if we're before the prefix range, stop
                     if opts.reverse()
                         && key_vec.as_slice()
-                            < start_bound.as_ref().map(|s| s.as_slice()).unwrap_or(&[])
+                            < start_bound.as_deref().unwrap_or(&[])
                     {
                         break;
                     }
@@ -549,7 +549,7 @@ impl Txn for RocksDBTxn {
         write_opts.set_sync(false); // Use WAL without fsync for better performance
 
         // Take ownership of the batch
-        let batch = std::mem::replace(&mut *self.batch.lock(), WriteBatch::default());
+        let batch = std::mem::take(&mut *self.batch.lock());
 
         match self.db.write_opt(batch, &write_opts) {
             Ok(_) => {

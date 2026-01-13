@@ -268,6 +268,7 @@ impl DefraBehaviour {
     }
 
     /// Send a PushLog response to a peer.
+    #[allow(clippy::result_large_err)]
     pub fn send_pushlog_response(
         &mut self,
         channel: request_response::ResponseChannel<PushLogReply>,

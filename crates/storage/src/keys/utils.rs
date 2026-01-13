@@ -67,7 +67,7 @@ pub fn encode_uvarint_ascending(mut buf: Vec<u8>, value: u64) -> Vec<u8> {
         buf.push((v & 0xFF) as u8);
     } else {
         // Determine number of bytes needed
-        let bytes_needed = ((64 - value.leading_zeros() + 7) / 8) as usize;
+        let bytes_needed = (64 - value.leading_zeros()).div_ceil(8) as usize;
         buf.push(0xF7 + bytes_needed as u8);
 
         // Encode big-endian
