@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 use crdt::{
     composite::{CompositeDAG, CompositeDelta, FieldDelta},
-    traits::{Context, ReplicatedData, ValueReader},
+    traits::{Context, PriorityReader, ReplicatedData, ValueReader},
     Counter, CounterDelta, Lww, LwwDelta,
 };
 use defra_core::{store::Store, types::DocId, Error, Result};
@@ -24,6 +24,7 @@ use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 
 // ============================================================================
@@ -70,12 +71,22 @@ impl Store for MemoryStore {
     }
 }
 
+/// Configuration for which operations should fail
+#[derive(Debug, Clone, Default)]
+struct FailureConfig {
+    /// Fail set operations after this many successful calls
+    fail_set_after: Option<usize>,
+    /// Fail has operations after this many successful calls
+    fail_has_after: Option<usize>,
+    /// Only fail on keys matching this prefix
+    fail_key_prefix: Option<Vec<u8>>,
+}
+
 /// Failing store for crash recovery testing
+/// Supports runtime configuration changes to simulate recovery scenarios
 struct FailingStore {
     inner: MemoryStore,
-    fail_set_after: Option<usize>,
-    fail_has_after: Option<usize>,
-    fail_key_prefix: Option<Vec<u8>>,
+    config: Arc<StdMutex<FailureConfig>>,
     set_count: AtomicUsize,
     has_count: AtomicUsize,
 }
@@ -84,34 +95,38 @@ impl FailingStore {
     fn new() -> Self {
         Self {
             inner: MemoryStore::new(),
-            fail_set_after: None,
-            fail_has_after: None,
-            fail_key_prefix: None,
+            config: Arc::new(StdMutex::new(FailureConfig::default())),
             set_count: AtomicUsize::new(0),
             has_count: AtomicUsize::new(0),
         }
     }
 
-    fn fail_set_after(mut self, n: usize) -> Self {
-        self.fail_set_after = Some(n);
+    fn fail_set_after(self, n: usize) -> Self {
+        self.config.lock().unwrap().fail_set_after = Some(n);
         self
     }
 
-    fn fail_has_after(mut self, n: usize) -> Self {
-        self.fail_has_after = Some(n);
+    fn fail_has_after(self, n: usize) -> Self {
+        self.config.lock().unwrap().fail_has_after = Some(n);
         self
     }
 
-    fn for_key_prefix(mut self, prefix: Vec<u8>) -> Self {
-        self.fail_key_prefix = Some(prefix);
+    fn for_key_prefix(self, prefix: Vec<u8>) -> Self {
+        self.config.lock().unwrap().fail_key_prefix = Some(prefix);
         self
     }
 
-    fn should_fail(&self, key: &[u8]) -> bool {
-        match &self.fail_key_prefix {
-            Some(p) => key.starts_with(p),
-            None => true,
-        }
+    /// Disable all failures (simulate recovery)
+    fn stop_failing(&self) {
+        let mut config = self.config.lock().unwrap();
+        config.fail_set_after = None;
+        config.fail_has_after = None;
+    }
+
+    /// Reset operation counts
+    fn reset_counts(&self) {
+        self.set_count.store(0, Ordering::SeqCst);
+        self.has_count.store(0, Ordering::SeqCst);
     }
 }
 
@@ -123,10 +138,23 @@ impl Store for FailingStore {
 
     async fn set(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let count = self.set_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(fail_after) = self.fail_set_after {
-            if count >= fail_after && self.should_fail(key) {
-                return Err(Error::Storage("simulated set failure".into()));
+        let should_fail = {
+            let config = self.config.lock().unwrap();
+            if let Some(fail_after) = config.fail_set_after {
+                if count >= fail_after {
+                    match &config.fail_key_prefix {
+                        Some(p) => key.starts_with(p),
+                        None => true,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+        if should_fail {
+            return Err(Error::Storage("simulated set failure".into()));
         }
         self.inner.set(key, value).await
     }
@@ -137,10 +165,23 @@ impl Store for FailingStore {
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
         let count = self.has_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(fail_after) = self.fail_has_after {
-            if count >= fail_after && self.should_fail(key) {
-                return Err(Error::Storage("simulated has failure".into()));
+        let should_fail = {
+            let config = self.config.lock().unwrap();
+            if let Some(fail_after) = config.fail_has_after {
+                if count >= fail_after {
+                    match &config.fail_key_prefix {
+                        Some(p) => key.starts_with(p),
+                        None => true,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+        if should_fail {
+            return Err(Error::Storage("simulated has failure".into()));
         }
         self.inner.has(key).await
     }
@@ -399,6 +440,202 @@ proptest! {
 
             assert_eq!(&value0, &value1);
             assert_eq!(&value1, &value2);
+        });
+    }
+
+    /// Property: LWW partition-heal convergence - replicas that diverge during partition
+    /// should converge when they sync after the partition heals
+    #[test]
+    fn test_lww_partition_heal_convergence(
+        replica_a_deltas in prop::collection::vec(
+            (1u64..10000, prop::collection::vec(any::<u8>(), 1..20)),
+            2..5
+        ),
+        replica_b_deltas in prop::collection::vec(
+            (1u64..10000, prop::collection::vec(any::<u8>(), 1..20)),
+            2..5
+        ),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create two replicas that will be "partitioned"
+            let store_a = Arc::new(MemoryStore::new());
+            let mut replica_a = Lww::new(
+                store_a.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "field1".to_string(),
+            ).unwrap();
+
+            let store_b = Arc::new(MemoryStore::new());
+            let mut replica_b = Lww::new(
+                store_b.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "field1".to_string(),
+            ).unwrap();
+
+            // Create deltas for each replica
+            let deltas_a: Vec<LwwDelta> = replica_a_deltas
+                .iter()
+                .map(|(priority, data)| {
+                    LwwDelta::new(
+                        b"doc1".to_vec(),
+                        "field1".to_string(),
+                        *priority,
+                        "v1".to_string(),
+                        data.clone(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+
+            let deltas_b: Vec<LwwDelta> = replica_b_deltas
+                .iter()
+                .map(|(priority, data)| {
+                    LwwDelta::new(
+                        b"doc1".to_vec(),
+                        "field1".to_string(),
+                        *priority,
+                        "v1".to_string(),
+                        data.clone(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+
+            // PARTITION: Each replica only sees its own deltas
+            for delta in &deltas_a {
+                replica_a.merge(&ctx, delta).await.unwrap();
+            }
+            for delta in &deltas_b {
+                replica_b.merge(&ctx, delta).await.unwrap();
+            }
+
+            // At this point, replicas have diverged
+            // (unless they happen to have the same highest priority)
+
+            // PARTITION HEALS: Exchange deltas
+            // Replica A receives B's deltas
+            for delta in &deltas_b {
+                replica_a.merge(&ctx, delta).await.unwrap();
+            }
+            // Replica B receives A's deltas
+            for delta in &deltas_a {
+                replica_b.merge(&ctx, delta).await.unwrap();
+            }
+
+            // Both replicas should now converge to the same value
+            let value_a = replica_a.value().await.unwrap();
+            let value_b = replica_b.value().await.unwrap();
+
+            assert_eq!(value_a, value_b, "replicas should converge after partition heals");
+        });
+    }
+
+    /// Property: Counter partition-heal convergence - counters from partitioned
+    /// replicas should sum correctly when they sync
+    #[test]
+    fn test_counter_partition_heal_convergence(
+        replica_a_increments in prop::collection::vec(1i64..100, 2..5),
+        replica_b_increments in prop::collection::vec(1i64..100, 2..5),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create two replicas
+            let store_a = Arc::new(MemoryStore::new());
+            let mut replica_a = Counter::new(
+                store_a.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Int64,
+            ).unwrap();
+
+            let store_b = Arc::new(MemoryStore::new());
+            let mut replica_b = Counter::new(
+                store_b.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Int64,
+            ).unwrap();
+
+            // Create deltas with unique nonces
+            let mut nonce = 1i64;
+            let deltas_a: Vec<CounterDelta> = replica_a_increments
+                .iter()
+                .map(|inc| {
+                    let delta = CounterDelta::new_int64(
+                        b"doc1".to_vec(),
+                        "count".to_string(),
+                        10,
+                        nonce,
+                        "v1".to_string(),
+                        *inc,
+                    ).unwrap();
+                    nonce += 1;
+                    delta
+                })
+                .collect();
+
+            let deltas_b: Vec<CounterDelta> = replica_b_increments
+                .iter()
+                .map(|inc| {
+                    let delta = CounterDelta::new_int64(
+                        b"doc1".to_vec(),
+                        "count".to_string(),
+                        10,
+                        nonce,
+                        "v1".to_string(),
+                        *inc,
+                    ).unwrap();
+                    nonce += 1;
+                    delta
+                })
+                .collect();
+
+            // PARTITION: Each replica only sees its own deltas
+            for delta in &deltas_a {
+                replica_a.merge(&ctx, delta).await.unwrap();
+            }
+            for delta in &deltas_b {
+                replica_b.merge(&ctx, delta).await.unwrap();
+            }
+
+            // PARTITION HEALS: Exchange deltas
+            for delta in &deltas_b {
+                replica_a.merge(&ctx, delta).await.unwrap();
+            }
+            for delta in &deltas_a {
+                replica_b.merge(&ctx, delta).await.unwrap();
+            }
+
+            // Both replicas should have the same value (sum of all increments)
+            let value_a_bytes = replica_a.value().await.unwrap();
+            let value_a = i64::from_be_bytes(value_a_bytes.try_into().unwrap());
+
+            let value_b_bytes = replica_b.value().await.unwrap();
+            let value_b = i64::from_be_bytes(value_b_bytes.try_into().unwrap());
+
+            let expected_sum: i64 = replica_a_increments.iter().sum::<i64>()
+                + replica_b_increments.iter().sum::<i64>();
+
+            assert_eq!(value_a, expected_sum, "replica A should have sum of all increments");
+            assert_eq!(value_b, expected_sum, "replica B should have sum of all increments");
+            assert_eq!(value_a, value_b, "replicas should converge");
         });
     }
 
@@ -935,6 +1172,259 @@ proptest! {
         });
     }
 
+    /// Property: Float64 Counter with extreme values (near overflow/underflow boundaries)
+    /// Tests commutativity with values near IEEE 754 limits
+    #[test]
+    fn test_counter_float64_extreme_values(
+        // Use prop_oneof to mix normal values with extreme values
+        inc1 in prop::strategy::Union::new(vec![
+            // Normal range
+            proptest::num::f64::NORMAL.boxed(),
+            // Near max positive
+            (1e307f64..1e308).boxed(),
+            // Near min positive (subnormal boundary)
+            (f64::MIN_POSITIVE..1e-307).boxed(),
+            // Near max negative
+            (-1e308f64..-1e307).boxed(),
+        ]),
+        inc2 in prop::strategy::Union::new(vec![
+            proptest::num::f64::NORMAL.boxed(),
+            (1e307f64..1e308).boxed(),
+            (f64::MIN_POSITIVE..1e-307).boxed(),
+            (-1e308f64..-1e307).boxed(),
+        ]),
+        nonce1 in any::<i64>(),
+        nonce2 in any::<i64>(),
+    ) {
+        // Skip if nonces are the same or values are not finite
+        if nonce1 == nonce2 || !inc1.is_finite() || !inc2.is_finite() {
+            return Ok(());
+        }
+
+        // Skip if sum would overflow to infinity
+        let expected_sum = inc1 + inc2;
+        if !expected_sum.is_finite() {
+            return Ok(());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            // Create two counters
+            let store1 = Arc::new(MemoryStore::new());
+            let mut counter1 = Counter::new(
+                store1.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            ).unwrap();
+
+            let store2 = Arc::new(MemoryStore::new());
+            let mut counter2 = Counter::new(
+                store2.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            ).unwrap();
+
+            let delta1 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            ).unwrap();
+
+            let delta2 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            ).unwrap();
+
+            // Merge in different orders
+            counter1.merge(&ctx, &delta1).await.unwrap();
+            counter1.merge(&ctx, &delta2).await.unwrap();
+
+            counter2.merge(&ctx, &delta2).await.unwrap();
+            counter2.merge(&ctx, &delta1).await.unwrap();
+
+            let value1_bytes = counter1.value().await.unwrap();
+            let value2_bytes = counter2.value().await.unwrap();
+
+            let value1 = f64::from_be_bytes(value1_bytes.try_into().unwrap());
+            let value2 = f64::from_be_bytes(value2_bytes.try_into().unwrap());
+
+            // Commutativity: values must be bit-identical
+            assert_eq!(value1.to_bits(), value2.to_bits(),
+                "extreme values must commute: {} vs {} (inc1={}, inc2={})",
+                value1, value2, inc1, inc2);
+
+            // Value should match expected sum (within relative tolerance for large values)
+            let tolerance = if expected_sum.abs() > 1e300 {
+                expected_sum.abs() * 1e-10  // Relative tolerance for very large numbers
+            } else {
+                1e-10  // Absolute tolerance for normal range
+            };
+            assert!((value1 - expected_sum).abs() < tolerance,
+                "value {} should be approximately {} (tolerance {})",
+                value1, expected_sum, tolerance);
+        });
+    }
+
+    /// Property: Float64 Counter handles very small increments correctly
+    /// Tests precision preservation near subnormal boundary
+    #[test]
+    fn test_counter_float64_small_increments(
+        // Generate very small values
+        mantissa in 1u64..((1u64 << 52) - 1),
+        exponent in -1022i32..-900,  // Near subnormal boundary
+        nonce1 in 1i64..1000000,
+        nonce2 in 1000001i64..2000000,
+    ) {
+        // Construct small positive values manually
+        let inc1 = f64::from_bits(
+            ((exponent + 1023) as u64) << 52 | mantissa
+        );
+        let inc2 = f64::from_bits(
+            ((exponent + 1023 + 10) as u64) << 52 | (mantissa / 2)  // Different exponent
+        );
+
+        if !inc1.is_finite() || !inc2.is_finite() || inc1 <= 0.0 || inc2 <= 0.0 {
+            return Ok(());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let store = Arc::new(MemoryStore::new());
+            let mut counter = Counter::new(
+                store.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            ).unwrap();
+
+            let delta1 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            ).unwrap();
+
+            let delta2 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            ).unwrap();
+
+            counter.merge(&ctx, &delta1).await.unwrap();
+            counter.merge(&ctx, &delta2).await.unwrap();
+
+            let value_bytes = counter.value().await.unwrap();
+            let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+
+            // Value should be positive and finite
+            assert!(value.is_finite(), "sum of small values should be finite");
+            assert!(value > 0.0, "sum of positive small values should be positive");
+
+            // Should be at least as large as the larger increment
+            let max_inc = inc1.max(inc2);
+            assert!(value >= max_inc, "sum {} should be >= larger increment {}", value, max_inc);
+        });
+    }
+
+    /// Property: Float64 Counter handles near-overflow gracefully
+    #[test]
+    fn test_counter_float64_near_overflow(
+        // Values that when added approach but don't exceed MAX
+        base in (f64::MAX / 10.0)..(f64::MAX / 5.0),
+        factor in 0.5f64..0.9,
+        nonce1 in 1i64..1000000,
+        nonce2 in 1000001i64..2000000,
+        nonce3 in 2000001i64..3000000,
+    ) {
+        let inc1 = base;
+        let inc2 = base * factor;
+        let inc3 = -(base * (factor + 0.1));  // Subtract to avoid overflow
+
+        // Extra safety: skip if sum would overflow
+        let expected = inc1 + inc2 + inc3;
+        if !inc1.is_finite() || !inc2.is_finite() || !inc3.is_finite() || !expected.is_finite() {
+            return Ok(());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let store = Arc::new(MemoryStore::new());
+            let mut counter = Counter::new(
+                store.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Float64,
+            ).unwrap();
+
+            let delta1 = CounterDelta::new_float64(
+                b"doc1".to_vec(), "count".to_string(), 10, nonce1, "v1".to_string(), inc1,
+            ).unwrap();
+            let delta2 = CounterDelta::new_float64(
+                b"doc1".to_vec(), "count".to_string(), 20, nonce2, "v1".to_string(), inc2,
+            ).unwrap();
+            let delta3 = CounterDelta::new_float64(
+                b"doc1".to_vec(), "count".to_string(), 30, nonce3, "v1".to_string(), inc3,
+            ).unwrap();
+
+            counter.merge(&ctx, &delta1).await.unwrap();
+            counter.merge(&ctx, &delta2).await.unwrap();
+            counter.merge(&ctx, &delta3).await.unwrap();
+
+            let value_bytes = counter.value().await.unwrap();
+            let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+
+            // Result should be finite (we subtracted enough to prevent overflow)
+            assert!(value.is_finite(),
+                "result should be finite: {} (inc1={}, inc2={}, inc3={})",
+                value, inc1, inc2, inc3);
+
+            // Verify approximate sum
+            let expected = inc1 + inc2 + inc3;
+            if expected.is_finite() {
+                let tolerance = expected.abs() * 1e-10;
+                assert!((value - expected).abs() < tolerance,
+                    "value {} should be approximately {}", value, expected);
+            }
+        });
+    }
+
     // ------------------------------------------------------------------------
     // Composite CRDT Tests
     // ------------------------------------------------------------------------
@@ -1422,6 +1912,252 @@ async fn test_counter_concurrent_increments() {
     assert_eq!(value, 10);
 }
 
+#[tokio::test]
+async fn test_counter_concurrent_same_delta_idempotency() {
+    // Multiple tasks try to apply the SAME delta concurrently
+    // Tests nonce idempotency under race conditions
+    let store = Arc::new(MemoryStore::new());
+    let barrier = Arc::new(tokio::sync::Barrier::new(10));
+
+    // Create the same delta that all tasks will try to apply
+    let shared_delta = CounterDelta::new_int64(
+        b"doc1".to_vec(),
+        "count".to_string(),
+        10,
+        99999, // Same nonce for all
+        "v1".to_string(),
+        100, // Increment by 100
+    )
+    .unwrap();
+
+    let mut handles = Vec::new();
+
+    for _ in 0..10 {
+        let store_clone = store.clone();
+        let barrier_clone = barrier.clone();
+        let delta_clone = shared_delta.clone();
+
+        let handle = tokio::spawn(async move {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let mut counter = Counter::new(
+                store_clone,
+                "v1".to_string(),
+                b"doc1",
+                "count".to_string(),
+                true,
+                crdt::counter::NumericKind::Int64,
+            )
+            .unwrap();
+
+            // Wait for all tasks to be ready, maximizing concurrent execution
+            barrier_clone.wait().await;
+
+            // All tasks try to apply the same delta at once
+            counter.merge(&ctx, &delta_clone).await
+        });
+
+        handles.push(handle);
+    }
+
+    // Collect results
+    let mut applied_count = 0;
+    let mut skipped_count = 0;
+
+    for handle in handles {
+        match handle.await.unwrap().unwrap() {
+            crdt::MergeResult::Applied => applied_count += 1,
+            crdt::MergeResult::SkippedAlreadyApplied { .. } => skipped_count += 1,
+            _ => panic!("unexpected merge result"),
+        }
+    }
+
+    // Exactly ONE should have applied, the rest should be skipped
+    assert_eq!(applied_count, 1, "exactly one task should apply the delta");
+    assert_eq!(skipped_count, 9, "other tasks should see nonce already applied");
+
+    // Final value should be 100 (not 1000 from all 10 applying)
+    let counter = Counter::new(
+        store.clone(),
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        crdt::counter::NumericKind::Int64,
+    )
+    .unwrap();
+    let value_bytes = counter.value().await.unwrap();
+    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+
+    assert_eq!(value, 100, "idempotency should prevent double-counting");
+}
+
+#[tokio::test]
+async fn test_lww_concurrent_read_modify_write() {
+    // Test concurrent read-modify-write scenarios
+    // Multiple tasks read current state, decide to update, then write
+    // With proper CRDT semantics, highest priority should still win
+    let store = Arc::new(MemoryStore::new());
+    let barrier = Arc::new(tokio::sync::Barrier::new(20));
+
+    let mut handles = Vec::new();
+
+    // First wave: 10 tasks with low priorities
+    for i in 0..10 {
+        let store_clone = store.clone();
+        let barrier_clone = barrier.clone();
+
+        let handle = tokio::spawn(async move {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let mut lww = Lww::new(
+                store_clone.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "name".to_string(),
+            )
+            .unwrap();
+
+            // Read current priority before barrier
+            let current_priority = lww.priority().await.unwrap_or(0);
+
+            // Wait for all tasks to be at the same point
+            barrier_clone.wait().await;
+
+            // Create delta with priority based on current + offset
+            // This simulates a read-modify-write pattern
+            let new_priority = current_priority + (i as u64) + 1;
+            let delta = LwwDelta::new(
+                b"doc1".to_vec(),
+                "name".to_string(),
+                new_priority,
+                "v1".to_string(),
+                format!("low_priority_{}", i).into_bytes(),
+            )
+            .unwrap();
+
+            lww.merge(&ctx, &delta).await
+        });
+
+        handles.push(handle);
+    }
+
+    // Second wave: 10 tasks with high priorities
+    for i in 0..10 {
+        let store_clone = store.clone();
+        let barrier_clone = barrier.clone();
+
+        let handle = tokio::spawn(async move {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let mut lww = Lww::new(
+                store_clone.clone(),
+                "v1".to_string(),
+                b"doc1",
+                "name".to_string(),
+            )
+            .unwrap();
+
+            // Wait for all tasks to be at the same point
+            barrier_clone.wait().await;
+
+            // High priority deltas that should win
+            let new_priority = 10000 + (i as u64);
+            let delta = LwwDelta::new(
+                b"doc1".to_vec(),
+                "name".to_string(),
+                new_priority,
+                "v1".to_string(),
+                format!("high_priority_{}", i).into_bytes(),
+            )
+            .unwrap();
+
+            lww.merge(&ctx, &delta).await
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all merges to complete
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    // The final value should be the one with highest priority (10009)
+    let lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+    let value = lww.value().await.unwrap();
+    let priority = lww.priority().await.unwrap();
+
+    // Highest priority is 10009 (10000 + 9)
+    assert_eq!(priority, 10009);
+    assert_eq!(value, b"high_priority_9");
+}
+
+#[tokio::test]
+async fn test_lww_shared_instance_concurrent_merge() {
+    // Test with a truly shared LWW instance (wrapped in Arc<Mutex>)
+    // This tests that the CRDT behaves correctly even when serialized through a lock
+    let store = Arc::new(MemoryStore::new());
+    let lww = Arc::new(Mutex::new(
+        Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap(),
+    ));
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(10));
+    let mut handles = Vec::new();
+
+    for i in 0..10 {
+        let lww_clone = lww.clone();
+        let barrier_clone = barrier.clone();
+
+        let handle = tokio::spawn(async move {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let delta = LwwDelta::new(
+                b"doc1".to_vec(),
+                "name".to_string(),
+                (i as u64) * 100 + 50, // Priorities: 50, 150, 250, ..., 950
+                "v1".to_string(),
+                format!("shared_value_{}", i).into_bytes(),
+            )
+            .unwrap();
+
+            // Wait for all tasks to be ready
+            barrier_clone.wait().await;
+
+            // Acquire lock and merge
+            let mut guard = lww_clone.lock().await;
+            guard.merge(&ctx, &delta).await
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all merges to complete
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    // The final value should be the one with highest priority (950)
+    let guard = lww.lock().await;
+    let value = guard.value().await.unwrap();
+    let priority = guard.priority().await.unwrap();
+
+    assert_eq!(priority, 950);
+    assert_eq!(value, b"shared_value_9");
+}
+
 // ============================================================================
 // Fuzz Tests for Malformed Data
 // ============================================================================
@@ -1458,12 +2194,17 @@ proptest! {
         });
     }
 
-    /// Fuzz test: Random bytes as counter data - should handle gracefully
+    /// Fuzz test: Corrupted storage data should be handled gracefully during merge
     #[test]
-    fn test_fuzz_counter_random_data_length(
+    fn test_fuzz_counter_corrupted_storage_during_merge(
         data_len in 0usize..20,
         nonce in any::<i64>(),
     ) {
+        // Skip length 8 as that's valid
+        if data_len == 8 {
+            return Ok(());
+        }
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let ctx = Context {
@@ -1472,6 +2213,13 @@ proptest! {
             };
 
             let store = Arc::new(MemoryStore::new());
+
+            // Inject corrupted data directly into the store
+            // This simulates storage corruption or malformed data
+            let value_key = b"/data/v1/doc1/count";
+            let bad_data: Vec<u8> = vec![0u8; data_len];
+            store.set(value_key, &bad_data).await.unwrap();
+
             let mut counter = Counter::new(
                 store.clone(),
                 "v1".to_string(),
@@ -1481,31 +2229,27 @@ proptest! {
                 crdt::counter::NumericKind::Int64,
             ).unwrap();
 
-            // Create delta with wrong data length
-            let bad_data: Vec<u8> = vec![0u8; data_len];
-
-            // Manually construct a CounterDelta with bad data
-            // This simulates receiving corrupted data over network
+            // Create a valid delta
             let delta = CounterDelta::new_int64(
                 b"doc1".to_vec(),
                 "count".to_string(),
                 10,
                 nonce,
                 "v1".to_string(),
-                0, // Will be overwritten
+                5,
             ).unwrap();
 
-            // The merge should either succeed (if data_len == 8) or fail gracefully
+            // The merge should fail gracefully (corrupt storage detected)
             let result = counter.merge(&ctx, &delta).await;
 
-            // Should not panic, should either succeed or return error
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    // Error is fine, as long as it doesn't panic
-                    let _ = e.to_string();
-                }
-            }
+            // Should not panic, should return error about invalid data length
+            assert!(result.is_err(), "merge should fail with corrupted storage data");
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string().contains("invalid counter value length"),
+                "error should mention invalid length, got: {}",
+                err
+            );
         });
     }
 
@@ -1617,10 +2361,17 @@ proptest! {
 async fn test_counter_crash_after_nonce_before_value() {
     // Simulate crash after marking nonce but before updating value
     // The nonce write succeeds, then the value write fails
-    let store = Arc::new(
-        FailingStore::new()
-            .fail_set_after(1), // First set (nonce) succeeds, second set (value) fails
-    );
+    //
+    // Expected behavior per counter.rs documentation:
+    // "If crash occurs after nonce but before value update: delta is lost (under-count)"
+    // This is safer than double-counting because it preserves idempotency.
+    let store = Arc::new(FailingStore::new());
+
+    // Configure to fail after first set (nonce succeeds, value fails)
+    {
+        let mut config = store.config.lock().unwrap();
+        config.fail_set_after = Some(1);
+    }
 
     let mut counter = Counter::new(
         store.clone(),
@@ -1647,15 +2398,17 @@ async fn test_counter_crash_after_nonce_before_value() {
     )
     .unwrap();
 
-    // The merge should fail
+    // The merge should fail (nonce written, value write failed)
     let result = counter.merge(&ctx, &delta).await;
-    assert!(result.is_err());
+    assert!(result.is_err(), "merge should fail when value write fails");
 
-    // Now simulate recovery - create a new counter instance
-    // The nonce was marked, so re-applying the delta should skip it
-    let store2 = Arc::new(MemoryStore::new());
-    let mut counter2 = Counter::new(
-        store2.clone(),
+    // Simulate recovery: stop failing and reset counts
+    store.stop_failing();
+    store.reset_counts();
+
+    // Create a new counter instance on the SAME store (simulating process restart)
+    let mut counter_recovered = Counter::new(
+        store.clone(),
         "v1".to_string(),
         b"doc1",
         "count".to_string(),
@@ -1664,12 +2417,36 @@ async fn test_counter_crash_after_nonce_before_value() {
     )
     .unwrap();
 
-    // Apply the delta to the new store - should work
-    counter2.merge(&ctx, &delta).await.unwrap();
+    // Re-apply the same delta - should be SKIPPED because nonce was already marked
+    let result = counter_recovered.merge(&ctx, &delta).await.unwrap();
+    assert!(
+        matches!(result, crdt::MergeResult::SkippedAlreadyApplied { .. }),
+        "delta should be skipped because nonce was already marked, got {:?}",
+        result
+    );
 
-    let value_bytes = counter2.value().await.unwrap();
-    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-    assert_eq!(value, 5);
+    // Verify the value key doesn't exist in the store (value write never happened)
+    // This is the "under-count on crash" behavior documented in counter.rs:
+    // "If crash occurs after nonce but before value update: delta is lost"
+    let value_key = b"/data/v1/doc1/count";
+    let stored_value = store.get(value_key).await.unwrap();
+    assert!(
+        stored_value.is_none(),
+        "value should not exist in store because value write never succeeded"
+    );
+
+    // Verify the nonce IS marked in the store (proving nonce write succeeded)
+    // Nonce key format: /data/{schema}/{doc}/{field}/nonces/{nonce_bytes}
+    let nonce_bytes: Vec<u8> = {
+        let mut key = b"/data/v1/doc1/count/nonces/".to_vec();
+        key.extend_from_slice(&12345i64.to_be_bytes());
+        key
+    };
+    let nonce_exists = store.has(&nonce_bytes).await.unwrap();
+    assert!(
+        nonce_exists,
+        "nonce should exist in store (nonce write succeeded before crash)"
+    );
 }
 
 #[tokio::test]
@@ -1840,4 +2617,71 @@ async fn test_composite_all_fields_rejected() {
     let count_bytes = store.get(b"/data/v1/doc1/count").await.unwrap().unwrap();
     let count = i64::from_be_bytes(count_bytes.try_into().unwrap());
     assert_eq!(count, 5);
+}
+
+#[tokio::test]
+async fn test_composite_partial_storage_failure() {
+    // Test what happens when storage fails during a multi-field composite delta
+    // We configure the store to fail on counter-related writes only
+    // This tests the atomicity (or lack thereof) of composite operations
+    let store = Arc::new(FailingStore::new());
+
+    // Configure to fail on counter field writes only
+    // Key format: /data/v1/doc1/count or /data/v1/doc1/count/nonces/...
+    {
+        let mut config = store.config.lock().unwrap();
+        config.fail_set_after = Some(0); // Fail immediately
+        config.fail_key_prefix = Some(b"/data/v1/doc1/count".to_vec());
+    }
+
+    let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+    composite.register_lww_field("name".to_string());
+    composite.register_counter_field("count".to_string());
+
+    let ctx = Context {
+        doc_id: DocId::new("doc1"),
+        schema_version: "v1".to_string(),
+    };
+
+    // Create a delta with both LWW and Counter updates
+    let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 1000).unwrap();
+    delta
+        .add_field_delta(
+            "name".to_string(),
+            FieldDelta::Lww {
+                priority: 1000,
+                data: b"Alice".to_vec(),
+            },
+        )
+        .unwrap();
+    delta
+        .add_field_delta(
+            "count".to_string(),
+            FieldDelta::Counter {
+                priority: 10,
+                nonce: 1,
+                data: 5i64.to_be_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+
+    // The merge should fail because counter write fails
+    let result = composite.merge(&ctx, &delta).await;
+    assert!(result.is_err(), "merge should fail when storage fails");
+
+    // LWW field should have been written (only counter writes fail)
+    let name = store.get(b"/data/v1/doc1/name").await.unwrap();
+    assert!(name.is_some(), "LWW field should be written before counter fails");
+    assert_eq!(name.unwrap(), b"Alice");
+
+    // Counter should NOT be written (storage failed for counter keys)
+    let count = store.get(b"/data/v1/doc1/count").await.unwrap();
+    assert!(
+        count.is_none(),
+        "counter should not be written after storage failure"
+    );
+
+    // This documents important behavior: composite operations are NOT atomic.
+    // If storage fails mid-way, partial state may be written.
+    // Applications requiring atomicity should use transactional storage.
 }

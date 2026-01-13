@@ -583,53 +583,11 @@ mod tests {
     }
 
     #[test]
-    fn test_lww_delta_empty_field_name() {
-        let result = LwwDelta::new(
-            b"doc1".to_vec(),
-            "".to_string(),
-            10,
-            "v1".to_string(),
-            b"value".to_vec(),
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field_name"));
-    }
+    fn test_lww_delta_validation_rejects_empty_values() {
+        // Test that empty doc_id, field_name, and schema_version are rejected
+        // for both new() and delete() constructors
 
-    #[test]
-    fn test_lww_delta_empty_schema_version() {
-        let result = LwwDelta::new(
-            b"doc1".to_vec(),
-            "name".to_string(),
-            10,
-            "".to_string(),
-            b"value".to_vec(),
-        );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("schema_version_id"));
-    }
-
-    #[test]
-    fn test_lww_delta_delete_empty_field_name() {
-        let result = LwwDelta::delete(b"doc1".to_vec(), "".to_string(), 10, "v1".to_string());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field_name"));
-    }
-
-    #[test]
-    fn test_lww_delta_delete_empty_schema_version() {
-        let result = LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 10, "".to_string());
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("schema_version_id"));
-    }
-
-    #[test]
-    fn test_lww_delta_empty_doc_id() {
+        // Empty doc_id
         let result = LwwDelta::new(
             Vec::new(),
             "name".to_string(),
@@ -639,6 +597,36 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("doc_id"));
+
+        // Empty field_name
+        let result = LwwDelta::new(
+            b"doc1".to_vec(),
+            "".to_string(),
+            10,
+            "v1".to_string(),
+            b"value".to_vec(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+
+        let result = LwwDelta::delete(b"doc1".to_vec(), "".to_string(), 10, "v1".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+
+        // Empty schema_version_id
+        let result = LwwDelta::new(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            10,
+            "".to_string(),
+            b"value".to_vec(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
+
+        let result = LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 10, "".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
     }
 
     #[tokio::test]
@@ -938,5 +926,97 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.to_string().contains("field_name cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_lww_large_payload() {
+        // Test LWW with large payloads (1MB, 10MB)
+        // Verifies no memory issues or data corruption with large values
+        let store = Arc::new(MemoryStore::new());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "content".to_string()).unwrap();
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // 1MB payload
+        let large_data_1mb: Vec<u8> = (0..1_048_576).map(|i| (i % 256) as u8).collect();
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "content".to_string(),
+            100,
+            "v1".to_string(),
+            large_data_1mb.clone(),
+        )
+        .unwrap();
+
+        lww.merge(&ctx, &delta1).await.unwrap();
+        let retrieved = lww.value().await.unwrap();
+        assert_eq!(retrieved.len(), 1_048_576, "1MB payload should be stored correctly");
+        assert_eq!(retrieved, large_data_1mb, "1MB payload should match");
+
+        // 10MB payload with higher priority should overwrite
+        let large_data_10mb: Vec<u8> = (0..10_485_760).map(|i| ((i * 7) % 256) as u8).collect();
+        let delta2 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "content".to_string(),
+            200,
+            "v1".to_string(),
+            large_data_10mb.clone(),
+        )
+        .unwrap();
+
+        lww.merge(&ctx, &delta2).await.unwrap();
+        let retrieved = lww.value().await.unwrap();
+        assert_eq!(retrieved.len(), 10_485_760, "10MB payload should be stored correctly");
+        assert_eq!(retrieved, large_data_10mb, "10MB payload should match");
+    }
+
+    #[tokio::test]
+    async fn test_lww_large_payload_priority_rejected() {
+        // Test that large payloads with lower priority are correctly rejected
+        let store = Arc::new(MemoryStore::new());
+        let mut lww =
+            Lww::new(store.clone(), "v1".to_string(), b"doc1", "content".to_string()).unwrap();
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // First, set small value with high priority
+        let small_data = b"small value";
+        let delta1 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "content".to_string(),
+            1000,
+            "v1".to_string(),
+            small_data.to_vec(),
+        )
+        .unwrap();
+        lww.merge(&ctx, &delta1).await.unwrap();
+
+        // Try to overwrite with large payload but lower priority
+        let large_data: Vec<u8> = vec![0u8; 1_000_000]; // 1MB of zeros
+        let delta2 = LwwDelta::new(
+            b"doc1".to_vec(),
+            "content".to_string(),
+            500, // Lower priority
+            "v1".to_string(),
+            large_data,
+        )
+        .unwrap();
+
+        let result = lww.merge(&ctx, &delta2).await.unwrap();
+        assert!(
+            matches!(result, MergeResult::RejectedLowerPriority { .. }),
+            "large payload with lower priority should be rejected"
+        );
+
+        // Value should still be the small one
+        let retrieved = lww.value().await.unwrap();
+        assert_eq!(retrieved, small_data);
     }
 }

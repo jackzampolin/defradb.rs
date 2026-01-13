@@ -1058,6 +1058,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_counter_float64_precision_edge_cases() {
+        // This test documents float64 precision behavior.
+        // When adding very small numbers to very large numbers,
+        // the small numbers are lost due to floating-point precision limits.
         let store = Arc::new(MemoryStore::new());
         let mut counter = Counter::new(
             store,
@@ -1110,83 +1113,92 @@ mod tests {
         .unwrap();
         counter.merge(&ctx, &delta3).await.unwrap();
 
-        // Result should be close to the original small number
-        // Due to floating point precision, this tests that we don't lose the small value entirely
         let value_bytes = counter.value().await.unwrap();
         let arr: [u8; 8] = value_bytes.try_into().unwrap();
         let value = f64::from_be_bytes(arr);
 
-        // Value should be finite and very small (not exactly 1e-308 due to FP precision)
+        // Due to floating-point precision limits:
+        // 1e-308 + 1e308 = 1e308 (small number is lost)
+        // 1e308 - 1e308 = 0.0
+        // Result is exactly 0.0, NOT 1e-308
+        // This is expected IEEE 754 behavior, not a bug.
         assert!(value.is_finite());
-        assert!(value.abs() < 1e-100); // Should be very small
+        assert_eq!(value, 0.0, "precision loss is expected: 1e-308 + 1e308 - 1e308 = 0");
     }
 
-    #[test]
-    fn test_counter_delta_int64_empty_field_name() {
-        let result =
-            CounterDelta::new_int64(b"doc1".to_vec(), "".to_string(), 10, 1, "v1".to_string(), 5);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field_name"));
-    }
-
-    #[test]
-    fn test_counter_delta_int64_empty_schema_version() {
-        let result = CounterDelta::new_int64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            1,
-            "".to_string(),
-            5,
-        );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("schema_version_id"));
-    }
-
-    #[test]
-    fn test_counter_delta_float64_empty_field_name() {
-        let result = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "".to_string(),
-            10,
-            1,
+    #[tokio::test]
+    async fn test_counter_float64_precision_preserved_within_range() {
+        // When numbers are within similar magnitude, precision is preserved
+        let store = Arc::new(MemoryStore::new());
+        let mut counter = Counter::new(
+            store,
             "v1".to_string(),
-            5.0,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field_name"));
-    }
+            b"doc1",
+            "value".to_string(),
+            true,
+            NumericKind::Float64,
+        )
+        .unwrap();
 
-    #[test]
-    fn test_counter_delta_float64_empty_schema_version() {
-        let result = CounterDelta::new_float64(
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        // Add numbers of similar magnitude
+        let delta1 = CounterDelta::new_float64(
             b"doc1".to_vec(),
-            "count".to_string(),
+            "value".to_string(),
             10,
-            1,
-            "".to_string(),
-            5.0,
-        );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("schema_version_id"));
+            1001,
+            "v1".to_string(),
+            1.0,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta1).await.unwrap();
+
+        let delta2 = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "value".to_string(),
+            20,
+            1002,
+            "v1".to_string(),
+            0.1,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta2).await.unwrap();
+
+        let delta3 = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "value".to_string(),
+            30,
+            1003,
+            "v1".to_string(),
+            0.01,
+        )
+        .unwrap();
+        counter.merge(&ctx, &delta3).await.unwrap();
+
+        let value_bytes = counter.value().await.unwrap();
+        let arr: [u8; 8] = value_bytes.try_into().unwrap();
+        let value = f64::from_be_bytes(arr);
+
+        // 1.0 + 0.1 + 0.01 = 1.11
+        // Precision is preserved because numbers are similar magnitude
+        assert!((value - 1.11).abs() < 1e-10, "precision preserved: got {}", value);
     }
 
     #[test]
-    fn test_counter_delta_int64_empty_doc_id() {
+    fn test_counter_delta_validation_rejects_empty_values() {
+        // Test that empty doc_id, field_name, and schema_version are rejected
+        // for both int64 and float64 constructors
+
+        // Empty doc_id
         let result =
             CounterDelta::new_int64(Vec::new(), "count".to_string(), 10, 1, "v1".to_string(), 5);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("doc_id"));
-    }
 
-    #[test]
-    fn test_counter_delta_float64_empty_doc_id() {
         let result = CounterDelta::new_float64(
             Vec::new(),
             "count".to_string(),
@@ -1197,6 +1209,46 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("doc_id"));
+
+        // Empty field_name
+        let result =
+            CounterDelta::new_int64(b"doc1".to_vec(), "".to_string(), 10, 1, "v1".to_string(), 5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+
+        let result = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "".to_string(),
+            10,
+            1,
+            "v1".to_string(),
+            5.0,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+
+        // Empty schema_version_id
+        let result = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            1,
+            "".to_string(),
+            5,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
+
+        let result = CounterDelta::new_float64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            1,
+            "".to_string(),
+            5.0,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
     }
 
     #[tokio::test]
