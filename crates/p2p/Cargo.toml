@@ -6,5 +6,31 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "P2P networking for DefraDB using libp2p"
 
 [dependencies]
+# Internal crates
+defra-core = { path = "../defra-core" }
+crypto = { path = "../crypto" }
+# blockstore = { path = "../blockstore" }  # uncomment when ready
+# crdt = { path = "../crdt" }              # uncomment when ready
+
+# P2P
+libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio"] }
+multiaddr = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_cbor = { workspace = true }
+
+# Errors
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
