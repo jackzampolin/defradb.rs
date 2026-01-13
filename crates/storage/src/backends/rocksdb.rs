@@ -463,11 +463,12 @@ impl Reader for RocksDBTxn {
             })
             .collect();
 
-        if opts.reverse() {
+        let reverse = opts.reverse();
+        if reverse {
             data.reverse();
         }
 
-        Ok(Box::new(SimpleIterator { data, position: 0, closed: false }))
+        Ok(Box::new(SimpleIterator { data, position: 0, closed: false, reverse }))
     }
 }
 
@@ -623,6 +624,7 @@ struct SimpleIterator {
     data: Vec<KvPair>,
     position: usize,
     closed: bool,
+    reverse: bool,
 }
 
 #[async_trait]
@@ -653,8 +655,16 @@ impl Iterator for SimpleIterator {
             return Err(Error::Iterator("Iterator has been closed".into()));
         }
 
-        // Find first key >= seek_key
-        let pos = self.data.iter().position(|kv| kv.key_bytes() >= key);
+        // Find the position to seek to based on iteration direction.
+        // For forward iteration: find first key >= seek_key
+        // For reverse iteration: find first key <= seek_key
+        let pos = if self.reverse {
+            // Reverse mode: data is descending, find first key <= target
+            self.data.iter().position(|kv| kv.key_bytes() <= key)
+        } else {
+            // Forward mode: data is ascending, find first key >= target
+            self.data.iter().position(|kv| kv.key_bytes() >= key)
+        };
 
         match pos {
             Some(p) => {

@@ -431,6 +431,9 @@ struct MemoryIterator {
 
     /// Whether this is a keys-only iterator
     keys_only: bool,
+
+    /// Whether this iterator is in reverse mode
+    reverse: bool,
 }
 
 impl MemoryIterator {
@@ -465,7 +468,8 @@ impl MemoryIterator {
             .collect();
 
         // Apply reverse ordering
-        if opts.reverse() {
+        let reverse = opts.reverse();
+        if reverse {
             filtered.reverse();
         }
 
@@ -474,6 +478,7 @@ impl MemoryIterator {
             position: 0,
             closed: false,
             keys_only: opts.keys_only(),
+            reverse,
         })
     }
 }
@@ -509,20 +514,21 @@ impl Iterator for MemoryIterator {
             return Err(Error::Iterator("Iterator has been closed".into()));
         }
 
-        // Binary search for the key or next greater key
-        // Note: data is already sorted (from BTreeMap), but may be reversed
+        // Find the position to seek to based on iteration direction.
         // For forward iteration: find first key >= seek_key
-        // For reverse iteration: find first key <= seek_key (from current direction)
-
-        // Since data is pre-sorted and potentially reversed, we need to search accordingly
-        // The data is sorted in iteration order (forward or reverse)
-        let pos = self.data.iter().position(|(k, _)| {
-            // In forward order: k >= key
-            // In reverse order: k <= key
-            // Since we don't store the reverse flag, we just find the first match >= key
-            // and let the caller handle the semantics
-            k.as_slice() >= key
-        });
+        // For reverse iteration: find first key <= seek_key
+        //
+        // The data is stored in iteration order (reversed for reverse mode),
+        // so in reverse mode we're looking for k <= key in descending order.
+        let pos = if self.reverse {
+            // Reverse mode: data is [k4, k3, k2, k1] (descending)
+            // seek(k2) should find the first key <= k2, which is k2 at position 2
+            self.data.iter().position(|(k, _)| k.as_slice() <= key)
+        } else {
+            // Forward mode: data is [k1, k2, k3, k4] (ascending)
+            // seek(k2) should find the first key >= k2, which is k2 at position 1
+            self.data.iter().position(|(k, _)| k.as_slice() >= key)
+        };
 
         match pos {
             Some(p) => {
@@ -530,7 +536,7 @@ impl Iterator for MemoryIterator {
                 Ok(true)
             }
             None => {
-                // No key >= seek_key found, position at end
+                // No matching key found, position at end
                 self.position = self.data.len();
                 Ok(false)
             }
