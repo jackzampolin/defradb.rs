@@ -1238,4 +1238,361 @@ mod tests {
         let unmerged = blockstore.get_unmerged().await.unwrap();
         assert!(unmerged.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_concurrent_delete_during_read() {
+        // Verify behavior when delete races with read
+        // Either outcome is acceptable: read returns data OR read returns None
+        // But there should be no errors or panics
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+
+        let cid = test_cid();
+        let data = b"data that may be deleted";
+
+        // Put initial data
+        blockstore.put(&cid, data).await.unwrap();
+
+        // Run multiple iterations to increase chance of race
+        for _ in 0..10 {
+            // Re-add the block if it was deleted
+            if !blockstore.has(&cid).await.unwrap() {
+                blockstore.put(&cid, data).await.unwrap();
+            }
+
+            let bs_read = blockstore.clone();
+            let bs_delete = blockstore.clone();
+
+            // Race: concurrent read and delete
+            let (read_result, delete_result) =
+                tokio::join!(async move { bs_read.get(&cid).await }, async move {
+                    bs_delete.delete(&cid).await
+                });
+
+            // Delete should always succeed (idempotent)
+            assert!(delete_result.is_ok());
+
+            // Read should succeed (returning Some or None, but no error)
+            let read_value = read_result.unwrap();
+            // Either we got the data or it was already deleted - both are valid
+            assert!(
+                read_value.is_none() || read_value == Some(data.to_vec()),
+                "Read during delete should return None or valid data, got {:?}",
+                read_value
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_delete_and_has() {
+        // Verify has() behavior during concurrent delete
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+
+        let cid = test_cid();
+        blockstore.put(&cid, b"data").await.unwrap();
+
+        for _ in 0..10 {
+            if !blockstore.has(&cid).await.unwrap() {
+                blockstore.put(&cid, b"data").await.unwrap();
+            }
+
+            let bs_has = blockstore.clone();
+            let bs_delete = blockstore.clone();
+
+            let (has_result, delete_result) =
+                tokio::join!(async move { bs_has.has(&cid).await }, async move {
+                    bs_delete.delete(&cid).await
+                });
+
+            // Both operations should succeed without error
+            assert!(delete_result.is_ok());
+            assert!(has_result.is_ok());
+            // has() returns true or false depending on race timing - both valid
+        }
+    }
+
+    // ==================== Merge Lifecycle Edge Cases ====================
+
+    #[tokio::test]
+    async fn test_is_merged_after_delete_of_merged_block() {
+        // Test lifecycle: put -> merge -> delete -> is_merged
+        // After deleting a merged block, is_merged should return false
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        let cid = test_cid();
+        let data = b"block to merge then delete";
+
+        // Step 1: Put block (creates merge marker in P2P mode)
+        blockstore.put(&cid, data).await.unwrap();
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+
+        // Step 2: Mark as merged
+        blockstore.mark_as_merged(&cid).await.unwrap();
+        assert!(blockstore.is_merged(&cid).await.unwrap());
+
+        // Step 3: Delete the merged block
+        blockstore.delete(&cid).await.unwrap();
+
+        // Step 4: Verify is_merged returns false (block doesn't exist)
+        assert!(
+            !blockstore.is_merged(&cid).await.unwrap(),
+            "is_merged should return false for deleted block"
+        );
+
+        // Also verify block is actually gone
+        assert!(!blockstore.has(&cid).await.unwrap());
+        assert_eq!(blockstore.get(&cid).await.unwrap(), None);
+
+        // And not in unmerged list
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert!(!unmerged.contains(&cid));
+    }
+
+    #[tokio::test]
+    async fn test_is_merged_after_delete_of_unmerged_block() {
+        // Test lifecycle: put -> delete (without merging) -> is_merged
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        let cid = test_cid();
+
+        // Put block (unmerged)
+        blockstore.put(&cid, b"unmerged block").await.unwrap();
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+
+        // Delete without merging
+        blockstore.delete(&cid).await.unwrap();
+
+        // is_merged should return false
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+
+        // Verify cleanup - not in unmerged list either
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert!(!unmerged.contains(&cid));
+    }
+
+    #[tokio::test]
+    async fn test_merge_then_reput_then_delete() {
+        // Complex lifecycle: put -> merge -> delete -> put again -> check state
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        let cid = test_cid();
+
+        // Initial: put and merge
+        blockstore.put(&cid, b"first").await.unwrap();
+        blockstore.mark_as_merged(&cid).await.unwrap();
+        assert!(blockstore.is_merged(&cid).await.unwrap());
+
+        // Delete
+        blockstore.delete(&cid).await.unwrap();
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+
+        // Re-put (should create new merge marker in P2P mode)
+        blockstore.put(&cid, b"second").await.unwrap();
+
+        // Should be unmerged again (new block, new merge marker)
+        assert!(
+            !blockstore.is_merged(&cid).await.unwrap(),
+            "Re-added block should be unmerged"
+        );
+
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert!(
+            unmerged.contains(&cid),
+            "Re-added block should appear in unmerged list"
+        );
+    }
+
+    // ==================== Stress Tests ====================
+
+    #[tokio::test]
+    async fn test_stress_many_blocks() {
+        // Stress test with many blocks to verify scaling behavior
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        const NUM_BLOCKS: usize = 500;
+        let mut cids = Vec::with_capacity(NUM_BLOCKS);
+
+        // Generate and store many blocks
+        for i in 0..NUM_BLOCKS {
+            let data = format!("block data {}", i);
+            let cid = cid_from_data(data.as_bytes());
+            blockstore.put(&cid, data.as_bytes()).await.unwrap();
+            cids.push(cid);
+        }
+
+        // Verify all_cids returns all blocks
+        let all = blockstore.all_cids().await.unwrap();
+        assert_eq!(
+            all.len(),
+            NUM_BLOCKS,
+            "all_cids should return all {} blocks",
+            NUM_BLOCKS
+        );
+
+        // Verify all CIDs are present
+        for cid in &cids {
+            assert!(all.contains(cid), "Missing CID: {}", cid);
+        }
+
+        // Verify random access still works
+        for (i, cid) in cids.iter().enumerate().step_by(50) {
+            let expected = format!("block data {}", i);
+            let data = blockstore.get(cid).await.unwrap();
+            assert_eq!(data, Some(expected.into_bytes()));
+        }
+
+        // Verify has() for all blocks
+        for cid in &cids {
+            assert!(blockstore.has(cid).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stress_many_blocks_p2p_merge_tracking() {
+        // Stress test merge tracking with many blocks in P2P mode
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        const NUM_BLOCKS: usize = 200;
+        let mut cids = Vec::with_capacity(NUM_BLOCKS);
+
+        // Store many blocks (all unmerged initially)
+        for i in 0..NUM_BLOCKS {
+            let data = format!("p2p block {}", i);
+            let cid = cid_from_data(data.as_bytes());
+            blockstore.put(&cid, data.as_bytes()).await.unwrap();
+            cids.push(cid);
+        }
+
+        // All should be unmerged
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert_eq!(unmerged.len(), NUM_BLOCKS);
+
+        // Merge half of them
+        for cid in cids.iter().take(NUM_BLOCKS / 2) {
+            blockstore.mark_as_merged(cid).await.unwrap();
+        }
+
+        // Verify correct split
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert_eq!(
+            unmerged.len(),
+            NUM_BLOCKS / 2,
+            "Half should still be unmerged"
+        );
+
+        // Verify merged status
+        for (i, cid) in cids.iter().enumerate() {
+            let is_merged = blockstore.is_merged(cid).await.unwrap();
+            if i < NUM_BLOCKS / 2 {
+                assert!(is_merged, "Block {} should be merged", i);
+            } else {
+                assert!(!is_merged, "Block {} should be unmerged", i);
+            }
+        }
+
+        // all_cids should still return all blocks (merged or not)
+        let all = blockstore.all_cids().await.unwrap();
+        assert_eq!(all.len(), NUM_BLOCKS);
+    }
+
+    #[tokio::test]
+    async fn test_stress_put_many_batch() {
+        // Stress test put_many with large batches
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        const BATCH_SIZE: usize = 100;
+
+        // Generate batch of blocks
+        let blocks: Vec<(Cid, Vec<u8>)> = (0..BATCH_SIZE)
+            .map(|i| {
+                let data = format!("batch block {}", i).into_bytes();
+                let cid = cid_from_data(&data);
+                (cid, data)
+            })
+            .collect();
+
+        // Convert to references for put_many
+        let block_refs: Vec<(&Cid, &[u8])> =
+            blocks.iter().map(|(c, d)| (c, d.as_slice())).collect();
+
+        // Put all at once
+        blockstore.put_many(&block_refs).await.unwrap();
+
+        // Verify all were stored
+        for (cid, expected_data) in &blocks {
+            let data = blockstore.get(cid).await.unwrap();
+            assert_eq!(data.as_ref(), Some(expected_data));
+        }
+
+        // Verify count
+        let all = blockstore.all_cids().await.unwrap();
+        assert_eq!(all.len(), BATCH_SIZE);
+    }
+
+    #[tokio::test]
+    async fn test_stress_concurrent_operations() {
+        // Stress test with many concurrent operations
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+
+        // Pre-populate with some blocks
+        let mut cids = Vec::new();
+        for i in 0..50 {
+            let data = format!("preload {}", i);
+            let cid = cid_from_data(data.as_bytes());
+            blockstore.put(&cid, data.as_bytes()).await.unwrap();
+            cids.push(cid);
+        }
+
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        // Spawn many concurrent readers
+        for cid in cids.iter().cloned() {
+            let bs = blockstore.clone();
+            let counter = success_count.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    if bs.get(&cid).await.is_ok() {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+
+        // Spawn concurrent writers (new blocks)
+        for i in 0..20 {
+            let bs = blockstore.clone();
+            let counter = success_count.clone();
+            handles.push(tokio::spawn(async move {
+                let data = format!("concurrent write {}", i);
+                let cid = cid_from_data(data.as_bytes());
+                if bs.put(&cid, data.as_bytes()).await.is_ok() {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        // Wait for all operations
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // All operations should have succeeded
+        let total_ops = success_count.load(Ordering::Relaxed);
+        assert!(
+            total_ops >= 500,
+            "Expected at least 500 successful ops, got {}",
+            total_ops
+        );
+    }
 }
