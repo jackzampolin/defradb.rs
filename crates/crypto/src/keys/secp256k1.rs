@@ -15,6 +15,7 @@ use subtle::ConstantTimeEq;
 
 use defra_core::Result;
 
+use crate::error::crypto_error;
 use crate::keys::{Key, PrivateKey, PublicKey};
 use crate::types::{KeyType, SECP256K1_PRIVATE_KEY_SIZE};
 
@@ -49,19 +50,24 @@ impl Secp256k1PrivateKey {
     /// * `bytes` - 32-byte secp256k1 private key
     ///
     /// # Returns
-    /// * `Some(Secp256k1PrivateKey)` if the key is valid
-    /// * `None` if the key is invalid (wrong length or nil)
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// * `Ok(Secp256k1PrivateKey)` if the key is valid
+    /// * `Err` if the key is invalid (wrong length, empty, or invalid scalar)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
-            return None;
+            return Err(crypto_error("secp256k1 private key cannot be empty"));
         }
 
         if bytes.len() != SECP256K1_PRIVATE_KEY_SIZE {
-            return None;
+            return Err(crypto_error(format!(
+                "secp256k1 private key must be {} bytes, got {} bytes",
+                SECP256K1_PRIVATE_KEY_SIZE,
+                bytes.len()
+            )));
         }
 
-        let key = SigningKey::from_slice(bytes).ok()?;
-        Some(Self { key })
+        let key = SigningKey::from_slice(bytes)
+            .map_err(|e| crypto_error(format!("invalid secp256k1 private key: {}", e)))?;
+        Ok(Self { key })
     }
 
     /// Get the underlying k256 signing key
@@ -135,18 +141,20 @@ impl Secp256k1PublicKey {
     /// * `bytes` - Public key bytes (33 or 65 bytes)
     ///
     /// # Returns
-    /// * `Some(Secp256k1PublicKey)` if the key is valid
-    /// * `None` if the key is invalid
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// * `Ok(Secp256k1PublicKey)` if the key is valid
+    /// * `Err` if the key is invalid (wrong length, empty, or invalid point)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
-            return None;
+            return Err(crypto_error("secp256k1 public key cannot be empty"));
         }
 
         // EncodedPoint handles both compressed (33) and uncompressed (65) formats
-        let point = EncodedPoint::from_bytes(bytes).ok()?;
-        let key = VerifyingKey::from_encoded_point(&point).ok()?;
+        let point = EncodedPoint::from_bytes(bytes)
+            .map_err(|e| crypto_error(format!("invalid secp256k1 public key encoding: {}", e)))?;
+        let key = VerifyingKey::from_encoded_point(&point)
+            .map_err(|_| crypto_error("invalid secp256k1 public key: not on curve"))?;
 
-        Some(Self { key })
+        Ok(Self { key })
     }
 
     /// Get the underlying k256 verifying key
@@ -313,20 +321,20 @@ mod tests {
     fn test_secp256k1_invalid_key_lengths() {
         // Invalid private key length
         let private_key = Secp256k1PrivateKey::from_bytes(&[0u8; 16]);
-        assert!(private_key.is_none());
+        assert!(private_key.is_err());
 
         // Invalid public key length
         let public_key = Secp256k1PublicKey::from_bytes(&[0u8; 10]);
-        assert!(public_key.is_none());
+        assert!(public_key.is_err());
     }
 
     #[test]
     fn test_secp256k1_nil_keys() {
         let private_key = Secp256k1PrivateKey::from_bytes(&[]);
-        assert!(private_key.is_none());
+        assert!(private_key.is_err());
 
         let public_key = Secp256k1PublicKey::from_bytes(&[]);
-        assert!(public_key.is_none());
+        assert!(public_key.is_err());
     }
 
     #[test]
@@ -347,7 +355,7 @@ mod tests {
 
         // Should be able to parse compressed format
         let public_key = Secp256k1PublicKey::from_bytes(&compressed);
-        assert!(public_key.is_some());
+        assert!(public_key.is_ok());
     }
 
     #[test]
@@ -395,7 +403,7 @@ mod tests {
 
         // Should be able to parse uncompressed format
         let parsed = Secp256k1PublicKey::from_bytes(uncompressed);
-        assert!(parsed.is_some(), "Should parse uncompressed format");
+        assert!(parsed.is_ok(), "Should parse uncompressed format");
 
         // Parsed key should produce same compressed output
         let parsed_compressed = parsed.unwrap().raw();
@@ -606,14 +614,14 @@ mod tests {
         let mut invalid_point = vec![0x02u8];
         invalid_point.extend_from_slice(&[0u8; 32]);
         let result = Secp256k1PublicKey::from_bytes(&invalid_point);
-        assert!(result.is_none(), "All-zero X coordinate should be rejected");
+        assert!(result.is_err(), "All-zero X coordinate should be rejected");
 
         // Valid length with 0x03 prefix and all zeros - also invalid
         let mut invalid_point2 = vec![0x03u8];
         invalid_point2.extend_from_slice(&[0u8; 32]);
         let result = Secp256k1PublicKey::from_bytes(&invalid_point2);
         assert!(
-            result.is_none(),
+            result.is_err(),
             "All-zero X coordinate with 0x03 prefix should be rejected"
         );
 
@@ -622,7 +630,7 @@ mod tests {
         invalid_point3.extend_from_slice(&[0xFFu8; 32]); // All 0xFF exceeds field prime
         let result = Secp256k1PublicKey::from_bytes(&invalid_point3);
         assert!(
-            result.is_none(),
+            result.is_err(),
             "X coordinate exceeding field prime should be rejected"
         );
 
@@ -631,25 +639,25 @@ mod tests {
         let mut invalid_prefix_00 = vec![0x00u8];
         invalid_prefix_00.extend_from_slice(&[1u8; 32]);
         let result = Secp256k1PublicKey::from_bytes(&invalid_prefix_00);
-        assert!(result.is_none(), "Prefix 0x00 should be rejected");
+        assert!(result.is_err(), "Prefix 0x00 should be rejected");
 
         // 0x01 is invalid
         let mut invalid_prefix_01 = vec![0x01u8];
         invalid_prefix_01.extend_from_slice(&[1u8; 32]);
         let result = Secp256k1PublicKey::from_bytes(&invalid_prefix_01);
-        assert!(result.is_none(), "Prefix 0x01 should be rejected");
+        assert!(result.is_err(), "Prefix 0x01 should be rejected");
 
         // 0x06 is invalid (0x06 and 0x07 are hybrid formats not supported)
         let mut invalid_prefix_06 = vec![0x06u8];
         invalid_prefix_06.extend_from_slice(&[1u8; 64]);
         let result = Secp256k1PublicKey::from_bytes(&invalid_prefix_06);
-        assert!(result.is_none(), "Prefix 0x06 should be rejected");
+        assert!(result.is_err(), "Prefix 0x06 should be rejected");
 
         // Uncompressed format (65 bytes) but all zeros - invalid point at infinity
         let mut invalid_uncompressed = vec![0x04u8];
         invalid_uncompressed.extend_from_slice(&[0u8; 64]); // Both X and Y are zero
         let result = Secp256k1PublicKey::from_bytes(&invalid_uncompressed);
-        assert!(result.is_none(), "Point at infinity should be rejected");
+        assert!(result.is_err(), "Point at infinity should be rejected");
     }
 
     #[test]
@@ -668,7 +676,7 @@ mod tests {
 
         let result = Secp256k1PublicKey::from_bytes(&uncompressed);
         assert!(
-            result.is_none(),
+            result.is_err(),
             "Point with invalid Y for given X should be rejected"
         );
     }

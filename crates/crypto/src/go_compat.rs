@@ -176,6 +176,37 @@ mod tests {
     const SECP256R1_DID: &str =
         "did:key:z4oJ8bQWmdRbkhWsbC85S7BkLD7dfZ2tm3eZ2mtA6C4j3Si19XLij1UD1qzaFYQM9fC7x1Yh2PMdnGkM8PoBnndDLwzHH";
 
+    // ===== secp256r1 Edge Case Test Vectors =====
+    // Empty message signature (using same key as SECP256R1_PRIVATE_KEY)
+    const SECP256R1_EMPTY_MESSAGE: &[u8] = b"";
+    const SECP256R1_EMPTY_MESSAGE_SIGNATURE: &[u8] = &[
+        0x30, 0x45, 0x02, 0x21, 0x00, 0xa3, 0xe3, 0x82, 0xd5, 0xbb, 0x5a, 0x15,
+        0x47, 0xd6, 0x79, 0x66, 0x50, 0x31, 0x4d, 0x4f, 0xf8, 0xfe, 0x4e, 0xd7,
+        0x89, 0x78, 0xd8, 0xf2, 0x02, 0x29, 0x37, 0x27, 0x2f, 0xae, 0xba, 0x87,
+        0xb3, 0x02, 0x20, 0x75, 0x5f, 0x43, 0x99, 0x3b, 0xb3, 0x5b, 0xb7, 0x41,
+        0x75, 0x3c, 0xea, 0x8a, 0x2d, 0x16, 0x26, 0x13, 0x76, 0x75, 0xa6, 0x65,
+        0xaf, 0x06, 0xf2, 0xb1, 0xaa, 0x48, 0xf0, 0xc3, 0x42, 0xde, 0xca,
+    ];
+    // Binary message with null bytes
+    const SECP256R1_BINARY_MESSAGE: &[u8] = &[0x00, 0x01, 0x02, 0xff, 0xfe, 0x00, 0x00];
+    const SECP256R1_BINARY_MESSAGE_SIGNATURE: &[u8] = &[
+        0x30, 0x46, 0x02, 0x21, 0x00, 0xfd, 0x7b, 0x34, 0x1f, 0xf7, 0x4b, 0xf0,
+        0x31, 0x5a, 0x90, 0x26, 0x39, 0xf0, 0xaf, 0xb4, 0x28, 0x1a, 0x8b, 0x42,
+        0x9f, 0x61, 0xe6, 0x10, 0x30, 0xc4, 0xd3, 0xc8, 0x7a, 0xf1, 0x0c, 0xfe,
+        0xac, 0x02, 0x21, 0x00, 0xa8, 0x9f, 0xd0, 0xc0, 0xc2, 0xdf, 0x07, 0xd6,
+        0xef, 0xb2, 0xf9, 0x66, 0x0d, 0xfc, 0xc8, 0x0f, 0xd1, 0x01, 0x9a, 0xd2,
+        0x7c, 0xe8, 0x59, 0x8c, 0x2f, 0xba, 0x16, 0x16, 0x36, 0x50, 0x3b, 0x30,
+    ];
+    // 1KB message (1024 'A' characters)
+    const SECP256R1_1KB_MESSAGE_SIGNATURE: &[u8] = &[
+        0x30, 0x45, 0x02, 0x21, 0x00, 0xb2, 0xaa, 0x12, 0x1d, 0xaa, 0xd5, 0xa4,
+        0xc7, 0x89, 0x7d, 0x56, 0xc8, 0x2f, 0xc6, 0x57, 0x82, 0xfe, 0xf4, 0x19,
+        0xc0, 0x3d, 0xdc, 0xfd, 0xe2, 0xf7, 0xe5, 0xd7, 0xbf, 0x33, 0xde, 0xce,
+        0x7c, 0x02, 0x20, 0x52, 0x0a, 0x2e, 0xde, 0xdd, 0xe8, 0xaf, 0x9e, 0x87,
+        0xa4, 0xc3, 0x16, 0x08, 0xbe, 0x2e, 0xc5, 0xe0, 0xce, 0x24, 0x31, 0xbc,
+        0x38, 0x4d, 0xd9, 0x94, 0xf3, 0x9c, 0xe3, 0x54, 0xfd, 0x20, 0xa4,
+    ];
+
     // ===== secp256k1 Edge Case Test Vectors =====
     // Empty message signature (using same key as SECP256K1_PRIVATE_KEY)
     const SECP256K1_EMPTY_MESSAGE: &[u8] = b"";
@@ -310,6 +341,21 @@ mod tests {
 
         let did = public_key.did().unwrap();
         assert_eq!(did, ED25519_DID, "Ed25519 DID should match Go");
+    }
+
+    #[test]
+    fn test_parse_go_ed25519_did() {
+        use crate::did::parse_did_key;
+        use crate::types::KeyType;
+
+        // Parse Go-generated DID
+        let (key_type, public_key_bytes) = parse_did_key(ED25519_DID).unwrap();
+
+        // Verify key type
+        assert_eq!(key_type, KeyType::Ed25519);
+
+        // Verify public key bytes match the expected Ed25519 public key
+        assert_eq!(public_key_bytes, ED25519_PUBLIC_KEY.to_vec());
     }
 
     // ===== Ed25519 Edge Case Tests =====
@@ -649,6 +695,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_go_secp256k1_did() {
+        use crate::did::parse_did_key;
+        use crate::types::KeyType;
+
+        // Parse Go-generated DID
+        let (key_type, public_key_bytes) = parse_did_key(SECP256K1_DID).unwrap();
+
+        // Verify key type
+        assert_eq!(key_type, KeyType::Secp256k1);
+
+        // secp256k1 DID uses uncompressed key (65 bytes)
+        assert_eq!(public_key_bytes.len(), 65);
+        assert_eq!(public_key_bytes, SECP256K1_PUBLIC_KEY_UNCOMPRESSED.to_vec());
+    }
+
+    #[test]
     fn test_secp256k1_empty_message_signature_from_go() {
         let public_key = Secp256k1PublicKey::from_bytes(&SECP256K1_PUBLIC_KEY_COMPRESSED)
             .expect("Should parse Go public key");
@@ -752,6 +814,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_go_secp256r1_did() {
+        use crate::did::parse_did_key;
+        use crate::types::KeyType;
+
+        // Parse Go-generated DID
+        let (key_type, public_key_bytes) = parse_did_key(SECP256R1_DID).unwrap();
+
+        // Verify key type
+        assert_eq!(key_type, KeyType::Secp256r1);
+
+        // secp256r1 DID uses uncompressed key (65 bytes)
+        assert_eq!(public_key_bytes.len(), 65);
+        assert_eq!(public_key_bytes, SECP256R1_PUBLIC_KEY_UNCOMPRESSED.to_vec());
+    }
+
+    #[test]
     fn test_secp256r1_signature_verification_rejects_wrong_message() {
         let public_key = Secp256r1PublicKey::from_bytes(&SECP256R1_PUBLIC_KEY_COMPRESSED)
             .expect("Should parse Go public key");
@@ -776,6 +854,51 @@ mod tests {
             .verify(SECP256R1_TEST_MESSAGE, &tampered_sig)
             .unwrap();
         assert!(!valid, "Should reject tampered signature");
+    }
+
+    #[test]
+    fn test_secp256r1_empty_message_signature_from_go() {
+        let public_key = Secp256r1PublicKey::from_bytes(&SECP256R1_PUBLIC_KEY_COMPRESSED)
+            .expect("Should parse Go public key");
+
+        let valid = public_key
+            .verify(SECP256R1_EMPTY_MESSAGE, SECP256R1_EMPTY_MESSAGE_SIGNATURE)
+            .unwrap();
+        assert!(
+            valid,
+            "Rust should verify Go-generated secp256r1 empty message signature"
+        );
+    }
+
+    #[test]
+    fn test_secp256r1_binary_message_signature_from_go() {
+        let public_key = Secp256r1PublicKey::from_bytes(&SECP256R1_PUBLIC_KEY_COMPRESSED)
+            .expect("Should parse Go public key");
+
+        let valid = public_key
+            .verify(SECP256R1_BINARY_MESSAGE, SECP256R1_BINARY_MESSAGE_SIGNATURE)
+            .unwrap();
+        assert!(
+            valid,
+            "Rust should verify Go-generated secp256r1 binary message signature"
+        );
+    }
+
+    #[test]
+    fn test_secp256r1_1kb_message_signature_from_go() {
+        let public_key = Secp256r1PublicKey::from_bytes(&SECP256R1_PUBLIC_KEY_COMPRESSED)
+            .expect("Should parse Go public key");
+
+        // 1KB message (1024 'A' characters)
+        let message: Vec<u8> = vec![b'A'; 1024];
+
+        let valid = public_key
+            .verify(&message, SECP256R1_1KB_MESSAGE_SIGNATURE)
+            .unwrap();
+        assert!(
+            valid,
+            "Rust should verify Go-generated secp256r1 1KB message signature"
+        );
     }
 
     // ===== X25519/HKDF Compatibility Tests =====

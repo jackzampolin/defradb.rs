@@ -11,7 +11,7 @@ use subtle::ConstantTimeEq;
 
 use defra_core::Result;
 
-use crate::error::signature_verification_failed;
+use crate::error::{crypto_error, signature_verification_failed};
 use crate::keys::{Key, PrivateKey, PublicKey};
 use crate::types::KeyType;
 
@@ -66,11 +66,11 @@ impl Ed25519PrivateKey {
     /// * `bytes` - 64-byte Ed25519 private key
     ///
     /// # Returns
-    /// * `Some(Ed25519PrivateKey)` if the key is valid
-    /// * `None` if the key is invalid (wrong length or nil)
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// * `Ok(Ed25519PrivateKey)` if the key is valid
+    /// * `Err` if the key is invalid (wrong length or empty)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
-            return None;
+            return Err(crypto_error("Ed25519 private key cannot be empty"));
         }
 
         // Ed25519 private keys stored as 64 bytes (32-byte seed + 32-byte public key)
@@ -78,15 +78,20 @@ impl Ed25519PrivateKey {
         // We use 64-byte format for compatibility with DefraDB Go implementation,
         // which stores both seed and derived public key together.
         if bytes.len() != 64 {
-            return None;
+            return Err(crypto_error(format!(
+                "Ed25519 private key must be 64 bytes, got {} bytes",
+                bytes.len()
+            )));
         }
 
         // ed25519-dalek expects 32 bytes for SigningKey (the seed)
         // The first 32 bytes are the seed
-        let seed: [u8; 32] = bytes[..32].try_into().ok()?;
+        let seed: [u8; 32] = bytes[..32]
+            .try_into()
+            .map_err(|_| crypto_error("failed to extract Ed25519 seed from key bytes"))?;
         let key = SigningKey::from_bytes(&seed);
 
-        Some(Self { key })
+        Ok(Self { key })
     }
 
     /// Get the underlying ed25519-dalek signing key
@@ -153,21 +158,28 @@ impl Ed25519PublicKey {
     /// * `bytes` - 32-byte Ed25519 public key
     ///
     /// # Returns
-    /// * `Some(Ed25519PublicKey)` if the key is valid
-    /// * `None` if the key is invalid (wrong length or nil)
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// * `Ok(Ed25519PublicKey)` if the key is valid
+    /// * `Err` if the key is invalid (wrong length, empty, or invalid point)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
-            return None;
+            return Err(crypto_error("Ed25519 public key cannot be empty"));
         }
 
         if bytes.len() != PUBLIC_KEY_LENGTH {
-            return None;
+            return Err(crypto_error(format!(
+                "Ed25519 public key must be {} bytes, got {} bytes",
+                PUBLIC_KEY_LENGTH,
+                bytes.len()
+            )));
         }
 
-        let key_bytes: [u8; PUBLIC_KEY_LENGTH] = bytes.try_into().ok()?;
-        let key = VerifyingKey::from_bytes(&key_bytes).ok()?;
+        let key_bytes: [u8; PUBLIC_KEY_LENGTH] = bytes
+            .try_into()
+            .map_err(|_| crypto_error("failed to convert Ed25519 public key bytes"))?;
+        let key = VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| crypto_error(format!("invalid Ed25519 public key: {}", e)))?;
 
-        Some(Self { key })
+        Ok(Self { key })
     }
 
     /// Get the underlying ed25519-dalek verifying key
@@ -259,7 +271,7 @@ mod tests {
     #[test]
     fn test_ed25519_key_generation() {
         let private_key = Ed25519PrivateKey::from_bytes(&[0u8; 64]);
-        assert!(private_key.is_some());
+        assert!(private_key.is_ok());
     }
 
     #[test]
@@ -315,20 +327,20 @@ mod tests {
     fn test_ed25519_invalid_key_lengths() {
         // Invalid private key length
         let private_key = Ed25519PrivateKey::from_bytes(&[0u8; 32]);
-        assert!(private_key.is_none());
+        assert!(private_key.is_err());
 
         // Invalid public key length
         let public_key = Ed25519PublicKey::from_bytes(&[0u8; 16]);
-        assert!(public_key.is_none());
+        assert!(public_key.is_err());
     }
 
     #[test]
     fn test_ed25519_nil_keys() {
         let private_key = Ed25519PrivateKey::from_bytes(&[]);
-        assert!(private_key.is_none());
+        assert!(private_key.is_err());
 
         let public_key = Ed25519PublicKey::from_bytes(&[]);
-        assert!(public_key.is_none());
+        assert!(public_key.is_err());
     }
 
     #[test]
@@ -510,7 +522,7 @@ mod tests {
             0xDD, 0xEE, 0xFF, 0x00,
         ];
         let result = Ed25519PublicKey::from_bytes(&invalid_bytes);
-        assert!(result.is_none(), "Random invalid bytes should be rejected");
+        assert!(result.is_err(), "Random invalid bytes should be rejected");
 
         // Note: all-zeros (identity point) is accepted by ed25519-dalek as it's
         // technically a valid curve point, though useless for signatures
@@ -528,7 +540,7 @@ mod tests {
             0x05, 0x06, 0x07, 0x08,
         ];
         assert!(
-            Ed25519PublicKey::from_bytes(&invalid_pattern1).is_none(),
+            Ed25519PublicKey::from_bytes(&invalid_pattern1).is_err(),
             "Invalid pattern 1 should be rejected"
         );
 
@@ -539,7 +551,7 @@ mod tests {
             0xAA, 0x55, 0xAA, 0x55,
         ];
         assert!(
-            Ed25519PublicKey::from_bytes(&invalid_pattern2).is_none(),
+            Ed25519PublicKey::from_bytes(&invalid_pattern2).is_err(),
             "Invalid pattern 2 should be rejected"
         );
     }
@@ -554,7 +566,7 @@ mod tests {
 
         let reconstructed = Ed25519PublicKey::from_bytes(&public_bytes);
         assert!(
-            reconstructed.is_some(),
+            reconstructed.is_ok(),
             "Valid public key bytes should be accepted"
         );
         assert_eq!(

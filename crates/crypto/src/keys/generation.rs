@@ -62,7 +62,6 @@ pub fn generate_key(key_type: KeyType) -> Result<Box<dyn PrivateKey>> {
 pub fn generate_secp256k1() -> Result<Secp256k1PrivateKey> {
     let signing_key = Secp256k1SigningKey::random(&mut OsRng);
     Secp256k1PrivateKey::from_bytes(&signing_key.to_bytes())
-        .ok_or_else(|| crypto_error("failed to create secp256k1 private key"))
 }
 
 /// Generate a new Ed25519 private key
@@ -92,7 +91,6 @@ pub fn generate_ed25519() -> Result<Ed25519PrivateKey> {
     key_bytes.extend_from_slice(&public);
 
     Ed25519PrivateKey::from_bytes(&key_bytes)
-        .ok_or_else(|| crypto_error("failed to create ed25519 private key"))
 }
 
 /// Generate a new X25519 private key for ECIES
@@ -153,21 +151,11 @@ pub fn private_key_from_bytes(key_type: KeyType, bytes: &[u8]) -> Result<Box<dyn
 
     match key_type {
         KeyType::Secp256k1 => {
-            let key = Secp256k1PrivateKey::from_bytes(bytes).ok_or_else(|| {
-                crypto_error(format!(
-                    "invalid secp256k1 private key: expected 32 bytes, got {}",
-                    bytes.len()
-                ))
-            })?;
+            let key = Secp256k1PrivateKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
         KeyType::Ed25519 => {
-            let key = Ed25519PrivateKey::from_bytes(bytes).ok_or_else(|| {
-                crypto_error(format!(
-                    "invalid ed25519 private key: expected 64 bytes, got {}",
-                    bytes.len()
-                ))
-            })?;
+            let key = Ed25519PrivateKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
         KeyType::Secp256r1 => Err(unsupported_key_type(key_type)),
@@ -212,18 +200,15 @@ pub fn public_key_from_bytes(
 ) -> Result<Box<dyn crate::keys::PublicKey>> {
     match key_type {
         KeyType::Secp256k1 => {
-            let key = Secp256k1PublicKey::from_bytes(bytes)
-                .ok_or_else(|| crypto_error("invalid secp256k1 public key bytes"))?;
+            let key = Secp256k1PublicKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
         KeyType::Ed25519 => {
-            let key = Ed25519PublicKey::from_bytes(bytes)
-                .ok_or_else(|| crypto_error("invalid ed25519 public key bytes"))?;
+            let key = Ed25519PublicKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
         KeyType::Secp256r1 => {
-            let key = Secp256r1PublicKey::from_bytes(bytes)
-                .ok_or_else(|| crypto_error("invalid secp256r1 public key bytes"))?;
+            let key = Secp256r1PublicKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
     }

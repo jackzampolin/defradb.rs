@@ -38,7 +38,7 @@ pub use keys::{
 };
 
 // Re-export DID functions
-pub use did::create_did_key;
+pub use did::{create_did_key, parse_did_key};
 
 // Re-export encryption functions
 pub use encryption::{

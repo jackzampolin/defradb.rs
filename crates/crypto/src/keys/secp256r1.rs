@@ -10,9 +10,11 @@ use p256::ecdsa::{Signature, VerifyingKey};
 use p256::EncodedPoint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use defra_core::Result;
 
+use crate::error::crypto_error;
 use crate::keys::{Key, PublicKey};
 use crate::types::KeyType;
 
@@ -39,21 +41,23 @@ impl Secp256r1PublicKey {
     /// * `bytes` - Public key bytes (33 or 65 bytes)
     ///
     /// # Returns
-    /// * `Some(Secp256r1PublicKey)` if the key is valid
-    /// * `None` if the key is invalid
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    /// * `Ok(Secp256r1PublicKey)` if the key is valid
+    /// * `Err` if the key is invalid (wrong length, empty, or invalid point)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
-            return None;
+            return Err(crypto_error("secp256r1 public key cannot be empty"));
         }
 
         // EncodedPoint handles both compressed (33) and uncompressed (65) formats
-        let point = EncodedPoint::from_bytes(bytes).ok()?;
-        let key = VerifyingKey::from_encoded_point(&point).ok()?;
+        let point = EncodedPoint::from_bytes(bytes)
+            .map_err(|e| crypto_error(format!("invalid secp256r1 public key encoding: {}", e)))?;
+        let key = VerifyingKey::from_encoded_point(&point)
+            .map_err(|_| crypto_error("invalid secp256r1 public key: not on curve"))?;
 
         // Pre-compute and cache compressed bytes
         let compressed_bytes = key.to_encoded_point(true).as_bytes().to_vec();
 
-        Some(Self {
+        Ok(Self {
             key,
             compressed_bytes,
         })
@@ -70,7 +74,13 @@ impl Key for Secp256r1PublicKey {
         if other.key_type() != KeyType::Secp256r1 {
             return false;
         }
-        self.raw() == other.raw()
+        // Use constant-time comparison to prevent timing attacks
+        let self_raw = self.raw();
+        let other_raw = other.raw();
+        if self_raw.len() != other_raw.len() {
+            return false;
+        }
+        self_raw.ct_eq(&other_raw).into()
     }
 
     fn raw(&self) -> Vec<u8> {
@@ -195,13 +205,13 @@ mod tests {
     fn test_secp256r1_invalid_key_lengths() {
         // Invalid public key length
         let public_key = Secp256r1PublicKey::from_bytes(&[0u8; 10]);
-        assert!(public_key.is_none());
+        assert!(public_key.is_err());
     }
 
     #[test]
     fn test_secp256r1_nil_key() {
         let public_key = Secp256r1PublicKey::from_bytes(&[]);
-        assert!(public_key.is_none());
+        assert!(public_key.is_err());
     }
 
     #[test]
@@ -243,5 +253,83 @@ mod tests {
             .verify(wrong_message, &signature.to_der().as_bytes())
             .unwrap();
         assert!(!valid);
+    }
+
+    #[test]
+    fn test_secp256r1_invalid_der_signatures() {
+        use p256::ecdsa::SigningKey;
+        use rand::rngs::OsRng;
+
+        // Generate a key pair for testing
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let compressed = verifying_key.to_encoded_point(true).as_bytes().to_vec();
+        let public_key = Secp256r1PublicKey::from_bytes(&compressed).unwrap();
+        let message = b"test";
+
+        // Empty signature
+        let result = public_key.verify(message, &[]);
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Empty signature should return false"
+        );
+
+        // Invalid DER: wrong sequence tag (should be 0x30)
+        let invalid_der = vec![0xFF, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Invalid DER tag should return false"
+        );
+
+        // Invalid DER: length exceeds data
+        let invalid_der = vec![0x30, 0xFF, 0x02, 0x01, 0x01];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Invalid DER length should return false"
+        );
+
+        // Too short to be valid DER
+        let invalid_der = vec![0x30, 0x02];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Truncated DER should return false"
+        );
+
+        // Single byte (not valid DER)
+        let invalid_der = vec![0x30];
+        let result = public_key.verify(message, &invalid_der);
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Single byte should return false"
+        );
+    }
+
+    #[test]
+    fn test_secp256r1_verify_tampered_signature() {
+        use p256::ecdsa::{signature::DigestSigner, SigningKey};
+        use rand::rngs::OsRng;
+
+        // Generate a key pair for testing
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let compressed = verifying_key.to_encoded_point(true).as_bytes().to_vec();
+        let public_key = Secp256r1PublicKey::from_bytes(&compressed).unwrap();
+
+        let message = b"test message";
+        let digest = Sha256::new_with_prefix(message);
+        let signature: Signature = signing_key.sign_digest(digest);
+        let mut signature_bytes = signature.to_der().as_bytes().to_vec();
+
+        // Tamper with the signature
+        if let Some(last) = signature_bytes.last_mut() {
+            *last ^= 0xFF;
+        }
+
+        // Should fail verification with tampered signature
+        let result = public_key.verify(message, &signature_bytes).unwrap();
+        assert!(!result, "Tampered signature should fail verification");
     }
 }
