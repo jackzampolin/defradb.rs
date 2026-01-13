@@ -7,10 +7,10 @@
 use crate::priority::{decode_priority, encode_priority};
 use crate::traits::{Context, Delta, MergeResult, PriorityReader, ReplicatedData, ValueReader};
 use async_trait::async_trait;
-use defra_core::{store::Store, Error, Result};
+use defra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
-use std::sync::Arc;
+use storage::{Reader, ReaderWriter};
 
 /// LWW Delta - represents a change to an LWW register
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,9 +124,11 @@ impl Delta for LwwDelta {
 }
 
 /// LWW Register - Last-Write-Wins conflict resolution for a field
+///
+/// This CRDT does not own storage. Instead, it receives a `ReaderWriter`
+/// reference for each operation, matching Go DefraDB's pattern where
+/// CRDTs operate on a provided `corekv.ReaderWriter`.
 pub struct Lww {
-    /// Storage backend
-    store: Arc<dyn Store>,
     /// Storage key for the value
     value_key: Vec<u8>,
     /// Storage key for the priority
@@ -141,19 +143,13 @@ impl Lww {
     /// Create a new LWW register
     ///
     /// # Arguments
-    /// * `store` - Storage backend
     /// * `schema_version_id` - Schema version identifier (must not be empty)
     /// * `doc_id` - Document identifier (must not be empty)
     /// * `field_name` - Field name (must not be empty)
     ///
     /// # Errors
     /// Returns an error if schema_version_id, doc_id, or field_name is empty.
-    pub fn new(
-        store: Arc<dyn Store>,
-        schema_version_id: String,
-        doc_id: &[u8],
-        field_name: String,
-    ) -> Result<Self> {
+    pub fn new(schema_version_id: String, doc_id: &[u8], field_name: String) -> Result<Self> {
         if schema_version_id.is_empty() {
             return Err(Error::MergeError(
                 "schema_version_id cannot be empty".into(),
@@ -181,7 +177,6 @@ impl Lww {
         priority_key.extend_from_slice(b"/priority");
 
         Ok(Self {
-            store,
             value_key,
             priority_key,
             schema_version_id,
@@ -190,9 +185,14 @@ impl Lww {
     }
 
     /// Set a value with priority, implementing LWW merge logic
-    async fn set_value(&mut self, data: &[u8], incoming_priority: u64) -> Result<MergeResult> {
+    async fn set_value(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        data: &[u8],
+        incoming_priority: u64,
+    ) -> Result<MergeResult> {
         // Get current priority
-        let current_priority = self.get_priority_internal().await?;
+        let current_priority = self.get_priority_internal(rw).await?;
 
         // Compare priorities
         match incoming_priority.cmp(&current_priority) {
@@ -208,8 +208,11 @@ impl Lww {
                 // Current value wins if incoming data <= current (lexicographically)
                 // This means: incoming data must be strictly greater to win
                 // Note: Store errors propagate via ?, None (uninitialized) treated as empty
-                let current_value: Vec<u8> =
-                    self.store.get(&self.value_key).await?.unwrap_or_default();
+                let current_value: Vec<u8> = rw
+                    .get(&self.value_key)
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?
+                    .unwrap_or_default();
                 if data <= &current_value[..] {
                     return Ok(MergeResult::RejectedTieBreak);
                 }
@@ -223,31 +226,45 @@ impl Lww {
         // Update value and priority
         if data.is_empty() {
             // Empty data = deletion/tombstone
-            self.store.delete(&self.value_key).await?;
+            rw.delete(&self.value_key)
+                .await
+                .map_err(|e| Error::Storage(e.to_string()))?;
         } else {
-            self.store.set(&self.value_key, data).await?;
+            rw.set(&self.value_key, data)
+                .await
+                .map_err(|e| Error::Storage(e.to_string()))?;
         }
 
         let priority_bytes = encode_priority(incoming_priority);
-        self.store.set(&self.priority_key, &priority_bytes).await?;
+        rw.set(&self.priority_key, &priority_bytes)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
 
         Ok(MergeResult::Applied)
     }
 
     /// Internal method to get current value
-    async fn get_value_internal(&self) -> Result<Vec<u8>> {
-        self.store.get(&self.value_key).await?.ok_or_else(|| {
-            Error::MergeError(format!(
-                "value not found for field '{}' in schema '{}'. \
+    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+        reader
+            .get(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .ok_or_else(|| {
+                Error::MergeError(format!(
+                    "value not found for field '{}' in schema '{}'. \
                      This indicates the field has never been set or has been deleted.",
-                self.field_name, self.schema_version_id
-            ))
-        })
+                    self.field_name, self.schema_version_id
+                ))
+            })
     }
 
     /// Internal method to get current priority
-    async fn get_priority_internal(&self) -> Result<u64> {
-        match self.store.get(&self.priority_key).await? {
+    async fn get_priority_internal(&self, reader: &dyn Reader) -> Result<u64> {
+        match reader
+            .get(&self.priority_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
             Some(bytes) => decode_priority(&bytes),
             None => {
                 // Missing priority indicates uninitialized state
@@ -260,7 +277,12 @@ impl Lww {
 
 #[async_trait]
 impl ReplicatedData for Lww {
-    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<MergeResult> {
+    async fn merge(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        _ctx: &Context,
+        delta: &dyn Delta,
+    ) -> Result<MergeResult> {
         // Downcast to LwwDelta
         let lww_delta = delta.as_any().downcast_ref::<LwwDelta>().ok_or_else(|| {
             Error::MergeError("invalid delta type for LWW merge: expected LwwDelta".into())
@@ -283,7 +305,8 @@ impl ReplicatedData for Lww {
         }
 
         // Apply merge logic
-        self.set_value(&lww_delta.data, lww_delta.priority).await
+        self.set_value(rw, &lww_delta.data, lww_delta.priority)
+            .await
     }
 
     fn headstore_prefix(&self) -> Vec<u8> {
@@ -298,15 +321,15 @@ impl ReplicatedData for Lww {
 
 #[async_trait]
 impl ValueReader for Lww {
-    async fn value(&self) -> Result<Vec<u8>> {
-        self.get_value_internal().await
+    async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+        self.get_value_internal(reader).await
     }
 }
 
 #[async_trait]
 impl PriorityReader for Lww {
-    async fn priority(&self) -> Result<u64> {
-        self.get_priority_internal().await
+    async fn priority(&self, reader: &dyn Reader) -> Result<u64> {
+        self.get_priority_internal(reader).await
     }
 }
 
@@ -314,12 +337,12 @@ impl PriorityReader for Lww {
 mod tests {
     use super::*;
     use crate::test_utils::MemoryStore;
+    use storage::Store;
 
     #[tokio::test]
     async fn test_lww_higher_priority_wins() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -335,8 +358,10 @@ mod tests {
             b"Alice".to_vec(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta1).await.unwrap();
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+
+        let mut txn = store.new_txn(false).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
 
         // Second write with higher priority 20
         let delta2 = LwwDelta {
@@ -346,20 +371,23 @@ mod tests {
             schema_version_id: "v1".to_string(),
             data: b"Bob".to_vec(),
         };
-        lww.merge(&ctx, &delta2).await.unwrap();
-        assert_eq!(lww.value().await.unwrap(), b"Bob");
+        lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_lww_lower_priority_ignored() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // First write with priority 20
         let delta1 = LwwDelta {
@@ -369,7 +397,7 @@ mod tests {
             schema_version_id: "v1".to_string(),
             data: b"Alice".to_vec(),
         };
-        lww.merge(&ctx, &delta1).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Second write with lower priority 10 - should be ignored
         let delta2 = LwwDelta {
@@ -379,20 +407,23 @@ mod tests {
             schema_version_id: "v1".to_string(),
             data: b"Bob".to_vec(),
         };
-        lww.merge(&ctx, &delta2).await.unwrap();
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_lww_same_priority_lexicographic() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // First write: "Alice" with priority 10
         let delta1 = LwwDelta {
@@ -402,7 +433,7 @@ mod tests {
             schema_version_id: "v1".to_string(),
             data: b"Alice".to_vec(),
         };
-        lww.merge(&ctx, &delta1).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Second write: "Bob" with same priority 10
         // "Bob" > "Alice" lexicographically, so Bob should win
@@ -413,20 +444,23 @@ mod tests {
             schema_version_id: "v1".to_string(),
             data: b"Bob".to_vec(),
         };
-        lww.merge(&ctx, &delta2).await.unwrap();
-        assert_eq!(lww.value().await.unwrap(), b"Bob");
+        lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_lww_deletion() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Set value
         let delta1 = LwwDelta {
@@ -436,7 +470,7 @@ mod tests {
             schema_version_id: "v1".to_string(),
             data: b"Alice".to_vec(),
         };
-        lww.merge(&ctx, &delta1).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Delete (empty data)
         let delta2 = LwwDelta {
@@ -446,22 +480,25 @@ mod tests {
             schema_version_id: "v1".to_string(),
             data: Vec::new(),
         };
-        lww.merge(&ctx, &delta2).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
         // Value should be deleted
-        assert!(lww.value().await.is_err());
+        assert!(lww.value(&*txn).await.is_err());
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_lww_empty_data_tie_breaking() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Write value at priority 10
         let delta1 = LwwDelta::new(
@@ -472,8 +509,8 @@ mod tests {
             b"Alice".to_vec(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta1).await.unwrap();
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
 
         // Delete (empty data) at same priority 10
         // Lexicographically, empty < "Alice", so "Alice" should win
@@ -485,10 +522,10 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta2).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
         // Value should still be "Alice" (empty data lost tie-break)
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
 
         // Now delete at higher priority 20
         let delta3 = LwwDelta::new(
@@ -499,22 +536,25 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta3).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta3).await.unwrap();
 
         // Value should now be deleted
-        assert!(lww.value().await.is_err());
+        assert!(lww.value(&*txn).await.is_err());
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_lww_deletion_resurrection_with_priority() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Write value at priority 20
         let delta1 = LwwDelta::new(
@@ -525,33 +565,33 @@ mod tests {
             b"Alice".to_vec(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta1).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Try to delete at lower priority 10 (should be ignored)
         let delta2 =
             LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 10, "v1".to_string()).unwrap();
-        lww.merge(&ctx, &delta2).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
         // Value should still exist (deletion was lower priority)
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
 
         // Delete at same priority 20
         // Since priorities are equal, lexicographic tie-breaking applies
         // Empty data < "Alice", so "Alice" wins
         let delta3 =
             LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 20, "v1".to_string()).unwrap();
-        lww.merge(&ctx, &delta3).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta3).await.unwrap();
 
         // Value should still be "Alice" (tie-break)
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
 
         // Delete at higher priority 30
         let delta4 =
             LwwDelta::delete(b"doc1".to_vec(), "name".to_string(), 30, "v1".to_string()).unwrap();
-        lww.merge(&ctx, &delta4).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta4).await.unwrap();
 
         // Value should now be deleted
-        assert!(lww.value().await.is_err());
+        assert!(lww.value(&*txn).await.is_err());
 
         // Try to resurrect with lower priority 25 (should fail)
         let delta5 = LwwDelta::new(
@@ -562,10 +602,10 @@ mod tests {
             b"Bob".to_vec(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta5).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta5).await.unwrap();
 
         // Value should still be deleted (resurrection priority too low)
-        assert!(lww.value().await.is_err());
+        assert!(lww.value(&*txn).await.is_err());
 
         // Resurrect with higher priority 40
         let delta6 = LwwDelta::new(
@@ -576,10 +616,12 @@ mod tests {
             b"Bob".to_vec(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta6).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta6).await.unwrap();
 
         // Value should now be resurrected
-        assert_eq!(lww.value().await.unwrap(), b"Bob");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
+
+        txn.commit().await.unwrap();
     }
 
     #[test]
@@ -633,9 +675,8 @@ mod tests {
     async fn test_lww_wrong_delta_type() {
         use crate::CounterDelta;
 
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -653,7 +694,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = lww.merge(&ctx, &wrong_delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = lww.merge(&mut *txn, &ctx, &wrong_delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -663,9 +705,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_lww_merge_result_applied() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -681,20 +722,22 @@ mod tests {
         )
         .unwrap();
 
-        let result = lww.merge(&ctx, &delta).await.unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = lww.merge(&mut *txn, &ctx, &delta).await.unwrap();
         assert!(matches!(result, MergeResult::Applied));
     }
 
     #[tokio::test]
     async fn test_lww_merge_result_rejected_lower_priority() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // First write with priority 20
         let delta1 = LwwDelta::new(
@@ -705,7 +748,7 @@ mod tests {
             b"Alice".to_vec(),
         )
         .unwrap();
-        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        let result1 = lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
         assert!(matches!(result1, MergeResult::Applied));
 
         // Second write with lower priority 10 - should be rejected
@@ -717,7 +760,7 @@ mod tests {
             b"Bob".to_vec(),
         )
         .unwrap();
-        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        let result2 = lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
         assert!(matches!(
             result2,
             MergeResult::RejectedLowerPriority {
@@ -729,14 +772,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_lww_merge_result_rejected_tie_break() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // First write: "Bob" with priority 10
         let delta1 = LwwDelta::new(
@@ -747,7 +791,7 @@ mod tests {
             b"Bob".to_vec(),
         )
         .unwrap();
-        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        let result1 = lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
         assert!(matches!(result1, MergeResult::Applied));
 
         // Second write: "Alice" with same priority 10
@@ -760,20 +804,21 @@ mod tests {
             b"Alice".to_vec(),
         )
         .unwrap();
-        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        let result2 = lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
         assert!(matches!(result2, MergeResult::RejectedTieBreak));
     }
 
     #[tokio::test]
     async fn test_lww_priority_zero() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Write with priority 0 (lowest possible)
         let delta1 = LwwDelta::new(
@@ -784,9 +829,9 @@ mod tests {
             b"Alice".to_vec(),
         )
         .unwrap();
-        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        let result1 = lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
         assert!(matches!(result1, MergeResult::Applied));
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
 
         // Second write with priority 0 should use tie-breaking
         // "Bob" > "Alice" so Bob should win
@@ -798,21 +843,22 @@ mod tests {
             b"Bob".to_vec(),
         )
         .unwrap();
-        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        let result2 = lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
         assert!(matches!(result2, MergeResult::Applied));
-        assert_eq!(lww.value().await.unwrap(), b"Bob");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Bob");
     }
 
     #[tokio::test]
     async fn test_lww_priority_max() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Write with priority u64::MAX (highest possible)
         let delta1 = LwwDelta::new(
@@ -823,9 +869,9 @@ mod tests {
             b"Alice".to_vec(),
         )
         .unwrap();
-        let result1 = lww.merge(&ctx, &delta1).await.unwrap();
+        let result1 = lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
         assert!(matches!(result1, MergeResult::Applied));
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
 
         // Any subsequent write with lower priority should be rejected
         let delta2 = LwwDelta::new(
@@ -836,16 +882,15 @@ mod tests {
             b"Bob".to_vec(),
         )
         .unwrap();
-        let result2 = lww.merge(&ctx, &delta2).await.unwrap();
+        let result2 = lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
         assert!(matches!(result2, MergeResult::RejectedLowerPriority { .. }));
-        assert_eq!(lww.value().await.unwrap(), b"Alice");
+        assert_eq!(lww.value(&*txn).await.unwrap(), b"Alice");
     }
 
     #[tokio::test]
     async fn test_lww_field_name_mismatch() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -862,7 +907,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = lww.merge(&ctx, &delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = lww.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -872,9 +918,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_lww_schema_version_mismatch() {
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -891,7 +936,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = lww.merge(&ctx, &delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = lww.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -901,8 +947,7 @@ mod tests {
 
     #[test]
     fn test_lww_constructor_empty_schema_version() {
-        let store = Arc::new(MemoryStore::new());
-        let result = Lww::new(store, "".to_string(), b"doc1", "name".to_string());
+        let result = Lww::new("".to_string(), b"doc1", "name".to_string());
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err
@@ -912,8 +957,7 @@ mod tests {
 
     #[test]
     fn test_lww_constructor_empty_doc_id() {
-        let store = Arc::new(MemoryStore::new());
-        let result = Lww::new(store, "v1".to_string(), b"", "name".to_string());
+        let result = Lww::new("v1".to_string(), b"", "name".to_string());
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.to_string().contains("doc_id cannot be empty"));
@@ -921,8 +965,7 @@ mod tests {
 
     #[test]
     fn test_lww_constructor_empty_field_name() {
-        let store = Arc::new(MemoryStore::new());
-        let result = Lww::new(store, "v1".to_string(), b"doc1", "".to_string());
+        let result = Lww::new("v1".to_string(), b"doc1", "".to_string());
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.to_string().contains("field_name cannot be empty"));
@@ -932,14 +975,15 @@ mod tests {
     async fn test_lww_large_payload() {
         // Test LWW with large payloads (1MB, 10MB)
         // Verifies no memory issues or data corruption with large values
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "content".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "content".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // 1MB payload
         let large_data_1mb: Vec<u8> = (0..1_048_576).map(|i| (i % 256) as u8).collect();
@@ -952,9 +996,13 @@ mod tests {
         )
         .unwrap();
 
-        lww.merge(&ctx, &delta1).await.unwrap();
-        let retrieved = lww.value().await.unwrap();
-        assert_eq!(retrieved.len(), 1_048_576, "1MB payload should be stored correctly");
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
+        let retrieved = lww.value(&*txn).await.unwrap();
+        assert_eq!(
+            retrieved.len(),
+            1_048_576,
+            "1MB payload should be stored correctly"
+        );
         assert_eq!(retrieved, large_data_1mb, "1MB payload should match");
 
         // 10MB payload with higher priority should overwrite
@@ -968,23 +1016,30 @@ mod tests {
         )
         .unwrap();
 
-        lww.merge(&ctx, &delta2).await.unwrap();
-        let retrieved = lww.value().await.unwrap();
-        assert_eq!(retrieved.len(), 10_485_760, "10MB payload should be stored correctly");
+        lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
+        let retrieved = lww.value(&*txn).await.unwrap();
+        assert_eq!(
+            retrieved.len(),
+            10_485_760,
+            "10MB payload should be stored correctly"
+        );
         assert_eq!(retrieved, large_data_10mb, "10MB payload should match");
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_lww_large_payload_priority_rejected() {
         // Test that large payloads with lower priority are correctly rejected
-        let store = Arc::new(MemoryStore::new());
-        let mut lww =
-            Lww::new(store.clone(), "v1".to_string(), b"doc1", "content".to_string()).unwrap();
+        let store = MemoryStore::new();
+        let lww = Lww::new("v1".to_string(), b"doc1", "content".to_string()).unwrap();
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // First, set small value with high priority
         let small_data = b"small value";
@@ -996,7 +1051,7 @@ mod tests {
             small_data.to_vec(),
         )
         .unwrap();
-        lww.merge(&ctx, &delta1).await.unwrap();
+        lww.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Try to overwrite with large payload but lower priority
         let large_data: Vec<u8> = vec![0u8; 1_000_000]; // 1MB of zeros
@@ -1009,14 +1064,16 @@ mod tests {
         )
         .unwrap();
 
-        let result = lww.merge(&ctx, &delta2).await.unwrap();
+        let result = lww.merge(&mut *txn, &ctx, &delta2).await.unwrap();
         assert!(
             matches!(result, MergeResult::RejectedLowerPriority { .. }),
             "large payload with lower priority should be rejected"
         );
 
         // Value should still be the small one
-        let retrieved = lww.value().await.unwrap();
+        let retrieved = lww.value(&*txn).await.unwrap();
         assert_eq!(retrieved, small_data);
+
+        txn.commit().await.unwrap();
     }
 }

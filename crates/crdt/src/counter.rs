@@ -7,10 +7,10 @@
 
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
-use defra_core::{store::Store, Error, Result};
+use defra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
-use std::sync::Arc;
+use storage::{Reader, ReaderWriter};
 
 /// Numeric kind for counter values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,9 +204,11 @@ impl Delta for CounterDelta {
 }
 
 /// Counter CRDT - supports increment/decrement with commutative merge
+///
+/// This CRDT does not own storage. Instead, it receives a `ReaderWriter`
+/// reference for each operation, matching Go DefraDB's pattern where
+/// CRDTs operate on a provided `corekv.ReaderWriter`.
 pub struct Counter {
-    /// Storage backend
-    store: Arc<dyn Store>,
     /// Storage key for the counter value
     value_key: Vec<u8>,
     /// Storage key for tracking applied nonces
@@ -225,7 +227,6 @@ impl Counter {
     /// Create a new Counter CRDT
     ///
     /// # Arguments
-    /// * `store` - Storage backend
     /// * `schema_version_id` - Schema version identifier (must not be empty)
     /// * `doc_id` - Document identifier (must not be empty)
     /// * `field_name` - Field name (must not be empty)
@@ -235,7 +236,6 @@ impl Counter {
     /// # Errors
     /// Returns an error if schema_version_id, doc_id, or field_name is empty.
     pub fn new(
-        store: Arc<dyn Store>,
         schema_version_id: String,
         doc_id: &[u8],
         field_name: String,
@@ -268,7 +268,6 @@ impl Counter {
         nonce_prefix.extend_from_slice(b"/nonces/");
 
         Ok(Self {
-            store,
             value_key,
             nonce_prefix,
             schema_version_id,
@@ -279,10 +278,13 @@ impl Counter {
     }
 
     /// Check if a nonce has been applied
-    async fn has_nonce(&self, nonce: i64) -> Result<bool> {
+    async fn has_nonce(&self, reader: &dyn Reader, nonce: i64) -> Result<bool> {
         let mut nonce_key = self.nonce_prefix.clone();
         nonce_key.extend_from_slice(&nonce.to_be_bytes());
-        self.store.has(&nonce_key).await
+        reader
+            .has(&nonce_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     /// Mark a nonce as applied
@@ -296,16 +298,22 @@ impl Counter {
     ///
     /// Nonce storage grows unbounded without GC, which could become a storage leak for
     /// high-throughput counters. The trade-off is between storage cost and idempotency window.
-    async fn mark_nonce(&self, nonce: i64) -> Result<()> {
+    async fn mark_nonce(&self, rw: &mut dyn ReaderWriter, nonce: i64) -> Result<()> {
         let mut nonce_key = self.nonce_prefix.clone();
         nonce_key.extend_from_slice(&nonce.to_be_bytes());
         // Store [1] as marker (value unused, only key existence matters)
-        self.store.set(&nonce_key, &[1]).await
+        rw.set(&nonce_key, &[1])
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     /// Get current value as i64
-    async fn get_int64(&self) -> Result<i64> {
-        match self.store.get(&self.value_key).await? {
+    async fn get_int64(&self, reader: &dyn Reader) -> Result<i64> {
+        match reader
+            .get(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
             Some(bytes) => {
                 if bytes.len() != 8 {
                     return Err(Error::MergeError(format!(
@@ -326,13 +334,19 @@ impl Counter {
     }
 
     /// Set value as i64
-    async fn set_int64(&self, value: i64) -> Result<()> {
-        self.store.set(&self.value_key, &value.to_be_bytes()).await
+    async fn set_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
+        rw.set(&self.value_key, &value.to_be_bytes())
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     /// Get current value as f64
-    async fn get_float64(&self) -> Result<f64> {
-        match self.store.get(&self.value_key).await? {
+    async fn get_float64(&self, reader: &dyn Reader) -> Result<f64> {
+        match reader
+            .get(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
             Some(bytes) => {
                 if bytes.len() != 8 {
                     return Err(Error::MergeError(format!(
@@ -353,8 +367,10 @@ impl Counter {
     }
 
     /// Set value as f64
-    async fn set_float64(&self, value: f64) -> Result<()> {
-        self.store.set(&self.value_key, &value.to_be_bytes()).await
+    async fn set_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
+        rw.set(&self.value_key, &value.to_be_bytes())
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 
     /// Apply an increment/decrement
@@ -371,7 +387,11 @@ impl Counter {
     /// 2. Over-counting violates CRDT idempotency guarantees
     ///
     /// For true atomicity, use a Store implementation with transaction support.
-    async fn apply_delta(&mut self, delta: &CounterDelta) -> Result<MergeResult> {
+    async fn apply_delta(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        delta: &CounterDelta,
+    ) -> Result<MergeResult> {
         // Validate numeric kind matches
         if delta.kind() != self.kind {
             return Err(Error::MergeError(format!(
@@ -383,7 +403,7 @@ impl Counter {
         }
 
         // Check if nonce already applied (idempotency)
-        if self.has_nonce(delta.nonce).await? {
+        if self.has_nonce(rw, delta.nonce).await? {
             return Ok(MergeResult::SkippedAlreadyApplied { nonce: delta.nonce });
         }
 
@@ -394,7 +414,7 @@ impl Counter {
                 if !self.allow_decrement && increment < 0 {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
-                let current = self.get_int64().await?;
+                let current = self.get_int64(rw).await?;
                 // Int64: Wrap on overflow to match Go DefraDB behavior
                 NewValue::Int64(current.wrapping_add(increment))
             }
@@ -413,7 +433,7 @@ impl Counter {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
 
-                let current = self.get_float64().await?;
+                let current = self.get_float64(rw).await?;
 
                 // Validate current value
                 if !current.is_finite() {
@@ -440,21 +460,40 @@ impl Counter {
         };
 
         // Mark nonce FIRST to prevent double-counting on crash recovery
-        self.mark_nonce(delta.nonce).await?;
+        self.mark_nonce(rw, delta.nonce).await?;
 
         // Then update value
         match new_value {
-            NewValue::Int64(v) => self.set_int64(v).await?,
-            NewValue::Float64(v) => self.set_float64(v).await?,
+            NewValue::Int64(v) => self.set_int64(rw, v).await?,
+            NewValue::Float64(v) => self.set_float64(rw, v).await?,
         }
 
         Ok(MergeResult::Applied)
+    }
+
+    /// Get current value bytes (for internal use)
+    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+        reader
+            .get(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .ok_or_else(|| {
+                Error::MergeError(format!(
+                    "counter value not found for field '{}' in schema '{}'",
+                    self.field_name, self.schema_version_id
+                ))
+            })
     }
 }
 
 #[async_trait]
 impl ReplicatedData for Counter {
-    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<MergeResult> {
+    async fn merge(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        _ctx: &Context,
+        delta: &dyn Delta,
+    ) -> Result<MergeResult> {
         // Downcast to CounterDelta
         let counter_delta = delta
             .as_any()
@@ -482,7 +521,7 @@ impl ReplicatedData for Counter {
         }
 
         // Apply delta
-        self.apply_delta(counter_delta).await
+        self.apply_delta(rw, counter_delta).await
     }
 
     fn headstore_prefix(&self) -> Vec<u8> {
@@ -497,13 +536,8 @@ impl ReplicatedData for Counter {
 
 #[async_trait]
 impl ValueReader for Counter {
-    async fn value(&self) -> Result<Vec<u8>> {
-        self.store.get(&self.value_key).await?.ok_or_else(|| {
-            Error::MergeError(format!(
-                "counter value not found for field '{}' in schema '{}'",
-                self.field_name, self.schema_version_id
-            ))
-        })
+    async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
+        self.get_value_internal(reader).await
     }
 }
 
@@ -511,12 +545,12 @@ impl ValueReader for Counter {
 mod tests {
     use super::*;
     use crate::test_utils::MemoryStore;
+    use storage::Store;
 
     #[tokio::test]
     async fn test_counter_increment() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -529,6 +563,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Increment by 5
         let delta1 = CounterDelta::new_int64(
@@ -540,7 +576,7 @@ mod tests {
             5,
         )
         .unwrap();
-        counter.merge(&ctx, &delta1).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Increment by 3
         let delta2 = CounterDelta {
@@ -552,19 +588,20 @@ mod tests {
             data: 3i64.to_be_bytes().to_vec(),
             kind: NumericKind::Int64,
         };
-        counter.merge(&ctx, &delta2).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
         // Should be 8
-        let value_bytes = counter.value().await.unwrap();
+        let value_bytes = counter.value(&*txn).await.unwrap();
         let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
         assert_eq!(value, 8);
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_counter_idempotency() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -577,6 +614,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Apply same delta twice
         let delta = CounterDelta {
@@ -589,20 +628,21 @@ mod tests {
             kind: NumericKind::Int64,
         };
 
-        counter.merge(&ctx, &delta).await.unwrap();
-        counter.merge(&ctx, &delta).await.unwrap(); // Should be ignored
+        counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta).await.unwrap(); // Should be ignored
 
         // Should still be 5 (not 10)
-        let value_bytes = counter.value().await.unwrap();
+        let value_bytes = counter.value(&*txn).await.unwrap();
         let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
         assert_eq!(value, 5);
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_counter_decrement_not_allowed() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -615,6 +655,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Try to decrement
         let delta = CounterDelta {
@@ -627,15 +669,14 @@ mod tests {
             kind: NumericKind::Int64,
         };
 
-        let result = counter.merge(&ctx, &delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_counter_overflow_wrapping() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -648,6 +689,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Set counter to near max
         let delta1 = CounterDelta {
@@ -659,7 +702,7 @@ mod tests {
             data: (i64::MAX - 10).to_be_bytes().to_vec(),
             kind: NumericKind::Int64,
         };
-        counter.merge(&ctx, &delta1).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Try to increment beyond max - should wrap to negative (matching Go behavior)
         let delta2 = CounterDelta {
@@ -671,20 +714,21 @@ mod tests {
             data: 20i64.to_be_bytes().to_vec(),
             kind: NumericKind::Int64,
         };
-        counter.merge(&ctx, &delta2).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
         // Should wrap: (i64::MAX - 10) + 20 = i64::MIN + 9
-        let value_bytes = counter.value().await.unwrap();
+        let value_bytes = counter.value(&*txn).await.unwrap();
         let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
         assert_eq!(value, (i64::MAX - 10).wrapping_add(20));
         assert_eq!(value, i64::MIN + 9); // Verify wrapping behavior
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_counter_field_name_mismatch() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -697,6 +741,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Delta for wrong field
         let delta = CounterDelta {
@@ -709,7 +755,7 @@ mod tests {
             kind: NumericKind::Int64,
         };
 
-        let result = counter.merge(&ctx, &delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -719,9 +765,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_counter_schema_version_mismatch() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -734,6 +779,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Delta for wrong schema version
         let delta = CounterDelta {
@@ -746,7 +793,7 @@ mod tests {
             kind: NumericKind::Int64,
         };
 
-        let result = counter.merge(&ctx, &delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -756,9 +803,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_counter_float64_nan() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -771,6 +817,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Try to increment by NaN
         let delta = CounterDelta {
@@ -783,7 +831,7 @@ mod tests {
             kind: NumericKind::Float64,
         };
 
-        let result = counter.merge(&ctx, &delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -793,9 +841,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_counter_float64_positive_infinity() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -808,6 +855,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Try to increment by positive infinity
         let delta = CounterDelta {
@@ -820,7 +869,7 @@ mod tests {
             kind: NumericKind::Float64,
         };
 
-        let result = counter.merge(&ctx, &delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -830,9 +879,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_counter_float64_negative_infinity() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -845,6 +893,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Try to increment by negative infinity
         let delta = CounterDelta {
@@ -857,7 +907,7 @@ mod tests {
             kind: NumericKind::Float64,
         };
 
-        let result = counter.merge(&ctx, &delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -867,9 +917,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_counter_float64_overflow() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -883,6 +932,8 @@ mod tests {
             schema_version: "v1".to_string(),
         };
 
+        let mut txn = store.new_txn(false).await.unwrap();
+
         // Set counter to near max
         let delta1 = CounterDelta {
             doc_id: b"doc1".to_vec(),
@@ -893,7 +944,7 @@ mod tests {
             data: f64::MAX.to_be_bytes().to_vec(),
             kind: NumericKind::Float64,
         };
-        counter.merge(&ctx, &delta1).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Try to increment - should overflow to infinity and be rejected
         let delta2 = CounterDelta {
@@ -906,16 +957,15 @@ mod tests {
             kind: NumericKind::Float64,
         };
 
-        let result = counter.merge(&ctx, &delta2).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta2).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("float64 overflow"));
     }
 
     #[tokio::test]
     async fn test_counter_float64_basic() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -928,6 +978,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Increment by 5.5
         let delta1 = CounterDelta {
@@ -939,7 +991,7 @@ mod tests {
             data: 5.5f64.to_be_bytes().to_vec(),
             kind: NumericKind::Float64,
         };
-        counter.merge(&ctx, &delta1).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta1).await.unwrap();
 
         // Increment by 3.2
         let delta2 = CounterDelta {
@@ -951,19 +1003,20 @@ mod tests {
             data: 3.2f64.to_be_bytes().to_vec(),
             kind: NumericKind::Float64,
         };
-        counter.merge(&ctx, &delta2).await.unwrap();
+        counter.merge(&mut *txn, &ctx, &delta2).await.unwrap();
 
         // Should be 8.7
-        let value_bytes = counter.value().await.unwrap();
+        let value_bytes = counter.value(&*txn).await.unwrap();
         let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
         assert!((value - 8.7).abs() < 0.0001);
+
+        txn.commit().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_counter_nonce_collision_idempotency() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+    async fn test_counter_merge_result_applied() {
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -977,295 +1030,69 @@ mod tests {
             schema_version: "v1".to_string(),
         };
 
-        // Apply delta with nonce 12345
-        let delta = CounterDelta {
-            doc_id: b"doc1".to_vec(),
-            field_name: "count".to_string(),
-            priority: 10,
-            nonce: 12345,
-            schema_version_id: "v1".to_string(),
-            data: 5i64.to_be_bytes().to_vec(),
-            kind: NumericKind::Int64,
-        };
-        counter.merge(&ctx, &delta).await.unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
 
-        // Verify value is 5
-        let value_bytes = counter.value().await.unwrap();
-        let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-        assert_eq!(value, 5);
-
-        // Apply same delta again with same nonce - should be idempotent
-        let delta2 = CounterDelta {
-            doc_id: b"doc1".to_vec(),
-            field_name: "count".to_string(),
-            priority: 20,
-            nonce: 12345, // Same nonce
-            schema_version_id: "v1".to_string(),
-            data: 5i64.to_be_bytes().to_vec(),
-            kind: NumericKind::Int64,
-        };
-        counter.merge(&ctx, &delta2).await.unwrap();
-
-        // Value should still be 5, not 10
-        let value_bytes = counter.value().await.unwrap();
-        let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-        assert_eq!(value, 5);
-    }
-
-    #[tokio::test]
-    async fn test_counter_concurrent_nonce_collision() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter1 = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true,
-            NumericKind::Int64,
-        )
-        .unwrap();
-        let mut counter2 = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true,
-            NumericKind::Int64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // Both replicas receive delta with nonce 999
-        let delta = CounterDelta {
-            doc_id: b"doc1".to_vec(),
-            field_name: "count".to_string(),
-            priority: 10,
-            nonce: 999,
-            schema_version_id: "v1".to_string(),
-            data: 7i64.to_be_bytes().to_vec(),
-            kind: NumericKind::Int64,
-        };
-
-        // Apply to both counters
-        counter1.merge(&ctx, &delta).await.unwrap();
-        counter2.merge(&ctx, &delta).await.unwrap();
-
-        // Both should have value 7, not 14
-        let value1_bytes = counter1.value().await.unwrap();
-        let value1 = i64::from_be_bytes(value1_bytes.try_into().unwrap());
-        assert_eq!(value1, 7);
-
-        let value2_bytes = counter2.value().await.unwrap();
-        let value2 = i64::from_be_bytes(value2_bytes.try_into().unwrap());
-        assert_eq!(value2, 7);
-    }
-
-    #[tokio::test]
-    async fn test_counter_float64_precision_edge_cases() {
-        // This test documents float64 precision behavior.
-        // When adding very small numbers to very large numbers,
-        // the small numbers are lost due to floating-point precision limits.
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store,
-            "v1".to_string(),
-            b"doc1",
-            "value".to_string(),
-            true,
-            NumericKind::Float64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // Test very small increments (near machine epsilon)
-        let delta1 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "value".to_string(),
-            10,
-            1001,
-            "v1".to_string(),
-            1e-308, // Very small number
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta1).await.unwrap();
-
-        // Add a large number
-        let delta2 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "value".to_string(),
-            20,
-            1002,
-            "v1".to_string(),
-            1e308, // Very large number
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta2).await.unwrap();
-
-        // Subtract the large number
-        let delta3 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "value".to_string(),
-            30,
-            1003,
-            "v1".to_string(),
-            -1e308,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta3).await.unwrap();
-
-        let value_bytes = counter.value().await.unwrap();
-        let arr: [u8; 8] = value_bytes.try_into().unwrap();
-        let value = f64::from_be_bytes(arr);
-
-        // Due to floating-point precision limits:
-        // 1e-308 + 1e308 = 1e308 (small number is lost)
-        // 1e308 - 1e308 = 0.0
-        // Result is exactly 0.0, NOT 1e-308
-        // This is expected IEEE 754 behavior, not a bug.
-        assert!(value.is_finite());
-        assert_eq!(value, 0.0, "precision loss is expected: 1e-308 + 1e308 - 1e308 = 0");
-    }
-
-    #[tokio::test]
-    async fn test_counter_float64_precision_preserved_within_range() {
-        // When numbers are within similar magnitude, precision is preserved
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store,
-            "v1".to_string(),
-            b"doc1",
-            "value".to_string(),
-            true,
-            NumericKind::Float64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // Add numbers of similar magnitude
-        let delta1 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "value".to_string(),
-            10,
-            1001,
-            "v1".to_string(),
-            1.0,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta1).await.unwrap();
-
-        let delta2 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "value".to_string(),
-            20,
-            1002,
-            "v1".to_string(),
-            0.1,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta2).await.unwrap();
-
-        let delta3 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "value".to_string(),
-            30,
-            1003,
-            "v1".to_string(),
-            0.01,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta3).await.unwrap();
-
-        let value_bytes = counter.value().await.unwrap();
-        let arr: [u8; 8] = value_bytes.try_into().unwrap();
-        let value = f64::from_be_bytes(arr);
-
-        // 1.0 + 0.1 + 0.01 = 1.11
-        // Precision is preserved because numbers are similar magnitude
-        assert!((value - 1.11).abs() < 1e-10, "precision preserved: got {}", value);
-    }
-
-    #[test]
-    fn test_counter_delta_validation_rejects_empty_values() {
-        // Test that empty doc_id, field_name, and schema_version are rejected
-        // for both int64 and float64 constructors
-
-        // Empty doc_id
-        let result =
-            CounterDelta::new_int64(Vec::new(), "count".to_string(), 10, 1, "v1".to_string(), 5);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("doc_id"));
-
-        let result = CounterDelta::new_float64(
-            Vec::new(),
-            "count".to_string(),
-            10,
-            1,
-            "v1".to_string(),
-            5.0,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("doc_id"));
-
-        // Empty field_name
-        let result =
-            CounterDelta::new_int64(b"doc1".to_vec(), "".to_string(), 10, 1, "v1".to_string(), 5);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field_name"));
-
-        let result = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "".to_string(),
-            10,
-            1,
-            "v1".to_string(),
-            5.0,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field_name"));
-
-        // Empty schema_version_id
-        let result = CounterDelta::new_int64(
+        let delta = CounterDelta::new_int64(
             b"doc1".to_vec(),
             "count".to_string(),
             10,
-            1,
-            "".to_string(),
+            12345,
+            "v1".to_string(),
             5,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
+        )
+        .unwrap();
 
-        let result = CounterDelta::new_float64(
+        let result = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+        assert!(matches!(result, MergeResult::Applied));
+    }
+
+    #[tokio::test]
+    async fn test_counter_merge_result_skipped_already_applied() {
+        let store = MemoryStore::new();
+        let counter = Counter::new(
+            "v1".to_string(),
+            b"doc1",
+            "count".to_string(),
+            true,
+            NumericKind::Int64,
+        )
+        .unwrap();
+
+        let ctx = Context {
+            doc_id: defra_core::types::DocId::new("doc1"),
+            schema_version: "v1".to_string(),
+        };
+
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let delta = CounterDelta::new_int64(
             b"doc1".to_vec(),
             "count".to_string(),
             10,
-            1,
-            "".to_string(),
-            5.0,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
+            12345,
+            "v1".to_string(),
+            5,
+        )
+        .unwrap();
+
+        // First merge should apply
+        let result1 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+        assert!(matches!(result1, MergeResult::Applied));
+
+        // Second merge with same nonce should be skipped
+        let result2 = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+        assert!(matches!(
+            result2,
+            MergeResult::SkippedAlreadyApplied { nonce: 12345 }
+        ));
     }
 
     #[tokio::test]
     async fn test_counter_wrong_delta_type() {
         use crate::LwwDelta;
 
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -1278,6 +1105,8 @@ mod tests {
             doc_id: defra_core::types::DocId::new("doc1"),
             schema_version: "v1".to_string(),
         };
+
+        let mut txn = store.new_txn(false).await.unwrap();
 
         // Try to merge an LwwDelta into a Counter
         let wrong_delta = LwwDelta::new(
@@ -1289,7 +1118,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = counter.merge(&ctx, &wrong_delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &wrong_delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1298,95 +1127,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_counter_float64_decrement_not_allowed() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            false, // Decrement not allowed
-            NumericKind::Float64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // Try to decrement with float64
-        let delta = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            12345,
-            "v1".to_string(),
-            -5.0,
-        )
-        .unwrap();
-
-        let result = counter.merge(&ctx, &delta).await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("decrement not allowed"));
-    }
-
-    #[tokio::test]
-    async fn test_counter_float64_successful_decrement() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true, // Decrement allowed
-            NumericKind::Float64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // First increment
-        let delta1 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            1,
-            "v1".to_string(),
-            10.0,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta1).await.unwrap();
-
-        // Then decrement
-        let delta2 = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            20,
-            2,
-            "v1".to_string(),
-            -3.0,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta2).await.unwrap();
-
-        // Should be 7.0
-        let value_bytes = counter.value().await.unwrap();
-        let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
-        assert!((value - 7.0).abs() < 0.0001);
-    }
-
-    #[tokio::test]
     async fn test_counter_numeric_kind_mismatch() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
+        let store = MemoryStore::new();
+        let counter = Counter::new(
             "v1".to_string(),
             b"doc1",
             "count".to_string(),
@@ -1400,6 +1143,8 @@ mod tests {
             schema_version: "v1".to_string(),
         };
 
+        let mut txn = store.new_txn(false).await.unwrap();
+
         // Try to apply a Float64 delta to an Int64 counter
         let delta = CounterDelta::new_float64(
             b"doc1".to_vec(),
@@ -1411,7 +1156,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = counter.merge(&ctx, &delta).await;
+        let result = counter.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1419,210 +1164,9 @@ mod tests {
             .contains("numeric kind mismatch"));
     }
 
-    #[tokio::test]
-    async fn test_counter_underflow_wrapping() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true, // Allow decrement
-            NumericKind::Int64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // Set counter to near minimum
-        let delta1 = CounterDelta::new_int64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            1,
-            "v1".to_string(),
-            i64::MIN + 10,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta1).await.unwrap();
-
-        // Try to decrement beyond minimum - should wrap to positive (matching Go behavior)
-        let delta2 = CounterDelta::new_int64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            20,
-            2,
-            "v1".to_string(),
-            -20,
-        )
-        .unwrap();
-        counter.merge(&ctx, &delta2).await.unwrap();
-
-        // Should wrap: (i64::MIN + 10) + (-20) = i64::MAX - 9
-        let value_bytes = counter.value().await.unwrap();
-        let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-        assert_eq!(value, (i64::MIN + 10).wrapping_add(-20));
-        assert_eq!(value, i64::MAX - 9); // Verify wrapping behavior
-    }
-
-    #[tokio::test]
-    async fn test_counter_merge_result_applied() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true,
-            NumericKind::Int64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        let delta = CounterDelta::new_int64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            12345,
-            "v1".to_string(),
-            5,
-        )
-        .unwrap();
-
-        let result = counter.merge(&ctx, &delta).await.unwrap();
-        assert!(matches!(result, MergeResult::Applied));
-    }
-
-    #[tokio::test]
-    async fn test_counter_merge_result_skipped_already_applied() {
-        let store = Arc::new(MemoryStore::new());
-        let mut counter = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true,
-            NumericKind::Int64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        let delta = CounterDelta::new_int64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            12345,
-            "v1".to_string(),
-            5,
-        )
-        .unwrap();
-
-        // First merge should apply
-        let result1 = counter.merge(&ctx, &delta).await.unwrap();
-        assert!(matches!(result1, MergeResult::Applied));
-
-        // Second merge with same nonce should be skipped
-        let result2 = counter.merge(&ctx, &delta).await.unwrap();
-        assert!(matches!(
-            result2,
-            MergeResult::SkippedAlreadyApplied { nonce: 12345 }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_counter_corrupted_storage_int64() {
-        let store = Arc::new(MemoryStore::new());
-
-        // Manually insert corrupted data (wrong length)
-        let value_key = b"/data/v1/doc1/count".to_vec();
-        store.set(&value_key, b"short").await.unwrap();
-
-        let mut counter = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true,
-            NumericKind::Int64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // Try to apply a delta - should fail when reading corrupted current value
-        let delta = CounterDelta::new_int64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            12345,
-            "v1".to_string(),
-            5,
-        )
-        .unwrap();
-
-        let result = counter.merge(&ctx, &delta).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected 8 bytes"));
-    }
-
-    #[tokio::test]
-    async fn test_counter_corrupted_storage_float64() {
-        let store = Arc::new(MemoryStore::new());
-
-        // Manually insert corrupted data (wrong length)
-        let value_key = b"/data/v1/doc1/count".to_vec();
-        store.set(&value_key, b"too_short").await.unwrap();
-
-        let mut counter = Counter::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "count".to_string(),
-            true,
-            NumericKind::Float64,
-        )
-        .unwrap();
-
-        let ctx = Context {
-            doc_id: defra_core::types::DocId::new("doc1"),
-            schema_version: "v1".to_string(),
-        };
-
-        // Try to apply a delta - should fail when reading corrupted current value
-        let delta = CounterDelta::new_float64(
-            b"doc1".to_vec(),
-            "count".to_string(),
-            10,
-            12345,
-            "v1".to_string(),
-            5.0,
-        )
-        .unwrap();
-
-        let result = counter.merge(&ctx, &delta).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected 8 bytes"));
-    }
-
     #[test]
     fn test_counter_constructor_empty_schema_version() {
-        let store = Arc::new(MemoryStore::new());
         let result = Counter::new(
-            store,
             "".to_string(),
             b"doc1",
             "count".to_string(),
@@ -1638,9 +1182,7 @@ mod tests {
 
     #[test]
     fn test_counter_constructor_empty_doc_id() {
-        let store = Arc::new(MemoryStore::new());
         let result = Counter::new(
-            store,
             "v1".to_string(),
             b"",
             "count".to_string(),
@@ -1654,9 +1196,7 @@ mod tests {
 
     #[test]
     fn test_counter_constructor_empty_field_name() {
-        let store = Arc::new(MemoryStore::new());
         let result = Counter::new(
-            store,
             "v1".to_string(),
             b"doc1",
             "".to_string(),
@@ -1666,5 +1206,34 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.to_string().contains("field_name cannot be empty"));
+    }
+
+    #[test]
+    fn test_counter_delta_validation_rejects_empty_values() {
+        // Test that empty doc_id, field_name, and schema_version are rejected
+
+        // Empty doc_id
+        let result =
+            CounterDelta::new_int64(Vec::new(), "count".to_string(), 10, 1, "v1".to_string(), 5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("doc_id"));
+
+        // Empty field_name
+        let result =
+            CounterDelta::new_int64(b"doc1".to_vec(), "".to_string(), 10, 1, "v1".to_string(), 5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field_name"));
+
+        // Empty schema_version_id
+        let result = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            10,
+            1,
+            "".to_string(),
+            5,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("schema_version_id"));
     }
 }

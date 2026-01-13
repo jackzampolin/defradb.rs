@@ -25,7 +25,7 @@ pub mod traits;
 mod test_utils;
 
 pub use composite::{CompositeDAG, CompositeDelta};
-pub use counter::{Counter, CounterDelta};
+pub use counter::{Counter, CounterDelta, NumericKind};
 pub use lww::{Lww, LwwDelta};
 pub use priority::{decode_priority, encode_priority};
 pub use traits::{Delta, MergeResult, ReplicatedData};

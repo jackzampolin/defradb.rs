@@ -107,4 +107,4 @@ pub mod stores;
 
 // Re-export commonly used types for convenience
 pub use backends::{MemoryStore, RocksDBStore};
-pub use corekv::{Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn, Writer};
+pub use corekv::{Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer};

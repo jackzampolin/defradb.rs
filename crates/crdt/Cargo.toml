@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 defra-core = { path = "../defra-core" }
+storage = { path = "../storage" }
 
 # Async
 async-trait.workspace = true

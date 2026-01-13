@@ -6,11 +6,11 @@
 use crate::priority::{decode_priority, encode_priority};
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData};
 use async_trait::async_trait;
-use defra_core::{store::Store, types::DocId, Error, Result};
+use defra_core::{types::DocId, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use storage::{Reader, ReaderWriter};
 
 /// Composite Delta - represents changes to multiple fields in a document
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,15 +117,12 @@ impl Delta for CompositeDelta {
 
 /// Composite DAG - manages document-level CRDT state
 pub struct CompositeDAG {
-    /// Storage backend
-    store: Arc<dyn Store>,
     /// Document ID
     doc_id: DocId,
     /// Schema version
     schema_version_id: String,
     /// Field-level CRDT managers
     /// Maps field_name -> CRDT instance
-    /// (In real implementation, this would be a proper registry)
     field_managers: HashMap<String, FieldCrdtType>,
 }
 
@@ -138,9 +135,8 @@ enum FieldCrdtType {
 
 impl CompositeDAG {
     /// Create a new CompositeDAG
-    pub fn new(store: Arc<dyn Store>, doc_id: DocId, schema_version_id: String) -> Self {
+    pub fn new(doc_id: DocId, schema_version_id: String) -> Self {
         Self {
-            store,
             doc_id,
             schema_version_id,
             field_managers: HashMap::new(),
@@ -178,30 +174,37 @@ impl CompositeDAG {
     }
 
     /// Get the current priority for a field (0 if not set)
-    async fn get_field_priority(&self, field_name: &str) -> Result<u64> {
+    async fn get_field_priority(&self, reader: &dyn Reader, field_name: &str) -> Result<u64> {
         let priority_key = self.build_priority_key(field_name);
-        match self.store.get(&priority_key).await? {
+        match reader
+            .get(&priority_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
             Some(bytes) => decode_priority(&bytes),
             None => Ok(0),
         }
     }
 
     /// Set the priority for a field
-    async fn set_field_priority(&self, field_name: &str, priority: u64) -> Result<()> {
+    async fn set_field_priority(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        field_name: &str,
+        priority: u64,
+    ) -> Result<()> {
         let priority_key = self.build_priority_key(field_name);
         let priority_bytes = encode_priority(priority);
-        self.store.set(&priority_key, &priority_bytes).await
+        rw.set(&priority_key, &priority_bytes)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
     }
 
     /// Apply field-level delta with proper CRDT conflict resolution
-    ///
-    /// # Warning
-    ///
-    /// Counter operations involve multiple storage writes (value + nonce) without
-    /// transaction support. If the process crashes between these operations, state may become
-    /// inconsistent and violate CRDT idempotency guarantees.
     async fn apply_field_delta(
         &self,
+        rw: &mut dyn ReaderWriter,
         field_name: &str,
         field_delta: &FieldDelta,
     ) -> Result<MergeResult> {
@@ -213,7 +216,7 @@ impl CompositeDAG {
         match (crdt_type, field_delta) {
             (FieldCrdtType::Lww, FieldDelta::Lww { priority, data }) => {
                 let value_key = self.build_value_key(field_name);
-                let current_priority = self.get_field_priority(field_name).await?;
+                let current_priority = self.get_field_priority(rw, field_name).await?;
 
                 // LWW conflict resolution: higher priority wins
                 match priority.cmp(&current_priority) {
@@ -225,7 +228,11 @@ impl CompositeDAG {
                     }
                     std::cmp::Ordering::Equal => {
                         // Same priority - use lexicographic tie-breaking
-                        let current_value = self.store.get(&value_key).await?.unwrap_or_default();
+                        let current_value = rw
+                            .get(&value_key)
+                            .await
+                            .map_err(|e| Error::Storage(e.to_string()))?
+                            .unwrap_or_default();
                         if data.as_slice() <= current_value.as_slice() {
                             return Ok(MergeResult::RejectedTieBreak);
                         }
@@ -237,11 +244,15 @@ impl CompositeDAG {
 
                 // Apply the update
                 if data.is_empty() {
-                    self.store.delete(&value_key).await?;
+                    rw.delete(&value_key)
+                        .await
+                        .map_err(|e| Error::Storage(e.to_string()))?;
                 } else {
-                    self.store.set(&value_key, data).await?;
+                    rw.set(&value_key, data)
+                        .await
+                        .map_err(|e| Error::Storage(e.to_string()))?;
                 }
-                self.set_field_priority(field_name, *priority).await?;
+                self.set_field_priority(rw, field_name, *priority).await?;
 
                 Ok(MergeResult::Applied)
             }
@@ -260,12 +271,20 @@ impl CompositeDAG {
                 nonce_key.extend_from_slice(b"/nonces/");
                 nonce_key.extend_from_slice(&nonce.to_be_bytes());
 
-                if self.store.has(&nonce_key).await? {
+                if rw
+                    .has(&nonce_key)
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?
+                {
                     return Ok(MergeResult::SkippedAlreadyApplied { nonce: *nonce });
                 }
 
                 // Apply increment
-                let current = match self.store.get(&value_key).await? {
+                let current = match rw
+                    .get(&value_key)
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?
+                {
                     Some(bytes) => {
                         if bytes.len() != 8 {
                             return Err(Error::MergeError(format!(
@@ -288,14 +307,18 @@ impl CompositeDAG {
 
                 let increment = i64::from_be_bytes(data[..8].try_into().unwrap());
                 let new_value = current.wrapping_add(increment);
-                self.store.set(&value_key, &new_value.to_be_bytes()).await?;
-                self.store.set(&nonce_key, &[1]).await?;
+                rw.set(&value_key, &new_value.to_be_bytes())
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                rw.set(&nonce_key, &[1])
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?;
 
                 Ok(MergeResult::Applied)
             }
             (_, FieldDelta::Delete { priority }) => {
                 let value_key = self.build_value_key(field_name);
-                let current_priority = self.get_field_priority(field_name).await?;
+                let current_priority = self.get_field_priority(rw, field_name).await?;
 
                 // Delete conflict resolution: higher priority wins
                 // On tie, non-empty value wins over deletion (empty < any value lexicographically)
@@ -308,7 +331,10 @@ impl CompositeDAG {
                     }
                     std::cmp::Ordering::Equal => {
                         // Same priority - deletion (empty) loses to any existing value
-                        let current_value = self.store.get(&value_key).await?;
+                        let current_value = rw
+                            .get(&value_key)
+                            .await
+                            .map_err(|e| Error::Storage(e.to_string()))?;
                         if current_value.is_some() && !current_value.as_ref().unwrap().is_empty() {
                             return Ok(MergeResult::RejectedTieBreak);
                         }
@@ -319,8 +345,10 @@ impl CompositeDAG {
                 }
 
                 // Apply deletion
-                self.store.delete(&value_key).await?;
-                self.set_field_priority(field_name, *priority).await?;
+                rw.delete(&value_key)
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+                self.set_field_priority(rw, field_name, *priority).await?;
 
                 Ok(MergeResult::Applied)
             }
@@ -334,7 +362,12 @@ impl CompositeDAG {
 
 #[async_trait]
 impl ReplicatedData for CompositeDAG {
-    async fn merge(&mut self, _ctx: &Context, delta: &dyn Delta) -> Result<MergeResult> {
+    async fn merge(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        _ctx: &Context,
+        delta: &dyn Delta,
+    ) -> Result<MergeResult> {
         // Downcast to CompositeDelta
         let composite_delta = delta
             .as_any()
@@ -392,10 +425,9 @@ impl ReplicatedData for CompositeDAG {
         }
 
         // Apply each field delta (now that all fields are pre-validated)
-        // Note: Storage operations still not atomic, but validation errors won't cause partial state.
         let mut any_applied = false;
         for (field_name, field_delta) in &composite_delta.field_deltas {
-            let result = self.apply_field_delta(field_name, field_delta).await?;
+            let result = self.apply_field_delta(rw, field_name, field_delta).await?;
             if result.was_applied() {
                 any_applied = true;
             }
@@ -423,11 +455,12 @@ impl ReplicatedData for CompositeDAG {
 mod tests {
     use super::*;
     use crate::test_utils::MemoryStore;
+    use storage::Store;
 
     #[tokio::test]
     async fn test_composite_multiple_fields() {
-        let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+        let store = MemoryStore::new();
+        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
         // Register fields
         composite.register_lww_field("name".to_string());
@@ -463,24 +496,27 @@ mod tests {
             field_deltas,
         };
 
-        composite.merge(&ctx, &delta).await.unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        composite.merge(&mut *txn, &ctx, &delta).await.unwrap();
+        txn.commit().await.unwrap();
 
         // Verify name field
+        let txn = store.new_txn(true).await.unwrap();
         let name_key = b"/data/v1/doc1/name".to_vec();
-        let name = store.get(&name_key).await.unwrap().unwrap();
+        let name = txn.get(&name_key).await.unwrap().unwrap();
         assert_eq!(name, b"Alice");
 
         // Verify count field
         let count_key = b"/data/v1/doc1/count".to_vec();
-        let count_bytes = store.get(&count_key).await.unwrap().unwrap();
+        let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
         let count = i64::from_be_bytes(count_bytes.try_into().unwrap());
         assert_eq!(count, 5);
     }
 
     #[tokio::test]
     async fn test_composite_field_type_mismatch_lww_to_counter() {
-        let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+        let store = MemoryStore::new();
+        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
         // Register field as LWW
         composite.register_lww_field("value".to_string());
@@ -508,7 +544,8 @@ mod tests {
             field_deltas,
         };
 
-        let result = composite.merge(&ctx, &delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = composite.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -518,8 +555,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_field_type_mismatch_counter_to_lww() {
-        let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+        let store = MemoryStore::new();
+        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
         // Register field as Counter
         composite.register_counter_field("count".to_string());
@@ -546,7 +583,8 @@ mod tests {
             field_deltas,
         };
 
-        let result = composite.merge(&ctx, &delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = composite.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -556,8 +594,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_unknown_field() {
-        let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+        let store = MemoryStore::new();
+        let composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
         // Don't register any fields
 
@@ -583,15 +621,16 @@ mod tests {
             field_deltas,
         };
 
-        let result = composite.merge(&ctx, &delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = composite.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));
     }
 
     #[tokio::test]
     async fn test_composite_schema_evolution_type_change() {
-        let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+        let store = MemoryStore::new();
+        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
         // Register field as LWW in schema v1
         composite.register_lww_field("score".to_string());
@@ -618,7 +657,9 @@ mod tests {
             field_deltas: field_deltas.clone(),
         };
 
-        composite.merge(&ctx, &delta1).await.unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        composite.merge(&mut *txn, &ctx, &delta1).await.unwrap();
+        txn.commit().await.unwrap();
 
         // Now simulate schema evolution where "score" becomes a Counter
         // This should fail since the field is registered as LWW
@@ -639,7 +680,8 @@ mod tests {
             field_deltas: field_deltas2,
         };
 
-        let result = composite.merge(&ctx, &delta2).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = composite.merge(&mut *txn, &ctx, &delta2).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -649,8 +691,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_doc_id_mismatch() {
-        let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+        let store = MemoryStore::new();
+        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
         composite.register_lww_field("name".to_string());
 
@@ -676,7 +718,8 @@ mod tests {
             field_deltas,
         };
 
-        let result = composite.merge(&ctx, &delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = composite.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -686,8 +729,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_schema_version_mismatch() {
-        let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
+        let store = MemoryStore::new();
+        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
         composite.register_lww_field("name".to_string());
 
@@ -713,7 +756,8 @@ mod tests {
             field_deltas,
         };
 
-        let result = composite.merge(&ctx, &delta).await;
+        let mut txn = store.new_txn(false).await.unwrap();
+        let result = composite.merge(&mut *txn, &ctx, &delta).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -725,7 +769,10 @@ mod tests {
     fn test_composite_delta_empty_doc_id_rejected() {
         let result = CompositeDelta::new(vec![], "v1".to_string(), 10);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("doc_id cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("doc_id cannot be empty"));
     }
 
     #[test]
@@ -741,11 +788,17 @@ mod tests {
     #[test]
     fn test_composite_delta_empty_field_name_rejected() {
         let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
-        let result = delta.add_field_delta("".to_string(), FieldDelta::Lww {
-            priority: 10,
-            data: b"value".to_vec(),
-        });
+        let result = delta.add_field_delta(
+            "".to_string(),
+            FieldDelta::Lww {
+                priority: 10,
+                data: b"value".to_vec(),
+            },
+        );
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field_name cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("field_name cannot be empty"));
     }
 }

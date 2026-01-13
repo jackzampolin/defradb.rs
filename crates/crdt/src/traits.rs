@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use defra_core::{types::DocId, Result};
 use std::any::Any;
+use storage::{Reader, ReaderWriter};
 
 /// Result of a merge operation, providing visibility into what happened
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,18 +74,38 @@ pub trait Delta: Send + Sync {
 ///
 /// This is the core trait for all CRDT implementations in DefraDB.
 /// It defines how to merge incoming deltas and manage state.
+///
+/// # Storage Pattern
+///
+/// CRDTs do not own storage - instead, they receive a mutable reference
+/// to a `ReaderWriter` (typically a transaction) for each operation.
+/// This pattern:
+/// - Matches Go DefraDB's design where CRDTs receive `corekv.ReaderWriter`
+/// - Allows the caller to control transaction lifecycle (commit/rollback)
+/// - Enables multiple CRDT operations within a single transaction
 #[async_trait]
 pub trait ReplicatedData: Send + Sync {
     /// Merge an incoming delta into this CRDT
     ///
     /// # Arguments
+    /// * `rw` - Storage transaction for reading/writing state
     /// * `ctx` - Context for the operation
     /// * `delta` - The delta to merge
     ///
     /// # Returns
     /// * `Ok(MergeResult)` indicating what happened (applied, rejected, or skipped)
     /// * `Err(...)` if merge failed (invalid delta, storage error, etc.)
-    async fn merge(&mut self, ctx: &Context, delta: &dyn Delta) -> Result<MergeResult>;
+    ///
+    /// # Transaction Semantics
+    ///
+    /// The caller is responsible for committing or rolling back the transaction.
+    /// Multiple merge calls can share the same transaction for atomic updates.
+    async fn merge(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        ctx: &Context,
+        delta: &dyn Delta,
+    ) -> Result<MergeResult>;
 
     /// Get the headstore key prefix for this CRDT
     ///
@@ -97,14 +118,14 @@ pub trait ReplicatedData: Send + Sync {
 #[async_trait]
 pub trait ValueReader: ReplicatedData {
     /// Get the current value from storage
-    async fn value(&self) -> Result<Vec<u8>>;
+    async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>>;
 }
 
 /// Trait for CRDTs that support priority retrieval
 #[async_trait]
 pub trait PriorityReader: ReplicatedData {
     /// Get the current priority from storage
-    async fn priority(&self) -> Result<u64>;
+    async fn priority(&self, reader: &dyn Reader) -> Result<u64>;
 }
 
 #[cfg(test)]
