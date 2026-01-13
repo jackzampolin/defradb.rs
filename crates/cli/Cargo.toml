@@ -41,8 +41,3 @@ anyhow = { workspace = true }
 
 # File system
 dirs = "5.0"
-
-# Signal handling (Unix)
-[target.'cfg(unix)'.dependencies]
-signal-hook = "0.3"
-signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }

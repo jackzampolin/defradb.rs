@@ -105,7 +105,7 @@ impl StartArgs {
     /// Execute the start command
     pub async fn execute(self, mut config: Config) -> Result<()> {
         // Apply start-specific flags to config
-        self.apply_to_config(&mut config);
+        self.apply_to_config(&mut config)?;
 
         // Create config if it doesn't exist
         config.create_if_missing()?;
@@ -121,7 +121,9 @@ impl StartArgs {
     }
 
     /// Apply start command flags to config
-    fn apply_to_config(&self, config: &mut Config) {
+    ///
+    /// Returns an error if any flag value fails to parse.
+    fn apply_to_config(&self, config: &mut Config) -> Result<()> {
         if let Some(ref peers) = self.peers {
             config.net.peers = peers.clone();
         }
@@ -129,9 +131,7 @@ impl StartArgs {
             config.datastore.max_txn_retries = retries;
         }
         if let Some(ref store) = self.store {
-            if let Ok(s) = store.parse() {
-                config.datastore.store = s;
-            }
+            config.datastore.store = store.parse()?;
         }
         if let Some(size) = self.valuelogfilesize {
             config.datastore.valuelogfilesize = size;
@@ -172,6 +172,7 @@ impl StartArgs {
         if let Some(ref intervals) = self.replicator_retry_intervals {
             config.replicator_retry_intervals = intervals.clone();
         }
+        Ok(())
     }
 }
 
@@ -251,7 +252,9 @@ impl Node {
                                 topic, propagation_source
                             );
                         }
-                        _ => {}
+                        other => {
+                            tracing::debug!("Unhandled P2P event: {:?}", other);
+                        }
                     }
                 }
             });
@@ -265,8 +268,9 @@ impl Node {
             }
 
             // Get and display peer ID
-            if let Ok(peer_id) = handle.local_peer_id().await {
-                info!("Local peer ID: {}", peer_id);
+            match handle.local_peer_id().await {
+                Ok(peer_id) => info!("Local peer ID: {}", peer_id),
+                Err(e) => error!("Failed to get local peer ID: {}", e),
             }
 
             Some(handle)

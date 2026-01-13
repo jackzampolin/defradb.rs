@@ -79,7 +79,7 @@ impl VersionArgs {
         let info = VersionInfo::new();
 
         if self.format.to_lowercase() == "json" {
-            let json = serde_json::to_string_pretty(&info).unwrap();
+            let json = serde_json::to_string_pretty(&info)?;
             println!("{json}");
         } else if self.full {
             println!("{}", info.full());

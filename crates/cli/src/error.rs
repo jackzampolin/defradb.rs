@@ -85,4 +85,7 @@ pub enum Error {
 
     #[error("invalid multiaddr: {0}")]
     InvalidMultiaddr(String),
+
+    #[error("JSON serialization error: {0}")]
+    JsonSerialization(#[from] serde_json::Error),
 }
