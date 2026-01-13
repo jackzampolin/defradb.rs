@@ -298,6 +298,29 @@ impl Reader for RocksDBTxn {
         Ok(self.snapshot.get(key)?.is_some())
     }
 
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        if *self.discarded.lock() {
+            return Err(Error::DiscardedTxn);
+        }
+
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+
+        // Check pending writes first
+        let pending = self.pending.lock();
+        if let Some(pending_value) = pending.get(key) {
+            return Ok(pending_value.as_ref().map(|v| v.len()));
+        }
+        drop(pending);
+
+        // Read from snapshot for isolation
+        match self.snapshot.get(key)? {
+            Some(value) => Ok(Some(value.len())),
+            None => Ok(None),
+        }
+    }
+
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);

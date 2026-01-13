@@ -227,6 +227,18 @@ impl Reader for MemoryTxn {
         Ok(self.has_internal(key))
     }
 
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        if *self.discarded.lock() {
+            return Err(Error::DiscardedTxn);
+        }
+
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+
+        Ok(self.get_internal(key).map(|v| v.len()))
+    }
+
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);

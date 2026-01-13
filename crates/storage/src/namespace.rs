@@ -146,6 +146,11 @@ impl Reader for NamespacedTxn {
         self.txn.has(&prefixed).await
     }
 
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        let prefixed = self.namespace.prefix_key(key);
+        self.txn.get_size(&prefixed).await
+    }
+
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         // Prefix the iterator options
         // IMPORTANT: If no prefix/start/end is specified, we MUST still scope to our namespace

@@ -164,6 +164,10 @@ impl Reader for BlockstoreTxn {
         self.txn.has(key).await
     }
 
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        self.txn.get_size(key).await
+    }
+
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         self.txn.iterator(opts).await
     }

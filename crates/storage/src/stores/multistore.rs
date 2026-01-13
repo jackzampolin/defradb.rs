@@ -396,4 +396,141 @@ mod tests {
             Some(b"encstore_data".to_vec())
         );
     }
+
+    // =========================================================================
+    // NAMESPACE PREFIX STRIPPING TESTS
+    // Verify that namespace prefixes are correctly stripped from iterator keys
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_namespace_iterator_strips_prefix() {
+        // This test verifies that when iterating within a namespace,
+        // the returned keys have the namespace prefix removed
+        let ms = MemoryMultistore::new_memory();
+
+        // Write keys to datastore (namespace 'd')
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"key1", b"value1").await.unwrap();
+        txn.set(b"key2", b"value2").await.unwrap();
+        txn.set(b"key3", b"value3").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Iterate over datastore - keys should NOT have 'd' prefix
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(crate::corekv::IterOptions::new()).await.unwrap();
+
+        let mut keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            let key = String::from_utf8_lossy(kv.key_bytes()).to_string();
+            keys.push(key.clone());
+            // Verify no namespace prefix
+            assert!(
+                !key.starts_with("d"),
+                "Key '{}' should not start with namespace prefix 'd'",
+                key
+            );
+        }
+
+        assert_eq!(keys, vec!["key1", "key2", "key3"]);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_iterator_strips_prefix_with_user_prefix() {
+        // Test that when user specifies a prefix, the returned keys
+        // are relative to that prefix (namespace still stripped)
+        let ms = MemoryMultistore::new_memory();
+
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"users/alice", b"data1").await.unwrap();
+        txn.set(b"users/bob", b"data2").await.unwrap();
+        txn.set(b"posts/hello", b"data3").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Iterate with prefix "users/"
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        let opts = crate::corekv::IterOptions::new().with_prefix(b"users/".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            let key = String::from_utf8_lossy(kv.key_bytes()).to_string();
+            keys.push(key);
+        }
+
+        // Should get "users/alice" and "users/bob" without namespace prefix
+        assert_eq!(keys, vec!["users/alice", "users/bob"]);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_iterator_reverse_strips_prefix() {
+        let ms = MemoryMultistore::new_memory();
+
+        let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+        txn.set(b"a", b"1").await.unwrap();
+        txn.set(b"b", b"2").await.unwrap();
+        txn.set(b"c", b"3").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Reverse iteration
+        let txn = ms.systemstore.new_txn(true).await.unwrap();
+        let opts = crate::corekv::IterOptions::new().with_reverse(true);
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            let key = String::from_utf8_lossy(kv.key_bytes()).to_string();
+            // Verify no 's' (systemstore) prefix
+            assert!(
+                !key.starts_with("s"),
+                "Reverse iterator key should not have namespace prefix"
+            );
+            keys.push(key);
+        }
+
+        assert_eq!(keys, vec!["c", "b", "a"]);
+    }
+
+    #[tokio::test]
+    async fn test_rootstore_iterator_shows_full_keys() {
+        // Rootstore has no namespace, so it should show the raw keys
+        // including other stores' namespace prefixes
+        let ms = MemoryMultistore::new_memory();
+
+        // Write to datastore (prefix 'd')
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"mykey", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Write to systemstore (prefix 's')
+        let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+        txn.set(b"mykey", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Rootstore should see both with their prefixes
+        let txn = ms.root.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(crate::corekv::IterOptions::new()).await.unwrap();
+
+        let mut keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+        }
+
+        // Should see "dmykey" and "smykey" (with namespace prefixes)
+        assert!(keys.contains(&"dmykey".to_string()), "Should see datastore key with 'd' prefix");
+        assert!(keys.contains(&"smykey".to_string()), "Should see systemstore key with 's' prefix");
+    }
+
+    #[tokio::test]
+    async fn test_get_size_through_namespace() {
+        let ms = MemoryMultistore::new_memory();
+
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"sized_key", b"12345").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // get_size should work through namespace
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        assert_eq!(txn.get_size(b"sized_key").await.unwrap(), Some(5));
+        assert_eq!(txn.get_size(b"nonexistent").await.unwrap(), None);
+    }
 }

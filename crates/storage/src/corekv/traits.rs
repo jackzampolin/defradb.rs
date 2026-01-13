@@ -65,6 +65,27 @@ pub trait Reader: Send + Sync {
     /// to check existence.
     async fn has(&self, key: &[u8]) -> Result<bool>;
 
+    /// Get the size of a value without reading the entire value.
+    ///
+    /// This is useful for checking the size of large values without incurring
+    /// the cost of reading them into memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(size))` if the key exists, with size in bytes
+    /// * `Ok(None)` if the key does not exist
+    /// * `Err(Error)` if an error occurred
+    ///
+    /// # Note
+    ///
+    /// Some backends may need to read the entire value to determine its size.
+    /// RocksDB can determine size without reading the value in some cases.
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>>;
+
     /// Create an iterator over key-value pairs.
     ///
     /// The iterator can be configured with various options for filtering

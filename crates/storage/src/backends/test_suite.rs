@@ -81,6 +81,55 @@ pub async fn test_has<S: Store>(store: &S) {
     txn.commit().await.unwrap();
 }
 
+/// Test get_size operation
+pub async fn test_get_size<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    // Non-existent key
+    assert_eq!(txn.get_size(b"nonexistent").await.unwrap(), None);
+
+    // Set a value and check size
+    txn.set(b"key", b"hello").await.unwrap();
+    assert_eq!(txn.get_size(b"key").await.unwrap(), Some(5));
+
+    // Larger value
+    let large_value = vec![0u8; 1000];
+    txn.set(b"large", &large_value).await.unwrap();
+    assert_eq!(txn.get_size(b"large").await.unwrap(), Some(1000));
+
+    // Empty value
+    txn.set(b"empty", b"").await.unwrap();
+    assert_eq!(txn.get_size(b"empty").await.unwrap(), Some(0));
+
+    txn.commit().await.unwrap();
+
+    // Verify after commit
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(txn.get_size(b"key").await.unwrap(), Some(5));
+    assert_eq!(txn.get_size(b"large").await.unwrap(), Some(1000));
+    assert_eq!(txn.get_size(b"empty").await.unwrap(), Some(0));
+    assert_eq!(txn.get_size(b"nonexistent").await.unwrap(), None);
+}
+
+/// Test get_size with pending deletes
+pub async fn test_get_size_with_deletes<S: Store>(store: &S) {
+    // Setup
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"to_delete", b"value").await.unwrap();
+    txn.commit().await.unwrap();
+
+    // Delete in new transaction
+    let mut txn = store.new_txn(false).await.unwrap();
+    assert_eq!(txn.get_size(b"to_delete").await.unwrap(), Some(5));
+    txn.delete(b"to_delete").await.unwrap();
+    assert_eq!(txn.get_size(b"to_delete").await.unwrap(), None);
+    txn.commit().await.unwrap();
+
+    // Verify
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(txn.get_size(b"to_delete").await.unwrap(), None);
+}
+
 /// Test read-your-writes within a transaction
 pub async fn test_read_your_writes<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
@@ -604,6 +653,164 @@ pub async fn test_iterator_reverse_with_prefix<S: Store>(store: &S) {
     }
 
     assert_eq!(keys, vec!["user/c", "user/b", "user/a"]);
+}
+
+// ============================================================================
+// ITERATOR EDGE CASES (From Go test suite)
+// ============================================================================
+
+/// Test iterator with reverse and start/end bounds combined
+pub async fn test_iterator_reverse_with_bounds<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    for c in b'a'..=b'z' {
+        txn.set(&[c], &[c]).await.unwrap();
+    }
+    txn.commit().await.unwrap();
+
+    // Reverse with start/end bounds: should get keys from d to m in reverse order
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_start(b"d".to_vec())
+        .with_end(b"n".to_vec())  // exclusive
+        .with_reverse(true);
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    let mut keys = vec![];
+    while let Some(kv) = iter.next().await.unwrap() {
+        keys.push(kv.key_bytes()[0] as char);
+    }
+
+    // Should be m, l, k, j, i, h, g, f, e, d (reverse order, end exclusive)
+    assert_eq!(keys, vec!['m', 'l', 'k', 'j', 'i', 'h', 'g', 'f', 'e', 'd']);
+}
+
+/// Test iterator boundary: single item at exact start bound
+pub async fn test_iterator_single_item_at_start<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"only_key", b"value").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_start(b"only_key".to_vec())
+        .with_end(b"only_keyz".to_vec());
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    let kv = iter.next().await.unwrap();
+    assert!(kv.is_some());
+    assert_eq!(kv.unwrap().key_bytes(), b"only_key");
+
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// Test iterator with item exactly at end bound (should be excluded)
+pub async fn test_iterator_item_at_end_excluded<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"b", b"2").await.unwrap();
+    txn.set(b"c", b"3").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_start(b"a".to_vec())
+        .with_end(b"c".to_vec());  // c should be excluded
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    let mut keys = vec![];
+    while let Some(kv) = iter.next().await.unwrap() {
+        keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+    }
+
+    assert_eq!(keys, vec!["a", "b"], "End bound should be exclusive");
+}
+
+/// Test iterator with prefix that has no matching keys (edge case)
+pub async fn test_iterator_prefix_between_keys<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"aaa", b"1").await.unwrap();
+    txn.set(b"ccc", b"2").await.unwrap();
+    txn.commit().await.unwrap();
+
+    // Prefix "b" should match nothing (between aaa and ccc)
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new().with_prefix(b"b".to_vec());
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// Test iterator with empty prefix (should return all keys)
+pub async fn test_iterator_empty_prefix<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"b", b"2").await.unwrap();
+    txn.set(b"c", b"3").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new().with_prefix(vec![]);  // Empty prefix
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    let mut count = 0;
+    while iter.next().await.unwrap().is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 3, "Empty prefix should match all keys");
+}
+
+/// Test iterator with overlapping start and prefix (prefix should win for scoping)
+pub async fn test_iterator_prefix_with_start<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"pre/a", b"1").await.unwrap();
+    txn.set(b"pre/b", b"2").await.unwrap();
+    txn.set(b"pre/c", b"3").await.unwrap();
+    txn.set(b"other/x", b"4").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let opts = IterOptions::new()
+        .with_prefix(b"pre/".to_vec())
+        .with_start(b"pre/b".to_vec());  // Start at b within prefix
+    let mut iter = txn.iterator(opts).await.unwrap();
+
+    let mut keys = vec![];
+    while let Some(kv) = iter.next().await.unwrap() {
+        keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+    }
+
+    assert_eq!(keys, vec!["pre/b", "pre/c"]);
+}
+
+/// Test multiple iterators on same transaction
+pub async fn test_multiple_iterators<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"b", b"2").await.unwrap();
+    txn.set(b"c", b"3").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+
+    // Create two iterators on the same transaction
+    let mut iter1 = txn.iterator(IterOptions::new()).await.unwrap();
+    let mut iter2 = txn.iterator(IterOptions::new().with_reverse(true)).await.unwrap();
+
+    // iter1 should go forward
+    let kv1 = iter1.next().await.unwrap().unwrap();
+    assert_eq!(kv1.key_bytes(), b"a");
+
+    // iter2 should go backward (independent of iter1)
+    let kv2 = iter2.next().await.unwrap().unwrap();
+    assert_eq!(kv2.key_bytes(), b"c");
+
+    // Continue iter1
+    let kv1 = iter1.next().await.unwrap().unwrap();
+    assert_eq!(kv1.key_bytes(), b"b");
+
+    // Continue iter2
+    let kv2 = iter2.next().await.unwrap().unwrap();
+    assert_eq!(kv2.key_bytes(), b"b");
 }
 
 // ============================================================================
@@ -1169,6 +1376,60 @@ macro_rules! generate_backend_tests {
         async fn shared_test_binary_key_ordering() {
             let store = $store_fn().await;
             test_suite::test_binary_key_ordering(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_get_size() {
+            let store = $store_fn().await;
+            test_suite::test_get_size(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_get_size_with_deletes() {
+            let store = $store_fn().await;
+            test_suite::test_get_size_with_deletes(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_reverse_with_bounds() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_reverse_with_bounds(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_single_item_at_start() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_single_item_at_start(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_item_at_end_excluded() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_item_at_end_excluded(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_prefix_between_keys() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_prefix_between_keys(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_empty_prefix() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_empty_prefix(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_prefix_with_start() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_prefix_with_start(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_multiple_iterators() {
+            let store = $store_fn().await;
+            test_suite::test_multiple_iterators(&store).await;
         }
     };
 }
