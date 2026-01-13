@@ -101,8 +101,7 @@ pub mod keys;
 pub mod namespace;
 pub mod stores;
 
-// Phase 4+ modules (to be implemented)
-// pub mod transaction;
+// See #19 for transaction wrapper module
 
 // Re-export commonly used types for convenience
 pub use backends::{MemoryStore, RocksDBStore};
