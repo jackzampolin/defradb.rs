@@ -202,7 +202,12 @@ mod tests {
 
     #[test]
     fn test_log_level_display_roundtrip() {
-        for level in [LogLevel::Debug, LogLevel::Info, LogLevel::Error, LogLevel::Fatal] {
+        for level in [
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Error,
+            LogLevel::Fatal,
+        ] {
             let display = level.to_string();
             let parsed: LogLevel = display.parse().unwrap();
             assert_eq!(level, parsed);
@@ -264,9 +269,18 @@ mod tests {
     // KeyringBackend tests
     #[test]
     fn test_keyring_backend_from_str_valid() {
-        assert_eq!("file".parse::<KeyringBackend>().unwrap(), KeyringBackend::File);
-        assert_eq!("system".parse::<KeyringBackend>().unwrap(), KeyringBackend::System);
-        assert_eq!("FILE".parse::<KeyringBackend>().unwrap(), KeyringBackend::File);
+        assert_eq!(
+            "file".parse::<KeyringBackend>().unwrap(),
+            KeyringBackend::File
+        );
+        assert_eq!(
+            "system".parse::<KeyringBackend>().unwrap(),
+            KeyringBackend::System
+        );
+        assert_eq!(
+            "FILE".parse::<KeyringBackend>().unwrap(),
+            KeyringBackend::File
+        );
     }
 
     #[test]
@@ -290,16 +304,31 @@ mod tests {
     // DatastoreType tests
     #[test]
     fn test_datastore_type_from_str_valid() {
-        assert_eq!("badger".parse::<DatastoreType>().unwrap(), DatastoreType::Badger);
-        assert_eq!("memory".parse::<DatastoreType>().unwrap(), DatastoreType::Memory);
-        assert_eq!("BADGER".parse::<DatastoreType>().unwrap(), DatastoreType::Badger);
+        assert_eq!(
+            "badger".parse::<DatastoreType>().unwrap(),
+            DatastoreType::Badger
+        );
+        assert_eq!(
+            "memory".parse::<DatastoreType>().unwrap(),
+            DatastoreType::Memory
+        );
+        assert_eq!(
+            "BADGER".parse::<DatastoreType>().unwrap(),
+            DatastoreType::Badger
+        );
     }
 
     #[test]
     fn test_datastore_type_accepts_rocksdb_alias() {
         // rocksdb is an alias for badger (Rust impl uses RocksDB)
-        assert_eq!("rocksdb".parse::<DatastoreType>().unwrap(), DatastoreType::Badger);
-        assert_eq!("RocksDB".parse::<DatastoreType>().unwrap(), DatastoreType::Badger);
+        assert_eq!(
+            "rocksdb".parse::<DatastoreType>().unwrap(),
+            DatastoreType::Badger
+        );
+        assert_eq!(
+            "RocksDB".parse::<DatastoreType>().unwrap(),
+            DatastoreType::Badger
+        );
     }
 
     #[test]

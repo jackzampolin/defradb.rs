@@ -318,6 +318,9 @@ mod tests {
         scan.start().await.unwrap();
 
         let result = scan.next().await;
-        assert!(result.is_err(), "Filter error should propagate through scan");
+        assert!(
+            result.is_err(),
+            "Filter error should propagate through scan"
+        );
     }
 }
