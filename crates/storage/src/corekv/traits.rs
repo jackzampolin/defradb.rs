@@ -186,6 +186,30 @@ pub trait Store: Send + Sync {
     async fn close(&self) -> Result<()>;
 }
 
+/// Dropable trait for stores that support bulk deletion.
+///
+/// This is an optional interface implemented by some stores. It provides a
+/// convenient and efficient way of deleting all data in a store.
+///
+/// # Note
+///
+/// Concurrent writes will be blocked during `drop_all()`. Depending on the
+/// underlying store implementation, concurrent reads may or may not be blocked.
+#[async_trait]
+pub trait Dropable: Store {
+    /// Delete all data stored in the store.
+    ///
+    /// This is a destructive operation that removes all key-value pairs.
+    /// Use with caution in production environments.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` on success
+    /// * `Err(Error::DBClosed)` if the store is closed
+    /// * `Err(Error)` for other errors
+    async fn drop_all(&self) -> Result<()>;
+}
+
 /// Transaction trait with ACID guarantees and callback support.
 ///
 /// Transactions provide atomicity, consistency, isolation, and durability (ACID).

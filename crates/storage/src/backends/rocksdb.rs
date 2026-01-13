@@ -648,6 +648,35 @@ impl Iterator for SimpleIterator {
         Ok(())
     }
 
+    async fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        if self.closed {
+            return Err(Error::Iterator("Iterator has been closed".into()));
+        }
+
+        // Find first key >= seek_key
+        let pos = self.data.iter().position(|kv| kv.key_bytes() >= key);
+
+        match pos {
+            Some(p) => {
+                self.position = p;
+                Ok(true)
+            }
+            None => {
+                self.position = self.data.len();
+                Ok(false)
+            }
+        }
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        if self.closed {
+            return Err(Error::Iterator("Iterator has been closed".into()));
+        }
+
+        self.position = 0;
+        Ok(())
+    }
+
     fn is_valid(&self) -> bool {
         !self.closed && self.position < self.data.len()
     }

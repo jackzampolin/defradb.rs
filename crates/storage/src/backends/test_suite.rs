@@ -814,6 +814,216 @@ pub async fn test_multiple_iterators<S: Store>(store: &S) {
 }
 
 // ============================================================================
+// ITERATOR SEEK AND RESET TESTS
+// ============================================================================
+
+/// Test iterator seek to existing key
+pub async fn test_iterator_seek<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"b", b"2").await.unwrap();
+    txn.set(b"c", b"3").await.unwrap();
+    txn.set(b"d", b"4").await.unwrap();
+    txn.set(b"e", b"5").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+    // Seek to 'c'
+    assert!(iter.seek(b"c").await.unwrap(), "Seek to existing key should return true");
+
+    // Next should return 'c'
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"c");
+
+    // Followed by 'd' and 'e'
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"d");
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"e");
+
+    // No more items
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// Test iterator seek to key that doesn't exist (seeks to next key)
+pub async fn test_iterator_seek_between_keys<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"aa", b"1").await.unwrap();
+    txn.set(b"cc", b"2").await.unwrap();
+    txn.set(b"ee", b"3").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+    // Seek to 'bb' (doesn't exist, should position at 'cc')
+    assert!(iter.seek(b"bb").await.unwrap(), "Seek to non-existing key should find next");
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"cc", "Should be positioned at next key >= seek target");
+}
+
+/// Test iterator seek past all keys
+pub async fn test_iterator_seek_past_end<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"b", b"2").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+    // Seek past all keys
+    assert!(!iter.seek(b"z").await.unwrap(), "Seek past end should return false");
+
+    // Iterator should be exhausted
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// Test iterator reset
+pub async fn test_iterator_reset<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"b", b"2").await.unwrap();
+    txn.set(b"c", b"3").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+    // Consume entire iterator
+    let mut count = 0;
+    while iter.next().await.unwrap().is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 3);
+
+    // Reset
+    iter.reset().await.unwrap();
+
+    // Should be able to iterate again from the beginning
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"a");
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"b");
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"c");
+
+    assert!(iter.next().await.unwrap().is_none());
+}
+
+/// Test iterator seek after partial iteration
+pub async fn test_iterator_seek_after_iteration<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"a", b"1").await.unwrap();
+    txn.set(b"b", b"2").await.unwrap();
+    txn.set(b"c", b"3").await.unwrap();
+    txn.set(b"d", b"4").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+    // Iterate partially
+    iter.next().await.unwrap(); // a
+    iter.next().await.unwrap(); // b
+
+    // Seek back to 'a'
+    assert!(iter.seek(b"a").await.unwrap());
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"a", "Should seek backwards");
+}
+
+/// Test iterator seek and reset on closed iterator
+pub async fn test_iterator_seek_reset_on_closed<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"key", b"value").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+    iter.close().await.unwrap();
+
+    // Both seek and reset should fail on closed iterator
+    assert!(matches!(iter.seek(b"key").await, Err(Error::Iterator(_))));
+    assert!(matches!(iter.reset().await, Err(Error::Iterator(_))));
+}
+
+// ============================================================================
+// DROPABLE TESTS (for stores that implement Dropable trait)
+// ============================================================================
+
+/// Test drop_all clears all data
+pub async fn test_drop_all<S: Store + crate::corekv::Dropable>(store: &S) {
+    // Add some data
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"key1", b"value1").await.unwrap();
+    txn.set(b"key2", b"value2").await.unwrap();
+    txn.set(b"key3", b"value3").await.unwrap();
+    txn.commit().await.unwrap();
+
+    // Verify data exists
+    let txn = store.new_txn(true).await.unwrap();
+    assert!(txn.has(b"key1").await.unwrap());
+    assert!(txn.has(b"key2").await.unwrap());
+    assert!(txn.has(b"key3").await.unwrap());
+
+    // Drop all
+    store.drop_all().await.unwrap();
+
+    // Verify data is gone
+    let txn = store.new_txn(true).await.unwrap();
+    assert!(!txn.has(b"key1").await.unwrap(), "key1 should be deleted after drop_all");
+    assert!(!txn.has(b"key2").await.unwrap(), "key2 should be deleted after drop_all");
+    assert!(!txn.has(b"key3").await.unwrap(), "key3 should be deleted after drop_all");
+}
+
+/// Test drop_all followed by new writes
+pub async fn test_drop_all_then_write<S: Store + crate::corekv::Dropable>(store: &S) {
+    // Add initial data
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"old_key", b"old_value").await.unwrap();
+    txn.commit().await.unwrap();
+
+    // Drop all
+    store.drop_all().await.unwrap();
+
+    // Write new data
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"new_key", b"new_value").await.unwrap();
+    txn.commit().await.unwrap();
+
+    // Verify old is gone, new exists
+    let txn = store.new_txn(true).await.unwrap();
+    assert!(!txn.has(b"old_key").await.unwrap(), "old_key should be deleted");
+    assert_eq!(
+        txn.get(b"new_key").await.unwrap(),
+        Some(b"new_value".to_vec()),
+        "new_key should exist"
+    );
+}
+
+/// Test drop_all on empty store (should succeed)
+pub async fn test_drop_all_empty_store<S: Store + crate::corekv::Dropable>(store: &S) {
+    // Drop all on empty store should succeed
+    store.drop_all().await.unwrap();
+
+    // Store should still be usable
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(b"key", b"value").await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value".to_vec()));
+}
+
+// ============================================================================
 // CONCURRENCY TESTS
 // ============================================================================
 
@@ -1431,6 +1641,42 @@ macro_rules! generate_backend_tests {
             let store = $store_fn().await;
             test_suite::test_multiple_iterators(&store).await;
         }
+
+        #[tokio::test]
+        async fn shared_test_iterator_seek() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_seek(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_seek_between_keys() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_seek_between_keys(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_seek_past_end() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_seek_past_end(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_reset() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_reset(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_seek_after_iteration() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_seek_after_iteration(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_iterator_seek_reset_on_closed() {
+            let store = $store_fn().await;
+            test_suite::test_iterator_seek_reset_on_closed(&store).await;
+        }
     };
 }
 
@@ -1495,5 +1741,31 @@ macro_rules! generate_backend_concurrency_tests {
     };
 }
 
+/// Macro for Dropable tests (for stores that implement the Dropable trait)
+/// NOTE: This macro assumes generate_backend_tests! was already called, which imports test_suite
+#[macro_export]
+macro_rules! generate_backend_dropable_tests {
+    ($store_fn:expr) => {
+        #[tokio::test]
+        async fn shared_test_drop_all() {
+            let store = $store_fn().await;
+            test_suite::test_drop_all(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_drop_all_then_write() {
+            let store = $store_fn().await;
+            test_suite::test_drop_all_then_write(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_drop_all_empty_store() {
+            let store = $store_fn().await;
+            test_suite::test_drop_all_empty_store(&store).await;
+        }
+    };
+}
+
 pub use generate_backend_tests;
 pub use generate_backend_concurrency_tests;
+pub use generate_backend_dropable_tests;

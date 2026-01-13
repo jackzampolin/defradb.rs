@@ -270,6 +270,16 @@ impl Iterator for NamespacedIterator {
         self.iter.close().await
     }
 
+    async fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        // Prefix the key before seeking in the underlying iterator
+        let prefixed_key = self.namespace.prefix_key(key);
+        self.iter.seek(&prefixed_key).await
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        self.iter.reset().await
+    }
+
     fn is_valid(&self) -> bool {
         self.iter.is_valid()
     }

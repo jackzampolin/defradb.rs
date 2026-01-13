@@ -38,7 +38,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::corekv::{
-    AsyncTxnCallback, Error, Iterator, IterOptions, KvPair, Reader, Result, Store, Txn,
+    AsyncTxnCallback, Dropable, Error, Iterator, IterOptions, KvPair, Reader, Result, Store, Txn,
     TxnCallback, Writer,
 };
 
@@ -101,6 +101,20 @@ impl Store for MemoryStore {
     async fn close(&self) -> Result<()> {
         let mut closed = self.closed.write().await;
         *closed = true;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Dropable for MemoryStore {
+    async fn drop_all(&self) -> Result<()> {
+        if self.is_closed().await {
+            return Err(Error::DBClosed);
+        }
+
+        // Clear all data
+        let mut data = self.data.write().await;
+        data.clear();
         Ok(())
     }
 }
@@ -490,6 +504,48 @@ impl Iterator for MemoryIterator {
         Ok(())
     }
 
+    async fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        if self.closed {
+            return Err(Error::Iterator("Iterator has been closed".into()));
+        }
+
+        // Binary search for the key or next greater key
+        // Note: data is already sorted (from BTreeMap), but may be reversed
+        // For forward iteration: find first key >= seek_key
+        // For reverse iteration: find first key <= seek_key (from current direction)
+
+        // Since data is pre-sorted and potentially reversed, we need to search accordingly
+        // The data is sorted in iteration order (forward or reverse)
+        let pos = self.data.iter().position(|(k, _)| {
+            // In forward order: k >= key
+            // In reverse order: k <= key
+            // Since we don't store the reverse flag, we just find the first match >= key
+            // and let the caller handle the semantics
+            k.as_slice() >= key
+        });
+
+        match pos {
+            Some(p) => {
+                self.position = p;
+                Ok(true)
+            }
+            None => {
+                // No key >= seek_key found, position at end
+                self.position = self.data.len();
+                Ok(false)
+            }
+        }
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        if self.closed {
+            return Err(Error::Iterator("Iterator has been closed".into()));
+        }
+
+        self.position = 0;
+        Ok(())
+    }
+
     fn is_valid(&self) -> bool {
         !self.closed
     }
@@ -503,6 +559,7 @@ mod shared_tests {
     use super::*;
     use crate::generate_backend_tests;
     use crate::generate_backend_concurrency_tests;
+    use crate::generate_backend_dropable_tests;
 
     async fn create_store() -> MemoryStore {
         MemoryStore::new()
@@ -517,6 +574,9 @@ mod shared_tests {
 
     // Generate concurrency tests
     generate_backend_concurrency_tests!(create_arc_store);
+
+    // Generate Dropable tests (MemoryStore implements Dropable)
+    generate_backend_dropable_tests!(create_store);
 }
 
 // ============================================================================

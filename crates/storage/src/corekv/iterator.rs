@@ -106,6 +106,39 @@ pub trait Iterator: Send {
     /// or an appropriate error.
     async fn close(&mut self) -> Result<()>;
 
+    /// Seek moves the iterator to the given key.
+    ///
+    /// If an exact match is not found, the iterator will progress to the next
+    /// valid value (depending on the `reverse` option - next greater for forward,
+    /// next lesser for reverse).
+    ///
+    /// Returns `true` if a valid item was found, `false` otherwise.
+    ///
+    /// Seek will not seek to values outside of the constraints provided in
+    /// IterOptions (prefix, start, end bounds).
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to seek to
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` if a valid item was found at or after the key
+    /// * `Ok(false)` if no valid item exists at or after the key
+    /// * `Err(Error)` if the iterator is closed or an error occurred
+    async fn seek(&mut self, key: &[u8]) -> Result<bool>;
+
+    /// Reset the iterator to the beginning, allowing re-iteration.
+    ///
+    /// After reset, the iterator behaves as if it was just created.
+    /// The next call to `next()` will return the first item.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` on success
+    /// * `Err(Error)` if the iterator is closed or an error occurred
+    async fn reset(&mut self) -> Result<()>;
+
     /// Check if the iterator is still valid (not closed).
     ///
     /// Returns false if close() has been called.
@@ -147,6 +180,14 @@ impl Iterator for Box<dyn Iterator> {
 
     async fn close(&mut self) -> Result<()> {
         (**self).close().await
+    }
+
+    async fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        (**self).seek(key).await
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        (**self).reset().await
     }
 
     fn is_valid(&self) -> bool {
