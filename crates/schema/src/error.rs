@@ -40,6 +40,9 @@ pub enum SchemaError {
 
     #[error("missing required field: {0}")]
     MissingRequiredField(String),
+
+    #[error("CID generation failed: {0}")]
+    CidGeneration(String),
 }
 
 impl From<serde_json::Error> for SchemaError {

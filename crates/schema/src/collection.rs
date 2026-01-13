@@ -1,8 +1,24 @@
 //! Collection version definitions
 
-use crate::{FieldDescription, FieldKind, Result, SchemaError};
-use serde::{Deserialize, Serialize};
+use crate::{
+    CollectionSetDescription, CollectionSource, EncryptedIndexDescription, FieldDescription,
+    FieldKind, IndexDescription, PolicyDescription, QuerySource, Result, SchemaError,
+    VectorEmbeddingDescription,
+};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
+
+/// Helper to deserialize `null` as an empty Vec (Go serializes empty slices as null).
+fn deserialize_null_as_empty_vec<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let opt: Option<Vec<T>> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
 
 /// A versioned collection schema.
 ///
@@ -13,18 +29,90 @@ pub struct CollectionVersion {
     /// Human-readable collection name
     #[serde(rename = "Name")]
     pub name: String,
+
     /// Content hash of this version (immutable)
     #[serde(rename = "VersionID")]
     pub version_id: String,
+
     /// Stable collection ID across versions
     #[serde(rename = "CollectionID")]
     pub collection_id: String,
+
+    /// Information about this collection's membership in a collection set.
+    /// Collections form a set when they have circular relations at creation time.
+    #[serde(
+        rename = "CollectionSet",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub collection_set: Option<CollectionSetDescription>,
+
+    /// Query source for views that derive data from queries.
+    #[serde(rename = "Query", default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<QuerySource>,
+
+    /// Path to the previous collection version (for schema migrations).
+    #[serde(
+        rename = "PreviousVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub previous_version: Option<CollectionSource>,
+
     /// Fields in this collection
-    #[serde(rename = "Fields")]
+    #[serde(rename = "Fields", deserialize_with = "deserialize_null_as_empty_vec")]
     pub fields: Vec<FieldDescription>,
+
+    /// Secondary indexes on this collection
+    #[serde(
+        rename = "Indexes",
+        default,
+        deserialize_with = "deserialize_null_as_empty_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub indexes: Vec<IndexDescription>,
+
+    /// Encrypted indexes for searchable encryption
+    #[serde(
+        rename = "EncryptedIndexes",
+        default,
+        deserialize_with = "deserialize_null_as_empty_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub encrypted_indexes: Vec<EncryptedIndexDescription>,
+
+    /// Access control policy for this collection
+    #[serde(rename = "Policy", default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyDescription>,
+
     /// Whether this is the active version
     #[serde(rename = "IsActive", default = "default_active")]
     pub is_active: bool,
+
+    /// Whether collection items are cached (materialized) or computed at query-time
+    #[serde(rename = "IsMaterialized", default)]
+    pub is_materialized: bool,
+
+    /// Whether the collection history is tracked as a single verifiable entity
+    #[serde(rename = "IsBranchable", default)]
+    pub is_branchable: bool,
+
+    /// Whether this collection exists only as embedded child objects
+    #[serde(rename = "IsEmbeddedOnly", default)]
+    pub is_embedded_only: bool,
+
+    /// Whether this is a placeholder version waiting to be defined
+    #[serde(rename = "IsPlaceholder", default)]
+    pub is_placeholder: bool,
+
+    /// Configuration for generating embedding vectors (AI/ML)
+    #[serde(
+        rename = "VectorEmbeddings",
+        default,
+        deserialize_with = "deserialize_null_as_empty_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub vector_embeddings: Vec<VectorEmbeddingDescription>,
 }
 
 fn default_active() -> bool {
@@ -32,7 +120,7 @@ fn default_active() -> bool {
 }
 
 impl CollectionVersion {
-    /// Create a new collection version
+    /// Create a new collection version with default values for optional fields.
     pub fn new(
         name: impl Into<String>,
         version_id: impl Into<String>,
@@ -43,9 +131,56 @@ impl CollectionVersion {
             name: name.into(),
             version_id: version_id.into(),
             collection_id: collection_id.into(),
+            collection_set: None,
+            query: None,
+            previous_version: None,
             fields,
+            indexes: Vec::new(),
+            encrypted_indexes: Vec::new(),
+            policy: None,
             is_active: true,
+            is_materialized: false,
+            is_branchable: false,
+            is_embedded_only: false,
+            is_placeholder: false,
+            vector_embeddings: Vec::new(),
         }
+    }
+
+    /// Set the previous version source (for migrations).
+    pub fn with_previous_version(mut self, source: CollectionSource) -> Self {
+        self.previous_version = Some(source);
+        self
+    }
+
+    /// Set the collection set membership.
+    pub fn with_collection_set(mut self, set: CollectionSetDescription) -> Self {
+        self.collection_set = Some(set);
+        self
+    }
+
+    /// Add an index to the collection.
+    pub fn with_index(mut self, index: IndexDescription) -> Self {
+        self.indexes.push(index);
+        self
+    }
+
+    /// Set the access control policy.
+    pub fn with_policy(mut self, policy: PolicyDescription) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Mark as branchable (history tracked as verifiable entity).
+    pub fn as_branchable(mut self) -> Self {
+        self.is_branchable = true;
+        self
+    }
+
+    /// Mark as embedded only (not directly queryable).
+    pub fn as_embedded_only(mut self) -> Self {
+        self.is_embedded_only = true;
+        self
     }
 
     /// Get a field by name

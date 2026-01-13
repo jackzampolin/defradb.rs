@@ -6,16 +6,28 @@
 //! The numeric values for FieldKind and CType match the Go DefraDB implementation
 //! exactly, ensuring Rust and Go can read/write the same datastores.
 
+mod cid;
 mod collection;
 mod ctype;
+mod embedding;
 mod error;
 mod field;
 mod field_kind;
+mod index;
+mod policy;
+mod source;
 mod validation;
 
+pub use cid::{generate_collection_cid, generate_field_cid};
 pub use collection::{CollectionBuilder, CollectionVersion};
 pub use ctype::CType;
+pub use embedding::VectorEmbeddingDescription;
 pub use error::{Result, SchemaError};
 pub use field::FieldDescription;
 pub use field_kind::{FieldKind, ScalarArrayKind, ScalarKind};
+pub use index::{
+    EncryptedIndexDescription, EncryptedIndexType, IndexDescription, IndexedFieldDescription,
+};
+pub use policy::PolicyDescription;
+pub use source::{CollectionSetDescription, CollectionSource, QuerySource};
 pub use validation::{validate_schema, SchemaValidator};

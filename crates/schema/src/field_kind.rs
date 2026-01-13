@@ -90,8 +90,9 @@ pub enum ScalarArrayKind {
 }
 
 impl ScalarArrayKind {
-    /// Returns true if this array contains nillable elements
-    pub fn is_nillable(&self) -> bool {
+    /// Returns true if this array contains elements that can be null.
+    /// For example, NillableIntArray can contain null values, but IntArray cannot.
+    pub fn has_nillable_elements(&self) -> bool {
         matches!(
             self,
             ScalarArrayKind::NillableBoolArray
@@ -274,14 +275,17 @@ impl FieldKind {
     }
 
     /// Returns true if values of this kind can be nil/null.
-    /// In Go DefraDB, all scalar types are nillable by default.
+    /// In Go DefraDB, ALL types return true for IsNillable().
     pub fn is_nillable(&self) -> bool {
+        true
+    }
+
+    /// Returns true if this array type has nillable elements.
+    /// This is different from is_nillable() which checks if the field itself can be null.
+    pub fn has_nillable_elements(&self) -> bool {
         match self {
-            FieldKind::Scalar(s) => !matches!(s, ScalarKind::None | ScalarKind::DocID),
-            FieldKind::ScalarArray(a) => a.is_nillable(),
-            FieldKind::Relation { .. } | FieldKind::SelfRef { .. } | FieldKind::Named { .. } => {
-                true
-            }
+            FieldKind::ScalarArray(a) => a.has_nillable_elements(),
+            _ => false,
         }
     }
 
@@ -585,14 +589,24 @@ mod tests {
 
     #[test]
     fn test_is_nillable() {
-        // Scalars are nillable (except None and DocID)
+        // Go: ALL types return true for IsNillable()
         assert!(FieldKind::string().is_nillable());
         assert!(FieldKind::int().is_nillable());
-        assert!(!FieldKind::doc_id().is_nillable());
-
-        // Nillable arrays have nillable elements
+        assert!(FieldKind::doc_id().is_nillable());
+        assert!(FieldKind::int_array().is_nillable());
         assert!(FieldKind::nillable_int_array().is_nillable());
-        assert!(!FieldKind::int_array().is_nillable());
+        assert!(FieldKind::relation("users", false).is_nillable());
+    }
+
+    #[test]
+    fn test_has_nillable_elements() {
+        // has_nillable_elements checks if array elements can be null
+        assert!(FieldKind::nillable_int_array().has_nillable_elements());
+        assert!(FieldKind::nillable_string_array().has_nillable_elements());
+        assert!(!FieldKind::int_array().has_nillable_elements());
+        assert!(!FieldKind::string_array().has_nillable_elements());
+        // Non-arrays return false
+        assert!(!FieldKind::int().has_nillable_elements());
     }
 
     #[test]
