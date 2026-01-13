@@ -108,6 +108,89 @@ pub async fn test_read_your_writes<S: Store>(store: &S) {
 // ERROR HANDLING
 // ============================================================================
 
+/// Test binary data handling - keys and values with null bytes and high bytes
+pub async fn test_binary_data<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    // Key with null byte in middle
+    let key_with_null = b"key\x00with\x00nulls";
+    txn.set(key_with_null, b"value1").await.unwrap();
+
+    // Key with high bytes (0xFF)
+    let key_with_high = b"\xff\xfe\xfd";
+    txn.set(key_with_high, b"value2").await.unwrap();
+
+    // Value with null bytes
+    let value_with_null = b"value\x00with\x00nulls";
+    txn.set(b"normal_key", value_with_null).await.unwrap();
+
+    // Value with all byte values 0x00-0xFF
+    let mut all_bytes: Vec<u8> = (0u8..=255u8).collect();
+    txn.set(b"all_bytes_key", &all_bytes).await.unwrap();
+
+    txn.commit().await.unwrap();
+
+    // Verify all data persisted correctly
+    let txn = store.new_txn(true).await.unwrap();
+
+    assert_eq!(
+        txn.get(key_with_null).await.unwrap(),
+        Some(b"value1".to_vec()),
+        "Key with null bytes should work"
+    );
+
+    assert_eq!(
+        txn.get(key_with_high).await.unwrap(),
+        Some(b"value2".to_vec()),
+        "Key with high bytes should work"
+    );
+
+    assert_eq!(
+        txn.get(b"normal_key").await.unwrap(),
+        Some(value_with_null.to_vec()),
+        "Value with null bytes should work"
+    );
+
+    all_bytes = (0u8..=255u8).collect();
+    assert_eq!(
+        txn.get(b"all_bytes_key").await.unwrap(),
+        Some(all_bytes),
+        "Value with all byte values should work"
+    );
+}
+
+/// Test that binary keys maintain correct sort order in iterators
+pub async fn test_binary_key_ordering<S: Store>(store: &S) {
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    // Insert keys that would sort differently if treated as strings vs bytes
+    // Byte order: 0x00 < 0x41 ('A') < 0x61 ('a') < 0xFF
+    txn.set(b"\x00", b"first").await.unwrap();
+    txn.set(b"A", b"second").await.unwrap();  // 0x41
+    txn.set(b"a", b"third").await.unwrap();   // 0x61
+    txn.set(b"\xff", b"fourth").await.unwrap();
+
+    txn.commit().await.unwrap();
+
+    // Iterate and verify byte order
+    let txn = store.new_txn(true).await.unwrap();
+    let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"\x00", "0x00 should come first");
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"A", "0x41 ('A') should come second");
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"a", "0x61 ('a') should come third");
+
+    let kv = iter.next().await.unwrap().unwrap();
+    assert_eq!(kv.key_bytes(), b"\xff", "0xFF should come fourth");
+
+    assert!(iter.next().await.unwrap().is_none());
+}
+
 /// Test empty key rejection
 pub async fn test_empty_key_rejected<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
@@ -793,6 +876,79 @@ pub async fn test_snapshot_isolation_long_running_reader<S: Store + 'static>(sto
     );
 }
 
+/// Test write-write isolation - writers don't see each other's uncommitted data.
+///
+/// Two concurrent writers should not see each other's pending changes.
+/// Only committed data should be visible to new transactions.
+pub async fn test_write_write_isolation<S: Store + 'static>(store: Arc<S>) {
+    // Setup initial state
+    let mut setup = store.new_txn(false).await.unwrap();
+    setup.set(b"shared_key", b"initial").await.unwrap();
+    setup.commit().await.unwrap();
+
+    // Start two writer transactions
+    let mut writer1 = store.new_txn(false).await.unwrap();
+    let mut writer2 = store.new_txn(false).await.unwrap();
+
+    // Writer1 makes a change (uncommitted)
+    writer1.set(b"shared_key", b"from_writer1").await.unwrap();
+    writer1.set(b"writer1_only", b"exclusive").await.unwrap();
+
+    // Writer2 should NOT see writer1's uncommitted changes
+    assert_eq!(
+        writer2.get(b"shared_key").await.unwrap(),
+        Some(b"initial".to_vec()),
+        "Writer2 should see original value, not writer1's uncommitted change"
+    );
+    assert_eq!(
+        writer2.get(b"writer1_only").await.unwrap(),
+        None,
+        "Writer2 should not see writer1's uncommitted new key"
+    );
+
+    // Writer2 makes its own changes
+    writer2.set(b"shared_key", b"from_writer2").await.unwrap();
+    writer2.set(b"writer2_only", b"exclusive").await.unwrap();
+
+    // Writer1 should NOT see writer2's uncommitted changes
+    assert_eq!(
+        writer1.get(b"writer2_only").await.unwrap(),
+        None,
+        "Writer1 should not see writer2's uncommitted new key"
+    );
+
+    // Commit writer1 first
+    writer1.commit().await.unwrap();
+
+    // Writer2 still shouldn't see writer1's committed changes (snapshot isolation)
+    assert_eq!(
+        writer2.get(b"shared_key").await.unwrap(),
+        Some(b"from_writer2".to_vec()), // Its own pending write
+        "Writer2 should see its own write, not writer1's commit"
+    );
+
+    // Commit writer2 (last writer wins)
+    writer2.commit().await.unwrap();
+
+    // New transaction should see writer2's final state
+    let reader = store.new_txn(true).await.unwrap();
+    assert_eq!(
+        reader.get(b"shared_key").await.unwrap(),
+        Some(b"from_writer2".to_vec()),
+        "Final value should be from writer2 (last commit)"
+    );
+    assert_eq!(
+        reader.get(b"writer1_only").await.unwrap(),
+        Some(b"exclusive".to_vec()),
+        "writer1_only key should exist"
+    );
+    assert_eq!(
+        reader.get(b"writer2_only").await.unwrap(),
+        Some(b"exclusive".to_vec()),
+        "writer2_only key should exist"
+    );
+}
+
 /// Test snapshot isolation with iterator under concurrent modification.
 ///
 /// A reader starts iteration, concurrent writers add/modify keys,
@@ -1002,6 +1158,18 @@ macro_rules! generate_backend_tests {
             let store = $store_fn().await;
             test_suite::test_iterator_reverse_with_prefix(&store).await;
         }
+
+        #[tokio::test]
+        async fn shared_test_binary_data() {
+            let store = $store_fn().await;
+            test_suite::test_binary_data(&store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_binary_key_ordering() {
+            let store = $store_fn().await;
+            test_suite::test_binary_key_ordering(&store).await;
+        }
     };
 }
 
@@ -1056,6 +1224,12 @@ macro_rules! generate_backend_concurrency_tests {
         async fn shared_test_snapshot_isolation_iterator() {
             let store = $arc_store_fn().await;
             test_suite::test_snapshot_isolation_iterator(store).await;
+        }
+
+        #[tokio::test]
+        async fn shared_test_write_write_isolation() {
+            let store = $arc_store_fn().await;
+            test_suite::test_write_write_isolation(store).await;
         }
     };
 }
