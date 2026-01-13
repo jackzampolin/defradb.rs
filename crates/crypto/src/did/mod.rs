@@ -78,7 +78,12 @@ pub fn parse_did_key(did: &str) -> Result<(KeyType, Vec<u8>)> {
         0xed => KeyType::Ed25519,
         0xe7 => KeyType::Secp256k1,
         0x1200 => KeyType::Secp256r1,
-        _ => return Err(crypto_error(format!("unknown multicodec: 0x{:x}", multicodec))),
+        _ => {
+            return Err(crypto_error(format!(
+                "unknown multicodec: 0x{:x}",
+                multicodec
+            )))
+        }
     };
 
     Ok((key_type, remaining_bytes.to_vec()))
@@ -240,7 +245,11 @@ mod tests {
 
         // secp256k1 DID uses uncompressed key (65 bytes), raw() returns compressed (33 bytes)
         // So we verify the length is correct for uncompressed
-        assert_eq!(parsed_bytes.len(), 65, "secp256k1 DID should contain uncompressed key");
+        assert_eq!(
+            parsed_bytes.len(),
+            65,
+            "secp256k1 DID should contain uncompressed key"
+        );
     }
 
     #[test]
@@ -264,7 +273,11 @@ mod tests {
         assert_eq!(key_type, KeyType::Secp256r1);
 
         // secp256r1 DID uses uncompressed key (65 bytes)
-        assert_eq!(parsed_bytes.len(), 65, "secp256r1 DID should contain uncompressed key");
+        assert_eq!(
+            parsed_bytes.len(),
+            65,
+            "secp256r1 DID should contain uncompressed key"
+        );
     }
 
     #[test]
@@ -303,5 +316,40 @@ mod tests {
         let (key_type, parsed) = parse_did_key(&secp256r1_did).unwrap();
         assert_eq!(key_type, KeyType::Secp256r1);
         assert_eq!(parsed, secp256r1_bytes);
+    }
+
+    #[test]
+    fn test_parse_did_key_unknown_multicodec() {
+        // Create a DID with valid multibase encoding but unknown multicodec (0x9999)
+        let mut codec_bytes = Vec::new();
+        let mut buf = unsigned_varint::encode::u64_buffer();
+        let encoded_varint = unsigned_varint::encode::u64(0x9999, &mut buf);
+        codec_bytes.extend_from_slice(encoded_varint);
+        codec_bytes.extend_from_slice(&[1u8; 32]); // some key bytes
+
+        let did = format!(
+            "did:key:{}",
+            multibase::encode(multibase::Base::Base58Btc, &codec_bytes)
+        );
+        let result = parse_did_key(&did);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("unknown multicodec"),
+            "Error should mention unknown multicodec"
+        );
+    }
+
+    #[test]
+    fn test_parse_did_key_invalid_varint() {
+        // Create a DID with valid multibase but truncated/invalid varint
+        // A varint byte with high bit set (0x80+) requires continuation bytes
+        // Providing only continuation bytes without a terminating byte is invalid
+        let invalid_varint = vec![0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+        let did = format!(
+            "did:key:{}",
+            multibase::encode(multibase::Base::Base58Btc, &invalid_varint)
+        );
+        let result = parse_did_key(&did);
+        assert!(result.is_err(), "Invalid varint should return error");
     }
 }
