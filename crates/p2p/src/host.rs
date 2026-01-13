@@ -18,15 +18,16 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::{
-    identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux, Multiaddr,
-    PeerId, Swarm, SwarmBuilder,
+    gossipsub, identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux,
+    Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::behaviour::{DefraBehaviour, DefraEvent};
 use crate::error::{Error, Result};
-use crate::message::{PushLogReply, PushLogRequest};
+use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
+use crate::topics::DefraTopic;
 
 /// Default idle connection timeout.
 const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -69,6 +70,30 @@ pub enum HostCommand {
         response: oneshot::Sender<Vec<PeerId>>,
     },
 
+    /// Subscribe to a GossipSub topic.
+    Subscribe {
+        topic: DefraTopic,
+        response: oneshot::Sender<Result<bool>>,
+    },
+
+    /// Unsubscribe from a GossipSub topic.
+    Unsubscribe {
+        topic: DefraTopic,
+        response: oneshot::Sender<Result<bool>>,
+    },
+
+    /// Publish a message to a GossipSub topic.
+    Publish {
+        topic: DefraTopic,
+        message: PushLogBroadcast,
+        response: oneshot::Sender<Result<gossipsub::MessageId>>,
+    },
+
+    /// Get subscribed topics.
+    SubscribedTopics {
+        response: oneshot::Sender<Vec<String>>,
+    },
+
     /// Shutdown the host.
     Shutdown,
 }
@@ -94,6 +119,30 @@ pub enum HostEvent {
 
     /// Started listening on an address.
     Listening(Multiaddr),
+
+    /// Received a GossipSub message.
+    GossipMessage {
+        /// The peer that propagated the message.
+        propagation_source: PeerId,
+        /// The message ID.
+        message_id: gossipsub::MessageId,
+        /// The topic the message was received on.
+        topic: String,
+        /// The message payload.
+        message: PushLogBroadcast,
+    },
+
+    /// A peer subscribed to a topic we're also subscribed to.
+    PeerSubscribed {
+        peer_id: PeerId,
+        topic: String,
+    },
+
+    /// A peer unsubscribed from a topic.
+    PeerUnsubscribed {
+        peer_id: PeerId,
+        topic: String,
+    },
 }
 
 /// Opaque response channel for sending PushLog responses.
@@ -190,6 +239,68 @@ impl P2PHostHandle {
             .send(HostCommand::Shutdown)
             .await
             .map_err(|_| Error::ChannelSend)
+    }
+
+    /// Subscribe to a GossipSub topic.
+    ///
+    /// Returns `true` if this is a new subscription, `false` if already subscribed.
+    pub async fn subscribe(&self, topic: DefraTopic) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::Subscribe {
+                topic,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Unsubscribe from a GossipSub topic.
+    ///
+    /// Returns `true` if was subscribed, `false` if wasn't subscribed.
+    pub async fn unsubscribe(&self, topic: DefraTopic) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::Unsubscribe {
+                topic,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Publish a message to a GossipSub topic.
+    ///
+    /// Returns the message ID on success.
+    pub async fn publish(
+        &self,
+        topic: DefraTopic,
+        message: PushLogBroadcast,
+    ) -> Result<gossipsub::MessageId> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::Publish {
+                topic,
+                message,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Get list of subscribed topics.
+    pub async fn subscribed_topics(&self) -> Result<Vec<String>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SubscribedTopics {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
     }
 }
 
@@ -331,6 +442,53 @@ impl P2PHost {
                 let _ = response.send(peers);
             }
 
+            HostCommand::Subscribe { topic, response } => {
+                let ident_topic = topic.to_ident_topic();
+                let result = self
+                    .swarm
+                    .behaviour_mut()
+                    .subscribe(&ident_topic)
+                    .map_err(|e| Error::GossipSubSubscription(e.to_string()));
+                let _ = response.send(result);
+            }
+
+            HostCommand::Unsubscribe { topic, response } => {
+                let ident_topic = topic.to_ident_topic();
+                let result = self
+                    .swarm
+                    .behaviour_mut()
+                    .unsubscribe(&ident_topic)
+                    .map_err(|e| Error::GossipSubUnsubscribe(e.to_string()));
+                let _ = response.send(result);
+            }
+
+            HostCommand::Publish {
+                topic,
+                message,
+                response,
+            } => {
+                let ident_topic = topic.to_ident_topic();
+                let result = serde_cbor::to_vec(&message)
+                    .map_err(|e| Error::CborSerialization(e.to_string()))
+                    .and_then(|data| {
+                        self.swarm
+                            .behaviour_mut()
+                            .publish(ident_topic, data)
+                            .map_err(|e| Error::GossipSubPublish(e.to_string()))
+                    });
+                let _ = response.send(result);
+            }
+
+            HostCommand::SubscribedTopics { response } => {
+                let topics: Vec<String> = self
+                    .swarm
+                    .behaviour()
+                    .subscribed_topics()
+                    .map(|t| t.to_string())
+                    .collect();
+                let _ = response.send(topics);
+            }
+
             HostCommand::Shutdown => {
                 info!("Shutdown requested");
                 return false;
@@ -394,6 +552,10 @@ impl P2PHost {
 
             SwarmEvent::Behaviour(DefraEvent::PushLog(pushlog_event)) => {
                 self.handle_pushlog_event(pushlog_event).await;
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::GossipSub(gossipsub_event)) => {
+                self.handle_gossipsub_event(gossipsub_event).await;
             }
 
             _ => {}
@@ -476,6 +638,70 @@ impl P2PHost {
 
             request_response::Event::ResponseSent { peer, .. } => {
                 debug!("Response sent to {}", peer);
+            }
+        }
+    }
+
+    /// Handle GossipSub events.
+    async fn handle_gossipsub_event(&mut self, event: gossipsub::Event) {
+        match event {
+            gossipsub::Event::Message {
+                propagation_source,
+                message_id,
+                message,
+            } => {
+                let topic = message.topic.to_string();
+                debug!(
+                    "Received gossipsub message {} on topic {} from {}",
+                    message_id, topic, propagation_source
+                );
+
+                // Decode the message payload
+                match serde_cbor::from_slice::<PushLogBroadcast>(&message.data) {
+                    Ok(broadcast) => {
+                        let _ = self
+                            .event_tx
+                            .send(HostEvent::GossipMessage {
+                                propagation_source,
+                                message_id,
+                                topic,
+                                message: broadcast,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to decode gossipsub message from {}: {}",
+                            propagation_source, e
+                        );
+                    }
+                }
+            }
+
+            gossipsub::Event::Subscribed { peer_id, topic } => {
+                debug!("Peer {} subscribed to {}", peer_id, topic);
+                let _ = self
+                    .event_tx
+                    .send(HostEvent::PeerSubscribed {
+                        peer_id,
+                        topic: topic.to_string(),
+                    })
+                    .await;
+            }
+
+            gossipsub::Event::Unsubscribed { peer_id, topic } => {
+                debug!("Peer {} unsubscribed from {}", peer_id, topic);
+                let _ = self
+                    .event_tx
+                    .send(HostEvent::PeerUnsubscribed {
+                        peer_id,
+                        topic: topic.to_string(),
+                    })
+                    .await;
+            }
+
+            gossipsub::Event::GossipsubNotSupported { peer_id } => {
+                debug!("Peer {} does not support gossipsub", peer_id);
             }
         }
     }

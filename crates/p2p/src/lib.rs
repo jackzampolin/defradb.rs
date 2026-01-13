@@ -22,6 +22,7 @@
 //! - [`codec`] - CBOR codec for request-response protocol
 //! - [`behaviour`] - Composite NetworkBehaviour
 //! - [`host`] - P2P host that manages the swarm
+//! - [`topics`] - GossipSub topic definitions
 //! - [`error`] - Error types
 //!
 //! # Example
@@ -62,11 +63,12 @@ pub mod host;
 pub mod message;
 pub mod protocol;
 pub mod signing;
+pub mod topics;
 
 // Re-export main types for convenience
 pub use error::{Error, Result};
 pub use host::{HostCommand, HostEvent, P2PHost, P2PHostHandle, ResponseChannel};
-pub use message::{Message, MetaData, PushLogReply, PushLogRequest};
+pub use message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
 pub use protocol::{
     BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, REP_REQUEST_PROTOCOL,
     REP_RESPONSE_PROTOCOL, VERSION,
@@ -79,8 +81,11 @@ pub use protocol::{PUSHLOG_REQUEST_PROTOCOL, PUSHLOG_RESPONSE_PROTOCOL};
 // Re-export signing functions
 pub use signing::{sign_message, sign_message_cloned, verify_message};
 
+// Re-export topic types
+pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
+
 // Re-export commonly used libp2p types
-pub use libp2p::{Multiaddr, PeerId};
+pub use libp2p::{gossipsub, Multiaddr, PeerId};
 
 #[cfg(test)]
 mod tests {

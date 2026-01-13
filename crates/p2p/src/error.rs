@@ -126,6 +126,22 @@ pub enum Error {
     /// Channel receive error.
     #[error("channel receive error")]
     ChannelReceive,
+
+    /// GossipSub subscription error.
+    #[error("gossipsub subscription error: {0}")]
+    GossipSubSubscription(String),
+
+    /// GossipSub publish error.
+    #[error("gossipsub publish error: {0}")]
+    GossipSubPublish(String),
+
+    /// GossipSub unsubscribe error.
+    #[error("gossipsub unsubscribe error: {0}")]
+    GossipSubUnsubscribe(String),
+
+    /// Invalid topic.
+    #[error("invalid topic: {0}")]
+    InvalidTopic(String),
 }
 
 impl From<serde_cbor::Error> for Error {
@@ -291,5 +307,24 @@ mod tests {
 
         assert_eq!(returns_result().unwrap(), 42);
         assert!(returns_error().is_err());
+    }
+
+    #[test]
+    fn test_gossipsub_errors() {
+        let sub_err = Error::GossipSubSubscription("topic not found".to_string());
+        assert!(sub_err.to_string().contains("gossipsub subscription"));
+        assert!(sub_err.to_string().contains("topic not found"));
+
+        let pub_err = Error::GossipSubPublish("no peers".to_string());
+        assert!(pub_err.to_string().contains("gossipsub publish"));
+        assert!(pub_err.to_string().contains("no peers"));
+
+        let unsub_err = Error::GossipSubUnsubscribe("not subscribed".to_string());
+        assert!(unsub_err.to_string().contains("gossipsub unsubscribe"));
+        assert!(unsub_err.to_string().contains("not subscribed"));
+
+        let topic_err = Error::InvalidTopic("empty topic".to_string());
+        assert!(topic_err.to_string().contains("invalid topic"));
+        assert!(topic_err.to_string().contains("empty topic"));
     }
 }

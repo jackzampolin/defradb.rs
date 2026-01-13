@@ -16,7 +16,7 @@ crypto = { path = "../crypto" }
 # crdt = { path = "../crdt" }              # uncomment when ready
 
 # P2P
-libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio"] }
+libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio", "gossipsub"] }
 multiaddr = { workspace = true }
 
 # Async

@@ -15,6 +15,7 @@
 //! - Peer identification (identify)
 //! - Local peer discovery (mDNS)
 //! - Request-response for PushLog synchronization
+//! - GossipSub for pubsub messaging
 //!
 //! # Wire Compatibility with Go
 //!
@@ -25,10 +26,14 @@
 //! This Rust implementation uses libp2p's request-response protocol which
 //! handles both request and response on a single stream. For full Go
 //! compatibility, both protocols are supported.
+//!
+//! For GossipSub, we use libp2p's native message signing via
+//! `MessageAuthenticity::Signed` which matches Go's approach.
 
 use std::time::Duration;
 
 use libp2p::{
+    gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
     identify, mdns,
     request_response::{self, ProtocolSupport},
     swarm::NetworkBehaviour,
@@ -56,6 +61,9 @@ pub struct DefraBehaviour {
 
     /// Request-response protocol for PushLog messages.
     pub pushlog: request_response::Behaviour<PushLogCodec>,
+
+    /// GossipSub for pubsub messaging.
+    pub gossipsub: gossipsub::Behaviour,
 }
 
 /// Events emitted by the DefraDB network behaviour.
@@ -69,6 +77,9 @@ pub enum DefraEvent {
 
     /// PushLog request-response event.
     PushLog(request_response::Event<PushLogRequest, PushLogReply>),
+
+    /// GossipSub event.
+    GossipSub(gossipsub::Event),
 }
 
 impl From<identify::Event> for DefraEvent {
@@ -86,6 +97,12 @@ impl From<mdns::Event> for DefraEvent {
 impl From<request_response::Event<PushLogRequest, PushLogReply>> for DefraEvent {
     fn from(event: request_response::Event<PushLogRequest, PushLogReply>) -> Self {
         DefraEvent::PushLog(event)
+    }
+}
+
+impl From<gossipsub::Event> for DefraEvent {
+    fn from(event: gossipsub::Event) -> Self {
+        DefraEvent::GossipSub(event)
     }
 }
 
@@ -121,7 +138,7 @@ impl DefraBehaviour {
         // Configure request-response for PushLog (replicator protocol)
         // Support both request and response protocols for Go compatibility
         // Use codec with keypair for message signing/verification
-        let codec = PushLogCodec::with_keypair(keypair);
+        let codec = PushLogCodec::with_keypair(keypair.clone());
         let pushlog = request_response::Behaviour::with_codec(
             codec,
             [
@@ -131,10 +148,41 @@ impl DefraBehaviour {
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 
+        // Configure GossipSub with native message signing
+        // MessageAuthenticity::Signed uses libp2p's built-in signing
+        // This matches Go's approach where pubsub handles authentication
+        let gossipsub_config = gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(Duration::from_secs(1))
+            .validation_mode(ValidationMode::Strict)
+            // Use content-based message ID to match Go behavior for deduplication
+            .message_id_fn(|message: &gossipsub::Message| {
+                let hash = crypto::sha256(&message.data);
+                MessageId::from(hash.to_vec())
+            })
+            .build()
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("gossipsub config error: {}", e),
+                )
+            })?;
+
+        let gossipsub = gossipsub::Behaviour::new(
+            MessageAuthenticity::Signed(keypair),
+            gossipsub_config,
+        )
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("gossipsub creation error: {}", e),
+            )
+        })?;
+
         Ok(Self {
             identify,
             mdns,
             pushlog,
+            gossipsub,
         })
     }
 
@@ -173,10 +221,38 @@ impl DefraBehaviour {
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 
+        // For testing, use RandomAuthor for gossipsub (no signing)
+        let gossipsub_config = gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(Duration::from_secs(1))
+            .validation_mode(ValidationMode::Permissive)
+            .message_id_fn(|message: &gossipsub::Message| {
+                let hash = crypto::sha256(&message.data);
+                MessageId::from(hash.to_vec())
+            })
+            .build()
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("gossipsub config error: {}", e),
+                )
+            })?;
+
+        let gossipsub = gossipsub::Behaviour::new(
+            MessageAuthenticity::RandomAuthor,
+            gossipsub_config,
+        )
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("gossipsub creation error: {}", e),
+            )
+        })?;
+
         Ok(Self {
             identify,
             mdns,
             pushlog,
+            gossipsub,
         })
     }
 
@@ -198,6 +274,42 @@ impl DefraBehaviour {
         response: PushLogReply,
     ) -> Result<(), PushLogReply> {
         self.pushlog.send_response(channel, response)
+    }
+
+    /// Subscribe to a GossipSub topic.
+    ///
+    /// Returns `true` if this is a new subscription, `false` if already subscribed.
+    pub fn subscribe(
+        &mut self,
+        topic: &gossipsub::IdentTopic,
+    ) -> Result<bool, gossipsub::SubscriptionError> {
+        self.gossipsub.subscribe(topic)
+    }
+
+    /// Unsubscribe from a GossipSub topic.
+    ///
+    /// Returns `true` if was subscribed, `false` if wasn't subscribed.
+    pub fn unsubscribe(
+        &mut self,
+        topic: &gossipsub::IdentTopic,
+    ) -> Result<bool, gossipsub::PublishError> {
+        self.gossipsub.unsubscribe(topic)
+    }
+
+    /// Publish a message to a GossipSub topic.
+    ///
+    /// Returns the message ID on success.
+    pub fn publish(
+        &mut self,
+        topic: gossipsub::IdentTopic,
+        data: Vec<u8>,
+    ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
+        self.gossipsub.publish(topic, data)
+    }
+
+    /// Get the list of subscribed topics.
+    pub fn subscribed_topics(&self) -> impl Iterator<Item = &gossipsub::TopicHash> {
+        self.gossipsub.topics()
     }
 }
 

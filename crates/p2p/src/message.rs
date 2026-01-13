@@ -196,6 +196,82 @@ impl Message for PushLogReply {
     }
 }
 
+/// PushLog broadcast message for GossipSub publishing.
+///
+/// This is a lightweight version of PushLogRequest used for pubsub broadcasts.
+/// Unlike request-response messages, pubsub messages do NOT include MetaData
+/// signing fields - libp2p's GossipSub handles message authentication via
+/// `MessageAuthenticity::Signed`.
+///
+/// # Wire Compatibility
+///
+/// This matches Go's approach where PushLogRequest is CBOR-encoded WITHOUT
+/// the MetaData signing fields for pubsub, since the sender peer ID comes
+/// from the pubsub layer itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PushLogBroadcast {
+    /// Document ID being updated.
+    #[serde(rename = "DocID")]
+    pub doc_id: String,
+
+    /// Content ID (CID) of the block.
+    #[serde(rename = "CID")]
+    pub cid: Vec<u8>,
+
+    /// Collection ID the document belongs to.
+    #[serde(rename = "CollectionID")]
+    pub collection_id: String,
+
+    /// Creator/author of the update.
+    #[serde(rename = "Creator")]
+    pub creator: String,
+
+    /// The IPLD block data.
+    #[serde(rename = "Block")]
+    pub block: Vec<u8>,
+}
+
+impl PushLogBroadcast {
+    /// Create a new PushLogBroadcast.
+    pub fn new(
+        doc_id: String,
+        cid: Vec<u8>,
+        collection_id: String,
+        creator: String,
+        block: Vec<u8>,
+    ) -> Self {
+        Self {
+            doc_id,
+            cid,
+            collection_id,
+            creator,
+            block,
+        }
+    }
+
+    /// Convert from a PushLogRequest (strips metadata).
+    pub fn from_request(req: &PushLogRequest) -> Self {
+        Self {
+            doc_id: req.doc_id.clone(),
+            cid: req.cid.clone(),
+            collection_id: req.collection_id.clone(),
+            creator: req.creator.clone(),
+            block: req.block.clone(),
+        }
+    }
+
+    /// Convert to a PushLogRequest (adds default metadata).
+    pub fn to_request(&self) -> PushLogRequest {
+        PushLogRequest::new(
+            self.doc_id.clone(),
+            self.cid.clone(),
+            self.collection_id.clone(),
+            self.creator.clone(),
+            self.block.clone(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +544,125 @@ mod tests {
         assert!(decoded.collection_id.is_empty());
         assert!(decoded.creator.is_empty());
         assert!(decoded.block.is_empty());
+    }
+
+    #[test]
+    fn test_pushlog_broadcast_serialization() {
+        let broadcast = PushLogBroadcast::new(
+            "doc123".to_string(),
+            vec![1, 2, 3, 4],
+            "collection1".to_string(),
+            "creator1".to_string(),
+            vec![5, 6, 7, 8],
+        );
+
+        let encoded = serde_cbor::to_vec(&broadcast).expect("failed to encode");
+        let decoded: PushLogBroadcast =
+            serde_cbor::from_slice(&encoded).expect("failed to decode");
+
+        assert_eq!(decoded.doc_id, "doc123");
+        assert_eq!(decoded.cid, vec![1, 2, 3, 4]);
+        assert_eq!(decoded.collection_id, "collection1");
+        assert_eq!(decoded.creator, "creator1");
+        assert_eq!(decoded.block, vec![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_pushlog_broadcast_cbor_field_names() {
+        // Verify CBOR field names match Go implementation WITHOUT MetaData fields
+        let broadcast = PushLogBroadcast::new(
+            "doc789".to_string(),
+            vec![1, 2, 3],
+            "collection3".to_string(),
+            "creator3".to_string(),
+            vec![4, 5, 6],
+        );
+
+        let encoded = serde_cbor::to_vec(&broadcast).expect("failed to encode");
+        let value: serde_cbor::Value =
+            serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+
+        if let serde_cbor::Value::Map(map) = value {
+            let field_names: Vec<String> = map
+                .iter()
+                .filter_map(|(k, _)| {
+                    if let serde_cbor::Value::Text(s) = k {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Should have Go-compatible field names
+            assert!(field_names.contains(&"DocID".to_string()), "Missing DocID");
+            assert!(field_names.contains(&"CID".to_string()), "Missing CID");
+            assert!(
+                field_names.contains(&"CollectionID".to_string()),
+                "Missing CollectionID"
+            );
+            assert!(field_names.contains(&"Creator".to_string()), "Missing Creator");
+            assert!(field_names.contains(&"Block".to_string()), "Missing Block");
+
+            // Should NOT have MetaData fields (pubsub doesn't use them)
+            assert!(
+                !field_names.contains(&"Version".to_string()),
+                "Version should not be present in broadcast"
+            );
+            assert!(
+                !field_names.contains(&"MessageID".to_string()),
+                "MessageID should not be present in broadcast"
+            );
+            assert!(
+                !field_names.contains(&"SenderID".to_string()),
+                "SenderID should not be present in broadcast"
+            );
+            assert!(
+                !field_names.contains(&"Signature".to_string()),
+                "Signature should not be present in broadcast"
+            );
+        } else {
+            panic!("Expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn test_pushlog_broadcast_from_request() {
+        let request = PushLogRequest::new(
+            "doc456".to_string(),
+            vec![10, 20, 30],
+            "col2".to_string(),
+            "creator2".to_string(),
+            vec![40, 50, 60],
+        );
+
+        let broadcast = PushLogBroadcast::from_request(&request);
+
+        assert_eq!(broadcast.doc_id, request.doc_id);
+        assert_eq!(broadcast.cid, request.cid);
+        assert_eq!(broadcast.collection_id, request.collection_id);
+        assert_eq!(broadcast.creator, request.creator);
+        assert_eq!(broadcast.block, request.block);
+    }
+
+    #[test]
+    fn test_pushlog_broadcast_to_request() {
+        let broadcast = PushLogBroadcast::new(
+            "doc789".to_string(),
+            vec![70, 80, 90],
+            "col3".to_string(),
+            "creator3".to_string(),
+            vec![100, 110, 120],
+        );
+
+        let request = broadcast.to_request();
+
+        assert_eq!(request.doc_id, broadcast.doc_id);
+        assert_eq!(request.cid, broadcast.cid);
+        assert_eq!(request.collection_id, broadcast.collection_id);
+        assert_eq!(request.creator, broadcast.creator);
+        assert_eq!(request.block, broadcast.block);
+        // Request should have default metadata
+        assert_eq!(request.metadata.version, MESSAGE_VERSION);
     }
 }
