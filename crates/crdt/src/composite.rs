@@ -4,8 +4,8 @@
 //! multiple field-level CRDTs (LWW, Counter, etc).
 
 use crate::traits::{Context, Delta, ReplicatedData};
-use defra_core::{Error, Result, store::Store, types::DocId};
 use async_trait::async_trait;
+use defra_core::{store::Store, types::DocId, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
@@ -30,7 +30,11 @@ pub enum FieldDelta {
     /// LWW field update
     Lww { priority: u64, data: Vec<u8> },
     /// Counter increment/decrement
-    Counter { priority: u64, nonce: i64, data: Vec<u8> },
+    Counter {
+        priority: u64,
+        nonce: i64,
+        data: Vec<u8>,
+    },
     /// Deletion marker
     Delete { priority: u64 },
 }
@@ -84,11 +88,7 @@ enum FieldCrdtType {
 
 impl CompositeDAG {
     /// Create a new CompositeDAG
-    pub fn new(
-        store: Arc<dyn Store>,
-        doc_id: DocId,
-        schema_version_id: String,
-    ) -> Self {
+    pub fn new(store: Arc<dyn Store>, doc_id: DocId, schema_version_id: String) -> Self {
         Self {
             store,
             doc_id,
@@ -104,16 +104,15 @@ impl CompositeDAG {
 
     /// Register a field as Counter
     pub fn register_counter_field(&mut self, field_name: String) {
-        self.field_managers.insert(field_name, FieldCrdtType::Counter);
+        self.field_managers
+            .insert(field_name, FieldCrdtType::Counter);
     }
 
     /// Apply field-level delta
-    async fn apply_field_delta(
-        &self,
-        field_name: &str,
-        field_delta: &FieldDelta,
-    ) -> Result<()> {
-        let crdt_type = self.field_managers.get(field_name)
+    async fn apply_field_delta(&self, field_name: &str, field_delta: &FieldDelta) -> Result<()> {
+        let crdt_type = self
+            .field_managers
+            .get(field_name)
             .ok_or_else(|| Error::MergeError(format!("unknown field: {}", field_name)))?;
 
         match (crdt_type, field_delta) {
@@ -136,7 +135,14 @@ impl CompositeDAG {
 
                 Ok(())
             }
-            (FieldCrdtType::Counter, FieldDelta::Counter { priority: _, nonce, data }) => {
+            (
+                FieldCrdtType::Counter,
+                FieldDelta::Counter {
+                    priority: _,
+                    nonce,
+                    data,
+                },
+            ) => {
                 // Apply counter merge logic
                 let mut value_key = Vec::new();
                 value_key.extend_from_slice(b"/data/");
@@ -189,12 +195,10 @@ impl CompositeDAG {
                 self.store.delete(&value_key).await?;
                 Ok(())
             }
-            _ => {
-                Err(Error::MergeError(format!(
-                    "field type mismatch for field: {}",
-                    field_name
-                )))
-            }
+            _ => Err(Error::MergeError(format!(
+                "field type mismatch for field: {}",
+                field_name
+            ))),
         }
     }
 }
@@ -276,11 +280,7 @@ mod tests {
     #[tokio::test]
     async fn test_composite_multiple_fields() {
         let store = Arc::new(MemoryStore::new());
-        let mut composite = CompositeDAG::new(
-            store.clone(),
-            DocId::new("doc1"),
-            "v1".to_string(),
-        );
+        let mut composite = CompositeDAG::new(store.clone(), DocId::new("doc1"), "v1".to_string());
 
         // Register fields
         composite.register_lww_field("name".to_string());

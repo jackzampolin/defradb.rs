@@ -240,7 +240,9 @@ mod ed25519_public_key_serde {
     {
         let bytes = <Vec<u8>>::deserialize(deserializer)?;
         if bytes.len() != 32 {
-            return Err(serde::de::Error::custom("invalid Ed25519 public key length"));
+            return Err(serde::de::Error::custom(
+                "invalid Ed25519 public key length",
+            ));
         }
         let key_bytes: [u8; 32] = bytes
             .try_into()
@@ -354,7 +356,10 @@ mod tests {
         let pub2 = key2.public_key();
         let pub1_concrete = Ed25519PublicKey::from_bytes(&pub1.raw()).unwrap();
         let pub2_concrete = Ed25519PublicKey::from_bytes(&pub2.raw()).unwrap();
-        assert_eq!(pub1_concrete, pub2_concrete, "Public keys from same private key should be equal");
+        assert_eq!(
+            pub1_concrete, pub2_concrete,
+            "Public keys from same private key should be equal"
+        );
     }
 
     // ===== Signature Tests (ported from Go signature_test.go) =====
@@ -370,7 +375,10 @@ mod tests {
 
         let public_key = private_key.public_key();
         let verified = public_key.verify(message, &signature).unwrap();
-        assert!(verified, "Signature should verify with correct key and message");
+        assert!(
+            verified,
+            "Signature should verify with correct key and message"
+        );
     }
 
     #[test]
@@ -436,7 +444,11 @@ mod tests {
             assert_eq!(signature.len(), 64, "Ed25519 signature should be 64 bytes");
 
             let verified = public_key.verify(message, &signature).unwrap();
-            assert!(verified, "Signature should verify for message: {:?}", std::str::from_utf8(message));
+            assert!(
+                verified,
+                "Signature should verify for message: {:?}",
+                std::str::from_utf8(message)
+            );
         }
     }
 
@@ -466,12 +478,18 @@ mod tests {
         // Too short
         let short_sig = vec![0u8; 63];
         let result = public_key.verify(message, &short_sig).unwrap();
-        assert!(!result, "Signature with wrong length (63 bytes) should fail");
+        assert!(
+            !result,
+            "Signature with wrong length (63 bytes) should fail"
+        );
 
         // Too long
         let long_sig = vec![0u8; 65];
         let result = public_key.verify(message, &long_sig).unwrap();
-        assert!(!result, "Signature with wrong length (65 bytes) should fail");
+        assert!(
+            !result,
+            "Signature with wrong length (65 bytes) should fail"
+        );
 
         // Empty
         let empty_sig = vec![];
@@ -487,10 +505,9 @@ mod tests {
         // Test that random invalid bytes are rejected
         // Most random 32-byte sequences are not valid Ed25519 public keys
         let invalid_bytes: [u8; 32] = [
-            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-            0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC,
+            0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
+            0xDD, 0xEE, 0xFF, 0x00,
         ];
         let result = Ed25519PublicKey::from_bytes(&invalid_bytes);
         assert!(result.is_none(), "Random invalid bytes should be rejected");
@@ -506,10 +523,9 @@ mod tests {
 
         // Pattern 1: specific bytes known to fail decompression
         let invalid_pattern1: [u8; 32] = [
-            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-            0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07, 0x08,
         ];
         assert!(
             Ed25519PublicKey::from_bytes(&invalid_pattern1).is_none(),
@@ -518,10 +534,9 @@ mod tests {
 
         // Pattern 2: alternating bits - fails decompression
         let invalid_pattern2: [u8; 32] = [
-            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
-            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
-            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
-            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
+            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
+            0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55,
+            0xAA, 0x55, 0xAA, 0x55,
         ];
         assert!(
             Ed25519PublicKey::from_bytes(&invalid_pattern2).is_none(),

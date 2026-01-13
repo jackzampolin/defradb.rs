@@ -15,17 +15,17 @@
 //! - **Delta**: Incremental state changes for efficient synchronization
 //! - **Merge**: Conflict resolution algorithm for concurrent updates
 
-pub mod traits;
-pub mod lww;
-pub mod counter;
 pub mod composite;
+pub mod counter;
+pub mod lww;
 pub mod priority;
+pub mod traits;
 
-pub use traits::{Delta, ReplicatedData};
-pub use lww::{Lww, LwwDelta};
-pub use counter::{Counter, CounterDelta};
 pub use composite::{CompositeDAG, CompositeDelta};
-pub use priority::{encode_priority, decode_priority};
+pub use counter::{Counter, CounterDelta};
+pub use lww::{Lww, LwwDelta};
+pub use priority::{decode_priority, encode_priority};
+pub use traits::{Delta, ReplicatedData};
 
 #[cfg(test)]
 mod tests {

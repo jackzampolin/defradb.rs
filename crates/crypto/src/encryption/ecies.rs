@@ -15,8 +15,7 @@ use defra_core::Result;
 
 use crate::encryption::aes::{decrypt_aes, encrypt_aes};
 use crate::error::{
-    crypto_error, failed_to_parse_ephemeral_public_key,
-    verification_with_hmac_failed,
+    crypto_error, failed_to_parse_ephemeral_public_key, verification_with_hmac_failed,
 };
 use crate::types::{AES_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
 
@@ -114,9 +113,9 @@ pub fn encrypt_ecies(
     options: EciesOptions,
 ) -> Result<Vec<u8>> {
     // 1. Generate or use provided ephemeral key pair
-    let ephemeral_private = options.private_key.unwrap_or_else(|| {
-        StaticSecret::random_from_rng(rand::rngs::OsRng)
-    });
+    let ephemeral_private = options
+        .private_key
+        .unwrap_or_else(|| StaticSecret::random_from_rng(rand::rngs::OsRng));
     let ephemeral_public = PublicKey::from(&ephemeral_private);
 
     // 2. ECDH: compute shared secret
@@ -182,7 +181,8 @@ pub fn decrypt_ecies(
     options: EciesOptions,
 ) -> Result<Vec<u8>> {
     // 1. Extract or use provided ephemeral public key
-    let (ephemeral_public_bytes, remaining) = if let Some(pub_key_bytes) = options.public_key_bytes {
+    let (ephemeral_public_bytes, remaining) = if let Some(pub_key_bytes) = options.public_key_bytes
+    {
         // Public key provided separately
         if pub_key_bytes.len() != X25519_PUBLIC_KEY_SIZE {
             return Err(crypto_error("invalid ephemeral public key size"));
@@ -204,12 +204,13 @@ pub fn decrypt_ecies(
     };
 
     // Parse ephemeral public key
-    let ephemeral_public_array: [u8; X25519_PUBLIC_KEY_SIZE] = ephemeral_public_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| failed_to_parse_ephemeral_public_key(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid key length")
-        ))?;
+    let ephemeral_public_array: [u8; X25519_PUBLIC_KEY_SIZE] =
+        ephemeral_public_bytes.as_slice().try_into().map_err(|_| {
+            failed_to_parse_ephemeral_public_key(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid key length",
+            ))
+        })?;
     let ephemeral_public = PublicKey::from(ephemeral_public_array);
 
     // 2. Extract HMAC and encrypted data
@@ -268,15 +269,11 @@ mod tests {
         let plaintext = b"test message";
 
         // Default options: prepend public key
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
 
         let ciphertext = encrypt_ecies(plaintext, &public_key, options_enc).unwrap();
 
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
 
         let decrypted = decrypt_ecies(&ciphertext, &private_key, options_dec).unwrap();
         assert_eq!(plaintext, &decrypted[..]);
@@ -333,9 +330,7 @@ mod tests {
         let public_key = PublicKey::from(&private_key);
         let plaintext = b"test message";
 
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
 
         let mut ciphertext = encrypt_ecies(plaintext, &public_key, options_enc).unwrap();
 
@@ -344,9 +339,7 @@ mod tests {
             ciphertext[40] ^= 0xFF;
         }
 
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
 
         let result = decrypt_ecies(&ciphertext, &private_key, options_dec);
         assert!(result.is_err());
@@ -387,9 +380,7 @@ mod tests {
         let public_key = PublicKey::from(&private_key);
         let plaintext = b"test message";
 
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
 
         let mut ciphertext = encrypt_ecies(plaintext, &public_key, options_enc).unwrap();
 
@@ -399,12 +390,13 @@ mod tests {
             ciphertext[len - 10] ^= 0xFF; // Flip a bit in the HMAC
         }
 
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
 
         let result = decrypt_ecies(&ciphertext, &private_key, options_dec);
-        assert!(result.is_err(), "Tampered HMAC should cause decryption to fail");
+        assert!(
+            result.is_err(),
+            "Tampered HMAC should cause decryption to fail"
+        );
     }
 
     #[test]
@@ -432,7 +424,10 @@ mod tests {
             .build();
 
         let result = decrypt_ecies(&ciphertext, &recipient_key, options_dec);
-        assert!(result.is_err(), "Wrong public key should cause decryption to fail");
+        assert!(
+            result.is_err(),
+            "Wrong public key should cause decryption to fail"
+        );
     }
 
     #[test]
@@ -441,9 +436,7 @@ mod tests {
         let public_key = PublicKey::from(&private_key);
         let plaintext = b"test";
 
-        let options = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options = EciesOptions::builder().prepend_public_key(true).build();
 
         let ciphertext = encrypt_ecies(plaintext, &public_key, options).unwrap();
 
@@ -457,15 +450,11 @@ mod tests {
         let public_key = PublicKey::from(&private_key);
         let plaintext = b"";
 
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
 
         let ciphertext = encrypt_ecies(plaintext, &public_key, options_enc).unwrap();
 
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
 
         let decrypted = decrypt_ecies(&ciphertext, &private_key, options_dec).unwrap();
         assert_eq!(plaintext, &decrypted[..]);
@@ -481,7 +470,10 @@ mod tests {
         let options = EciesOptions::builder().prepend_public_key(true).build();
         let result = decrypt_ecies(&malformed_ct, &private_key, options);
 
-        assert!(result.is_err(), "Should fail: ciphertext too short (only ephemeral key)");
+        assert!(
+            result.is_err(),
+            "Should fail: ciphertext too short (only ephemeral key)"
+        );
     }
 
     #[test]
@@ -494,7 +486,10 @@ mod tests {
         let options = EciesOptions::builder().prepend_public_key(true).build();
         let result = decrypt_ecies(&malformed_ct, &private_key, options);
 
-        assert!(result.is_err(), "Should fail: ciphertext too short (missing HMAC)");
+        assert!(
+            result.is_err(),
+            "Should fail: ciphertext too short (missing HMAC)"
+        );
     }
 
     #[test]
@@ -535,18 +530,17 @@ mod tests {
         let wrong_key = generate_x25519().unwrap();
         let plaintext = b"sensitive data";
 
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
         let ciphertext = encrypt_ecies(plaintext, &correct_pub, options_enc).unwrap();
 
         // Try to decrypt with wrong recipient key
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
         let result = decrypt_ecies(&ciphertext, &wrong_key, options_dec);
 
-        assert!(result.is_err(), "Wrong recipient key should cause HMAC verification failure");
+        assert!(
+            result.is_err(),
+            "Wrong recipient key should cause HMAC verification failure"
+        );
     }
 
     // ===== ECIES Error Handling Tests (ported from Go ecies_test.go) =====
@@ -568,7 +562,10 @@ mod tests {
         let options_dec = EciesOptions::builder().prepend_public_key(true).build();
         let result = decrypt_ecies(&ciphertext, &random_private, options_dec);
 
-        assert!(result.is_err(), "Decryption with wrong key should fail HMAC verification");
+        assert!(
+            result.is_err(),
+            "Decryption with wrong key should fail HMAC verification"
+        );
     }
 
     #[test]
@@ -582,19 +579,18 @@ mod tests {
         let plaintext = b"test data";
 
         // Encrypt without prepending public key
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(false)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(false).build();
         let ciphertext = encrypt_ecies(plaintext, &public_key, options_enc).unwrap();
 
         // Try to decrypt with prepend_public_key=true (expecting prepended key but there isn't one)
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
         let result = decrypt_ecies(&ciphertext, &private_key, options_dec);
 
         // This should fail because we're expecting a prepended key but there isn't one
-        assert!(result.is_err(), "Decryption should fail when expecting prepended key but none exists");
+        assert!(
+            result.is_err(),
+            "Decryption should fail when expecting prepended key but none exists"
+        );
     }
 
     #[test]
@@ -605,22 +601,21 @@ mod tests {
         let plaintext = b"test data";
 
         // Encrypt with correct key
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
         let ciphertext = encrypt_ecies(plaintext, &correct_pub, options_enc).unwrap();
 
         // Create a malformed/weak private key (all zeros)
         let weak_key = StaticSecret::from([0u8; 32]);
 
         // Try to decrypt with weak private key
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
         let result = decrypt_ecies(&ciphertext, &weak_key, options_dec);
 
         // Should fail with HMAC verification error (keys don't match)
-        assert!(result.is_err(), "Decryption with weak/wrong private key should fail");
+        assert!(
+            result.is_err(),
+            "Decryption with weak/wrong private key should fail"
+        );
     }
 
     #[test]
@@ -644,7 +639,10 @@ mod tests {
         let ciphertext = encrypt_ecies(plaintext, &recipient_public, options_enc).unwrap();
 
         // Verify the first 32 bytes are the sender's ephemeral public key
-        assert!(ciphertext.len() >= X25519_PUBLIC_KEY_SIZE, "Ciphertext should contain ephemeral public key");
+        assert!(
+            ciphertext.len() >= X25519_PUBLIC_KEY_SIZE,
+            "Ciphertext should contain ephemeral public key"
+        );
         let prepended_key = &ciphertext[..X25519_PUBLIC_KEY_SIZE];
         assert_eq!(
             prepended_key,
@@ -653,9 +651,7 @@ mod tests {
         );
 
         // Verify decryption works
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
         let decrypted = decrypt_ecies(&ciphertext, &recipient_private, options_dec).unwrap();
         assert_eq!(decrypted, plaintext, "Decrypted data should match original");
     }
@@ -667,9 +663,7 @@ mod tests {
         let public_key = PublicKey::from(&private_key);
         let plaintext = b"";
 
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
         let ciphertext = encrypt_ecies(plaintext, &public_key, options_enc).unwrap();
 
         // Ciphertext should still contain ephemeral key + HMAC even for empty plaintext
@@ -678,11 +672,12 @@ mod tests {
             "Empty plaintext should still produce ciphertext with ephemeral key and HMAC"
         );
 
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
         let decrypted = decrypt_ecies(&ciphertext, &private_key, options_dec).unwrap();
-        assert_eq!(decrypted, plaintext, "Should decrypt empty plaintext correctly");
+        assert_eq!(
+            decrypted, plaintext,
+            "Should decrypt empty plaintext correctly"
+        );
     }
 
     #[test]
@@ -714,7 +709,10 @@ mod tests {
         let result = decrypt_ecies(&ciphertext, &recipient_key, options_dec);
 
         // Should fail due to AAD mismatch
-        assert!(result.is_err(), "AAD mismatch should cause decryption failure");
+        assert!(
+            result.is_err(),
+            "AAD mismatch should cause decryption failure"
+        );
     }
 
     #[test]
@@ -724,27 +722,31 @@ mod tests {
         let public_key = PublicKey::from(&private_key);
         let large_plaintext = vec![0xABu8; 1024 * 1024]; // 1MB
 
-        let options_enc = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_enc = EciesOptions::builder().prepend_public_key(true).build();
 
         let ciphertext = encrypt_ecies(&large_plaintext, &public_key, options_enc).unwrap();
 
         // Expected size: ephemeral_pub(32) + nonce(12) + ciphertext(1MB + 16 auth tag) + HMAC(32)
-        let expected_min_size = X25519_PUBLIC_KEY_SIZE + 12 + large_plaintext.len() + 16 + HMAC_SIZE;
+        let expected_min_size =
+            X25519_PUBLIC_KEY_SIZE + 12 + large_plaintext.len() + 16 + HMAC_SIZE;
         assert_eq!(
             ciphertext.len(),
             expected_min_size,
             "ECIES ciphertext size should be ephemeral_pub + nonce + plaintext + auth_tag + HMAC"
         );
 
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
 
         let decrypted = decrypt_ecies(&ciphertext, &private_key, options_dec).unwrap();
-        assert_eq!(large_plaintext.len(), decrypted.len(), "Decrypted length should match");
-        assert_eq!(large_plaintext, decrypted, "1MB plaintext should decrypt correctly");
+        assert_eq!(
+            large_plaintext.len(),
+            decrypted.len(),
+            "Decrypted length should match"
+        );
+        assert_eq!(
+            large_plaintext, decrypted,
+            "1MB plaintext should decrypt correctly"
+        );
     }
 
     #[test]
@@ -768,7 +770,10 @@ mod tests {
             .build();
 
         let decrypted = decrypt_ecies(&ciphertext, &private_key, options_dec).unwrap();
-        assert_eq!(large_plaintext, decrypted, "5MB plaintext with AAD should decrypt correctly");
+        assert_eq!(
+            large_plaintext, decrypted,
+            "5MB plaintext with AAD should decrypt correctly"
+        );
     }
 
     #[test]
@@ -800,7 +805,10 @@ mod tests {
             .build();
 
         let decrypted = decrypt_ecies(&ciphertext, &recipient_key, options_dec).unwrap();
-        assert_eq!(large_plaintext, decrypted, "2MB plaintext should decrypt correctly with separate key");
+        assert_eq!(
+            large_plaintext, decrypted,
+            "2MB plaintext should decrypt correctly with separate key"
+        );
     }
 
     #[test]
@@ -810,16 +818,14 @@ mod tests {
 
         // Use deterministic keys for reproducible test
         let alice_private_bytes: [u8; 32] = [
-            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d,
-            0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
-            0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
-            0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
+            0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
+            0x1d, 0xb9, 0x2c, 0x2a,
         ];
         let bob_private_bytes: [u8; 32] = [
-            0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b,
-            0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80, 0x0e, 0xe6,
-            0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd,
-            0x1c, 0x2f, 0x8b, 0x27, 0xff, 0x88, 0xe0, 0xeb,
+            0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80,
+            0x0e, 0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27,
+            0xff, 0x88, 0xe0, 0xeb,
         ];
 
         let alice_private = StaticSecret::from(alice_private_bytes);
@@ -844,8 +850,14 @@ mod tests {
         assert_ne!(aes_key, hmac_key, "AES and HMAC keys should be different");
 
         // Verify keys are non-trivial (not all zeros or ones)
-        assert!(!aes_key.iter().all(|&b| b == 0), "AES key should not be all zeros");
-        assert!(!hmac_key.iter().all(|&b| b == 0), "HMAC key should not be all zeros");
+        assert!(
+            !aes_key.iter().all(|&b| b == 0),
+            "AES key should not be all zeros"
+        );
+        assert!(
+            !hmac_key.iter().all(|&b| b == 0),
+            "HMAC key should not be all zeros"
+        );
 
         // Re-derive to ensure determinism
         let hkdf2 = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
@@ -865,11 +877,12 @@ mod tests {
         let ciphertext1 = encrypt_ecies(plaintext, &bob_public, options_enc).unwrap();
 
         // Decrypt should succeed with Bob's private key
-        let options_dec = EciesOptions::builder()
-            .prepend_public_key(true)
-            .build();
+        let options_dec = EciesOptions::builder().prepend_public_key(true).build();
         let decrypted = decrypt_ecies(&ciphertext1, &bob_private, options_dec).unwrap();
-        assert_eq!(plaintext.to_vec(), decrypted, "Decryption should recover original plaintext");
+        assert_eq!(
+            plaintext.to_vec(),
+            decrypted,
+            "Decryption should recover original plaintext"
+        );
     }
 }
-

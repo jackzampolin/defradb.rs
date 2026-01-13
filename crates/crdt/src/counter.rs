@@ -4,8 +4,8 @@
 //! Counters use nonces to ensure unique DAG blocks for idempotent delivery.
 
 use crate::traits::{Context, Delta, ReplicatedData, ValueReader};
-use defra_core::{Error, Result, store::Store};
 use async_trait::async_trait;
+use defra_core::{store::Store, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::sync::Arc;
@@ -494,7 +494,10 @@ mod tests {
 
         let result = counter.merge(&ctx, &delta).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field name mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("field name mismatch"));
     }
 
     #[tokio::test]
@@ -526,6 +529,9 @@ mod tests {
 
         let result = counter.merge(&ctx, &delta).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("schema version mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("schema version mismatch"));
     }
 }

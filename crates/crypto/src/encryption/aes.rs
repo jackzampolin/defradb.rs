@@ -150,8 +150,8 @@ pub fn decrypt_aes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::generation::generate_aes256;
     use crate::encryption::nonce::USE_DETERMINISTIC_NONCE;
+    use crate::keys::generation::generate_aes256;
 
     #[test]
     fn test_encrypt_decrypt_round_trip() {
@@ -302,10 +302,17 @@ mod tests {
         let (ciphertext, nonce) = encrypt_aes(plaintext, &key, aad, false).unwrap();
 
         // Ciphertext should not be empty (contains authentication tag)
-        assert!(!ciphertext.is_empty(), "Ciphertext should contain auth tag even for empty plaintext");
+        assert!(
+            !ciphertext.is_empty(),
+            "Ciphertext should contain auth tag even for empty plaintext"
+        );
 
         let decrypted = decrypt_aes(Some(&nonce), &ciphertext, &key, aad).unwrap();
-        assert_eq!(plaintext, &decrypted[..], "Should decrypt empty plaintext correctly");
+        assert_eq!(
+            plaintext,
+            &decrypted[..],
+            "Should decrypt empty plaintext correctly"
+        );
     }
 
     #[test]
@@ -354,7 +361,10 @@ mod tests {
         ciphertext[ct_len - 1] ^= 0x01;
 
         let result = decrypt_aes(Some(&nonce), &ciphertext, &key, aad);
-        assert!(result.is_err(), "Tampered auth tag should cause decryption failure");
+        assert!(
+            result.is_err(),
+            "Tampered auth tag should cause decryption failure"
+        );
     }
 
     #[test]
@@ -366,11 +376,17 @@ mod tests {
         let (mut ciphertext, nonce) = encrypt_aes(plaintext, &key, aad, false).unwrap();
 
         // Tamper with the first byte of actual ciphertext (not the auth tag)
-        assert!(ciphertext.len() > 16, "Should have ciphertext before auth tag");
+        assert!(
+            ciphertext.len() > 16,
+            "Should have ciphertext before auth tag"
+        );
         ciphertext[0] ^= 0x01;
 
         let result = decrypt_aes(Some(&nonce), &ciphertext, &key, aad);
-        assert!(result.is_err(), "Tampered ciphertext body should cause auth failure");
+        assert!(
+            result.is_err(),
+            "Tampered ciphertext body should cause auth failure"
+        );
     }
 
     #[test]
@@ -395,7 +411,10 @@ mod tests {
             decrypted.len(),
             "Decrypted length should match original"
         );
-        assert_eq!(large_plaintext, decrypted, "Decrypted data should match original");
+        assert_eq!(
+            large_plaintext, decrypted,
+            "Decrypted data should match original"
+        );
     }
 
     #[test]
@@ -415,7 +434,10 @@ mod tests {
         );
 
         let decrypted = decrypt_aes(None, &ciphertext, &key, aad).unwrap();
-        assert_eq!(large_plaintext, decrypted, "Large plaintext should decrypt correctly");
+        assert_eq!(
+            large_plaintext, decrypted,
+            "Large plaintext should decrypt correctly"
+        );
     }
 
     #[test]
@@ -431,7 +453,9 @@ mod tests {
         assert_eq!(sequential, dec1, "Sequential pattern should round-trip");
 
         // Pattern 2: Alternating high/low bytes
-        let alternating: Vec<u8> = (0..100_000).map(|i| if i % 2 == 0 { 0x00 } else { 0xFF }).collect();
+        let alternating: Vec<u8> = (0..100_000)
+            .map(|i| if i % 2 == 0 { 0x00 } else { 0xFF })
+            .collect();
         let (ct2, _) = encrypt_aes(&alternating, &key, aad, true).unwrap();
         let dec2 = decrypt_aes(None, &ct2, &key, aad).unwrap();
         assert_eq!(alternating, dec2, "Alternating pattern should round-trip");
@@ -500,4 +524,3 @@ mod tests {
         assert_eq!(nonces.len(), 100, "Should have 100 unique nonces");
     }
 }
-

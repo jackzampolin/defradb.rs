@@ -6,9 +6,12 @@
 //! - Idempotence: Merging same delta multiple times has same effect (A+A = A)
 //! - Convergence: All replicas converge to same state
 
-use crdt::{Lww, LwwDelta, Counter, CounterDelta, traits::{Context, ReplicatedData, ValueReader}};
-use defra_core::{types::DocId, store::Store, Result};
 use async_trait::async_trait;
+use crdt::{
+    traits::{Context, ReplicatedData, ValueReader},
+    Counter, CounterDelta, Lww, LwwDelta,
+};
+use defra_core::{store::Store, types::DocId, Result};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;

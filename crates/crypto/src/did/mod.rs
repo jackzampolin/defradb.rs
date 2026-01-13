@@ -86,7 +86,10 @@ mod tests {
         let bytes = vec![1u8; 33];
         let did_secp256k1 = create_did_key(KeyType::Secp256k1, &bytes).unwrap();
         let did_secp256r1 = create_did_key(KeyType::Secp256r1, &bytes).unwrap();
-        assert_ne!(did_secp256k1, did_secp256r1, "Different key types should produce different DIDs");
+        assert_ne!(
+            did_secp256k1, did_secp256r1,
+            "Different key types should produce different DIDs"
+        );
     }
 
     #[test]
@@ -99,7 +102,10 @@ mod tests {
         let did = public_key.did().unwrap();
 
         // Verify DID format
-        assert!(did.starts_with("did:key:z"), "DID should start with did:key:z (base58btc)");
+        assert!(
+            did.starts_with("did:key:z"),
+            "DID should start with did:key:z (base58btc)"
+        );
 
         // Verify DID is longer than just the prefix (contains encoded data)
         assert!(did.len() > 15, "DID should contain encoded key data");
@@ -108,10 +114,11 @@ mod tests {
     #[test]
     fn test_did_key_roundtrip_format() {
         // Test that we can decode the DID back to verify format
-        let public_key = vec![0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
-                             0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
-                             0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
-                             0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89];
+        let public_key = vec![
+            0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45,
+            0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01,
+            0x23, 0x45, 0x67, 0x89,
+        ];
 
         let did = create_did_key(KeyType::Ed25519, &public_key).unwrap();
 
@@ -122,15 +129,19 @@ mod tests {
         let decoded = multibase::decode(encoded).unwrap();
 
         // Decode the varint multicodec prefix
-        let (multicodec, remaining_bytes) = unsigned_varint::decode::u64(&decoded.1)
-            .expect("Failed to decode multicodec");
+        let (multicodec, remaining_bytes) =
+            unsigned_varint::decode::u64(&decoded.1).expect("Failed to decode multicodec");
 
         // Verify multicodec is correct for Ed25519
         assert_eq!(multicodec, 0xed, "Multicodec should be 0xed for Ed25519");
 
         // Verify public key bytes are included after the varint prefix
         // remaining_bytes is the slice after the varint
-        assert_eq!(remaining_bytes, &public_key[..], "DID should contain original public key after multicodec");
+        assert_eq!(
+            remaining_bytes,
+            &public_key[..],
+            "DID should contain original public key after multicodec"
+        );
     }
 
     #[test]
@@ -150,6 +161,9 @@ mod tests {
         assert!(secp256k1_did.starts_with("did:key:z"));
 
         // Verify they're different
-        assert_ne!(ed25519_did, secp256k1_did, "Different key types should produce different DIDs");
+        assert_ne!(
+            ed25519_did, secp256k1_did,
+            "Different key types should produce different DIDs"
+        );
     }
 }

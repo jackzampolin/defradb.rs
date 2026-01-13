@@ -6,7 +6,7 @@
 //!
 //! - Public keys: 33 bytes (compressed format with 0x02/0x03 prefix) or 65 bytes (uncompressed)
 
-use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::ecdsa::{Signature, VerifyingKey};
 use p256::EncodedPoint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -85,17 +85,21 @@ impl Key for Secp256r1PublicKey {
 
 impl PublicKey for Secp256r1PublicKey {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
+        use p256::ecdsa::signature::DigestVerifier;
+
         // Parse DER-encoded signature
         let sig = match Signature::from_der(signature) {
             Ok(s) => s,
             Err(_) => return Ok(false),
         };
 
-        // Hash the message with SHA-256
-        let hash = Sha256::digest(data);
+        // Hash the message with SHA-256 first
+        // Go's ecdsa.Sign takes a pre-computed hash, so we must also pre-hash
+        // and use verify_digest (DigestVerifier) to match Go behavior
+        let digest = Sha256::new_with_prefix(data);
 
-        // Verify signature
-        match self.key.verify(&hash, &sig) {
+        // Verify signature using pre-hashed digest
+        match self.key.verify_digest(digest, &sig) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -129,8 +133,8 @@ mod secp256r1_public_key_serde {
         D: Deserializer<'de>,
     {
         let bytes = <Vec<u8>>::deserialize(deserializer)?;
-        let point =
-            EncodedPoint::from_bytes(&bytes).map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        let point = EncodedPoint::from_bytes(&bytes)
+            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
         VerifyingKey::from_encoded_point(&point).map_err(serde::de::Error::custom)
     }
 }
@@ -210,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_secp256r1_verify_signature() {
-        use p256::ecdsa::{signature::Signer, SigningKey};
+        use p256::ecdsa::{signature::DigestSigner, SigningKey};
         use rand::rngs::OsRng;
 
         // Generate a key pair
@@ -221,13 +225,16 @@ mod tests {
         let compressed = verifying_key.to_encoded_point(true).as_bytes().to_vec();
         let public_key = Secp256r1PublicKey::from_bytes(&compressed).unwrap();
 
-        // Sign a message
+        // Sign a message using sign_digest to match Go's ecdsa.Sign behavior
+        // Go's ecdsa.Sign takes a pre-computed hash, so we use DigestSigner
         let message = b"test message";
-        let hash = Sha256::digest(message);
-        let signature: Signature = signing_key.sign(&hash);
+        let digest = Sha256::new_with_prefix(message);
+        let signature: Signature = signing_key.sign_digest(digest);
 
         // Verify with our wrapper
-        let valid = public_key.verify(message, &signature.to_der().as_bytes()).unwrap();
+        let valid = public_key
+            .verify(message, &signature.to_der().as_bytes())
+            .unwrap();
         assert!(valid);
 
         // Verify with wrong message

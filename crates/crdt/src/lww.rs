@@ -4,10 +4,10 @@
 //! When two concurrent writes occur, the one with higher priority wins.
 //! On tie, lexicographic comparison of values provides deterministic resolution.
 
-use crate::traits::{Context, Delta, ReplicatedData, ValueReader, PriorityReader};
-use crate::priority::{encode_priority, decode_priority};
-use defra_core::{Error, Result, store::Store};
+use crate::priority::{decode_priority, encode_priority};
+use crate::traits::{Context, Delta, PriorityReader, ReplicatedData, ValueReader};
 use async_trait::async_trait;
+use defra_core::{store::Store, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::sync::Arc;
@@ -256,12 +256,7 @@ mod tests {
     #[tokio::test]
     async fn test_lww_higher_priority_wins() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -294,12 +289,7 @@ mod tests {
     #[tokio::test]
     async fn test_lww_lower_priority_ignored() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -331,12 +321,7 @@ mod tests {
     #[tokio::test]
     async fn test_lww_same_priority_lexicographic() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),
@@ -369,12 +354,7 @@ mod tests {
     #[tokio::test]
     async fn test_lww_deletion() {
         let store = Arc::new(MemoryStore::new());
-        let mut lww = Lww::new(
-            store.clone(),
-            "v1".to_string(),
-            b"doc1",
-            "name".to_string(),
-        );
+        let mut lww = Lww::new(store.clone(), "v1".to_string(), b"doc1", "name".to_string());
 
         let ctx = Context {
             doc_id: defra_core::types::DocId::new("doc1"),

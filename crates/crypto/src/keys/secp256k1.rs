@@ -233,8 +233,8 @@ mod secp256k1_public_key_serde {
         D: Deserializer<'de>,
     {
         let bytes = <Vec<u8>>::deserialize(deserializer)?;
-        let point =
-            EncodedPoint::from_bytes(&bytes).map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        let point = EncodedPoint::from_bytes(&bytes)
+            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
         VerifyingKey::from_encoded_point(&point).map_err(serde::de::Error::custom)
     }
 }
@@ -365,7 +365,10 @@ mod tests {
         let pub2 = key2.public_key();
         let pub1_concrete = Secp256k1PublicKey::from_bytes(&pub1.raw()).unwrap();
         let pub2_concrete = Secp256k1PublicKey::from_bytes(&pub2.raw()).unwrap();
-        assert_eq!(pub1_concrete, pub2_concrete, "Public keys from same private key should be equal");
+        assert_eq!(
+            pub1_concrete, pub2_concrete,
+            "Public keys from same private key should be equal"
+        );
     }
 
     #[test]
@@ -380,8 +383,15 @@ mod tests {
         let uncompressed = uncompressed_point.as_bytes();
 
         // Verify uncompressed format
-        assert_eq!(uncompressed.len(), 65, "Uncompressed key should be 65 bytes");
-        assert_eq!(uncompressed[0], 0x04, "Uncompressed key should start with 0x04");
+        assert_eq!(
+            uncompressed.len(),
+            65,
+            "Uncompressed key should be 65 bytes"
+        );
+        assert_eq!(
+            uncompressed[0], 0x04,
+            "Uncompressed key should start with 0x04"
+        );
 
         // Should be able to parse uncompressed format
         let parsed = Secp256k1PublicKey::from_bytes(uncompressed);
@@ -389,7 +399,10 @@ mod tests {
 
         // Parsed key should produce same compressed output
         let parsed_compressed = parsed.unwrap().raw();
-        assert_eq!(compressed, parsed_compressed, "Parsed key should match original compressed");
+        assert_eq!(
+            compressed, parsed_compressed,
+            "Parsed key should match original compressed"
+        );
     }
 
     #[test]
@@ -403,12 +416,18 @@ mod tests {
         // Test equality through trait objects
         let key1_trait: &dyn Key = &key1;
         let key2_trait: &dyn Key = &key2;
-        assert!(key1_trait.equal(key2_trait), "Keys should be equal through trait objects");
+        assert!(
+            key1_trait.equal(key2_trait),
+            "Keys should be equal through trait objects"
+        );
 
         // Test inequality
         let key3 = Secp256k1PrivateKey::from_bytes(&[14u8; 32]).unwrap();
         let key3_trait: &dyn Key = &key3;
-        assert!(!key1_trait.equal(key3_trait), "Different keys should not be equal through trait objects");
+        assert!(
+            !key1_trait.equal(key3_trait),
+            "Different keys should not be equal through trait objects"
+        );
     }
 
     #[test]
@@ -419,27 +438,42 @@ mod tests {
 
         // Empty signature
         let result = public_key.verify(message, &[]);
-        assert!(result.is_ok() && !result.unwrap(), "Empty signature should return false");
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Empty signature should return false"
+        );
 
         // Invalid DER: wrong sequence tag (should be 0x30)
         let invalid_der = vec![0xFF, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01];
         let result = public_key.verify(message, &invalid_der);
-        assert!(result.is_ok() && !result.unwrap(), "Invalid DER tag should return false");
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Invalid DER tag should return false"
+        );
 
         // Invalid DER: length exceeds data
         let invalid_der = vec![0x30, 0xFF, 0x02, 0x01, 0x01];
         let result = public_key.verify(message, &invalid_der);
-        assert!(result.is_ok() && !result.unwrap(), "Invalid DER length should return false");
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Invalid DER length should return false"
+        );
 
         // Too short to be valid DER
         let invalid_der = vec![0x30, 0x02];
         let result = public_key.verify(message, &invalid_der);
-        assert!(result.is_ok() && !result.unwrap(), "Truncated DER should return false");
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Truncated DER should return false"
+        );
 
         // Single byte (not valid DER)
         let invalid_der = vec![0x30];
         let result = public_key.verify(message, &invalid_der);
-        assert!(result.is_ok() && !result.unwrap(), "Single byte should return false");
+        assert!(
+            result.is_ok() && !result.unwrap(),
+            "Single byte should return false"
+        );
     }
 
     #[test]
@@ -448,7 +482,10 @@ mod tests {
         let empty_message = b"";
 
         let signature = private_key.sign(empty_message).unwrap();
-        assert!(signature.len() >= 8 && signature.len() <= 73, "DER signature should be 8-73 bytes");
+        assert!(
+            signature.len() >= 8 && signature.len() <= 73,
+            "DER signature should be 8-73 bytes"
+        );
 
         let public_key = private_key.public_key();
         let valid = public_key.verify(empty_message, &signature).unwrap();
@@ -467,7 +504,10 @@ mod tests {
         let public_key = private_key.public_key();
 
         let verified = public_key.verify(message, &signature).unwrap();
-        assert!(verified, "Signature should verify with correct key and message");
+        assert!(
+            verified,
+            "Signature should verify with correct key and message"
+        );
     }
 
     #[test]
@@ -534,7 +574,11 @@ mod tests {
         for message in messages {
             let signature = private_key.sign(message).unwrap();
             let verified = public_key.verify(message, &signature).unwrap();
-            assert!(verified, "Signature should verify for message: {:?}", std::str::from_utf8(message));
+            assert!(
+                verified,
+                "Signature should verify for message: {:?}",
+                std::str::from_utf8(message)
+            );
         }
     }
 
@@ -568,13 +612,19 @@ mod tests {
         let mut invalid_point2 = vec![0x03u8];
         invalid_point2.extend_from_slice(&[0u8; 32]);
         let result = Secp256k1PublicKey::from_bytes(&invalid_point2);
-        assert!(result.is_none(), "All-zero X coordinate with 0x03 prefix should be rejected");
+        assert!(
+            result.is_none(),
+            "All-zero X coordinate with 0x03 prefix should be rejected"
+        );
 
         // Valid length but X coordinate larger than field prime - invalid
         let mut invalid_point3 = vec![0x02u8];
         invalid_point3.extend_from_slice(&[0xFFu8; 32]); // All 0xFF exceeds field prime
         let result = Secp256k1PublicKey::from_bytes(&invalid_point3);
-        assert!(result.is_none(), "X coordinate exceeding field prime should be rejected");
+        assert!(
+            result.is_none(),
+            "X coordinate exceeding field prime should be rejected"
+        );
 
         // Invalid prefix bytes that k256 rejects
         // 0x00 is invalid
@@ -617,6 +667,9 @@ mod tests {
         uncompressed[64] ^= 0xFF;
 
         let result = Secp256k1PublicKey::from_bytes(&uncompressed);
-        assert!(result.is_none(), "Point with invalid Y for given X should be rejected");
+        assert!(
+            result.is_none(),
+            "Point with invalid Y for given X should be rejected"
+        );
     }
 }

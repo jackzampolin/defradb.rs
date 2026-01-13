@@ -79,7 +79,8 @@ pub fn generate_ed25519() -> Result<Ed25519PrivateKey> {
     // Generate random 32-byte seed
     use rand::RngCore;
     let mut seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut seed)
+    OsRng
+        .try_fill_bytes(&mut seed)
         .map_err(|e| crypto_error(format!("RNG failure in Ed25519 key generation: {}", e)))?;
 
     let signing_key = Ed25519SigningKey::from_bytes(&seed);
@@ -121,7 +122,8 @@ pub fn generate_x25519() -> Result<StaticSecret> {
 pub fn generate_aes256() -> Result<Vec<u8>> {
     let mut key = vec![0u8; AES_KEY_SIZE];
     use rand::RngCore;
-    OsRng.try_fill_bytes(&mut key)
+    OsRng
+        .try_fill_bytes(&mut key)
         .map_err(|e| crypto_error(format!("RNG failure in AES-256 key generation: {}", e)))?;
     Ok(key)
 }
@@ -138,28 +140,34 @@ pub fn private_key_from_bytes(key_type: KeyType, bytes: &[u8]) -> Result<Box<dyn
     // Validate against obviously weak keys
     if !bytes.is_empty() {
         if bytes.iter().all(|&b| b == 0) {
-            return Err(crypto_error("private key is all zeros (cryptographically weak)"));
+            return Err(crypto_error(
+                "private key is all zeros (cryptographically weak)",
+            ));
         }
         if bytes.iter().all(|&b| b == 0xFF) {
-            return Err(crypto_error("private key is all ones (cryptographically weak)"));
+            return Err(crypto_error(
+                "private key is all ones (cryptographically weak)",
+            ));
         }
     }
 
     match key_type {
         KeyType::Secp256k1 => {
-            let key = Secp256k1PrivateKey::from_bytes(bytes)
-                .ok_or_else(|| crypto_error(format!(
+            let key = Secp256k1PrivateKey::from_bytes(bytes).ok_or_else(|| {
+                crypto_error(format!(
                     "invalid secp256k1 private key: expected 32 bytes, got {}",
                     bytes.len()
-                )))?;
+                ))
+            })?;
             Ok(Box::new(key))
         }
         KeyType::Ed25519 => {
-            let key = Ed25519PrivateKey::from_bytes(bytes)
-                .ok_or_else(|| crypto_error(format!(
+            let key = Ed25519PrivateKey::from_bytes(bytes).ok_or_else(|| {
+                crypto_error(format!(
                     "invalid ed25519 private key: expected 64 bytes, got {}",
                     bytes.len()
-                )))?;
+                ))
+            })?;
             Ok(Box::new(key))
         }
         KeyType::Secp256r1 => Err(unsupported_key_type(key_type)),
@@ -174,13 +182,14 @@ pub fn private_key_from_bytes(key_type: KeyType, bytes: &[u8]) -> Result<Box<dyn
 ///
 /// # Returns
 /// A boxed private key implementing the PrivateKey trait
-pub fn private_key_from_string(
-    key_type: KeyType,
-    hex_str: &str,
-) -> Result<Box<dyn PrivateKey>> {
+pub fn private_key_from_string(key_type: KeyType, hex_str: &str) -> Result<Box<dyn PrivateKey>> {
     let bytes = hex::decode(hex_str).map_err(|e| {
         let preview = if hex_str.len() > 64 {
-            format!("{}...(truncated, length: {})", &hex_str[..64], hex_str.len())
+            format!(
+                "{}...(truncated, length: {})",
+                &hex_str[..64],
+                hex_str.len()
+            )
         } else {
             hex_str.to_string()
         };
@@ -234,7 +243,11 @@ pub fn public_key_from_string(
 ) -> Result<Box<dyn crate::keys::PublicKey>> {
     let bytes = hex::decode(hex_str).map_err(|e| {
         let preview = if hex_str.len() > 64 {
-            format!("{}...(truncated, length: {})", &hex_str[..64], hex_str.len())
+            format!(
+                "{}...(truncated, length: {})",
+                &hex_str[..64],
+                hex_str.len()
+            )
         } else {
             hex_str.to_string()
         };
@@ -381,12 +394,12 @@ mod tests {
     #[test]
     fn test_private_key_from_string_wrong_length() {
         // Valid hex but wrong length for secp256k1 (needs 32 bytes = 64 hex chars)
-        let short_hex = "0123456789abcdef";  // Only 8 bytes
+        let short_hex = "0123456789abcdef"; // Only 8 bytes
         let result = private_key_from_string(KeyType::Secp256k1, short_hex);
         assert!(result.is_err(), "Short key should fail");
 
         // Valid hex but wrong length for Ed25519 (needs 64 bytes = 128 hex chars)
-        let wrong_length_hex = "0123456789abcdef0123456789abcdef";  // Only 16 bytes
+        let wrong_length_hex = "0123456789abcdef0123456789abcdef"; // Only 16 bytes
         let result = private_key_from_string(KeyType::Ed25519, wrong_length_hex);
         assert!(result.is_err(), "Wrong length should fail");
     }
@@ -398,7 +411,10 @@ mod tests {
         let result = private_key_from_bytes(KeyType::Secp256k1, &zero_key);
         assert!(result.is_err(), "All-zero key should be rejected");
         match result {
-            Err(e) => assert!(e.to_string().contains("all zeros"), "Error should mention weak key"),
+            Err(e) => assert!(
+                e.to_string().contains("all zeros"),
+                "Error should mention weak key"
+            ),
             Ok(_) => panic!("Should have failed for all-zero key"),
         }
 
@@ -407,7 +423,10 @@ mod tests {
         let result = private_key_from_bytes(KeyType::Secp256k1, &ones_key);
         assert!(result.is_err(), "All-ones key should be rejected");
         match result {
-            Err(e) => assert!(e.to_string().contains("all ones"), "Error should mention weak key"),
+            Err(e) => assert!(
+                e.to_string().contains("all ones"),
+                "Error should mention weak key"
+            ),
             Ok(_) => panic!("Should have failed for all-ones key"),
         }
 
@@ -431,13 +450,21 @@ mod tests {
 
         let parsed = private_key_from_bytes(KeyType::Secp256k1, &key_bytes).unwrap();
 
-        assert_eq!(parsed.key_type(), KeyType::Secp256k1, "Key type should match");
+        assert_eq!(
+            parsed.key_type(),
+            KeyType::Secp256k1,
+            "Key type should match"
+        );
         assert_eq!(parsed.raw(), key_bytes, "Raw bytes should match");
 
         // Verify public keys match
         let original_pub = original.public_key();
         let parsed_pub = parsed.public_key();
-        assert_eq!(original_pub.raw(), parsed_pub.raw(), "Public keys should match");
+        assert_eq!(
+            original_pub.raw(),
+            parsed_pub.raw(),
+            "Public keys should match"
+        );
     }
 
     #[test]
@@ -454,7 +481,11 @@ mod tests {
         // Verify public keys match
         let original_pub = original.public_key();
         let parsed_pub = parsed.public_key();
-        assert_eq!(original_pub.raw(), parsed_pub.raw(), "Public keys should match");
+        assert_eq!(
+            original_pub.raw(),
+            parsed_pub.raw(),
+            "Public keys should match"
+        );
     }
 
     #[test]
@@ -486,7 +517,10 @@ mod tests {
         // TestPrivateKeyFromBytes_Secp256r1NotSupported
         let key_bytes = vec![1u8; 32];
         let result = private_key_from_bytes(KeyType::Secp256r1, &key_bytes);
-        assert!(result.is_err(), "Secp256r1 private keys should not be supported");
+        assert!(
+            result.is_err(),
+            "Secp256r1 private keys should not be supported"
+        );
 
         match result {
             Err(e) => assert!(
@@ -506,7 +540,11 @@ mod tests {
 
         let parsed = private_key_from_string(KeyType::Secp256k1, &hex_string).unwrap();
 
-        assert_eq!(parsed.key_type(), KeyType::Secp256k1, "Key type should match");
+        assert_eq!(
+            parsed.key_type(),
+            KeyType::Secp256k1,
+            "Key type should match"
+        );
         assert_eq!(parsed.raw(), original.raw(), "Raw bytes should match");
     }
 
@@ -531,7 +569,11 @@ mod tests {
 
         let parsed = public_key_from_bytes(KeyType::Secp256k1, &key_bytes).unwrap();
 
-        assert_eq!(parsed.key_type(), KeyType::Secp256k1, "Key type should match");
+        assert_eq!(
+            parsed.key_type(),
+            KeyType::Secp256k1,
+            "Key type should match"
+        );
         assert_eq!(parsed.raw(), key_bytes, "Raw bytes should match");
     }
 
@@ -556,7 +598,10 @@ mod tests {
         let mut invalid_all_ff = vec![0x02u8; 33];
         invalid_all_ff[1..].fill(0xFF);
         let result = public_key_from_bytes(KeyType::Secp256r1, &invalid_all_ff);
-        assert!(result.is_err(), "X coordinate exceeding field prime should be rejected");
+        assert!(
+            result.is_err(),
+            "X coordinate exceeding field prime should be rejected"
+        );
 
         // Invalid prefix byte (0x05 is not valid)
         let mut invalid_prefix = vec![0x05u8; 33];
@@ -578,14 +623,22 @@ mod tests {
         let secp_hex = secp_public.to_hex_string();
 
         let parsed_secp = public_key_from_string(KeyType::Secp256k1, &secp_hex).unwrap();
-        assert_eq!(parsed_secp.raw(), secp_public.raw(), "Secp256k1 public key should match");
+        assert_eq!(
+            parsed_secp.raw(),
+            secp_public.raw(),
+            "Secp256k1 public key should match"
+        );
 
         let ed_private = generate_ed25519().unwrap();
         let ed_public = ed_private.public_key();
         let ed_hex = ed_public.to_hex_string();
 
         let parsed_ed = public_key_from_string(KeyType::Ed25519, &ed_hex).unwrap();
-        assert_eq!(parsed_ed.raw(), ed_public.raw(), "Ed25519 public key should match");
+        assert_eq!(
+            parsed_ed.raw(),
+            ed_public.raw(),
+            "Ed25519 public key should match"
+        );
     }
 
     #[test]

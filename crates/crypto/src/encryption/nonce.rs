@@ -36,9 +36,9 @@ pub fn generate_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
 /// Generate a random nonce using cryptographically secure RNG
 fn generate_random_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     let mut nonce = [0u8; AES_NONCE_SIZE];
-    OsRng
-        .try_fill_bytes(&mut nonce)
-        .map_err(|e| crate::error::crypto_error(format!("RNG failure in nonce generation: {}", e)))?;
+    OsRng.try_fill_bytes(&mut nonce).map_err(|e| {
+        crate::error::crypto_error(format!("RNG failure in nonce generation: {}", e))
+    })?;
     Ok(nonce)
 }
 
@@ -146,4 +146,3 @@ mod tests {
         );
     }
 }
-
