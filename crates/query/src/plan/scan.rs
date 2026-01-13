@@ -80,14 +80,16 @@ impl PlanNode for ScanNode {
     }
 
     async fn start(&mut self) -> Result<()> {
-        // In a real implementation, this would:
-        // 1. Open an iterator on the datastore
-        // 2. Set up key prefixes for the collection
-        // 3. Begin scanning
         Ok(())
     }
 
     async fn next(&mut self) -> Result<bool> {
+        if !self.initialized {
+            return Err(crate::error::QueryError::execution(
+                "ScanNode.next() called before init()",
+            ));
+        }
+
         loop {
             if self.position >= self.docs.len() {
                 return Ok(false);
@@ -103,7 +105,7 @@ impl PlanNode for ScanNode {
 
             // Apply filter if present
             if let Some(ref filter) = self.filter {
-                if !filter.matches(&doc.fields, &self.document_mapping)? {
+                if !filter.matches(doc.fields(), &self.document_mapping)? {
                     continue;
                 }
             }
@@ -271,5 +273,51 @@ mod tests {
         }
 
         assert_eq!(count, 3); // All three including deleted
+    }
+
+    #[tokio::test]
+    async fn test_scan_next_before_init_errors() {
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+        let docs = make_test_docs();
+
+        let mut scan = ScanNode::new(collection, mapping).with_docs(docs);
+        // Intentionally not calling init()
+
+        let result = scan.next().await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("called before init"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_filter_error_propagation() {
+        use std::collections::HashMap;
+
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+
+        // Create docs with null age field
+        let docs = vec![Doc::with_fields(vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+        ])];
+
+        // Filter with _gt on null will error
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
+
+        let mut scan = ScanNode::new(collection, mapping)
+            .with_docs(docs)
+            .with_filter(filter);
+
+        scan.init().await.unwrap();
+        scan.start().await.unwrap();
+
+        let result = scan.next().await;
+        assert!(result.is_err(), "Filter error should propagate through scan");
     }
 }

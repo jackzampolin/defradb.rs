@@ -23,7 +23,7 @@ pub struct Doc {
     /// Whether this doc should be hidden from final output
     pub hidden: bool,
     /// Field values indexed by position
-    pub fields: DocFields,
+    fields: DocFields,
     /// Document status
     pub status: DocStatus,
     /// Schema version ID (for migrations)
@@ -78,6 +78,16 @@ impl Doc {
             self.fields.resize(index + 1, None);
         }
         self.fields[index] = Some(value);
+    }
+
+    /// Get all fields as a slice
+    pub fn fields(&self) -> &[Option<JsonValue>] {
+        &self.fields
+    }
+
+    /// Get the number of fields
+    pub fn num_fields(&self) -> usize {
+        self.fields.len()
     }
 
     /// Clone the document
@@ -180,8 +190,8 @@ mod tests {
     #[test]
     fn test_doc_new() {
         let doc = Doc::new(3);
-        assert_eq!(doc.fields.len(), 3);
-        assert!(doc.fields.iter().all(|f| f.is_none()));
+        assert_eq!(doc.num_fields(), 3);
+        assert!(doc.fields().iter().all(|f| f.is_none()));
     }
 
     #[test]
@@ -207,7 +217,7 @@ mod tests {
         let mut doc = Doc::new(2);
         doc.set(5, json!("value"));
 
-        assert_eq!(doc.fields.len(), 6);
+        assert_eq!(doc.num_fields(), 6);
         assert_eq!(doc.get(5), Some(&json!("value")));
     }
 

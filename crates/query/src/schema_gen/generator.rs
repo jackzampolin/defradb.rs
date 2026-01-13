@@ -324,9 +324,6 @@ pub fn generate_query_type(collections: &[&CollectionVersion]) -> GqlObjectType 
     for collection in collections {
         let type_name = &collection.name;
 
-        // Single item query (e.g., user(docID: ID!): User)
-        // query.fields.push(...) - would need args support
-
         // List query (e.g., users(filter: UserFilterInput, limit: Int, offset: Int): [User!]!)
         query = query.with_field(GqlField::new(
             type_name.to_lowercase(),

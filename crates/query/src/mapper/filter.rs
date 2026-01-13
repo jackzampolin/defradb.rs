@@ -105,7 +105,7 @@ impl FilterOp {
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
     /// Parsed filter conditions
-    pub conditions: HashMap<String, JsonValue>,
+    conditions: HashMap<String, JsonValue>,
 }
 
 impl Filter {

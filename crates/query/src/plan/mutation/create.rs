@@ -89,12 +89,8 @@ impl CreateNode {
         &self.generated_doc_ids
     }
 
-    /// Generate a document ID (placeholder - real impl would use proper ID generation)
+    /// Generate a deterministic document ID based on collection and index
     fn generate_doc_id(&self, index: usize) -> String {
-        // In a real implementation, this would:
-        // 1. Serialize the document fields
-        // 2. Hash the content
-        // 3. Format as a proper DefraDB document ID (bae-...)
         format!("bae-{}-{}", self.collection.collection_id, index)
     }
 
@@ -129,9 +125,6 @@ impl PlanNode for CreateNode {
     }
 
     async fn start(&mut self) -> Result<()> {
-        // In a real implementation, this would:
-        // 1. Begin a transaction
-        // 2. Validate inputs against schema
         Ok(())
     }
 
@@ -145,12 +138,6 @@ impl PlanNode for CreateNode {
 
         // Create the document
         self.current_doc = self.create_document(input, &doc_id)?;
-
-        // In a real implementation, this would:
-        // 1. Create CRDT deltas for each field
-        // 2. Write to storage via blockstore
-        // 3. Update headstore
-        // 4. Broadcast via P2P
 
         self.generated_doc_ids.push(doc_id);
         self.position += 1;
@@ -280,5 +267,21 @@ mod tests {
         let result = create.next().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), QueryError::UnknownField(_)));
+    }
+
+    #[tokio::test]
+    async fn test_create_with_no_inputs() {
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+
+        let mut create = CreateNode::new(collection, mapping);
+        // No inputs added
+
+        create.init().await.unwrap();
+        create.start().await.unwrap();
+
+        // Should return false immediately with no inputs
+        assert!(!create.next().await.unwrap());
+        assert!(create.generated_doc_ids().is_empty());
     }
 }

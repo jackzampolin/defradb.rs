@@ -60,7 +60,7 @@ impl PlanNode for SelectNode {
 
             // Apply filter if present
             if let Some(ref filter) = self.filter {
-                if !filter.matches(&doc.fields, &self.document_mapping)? {
+                if !filter.matches(doc.fields(), &self.document_mapping)? {
                     continue;
                 }
             }
@@ -185,5 +185,37 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], Some("doc1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_select_source_error_propagation() {
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+
+        // Create docs with null age field
+        let docs = vec![Doc::with_fields(vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+        ])];
+
+        // Add filter on scan that will error
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
+
+        let scan = ScanNode::new(collection, mapping.clone())
+            .with_docs(docs)
+            .with_filter(filter);
+
+        let mut select = SelectNode::new(Box::new(scan), mapping);
+
+        select.init().await.unwrap();
+        select.start().await.unwrap();
+
+        let result = select.next().await;
+        assert!(
+            result.is_err(),
+            "Source error should propagate through select"
+        );
     }
 }

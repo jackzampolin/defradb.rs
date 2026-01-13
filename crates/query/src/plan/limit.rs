@@ -257,4 +257,20 @@ mod tests {
 
         assert_eq!(count, 0); // All skipped
     }
+
+    #[tokio::test]
+    async fn test_limit_zero_returns_nothing() {
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+        let docs = make_test_docs(5);
+
+        let scan = ScanNode::new(collection, mapping).with_docs(docs);
+        let mut limit = LimitNode::limit_only(Box::new(scan), 0);
+
+        limit.init().await.unwrap();
+        limit.start().await.unwrap();
+
+        // limit=0 should return no documents
+        assert!(!limit.next().await.unwrap());
+    }
 }
