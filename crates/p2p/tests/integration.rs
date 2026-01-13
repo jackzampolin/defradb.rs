@@ -72,8 +72,14 @@ async fn test_two_hosts_connect() {
     let addr1 = wait_for_listening(&mut events1).await;
 
     // Get peer IDs
-    let peer_id1 = handle1.local_peer_id().await.expect("failed to get peer id");
-    let peer_id2 = handle2.local_peer_id().await.expect("failed to get peer id");
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+    let peer_id2 = handle2
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
 
     assert_ne!(peer_id1, peer_id2, "peer IDs should be different");
 
@@ -108,7 +114,10 @@ async fn test_host_listen_addresses() {
     let (handle, mut events) = create_and_start_host().await;
 
     // Initially no addresses
-    let addrs = handle.listen_addresses().await.expect("failed to get addresses");
+    let addrs = handle
+        .listen_addresses()
+        .await
+        .expect("failed to get addresses");
     assert!(addrs.is_empty());
 
     // Start listening
@@ -120,7 +129,10 @@ async fn test_host_listen_addresses() {
     wait_for_listening(&mut events).await;
 
     // Now should have an address
-    let addrs = handle.listen_addresses().await.expect("failed to get addresses");
+    let addrs = handle
+        .listen_addresses()
+        .await
+        .expect("failed to get addresses");
     assert!(!addrs.is_empty());
 
     handle.shutdown().await.ok();
@@ -132,7 +144,10 @@ async fn test_host_connected_peers() {
     let (handle2, mut events2) = create_and_start_host().await;
 
     // Initially no connected peers
-    let peers = handle1.connected_peers().await.expect("failed to get peers");
+    let peers = handle1
+        .connected_peers()
+        .await
+        .expect("failed to get peers");
     assert!(peers.is_empty());
 
     // Set up connection
@@ -148,17 +163,29 @@ async fn test_host_connected_peers() {
         .expect("failed to listen");
     wait_for_listening(&mut events2).await;
 
-    let peer_id1 = handle1.local_peer_id().await.expect("failed to get peer id");
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
 
     // Connect
-    handle2.dial(peer_id1, vec![addr1]).await.expect("failed to dial");
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
 
     wait_for_peer_connected(&mut events1).await;
     wait_for_peer_connected(&mut events2).await;
 
     // Now should have connected peer
-    let peers1 = handle1.connected_peers().await.expect("failed to get peers");
-    let peers2 = handle2.connected_peers().await.expect("failed to get peers");
+    let peers1 = handle1
+        .connected_peers()
+        .await
+        .expect("failed to get peers");
+    let peers2 = handle2
+        .connected_peers()
+        .await
+        .expect("failed to get peers");
 
     assert_eq!(peers1.len(), 1);
     assert_eq!(peers2.len(), 1);
@@ -229,7 +256,7 @@ async fn test_dial_unreachable_peer_connection_fails() {
 
     // Either timeout (good) or no matching event (good)
     match result {
-        Err(_) => {} // Timeout is expected
+        Err(_) => {}    // Timeout is expected
         Ok(false) => {} // Channel closed without connection is fine
         Ok(true) => panic!("Should not have connected to unreachable peer"),
     }
@@ -266,7 +293,10 @@ async fn test_multiple_listen_addresses() {
         .expect("failed to listen on second address");
     wait_for_listening(&mut events).await;
 
-    let addrs = handle.listen_addresses().await.expect("failed to get addresses");
+    let addrs = handle
+        .listen_addresses()
+        .await
+        .expect("failed to get addresses");
     assert!(addrs.len() >= 2);
 
     handle.shutdown().await.ok();
@@ -309,10 +339,16 @@ async fn test_two_hosts_pushlog_exchange() {
         .expect("failed to listen");
     wait_for_listening(&mut events2).await;
 
-    let peer_id1 = handle1.local_peer_id().await.expect("failed to get peer id");
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
 
     // Connect
-    handle2.dial(peer_id1, vec![addr1]).await.expect("failed to dial");
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
 
     wait_for_peer_connected(&mut events1).await;
     wait_for_peer_connected(&mut events2).await;
@@ -396,7 +432,11 @@ async fn test_send_to_disconnected_peer_returns_error() {
 
     // This should eventually return an error (not hang forever)
     // The timeout ensures the test doesn't hang if the error isn't returned
-    let result = timeout(Duration::from_secs(5), handle.send_pushlog(fake_peer_id, request)).await;
+    let result = timeout(
+        Duration::from_secs(5),
+        handle.send_pushlog(fake_peer_id, request),
+    )
+    .await;
 
     // Either we get a timeout (acceptable) or we get an error (preferred)
     match result {
@@ -474,7 +514,10 @@ fn test_cbor_wire_compatibility_pushlog_request() {
             field_names.contains(&"DocID".to_string()),
             "Missing DocID field"
         );
-        assert!(field_names.contains(&"CID".to_string()), "Missing CID field");
+        assert!(
+            field_names.contains(&"CID".to_string()),
+            "Missing CID field"
+        );
         assert!(
             field_names.contains(&"CollectionID".to_string()),
             "Missing CollectionID field"
@@ -593,11 +636,7 @@ fn test_signed_message_has_required_fields() {
 
     // Verify all required fields are populated
     assert!(!request.message_id().is_empty(), "message_id should be set");
-    assert_eq!(
-        request.version(),
-        "/defradb/0.0.1",
-        "version should be set"
-    );
+    assert_eq!(request.version(), "/defradb/0.0.1", "version should be set");
     assert!(!request.sender_id().is_empty(), "sender_id should be set");
     assert!(!request.pubkey().is_empty(), "pubkey should be set");
     assert!(request.signature().is_some(), "signature should be set");
@@ -623,7 +662,10 @@ async fn test_gossipsub_subscribe_unsubscribe() {
     wait_for_listening(&mut events).await;
 
     // Initially no subscriptions
-    let topics = handle.subscribed_topics().await.expect("failed to get topics");
+    let topics = handle
+        .subscribed_topics()
+        .await
+        .expect("failed to get topics");
     assert!(topics.is_empty(), "should start with no subscriptions");
 
     // Subscribe to doc-sync topic
@@ -634,7 +676,10 @@ async fn test_gossipsub_subscribe_unsubscribe() {
     assert!(is_new, "should be a new subscription");
 
     // Verify subscription
-    let topics = handle.subscribed_topics().await.expect("failed to get topics");
+    let topics = handle
+        .subscribed_topics()
+        .await
+        .expect("failed to get topics");
     assert_eq!(topics.len(), 1, "should have one subscription");
 
     // Subscribe again - should return false (already subscribed)
@@ -652,7 +697,10 @@ async fn test_gossipsub_subscribe_unsubscribe() {
     assert!(was_subscribed, "should have been subscribed");
 
     // Verify unsubscription
-    let topics = handle.subscribed_topics().await.expect("failed to get topics");
+    let topics = handle
+        .subscribed_topics()
+        .await
+        .expect("failed to get topics");
     assert!(topics.is_empty(), "should have no subscriptions");
 
     // Unsubscribe again - should return false (not subscribed)
@@ -694,7 +742,10 @@ async fn test_gossipsub_multiple_topics() {
         .expect("subscribe should succeed");
 
     // Verify all subscriptions
-    let topics = handle.subscribed_topics().await.expect("failed to get topics");
+    let topics = handle
+        .subscribed_topics()
+        .await
+        .expect("failed to get topics");
     assert_eq!(topics.len(), 4, "should have four subscriptions");
 
     handle.shutdown().await.ok();
@@ -718,17 +769,29 @@ async fn test_gossipsub_publish_receive() {
         .expect("failed to listen");
     wait_for_listening(&mut events2).await;
 
-    let peer_id1 = handle1.local_peer_id().await.expect("failed to get peer id");
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
 
     // Connect
-    handle2.dial(peer_id1, vec![addr1]).await.expect("failed to dial");
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
     wait_for_peer_connected(&mut events1).await;
     wait_for_peer_connected(&mut events2).await;
 
     // Both hosts subscribe to the same topic
     let topic = DefraTopic::collection("test-collection");
-    handle1.subscribe(topic.clone()).await.expect("subscribe failed");
-    handle2.subscribe(topic.clone()).await.expect("subscribe failed");
+    handle1
+        .subscribe(topic.clone())
+        .await
+        .expect("subscribe failed");
+    handle2
+        .subscribe(topic.clone())
+        .await
+        .expect("subscribe failed");
 
     // Give time for subscription propagation
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -815,7 +878,10 @@ fn test_pushlog_broadcast_cbor_field_names() {
             field_names.contains(&"DocID".to_string()),
             "Missing DocID field"
         );
-        assert!(field_names.contains(&"CID".to_string()), "Missing CID field");
+        assert!(
+            field_names.contains(&"CID".to_string()),
+            "Missing CID field"
+        );
         assert!(
             field_names.contains(&"CollectionID".to_string()),
             "Missing CollectionID field"
@@ -867,10 +933,7 @@ fn test_defra_topic_types() {
     // Verify topic string conversions
     assert_eq!(DefraTopic::DocSync.topic_string(), "doc-sync");
     assert_eq!(DefraTopic::Encryption.topic_string(), "encryption");
-    assert_eq!(
-        DefraTopic::collection("my-col").topic_string(),
-        "my-col"
-    );
+    assert_eq!(DefraTopic::collection("my-col").topic_string(), "my-col");
     assert_eq!(DefraTopic::document("my-doc").topic_string(), "my-doc");
     assert_eq!(
         DefraTopic::Custom("custom".to_string()).topic_string(),

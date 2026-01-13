@@ -167,7 +167,10 @@ impl request_response::Codec for PushLogCodec {
         // Verify signature if signing is enabled
         if self.keypair.is_some() {
             verify_message(&msg).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("signature verification failed: {}", e))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("signature verification failed: {}", e),
+                )
             })?;
         }
 
@@ -187,7 +190,10 @@ impl request_response::Codec for PushLogCodec {
         // Verify signature if signing is enabled
         if self.keypair.is_some() {
             verify_message(&msg).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("signature verification failed: {}", e))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("signature verification failed: {}", e),
+                )
             })?;
         }
 

@@ -192,7 +192,7 @@ impl Key for IndexDataStoreKey {
         let values_str = self
             .field_values
             .iter()
-            .map(|v| hex::encode(v))
+            .map(hex::encode)
             .collect::<Vec<_>>()
             .join("/");
         format!("/{}/{}/{}", self.collection_id, self.index_id, values_str)

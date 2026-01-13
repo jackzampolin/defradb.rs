@@ -163,7 +163,7 @@ pub trait Iterator: Send {
     /// This consumes the iterator but doesn't allocate memory for values.
     async fn count(&mut self) -> Result<usize> {
         let mut count = 0;
-        while let Some(_) = self.next().await? {
+        while (self.next().await?).is_some() {
             count += 1;
         }
         Ok(count)
