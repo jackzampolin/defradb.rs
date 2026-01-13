@@ -1,0 +1,62 @@
+/// Systemstore - Metadata and configuration
+///
+/// The Systemstore handles storage of collection metadata, field metadata,
+/// sequence counters, P2P tracking, and access control policies.
+
+use crate::corekv::{Result, Store, Txn};
+use crate::namespace::{Namespace, NamespacedStore};
+use async_trait::async_trait;
+use std::sync::Arc;
+
+/// Systemstore provides storage for metadata and configuration
+pub struct Systemstore<S: Store> {
+    store: NamespacedStore<S>,
+}
+
+impl<S: Store> Systemstore<S> {
+    /// Create a new Systemstore
+    pub fn new(store: Arc<S>) -> Self {
+        Self {
+            store: NamespacedStore::new(store, Namespace::Systemstore),
+        }
+    }
+}
+
+#[async_trait]
+impl<S: Store> Store for Systemstore<S> {
+    async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
+        self.store.new_txn(readonly).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.store.close().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::MemoryStore;
+    use crate::corekv::Key;
+    use crate::keys::systemstore::CollectionKey;
+
+    #[tokio::test]
+    async fn test_systemstore_basic() {
+        let store = Arc::new(MemoryStore::new());
+        let systemstore = Systemstore::new(store);
+
+        let key = CollectionKey::new("users_v1");
+
+        // Write
+        let mut txn = systemstore.new_txn(false).await.unwrap();
+        txn.set(&key.bytes(), b"collection_definition")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Read
+        let txn = systemstore.new_txn(true).await.unwrap();
+        let value = txn.get(&key.bytes()).await.unwrap();
+        assert_eq!(value, Some(b"collection_definition".to_vec()));
+    }
+}

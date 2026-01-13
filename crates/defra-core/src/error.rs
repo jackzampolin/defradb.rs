@@ -32,6 +32,10 @@ pub enum Error {
     #[error("invalid document ID: {0}")]
     InvalidDocumentId(String),
 
+    /// Invalid CID
+    #[error("invalid CID: {0}")]
+    InvalidCID(String),
+
     /// CRDT merge errors
     #[error("merge error: {0}")]
     MergeError(String),

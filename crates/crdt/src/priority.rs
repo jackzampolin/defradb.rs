@@ -113,4 +113,30 @@ mod tests {
         let incomplete = vec![0x80, 0x80];
         assert!(decode_priority(&incomplete).is_err());
     }
+
+    #[test]
+    fn test_priority_zero() {
+        let priority = 0u64;
+        let encoded = encode_priority(priority);
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0], 0);
+        assert_eq!(decode_priority(&encoded).unwrap(), priority);
+    }
+
+    #[test]
+    fn test_priority_one() {
+        let priority = 1u64;
+        let encoded = encode_priority(priority);
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(decode_priority(&encoded).unwrap(), priority);
+    }
+
+    #[test]
+    fn test_priority_boundary_128() {
+        // 128 requires 2 bytes in varint encoding
+        let priority = 128u64;
+        let encoded = encode_priority(priority);
+        assert_eq!(encoded.len(), 2);
+        assert_eq!(decode_priority(&encoded).unwrap(), priority);
+    }
 }

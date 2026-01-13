@@ -38,7 +38,7 @@ libp2p = { version = "0.54", features = ["tcp", "noise", "yamux", "gossipsub", "
 multiaddr = "0.18"
 
 # Storage
-rocksdb = "0.22"
+rocksdb = "0.24"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde"] }
@@ -47,8 +47,8 @@ sha2 = "0.10"
 aes-gcm = "0.10"
 
 # IPLD
-cid = "0.11"
-multihash = { version = "0.19", features = ["sha2"] }
+cid = { version = "0.11", features = ["serde"] }
+multihash = "0.19"
 
 # GraphQL
 graphql-parser = "0.4"

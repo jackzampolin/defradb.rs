@@ -21,11 +21,14 @@ pub mod lww;
 pub mod priority;
 pub mod traits;
 
+#[cfg(test)]
+mod test_utils;
+
 pub use composite::{CompositeDAG, CompositeDelta};
 pub use counter::{Counter, CounterDelta};
 pub use lww::{Lww, LwwDelta};
 pub use priority::{decode_priority, encode_priority};
-pub use traits::{Delta, ReplicatedData};
+pub use traits::{Delta, MergeResult, ReplicatedData};
 
 #[cfg(test)]
 mod tests {
