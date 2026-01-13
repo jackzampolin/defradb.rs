@@ -13,6 +13,7 @@
 pub mod did;
 pub mod encryption;
 pub mod error;
+pub mod hash;
 pub mod keys;
 pub mod signature;
 pub mod types;
@@ -46,6 +47,9 @@ pub use encryption::{
     ecies::{decrypt_ecies, encrypt_ecies, EciesOptions, EciesOptionsBuilder},
     nonce::generate_nonce,
 };
+
+// Re-export hash functions
+pub use hash::{sha256, sha256_hash, Sha256Hash};
 
 #[cfg(test)]
 mod tests {
