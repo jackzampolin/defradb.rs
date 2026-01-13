@@ -70,8 +70,8 @@ impl<S: Store + 'static> DefraBlockstore<S> {
     ///
     /// * `store` - The underlying key-value store
     /// * `is_p2p` - If true, enables merge tracking for P2P synchronization.
-    ///              Blocks put in P2P mode are initially marked as "unmerged"
-    ///              until explicitly merged via `mark_as_merged`.
+    ///   Blocks put in P2P mode are initially marked as "unmerged"
+    ///   until explicitly merged via `mark_as_merged`.
     pub fn new(store: Arc<S>, is_p2p: bool) -> Self {
         Self {
             store: InternalBlockstore::new(store, is_p2p),
@@ -539,10 +539,7 @@ mod tests {
         // This simulates data corruption
         {
             let mut txn = blockstore.store.new_txn(false).await.unwrap();
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .unwrap();
+            let bs_txn = txn.as_any_mut().downcast_mut::<BlockstoreTxn>().unwrap();
             bs_txn.put_block(&cid, corrupted_data).await.unwrap();
             txn.commit().await.unwrap();
         }
@@ -722,5 +719,396 @@ mod tests {
         // Not in unmerged list
         let unmerged = blockstore.get_unmerged().await.unwrap();
         assert!(!unmerged.contains(&cid));
+    }
+
+    // ==================== Go Compatibility Tests ====================
+
+    #[tokio::test]
+    async fn test_put_same_cid_different_data_no_overwrite() {
+        // Critical: Content-addressed stores MUST be immutable by CID
+        // If put() overwrote data, it would violate content-addressing invariants
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        let cid = test_cid();
+        let original_data = b"original data";
+        let new_data = b"different data";
+
+        // Put original
+        blockstore.put(&cid, original_data).await.unwrap();
+
+        // Put with same CID but different data (should be ignored per Go behavior)
+        blockstore.put(&cid, new_data).await.unwrap();
+
+        // Should still have original data
+        let retrieved = blockstore.get(&cid).await.unwrap();
+        assert_eq!(retrieved, Some(original_data.to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_put_many_duplicate_cids_in_batch() {
+        // Verify behavior when same CID appears multiple times in one batch
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        let cid = test_cid();
+        let data1 = b"first data";
+        let data2 = b"second data";
+
+        // Put same CID twice in one batch - first write should win
+        let blocks: Vec<(&Cid, &[u8])> = vec![(&cid, data1.as_slice()), (&cid, data2.as_slice())];
+        blockstore.put_many(&blocks).await.unwrap();
+
+        // Should have first data (first write wins within transaction)
+        let retrieved = blockstore.get(&cid).await.unwrap();
+        assert_eq!(retrieved, Some(data1.to_vec()));
+
+        // Should only appear once in all_cids
+        let cids = blockstore.all_cids().await.unwrap();
+        assert_eq!(cids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_mark_as_merged_nonexistent_block() {
+        // Verify mark_as_merged behavior for non-existent blocks
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        let cid = test_cid();
+
+        // Should not error when marking non-existent block as merged
+        // This is a no-op - deleting a merge key that doesn't exist
+        let result = blockstore.mark_as_merged(&cid).await;
+        assert!(result.is_ok());
+
+        // Block still doesn't exist
+        assert!(!blockstore.has(&cid).await.unwrap());
+
+        // is_merged still returns false (block doesn't exist)
+        assert!(!blockstore.is_merged(&cid).await.unwrap());
+    }
+
+    // ==================== Edge Case Tests ====================
+
+    #[tokio::test]
+    async fn test_empty_block() {
+        // Empty blocks are valid in IPLD (e.g., empty directory nodes)
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        let data: &[u8] = b"";
+        let cid = cid_from_data(data);
+
+        // Put empty block
+        blockstore.put(&cid, data).await.unwrap();
+
+        // Verify retrieval
+        let retrieved = blockstore.get(&cid).await.unwrap();
+        assert_eq!(retrieved, Some(vec![]));
+
+        // Verify size
+        assert_eq!(blockstore.get_size(&cid).await.unwrap(), Some(0));
+
+        // Verify has
+        assert!(blockstore.has(&cid).await.unwrap());
+
+        // Verify hash_on_read works with empty data
+        blockstore.hash_on_read(true);
+        let verified = blockstore.get(&cid).await.unwrap();
+        assert_eq!(verified, Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_block() {
+        // Delete should be idempotent - deleting non-existent block is a no-op
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        let cid = test_cid();
+
+        // Should succeed silently (idempotent)
+        let result = blockstore.delete(&cid).await;
+        assert!(result.is_ok());
+
+        // Still doesn't exist
+        assert!(!blockstore.has(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_block_p2p_mode() {
+        // Verify idempotent delete in P2P mode too
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true); // P2P mode
+
+        let cid = test_cid();
+
+        // Should succeed silently
+        let result = blockstore.delete(&cid).await;
+        assert!(result.is_ok());
+
+        // Not in unmerged list
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert!(!unmerged.contains(&cid));
+    }
+
+    #[tokio::test]
+    async fn test_hash_on_read_unsupported_algorithm_skipped() {
+        // Verify unsupported hash algorithms are skipped with warning (not error)
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        // Create a CID with identity hash (code 0x00) - no actual hashing
+        use multihash::Multihash;
+        let data = b"identity hash data";
+        let hash = Multihash::<64>::wrap(0x00, data).unwrap(); // Identity hash
+        let cid = Cid::new_v1(0x55, hash); // raw codec
+
+        // Store the block
+        blockstore.put(&cid, data).await.unwrap();
+
+        // Enable hash_on_read
+        blockstore.hash_on_read(true);
+
+        // Should succeed - unsupported algorithm is skipped, not errored
+        let result = blockstore.get(&cid).await.unwrap();
+        assert_eq!(result, Some(data.to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_hash_on_read_blake2b_skipped() {
+        // Verify blake2b-256 (code 0xb220) is skipped
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        use multihash::Multihash;
+        let data = b"blake2b test data";
+        // Create a fake blake2b-256 multihash (just for testing skip behavior)
+        let fake_digest = [0u8; 32];
+        let hash = Multihash::<64>::wrap(0xb220, &fake_digest).unwrap();
+        let cid = Cid::new_v1(0x55, hash);
+
+        // Store with this CID
+        blockstore.put(&cid, data).await.unwrap();
+
+        // Enable hash_on_read
+        blockstore.hash_on_read(true);
+
+        // Should succeed - blake2b is skipped
+        let result = blockstore.get(&cid).await.unwrap();
+        assert_eq!(result, Some(data.to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_large_block() {
+        // Test with 256KB block (typical IPFS chunk size)
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        // Generate 256KB of data
+        let data: Vec<u8> = (0..262144).map(|i| (i % 256) as u8).collect();
+        let cid = cid_from_data(&data);
+
+        // Put large block
+        blockstore.put(&cid, &data).await.unwrap();
+
+        // Verify retrieval
+        let retrieved = blockstore.get(&cid).await.unwrap();
+        assert_eq!(retrieved, Some(data.clone()));
+
+        // Verify size
+        assert_eq!(blockstore.get_size(&cid).await.unwrap(), Some(262144));
+
+        // Verify hash_on_read works with large data
+        blockstore.hash_on_read(true);
+        let verified = blockstore.get(&cid).await.unwrap();
+        assert_eq!(verified, Some(data));
+    }
+
+    #[tokio::test]
+    async fn test_large_block_many() {
+        // Test put_many with multiple large blocks
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, false);
+
+        // Generate three 64KB blocks
+        let data1: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        let data2: Vec<u8> = (0..65536).map(|i| ((i + 100) % 256) as u8).collect();
+        let data3: Vec<u8> = (0..65536).map(|i| ((i + 200) % 256) as u8).collect();
+
+        let cid1 = cid_from_data(&data1);
+        let cid2 = cid_from_data(&data2);
+        let cid3 = cid_from_data(&data3);
+
+        // Put all at once
+        let blocks: Vec<(&Cid, &[u8])> = vec![
+            (&cid1, data1.as_slice()),
+            (&cid2, data2.as_slice()),
+            (&cid3, data3.as_slice()),
+        ];
+        blockstore.put_many(&blocks).await.unwrap();
+
+        // Verify all exist
+        assert_eq!(blockstore.get(&cid1).await.unwrap(), Some(data1));
+        assert_eq!(blockstore.get(&cid2).await.unwrap(), Some(data2));
+        assert_eq!(blockstore.get(&cid3).await.unwrap(), Some(data3));
+    }
+
+    // ==================== Concurrency Tests ====================
+
+    #[tokio::test]
+    async fn test_concurrent_put_different_cids() {
+        // Verify concurrent puts to different CIDs work correctly
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+
+        let cid1 = test_cid();
+        let cid2 = test_cid2();
+        let cid3 = test_cid3();
+        let data1 = b"concurrent data 1";
+        let data2 = b"concurrent data 2";
+        let data3 = b"concurrent data 3";
+
+        let bs1 = blockstore.clone();
+        let bs2 = blockstore.clone();
+        let bs3 = blockstore.clone();
+
+        // Concurrent puts
+        let (r1, r2, r3) = tokio::join!(
+            async move { bs1.put(&cid1, data1).await },
+            async move { bs2.put(&cid2, data2).await },
+            async move { bs3.put(&cid3, data3).await }
+        );
+
+        r1.unwrap();
+        r2.unwrap();
+        r3.unwrap();
+
+        // Verify all exist with correct data
+        assert_eq!(blockstore.get(&cid1).await.unwrap(), Some(data1.to_vec()));
+        assert_eq!(blockstore.get(&cid2).await.unwrap(), Some(data2.to_vec()));
+        assert_eq!(blockstore.get(&cid3).await.unwrap(), Some(data3.to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_put_same_cid() {
+        // Verify concurrent puts to same CID (both should succeed, first wins)
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+
+        let cid = test_cid();
+        let data1 = b"first writer";
+        let data2 = b"second writer";
+
+        let bs1 = blockstore.clone();
+        let bs2 = blockstore.clone();
+
+        // Concurrent puts to same CID
+        let (r1, r2) = tokio::join!(async move { bs1.put(&cid, data1).await }, async move {
+            bs2.put(&cid, data2).await
+        });
+
+        // Both should succeed (one writes, one is no-op)
+        r1.unwrap();
+        r2.unwrap();
+
+        // Data should be consistent (whichever wrote first)
+        let retrieved = blockstore.get(&cid).await.unwrap();
+        assert!(retrieved == Some(data1.to_vec()) || retrieved == Some(data2.to_vec()));
+
+        // Only one copy should exist
+        let cids = blockstore.all_cids().await.unwrap();
+        assert_eq!(cids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_get_and_put() {
+        // Verify concurrent get and put operations
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+
+        let cid = test_cid();
+        let data = b"concurrent access data";
+
+        // First put the data
+        blockstore.put(&cid, data).await.unwrap();
+
+        let bs1 = blockstore.clone();
+        let bs2 = blockstore.clone();
+        let bs3 = blockstore.clone();
+
+        // Concurrent reads and a write (to different CID)
+        let cid2 = test_cid2();
+        let (r1, r2, r3) = tokio::join!(
+            async move { bs1.get(&cid).await },
+            async move { bs2.get(&cid).await },
+            async move { bs3.put(&cid2, b"other data").await }
+        );
+
+        // All should succeed
+        assert_eq!(r1.unwrap(), Some(data.to_vec()));
+        assert_eq!(r2.unwrap(), Some(data.to_vec()));
+        r3.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_hash_on_read_toggle() {
+        // Verify hash_on_read toggle is thread-safe
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+
+        let data = b"hash verification data";
+        let cid = cid_from_data(data);
+        blockstore.put(&cid, data).await.unwrap();
+
+        let bs1 = blockstore.clone();
+        let bs2 = blockstore.clone();
+        let bs3 = blockstore.clone();
+
+        // Concurrent toggle and reads
+        let (_, _, r3) = tokio::join!(
+            async move {
+                bs1.hash_on_read(true);
+            },
+            async move {
+                bs2.hash_on_read(false);
+            },
+            async move { bs3.get(&cid).await }
+        );
+
+        // Read should succeed regardless of toggle state
+        assert_eq!(r3.unwrap(), Some(data.to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_p2p_merge_tracking() {
+        // Verify concurrent merge operations in P2P mode
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true)); // P2P mode
+
+        let cid1 = test_cid();
+        let cid2 = test_cid2();
+
+        // Put blocks
+        blockstore.put(&cid1, b"block1").await.unwrap();
+        blockstore.put(&cid2, b"block2").await.unwrap();
+
+        let bs1 = blockstore.clone();
+        let bs2 = blockstore.clone();
+
+        // Concurrent merge operations
+        let (r1, r2) = tokio::join!(async move { bs1.mark_as_merged(&cid1).await }, async move {
+            bs2.mark_as_merged(&cid2).await
+        });
+
+        r1.unwrap();
+        r2.unwrap();
+
+        // Both should be merged
+        assert!(blockstore.is_merged(&cid1).await.unwrap());
+        assert!(blockstore.is_merged(&cid2).await.unwrap());
+
+        // Unmerged list should be empty
+        let unmerged = blockstore.get_unmerged().await.unwrap();
+        assert!(unmerged.is_empty());
     }
 }
