@@ -1,14 +1,33 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Schema definitions for DefraDB
+//!
+//! This crate provides types for defining document structure and CRDT types.
+//! It is foundational for the query crate and document storage.
+//!
+//! The numeric values for FieldKind and CType match the Go DefraDB implementation
+//! exactly, ensuring Rust and Go can read/write the same datastores.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod cid;
+mod collection;
+mod ctype;
+mod embedding;
+mod error;
+mod field;
+mod field_kind;
+mod index;
+mod policy;
+mod source;
+mod validation;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use cid::{generate_collection_cid, generate_field_cid};
+pub use collection::{CollectionBuilder, CollectionVersion};
+pub use ctype::CType;
+pub use embedding::VectorEmbeddingDescription;
+pub use error::{Result, SchemaError};
+pub use field::FieldDescription;
+pub use field_kind::{FieldKind, ScalarArrayKind, ScalarKind};
+pub use index::{
+    EncryptedIndexDescription, EncryptedIndexType, IndexDescription, IndexedFieldDescription,
+};
+pub use policy::PolicyDescription;
+pub use source::{CollectionSetDescription, CollectionSource, QuerySource};
+pub use validation::{validate_schema, SchemaValidator};
