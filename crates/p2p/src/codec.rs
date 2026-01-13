@@ -8,23 +8,88 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//! CBOR codec for request-response protocol.
+//! CBOR codec for P2P messages.
 //!
-//! This module implements a CBOR-based codec for the libp2p request-response
-//! protocol, providing wire compatibility with the Go implementation.
+//! This module provides CBOR serialization/deserialization for P2P messages,
+//! compatible with the Go implementation using `github.com/fxamacker/cbor/v2`.
+//!
+//! # Wire Format
+//!
+//! Messages are CBOR-encoded with PascalCase field names to match Go's default
+//! struct field naming. The Rust structs use `#[serde(rename = "...")]` to
+//! ensure wire compatibility.
 
 use std::io;
 
 use async_trait::async_trait;
 use futures::prelude::*;
 use libp2p::request_response;
+use serde::{de::DeserializeOwned, Serialize};
 
+use crate::error::{Error, Result};
 use crate::message::{PushLogReply, PushLogRequest};
 
 /// Maximum message size (16 MB).
-const MAX_MESSAGE_SIZE: u64 = 16 * 1024 * 1024;
+/// This limit prevents memory exhaustion from malicious oversized messages.
+pub const MAX_MESSAGE_SIZE: u64 = 16 * 1024 * 1024;
 
-/// CBOR codec for PushLog messages.
+/// Encode a message to CBOR bytes.
+pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
+    serde_cbor::to_vec(msg).map_err(|e| Error::CborSerialization(e.to_string()))
+}
+
+/// Decode a message from CBOR bytes.
+pub fn decode<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
+    serde_cbor::from_slice(data).map_err(|e| Error::CborDeserialization(e.to_string()))
+}
+
+/// Read a CBOR message from an async reader with size limit.
+pub async fn read_message<T, R>(reader: &mut R) -> io::Result<T>
+where
+    T: DeserializeOwned,
+    R: AsyncRead + Unpin + Send,
+{
+    let mut buf = Vec::new();
+    reader.take(MAX_MESSAGE_SIZE).read_to_end(&mut buf).await?;
+
+    if buf.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty message received",
+        ));
+    }
+
+    serde_cbor::from_slice(&buf).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("CBOR deserialization error: {}", e),
+        )
+    })
+}
+
+/// Write a CBOR message to an async writer.
+pub async fn write_message<T, W>(writer: &mut W, msg: &T) -> io::Result<()>
+where
+    T: Serialize,
+    W: AsyncWrite + Unpin + Send,
+{
+    let data = serde_cbor::to_vec(msg).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("CBOR serialization error: {}", e),
+        )
+    })?;
+
+    writer.write_all(&data).await?;
+    writer.close().await?;
+
+    Ok(())
+}
+
+/// CBOR codec for PushLog messages using libp2p request-response.
+///
+/// This codec implements the libp2p `request_response::Codec` trait for
+/// PushLog message exchange.
 #[derive(Debug, Clone, Default)]
 pub struct PushLogCodec;
 
@@ -48,15 +113,7 @@ impl request_response::Codec for PushLogCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut buf = Vec::new();
-        io.take(MAX_MESSAGE_SIZE).read_to_end(&mut buf).await?;
-
-        serde_cbor::from_slice(&buf).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("CBOR deserialization error: {}", e),
-            )
-        })
+        read_message(io).await
     }
 
     async fn read_response<T>(
@@ -67,15 +124,7 @@ impl request_response::Codec for PushLogCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut buf = Vec::new();
-        io.take(MAX_MESSAGE_SIZE).read_to_end(&mut buf).await?;
-
-        serde_cbor::from_slice(&buf).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("CBOR deserialization error: {}", e),
-            )
-        })
+        read_message(io).await
     }
 
     async fn write_request<T>(
@@ -87,17 +136,7 @@ impl request_response::Codec for PushLogCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let data = serde_cbor::to_vec(&req).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("CBOR serialization error: {}", e),
-            )
-        })?;
-
-        io.write_all(&data).await?;
-        io.close().await?;
-
-        Ok(())
+        write_message(io, &req).await
     }
 
     async fn write_response<T>(
@@ -109,30 +148,21 @@ impl request_response::Codec for PushLogCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let data = serde_cbor::to_vec(&res).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("CBOR serialization error: {}", e),
-            )
-        })?;
-
-        io.write_all(&data).await?;
-        io.close().await?;
-
-        Ok(())
+        write_message(io, &res).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{pushlog_request_protocol, pushlog_response_protocol};
     use futures::io::Cursor;
     use libp2p::request_response::Codec;
 
     #[tokio::test]
     async fn test_codec_roundtrip_request() {
         let mut codec = PushLogCodec::new();
-        let protocol = libp2p::StreamProtocol::new("/defra/0.0.1");
+        let protocol = pushlog_request_protocol();
 
         let original = PushLogRequest::new(
             "doc123".to_string(),
@@ -164,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn test_codec_roundtrip_response() {
         let mut codec = PushLogCodec::new();
-        let protocol = libp2p::StreamProtocol::new("/defra/0.0.1");
+        let protocol = pushlog_response_protocol();
 
         let original = PushLogReply::success("msg123");
 
@@ -183,5 +213,108 @@ mod tests {
             .expect("read failed");
 
         assert_eq!(decoded.metadata.message_id, original.metadata.message_id);
+    }
+
+    #[tokio::test]
+    async fn test_codec_invalid_cbor_request() {
+        let mut codec = PushLogCodec::new();
+        let protocol = pushlog_request_protocol();
+
+        // Invalid CBOR data
+        let mut read_buf = Cursor::new(vec![0xFF, 0xFF, 0xFF, 0xFF]);
+        let result = codec.read_request(&protocol, &mut read_buf).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("CBOR deserialization error"));
+    }
+
+    #[tokio::test]
+    async fn test_codec_invalid_cbor_response() {
+        let mut codec = PushLogCodec::new();
+        let protocol = pushlog_response_protocol();
+
+        // Invalid CBOR data
+        let mut read_buf = Cursor::new(vec![0xFE, 0xFE, 0xFE]);
+        let result = codec.read_response(&protocol, &mut read_buf).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_codec_empty_message() {
+        let mut codec = PushLogCodec::new();
+        let protocol = pushlog_request_protocol();
+
+        // Empty data
+        let mut read_buf = Cursor::new(Vec::new());
+        let result = codec.read_request(&protocol, &mut read_buf).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn test_codec_truncated_cbor() {
+        let mut codec = PushLogCodec::new();
+        let protocol = pushlog_request_protocol();
+
+        let original = PushLogRequest::new(
+            "doc123".to_string(),
+            vec![1, 2, 3],
+            "collection1".to_string(),
+            "creator1".to_string(),
+            vec![4, 5, 6],
+        );
+
+        // Encode then truncate
+        let full_data = serde_cbor::to_vec(&original).unwrap();
+        let truncated = &full_data[..full_data.len() / 2];
+
+        let mut read_buf = Cursor::new(truncated.to_vec());
+        let result = codec.read_request(&protocol, &mut read_buf).await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip() {
+        let request = PushLogRequest::new(
+            "doc456".to_string(),
+            vec![10, 20, 30],
+            "col2".to_string(),
+            "creator2".to_string(),
+            vec![40, 50, 60],
+        );
+
+        let encoded = encode(&request).expect("encode failed");
+        let decoded: PushLogRequest = decode(&encoded).expect("decode failed");
+
+        assert_eq!(decoded.doc_id, request.doc_id);
+        assert_eq!(decoded.cid, request.cid);
+        assert_eq!(decoded.collection_id, request.collection_id);
+    }
+
+    #[test]
+    fn test_decode_invalid_cbor() {
+        let invalid_data = vec![0xFF, 0xFF];
+        let result: Result<PushLogRequest> = decode(&invalid_data);
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::CborDeserialization(_)) => {}
+            _ => panic!("Expected CborDeserialization error"),
+        }
+    }
+
+    #[test]
+    fn test_max_message_size_constant() {
+        // Verify the constant is 16 MB
+        assert_eq!(MAX_MESSAGE_SIZE, 16 * 1024 * 1024);
     }
 }

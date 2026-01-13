@@ -15,6 +15,16 @@
 //! - Peer identification (identify)
 //! - Local peer discovery (mDNS)
 //! - Request-response for PushLog synchronization
+//!
+//! # Wire Compatibility with Go
+//!
+//! The Go implementation uses separate request/response protocol IDs:
+//! - Request: `/defradb/pushlog_req/0.0.1`
+//! - Response: `/defradb/pushlog_resp/0.0.1`
+//!
+//! This Rust implementation uses libp2p's request-response protocol which
+//! handles both request and response on a single stream. For full Go
+//! compatibility, both protocols are supported.
 
 use std::time::Duration;
 
@@ -27,7 +37,7 @@ use libp2p::{
 
 use crate::codec::PushLogCodec;
 use crate::message::{PushLogReply, PushLogRequest};
-use crate::protocol::pushlog_protocol;
+use crate::protocol::{pushlog_request_protocol, pushlog_response_protocol};
 
 /// Timeout for PushLog requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -105,8 +115,12 @@ impl DefraBehaviour {
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
         // Configure request-response for PushLog
+        // Support both request and response protocols for Go compatibility
         let pushlog = request_response::Behaviour::new(
-            [(pushlog_protocol(), ProtocolSupport::Full)],
+            [
+                (pushlog_request_protocol(), ProtocolSupport::Full),
+                (pushlog_response_protocol(), ProtocolSupport::Full),
+            ],
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 

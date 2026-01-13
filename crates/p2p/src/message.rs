@@ -237,4 +237,236 @@ mod tests {
             Some("something went wrong".to_string())
         );
     }
+
+    #[test]
+    fn test_metadata_new() {
+        let metadata = MetaData::new();
+        assert_eq!(metadata.version, MESSAGE_VERSION);
+        assert!(metadata.message_id.is_empty());
+        assert!(metadata.sender_id.is_empty());
+        assert!(metadata.pubkey.is_empty());
+        assert!(metadata.signature.is_none());
+        assert!(metadata.err_message.is_none());
+    }
+
+    #[test]
+    fn test_metadata_set_version() {
+        let mut metadata = MetaData::default();
+        assert!(metadata.version.is_empty());
+
+        metadata.set_version();
+        assert_eq!(metadata.version, MESSAGE_VERSION);
+    }
+
+    #[test]
+    fn test_message_trait_accessors_pushlog_request() {
+        let mut request = PushLogRequest::new(
+            "doc456".to_string(),
+            vec![10, 20],
+            "col2".to_string(),
+            "creator2".to_string(),
+            vec![30, 40],
+        );
+
+        // Set metadata fields
+        request.metadata.message_id = "test-msg-id".to_string();
+        request.metadata.sender_id = "sender-peer-id".to_string();
+        request.metadata.pubkey = vec![1, 2, 3, 4, 5];
+        request.metadata.signature = Some(vec![6, 7, 8, 9]);
+        request.metadata.err_message = Some("test error".to_string());
+
+        // Test trait accessors
+        assert_eq!(request.version(), MESSAGE_VERSION);
+        assert_eq!(request.message_id(), "test-msg-id");
+        assert_eq!(request.sender_id(), "sender-peer-id");
+        assert_eq!(request.pubkey(), &[1, 2, 3, 4, 5]);
+        assert_eq!(request.signature(), Some(&[6u8, 7, 8, 9][..]));
+        assert_eq!(request.err_message(), Some("test error"));
+
+        // Test mutable access
+        request.metadata_mut().message_id = "new-msg-id".to_string();
+        assert_eq!(request.message_id(), "new-msg-id");
+    }
+
+    #[test]
+    fn test_message_trait_accessors_pushlog_reply() {
+        let mut reply = PushLogReply::success("reply-id");
+
+        // Set additional metadata
+        reply.metadata.sender_id = "replier-id".to_string();
+        reply.metadata.pubkey = vec![11, 22, 33];
+
+        // Test trait accessors
+        assert_eq!(reply.version(), MESSAGE_VERSION);
+        assert_eq!(reply.message_id(), "reply-id");
+        assert_eq!(reply.sender_id(), "replier-id");
+        assert_eq!(reply.pubkey(), &[11, 22, 33]);
+        assert!(reply.signature().is_none());
+        assert!(reply.err_message().is_none());
+
+        // Test error reply
+        let error_reply = PushLogReply::error("error-id", "failed");
+        assert_eq!(error_reply.err_message(), Some("failed"));
+    }
+
+    #[test]
+    fn test_pushlog_request_cbor_field_names() {
+        // This test verifies CBOR field names match Go implementation
+        let request = PushLogRequest::new(
+            "doc789".to_string(),
+            vec![1, 2, 3],
+            "collection3".to_string(),
+            "creator3".to_string(),
+            vec![4, 5, 6],
+        );
+
+        let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
+
+        // Decode as a generic CBOR value to check field names
+        let value: serde_cbor::Value =
+            serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+
+        if let serde_cbor::Value::Map(map) = value {
+            // Check that Go-compatible field names are used
+            let has_version = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("Version".to_string()));
+            let has_doc_id = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("DocID".to_string()));
+            let has_cid = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("CID".to_string()));
+            let has_collection_id = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("CollectionID".to_string()));
+            let has_creator = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("Creator".to_string()));
+            let has_block = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("Block".to_string()));
+
+            assert!(has_version, "Missing 'Version' field");
+            assert!(has_doc_id, "Missing 'DocID' field");
+            assert!(has_cid, "Missing 'CID' field");
+            assert!(has_collection_id, "Missing 'CollectionID' field");
+            assert!(has_creator, "Missing 'Creator' field");
+            assert!(has_block, "Missing 'Block' field");
+        } else {
+            panic!("Expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn test_pushlog_reply_cbor_field_names() {
+        // Verify reply field names for Go compatibility
+        let reply = PushLogReply::success("msg123");
+
+        let encoded = serde_cbor::to_vec(&reply).expect("failed to encode");
+        let value: serde_cbor::Value =
+            serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+
+        if let serde_cbor::Value::Map(map) = value {
+            let has_version = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("Version".to_string()));
+            let has_message_id = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("MessageID".to_string()));
+
+            assert!(has_version, "Missing 'Version' field");
+            assert!(has_message_id, "Missing 'MessageID' field");
+        } else {
+            panic!("Expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn test_optional_fields_omitted() {
+        // Verify optional fields are omitted when None (matching Go's omitempty)
+        let reply = PushLogReply::success("msg123");
+
+        let encoded = serde_cbor::to_vec(&reply).expect("failed to encode");
+        let value: serde_cbor::Value =
+            serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+
+        if let serde_cbor::Value::Map(map) = value {
+            // Signature and ErrMessage should NOT be present when None
+            let has_signature = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("Signature".to_string()));
+            let has_err_message = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("ErrMessage".to_string()));
+
+            assert!(!has_signature, "Signature should be omitted when None");
+            assert!(!has_err_message, "ErrMessage should be omitted when None");
+        } else {
+            panic!("Expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn test_optional_fields_included_when_set() {
+        // Verify optional fields ARE included when set
+        let reply = PushLogReply::error("msg123", "error message");
+
+        let encoded = serde_cbor::to_vec(&reply).expect("failed to encode");
+        let value: serde_cbor::Value =
+            serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+
+        if let serde_cbor::Value::Map(map) = value {
+            let has_err_message = map
+                .iter()
+                .any(|(k, _)| k == &serde_cbor::Value::Text("ErrMessage".to_string()));
+
+            assert!(has_err_message, "ErrMessage should be present when set");
+        } else {
+            panic!("Expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn test_large_block_data() {
+        // Test with large block data (realistic scenario)
+        let large_block = vec![0xAB; 1024 * 1024]; // 1 MB block
+
+        let request = PushLogRequest::new(
+            "large-doc".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            "collection".to_string(),
+            "creator".to_string(),
+            large_block.clone(),
+        );
+
+        let encoded = serde_cbor::to_vec(&request).expect("failed to encode large request");
+        let decoded: PushLogRequest =
+            serde_cbor::from_slice(&encoded).expect("failed to decode large request");
+
+        assert_eq!(decoded.block.len(), 1024 * 1024);
+        assert_eq!(decoded.block, large_block);
+    }
+
+    #[test]
+    fn test_empty_fields() {
+        // Test with empty but valid fields
+        let request = PushLogRequest::new(
+            "".to_string(),
+            vec![],
+            "".to_string(),
+            "".to_string(),
+            vec![],
+        );
+
+        let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
+        let decoded: PushLogRequest =
+            serde_cbor::from_slice(&encoded).expect("failed to decode");
+
+        assert!(decoded.doc_id.is_empty());
+        assert!(decoded.cid.is_empty());
+        assert!(decoded.collection_id.is_empty());
+        assert!(decoded.creator.is_empty());
+        assert!(decoded.block.is_empty());
+    }
 }

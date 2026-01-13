@@ -66,7 +66,10 @@ pub mod protocol;
 pub use error::{Error, Result};
 pub use host::{HostCommand, HostEvent, P2PHost, P2PHostHandle, ResponseChannel};
 pub use message::{Message, MetaData, PushLogReply, PushLogRequest};
-pub use protocol::{CODE, MESSAGE_VERSION, NAME, PROTOCOL_ID, VERSION};
+pub use protocol::{
+    BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, PUSHLOG_REQUEST_PROTOCOL,
+    PUSHLOG_RESPONSE_PROTOCOL, VERSION,
+};
 
 // Re-export commonly used libp2p types
 pub use libp2p::{Multiaddr, PeerId};
@@ -78,7 +81,9 @@ mod tests {
     #[test]
     fn test_exports() {
         // Verify key constants are accessible
-        assert_eq!(PROTOCOL_ID, "/defra/0.0.1");
+        assert_eq!(BASE_PROTOCOL_ID, "/defra/0.0.1");
+        assert_eq!(PUSHLOG_REQUEST_PROTOCOL, "/defradb/pushlog_req/0.0.1");
+        assert_eq!(PUSHLOG_RESPONSE_PROTOCOL, "/defradb/pushlog_resp/0.0.1");
         assert_eq!(CODE, 961);
         assert_eq!(NAME, "defra");
         assert_eq!(VERSION, "0.0.1");
