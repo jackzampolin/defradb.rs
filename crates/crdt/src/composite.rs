@@ -284,7 +284,7 @@ impl CompositeDAG {
                 }
 
                 let increment = i64::from_be_bytes(data[..8].try_into().unwrap());
-                let new_value = current.saturating_add(increment);
+                let new_value = current.wrapping_add(increment);
                 self.store.set(&value_key, &new_value.to_be_bytes()).await?;
                 self.store.set(&nonce_key, &[1]).await?;
 

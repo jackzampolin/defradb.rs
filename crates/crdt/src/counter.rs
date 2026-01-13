@@ -1,9 +1,9 @@
 //! Counter CRDT implementation
 //!
 //! Supports increment and decrement operations with nonce-based idempotent delivery.
-//! Uses commutative addition with saturation on overflow for Int64, and error on
-//! overflow for Float64. This is not a traditional PN-Counter (which uses separate
-//! per-replica counters); instead it uses a single value with nonce tracking.
+//! Uses commutative addition with wrapping on overflow for Int64 (matching Go DefraDB),
+//! and error on overflow for Float64. This is not a traditional PN-Counter (which uses
+//! separate per-replica counters); instead it uses a single value with nonce tracking.
 
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
@@ -387,8 +387,8 @@ impl Counter {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
                 let current = self.get_int64().await?;
-                // Int64: Saturate on overflow to match Go DefraDB behavior
-                NewValue::Int64(current.saturating_add(increment))
+                // Int64: Wrap on overflow to match Go DefraDB behavior
+                NewValue::Int64(current.wrapping_add(increment))
             }
             NumericKind::Float64 => {
                 let increment = delta.decode_float64()?;
@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_counter_overflow_saturating() {
+    async fn test_counter_overflow_wrapping() {
         let store = Arc::new(MemoryStore::new());
         let mut counter = Counter::new(
             store.clone(),
@@ -653,7 +653,7 @@ mod tests {
         };
         counter.merge(&ctx, &delta1).await.unwrap();
 
-        // Try to increment beyond max - should saturate
+        // Try to increment beyond max - should wrap to negative (matching Go behavior)
         let delta2 = CounterDelta {
             doc_id: b"doc1".to_vec(),
             field_name: "count".to_string(),
@@ -665,10 +665,11 @@ mod tests {
         };
         counter.merge(&ctx, &delta2).await.unwrap();
 
-        // Should saturate at i64::MAX
+        // Should wrap: (i64::MAX - 10) + 20 = i64::MIN + 9
         let value_bytes = counter.value().await.unwrap();
         let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-        assert_eq!(value, i64::MAX);
+        assert_eq!(value, (i64::MAX - 10).wrapping_add(20));
+        assert_eq!(value, i64::MIN + 9); // Verify wrapping behavior
     }
 
     #[tokio::test]
@@ -1359,7 +1360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_counter_underflow_saturating() {
+    async fn test_counter_underflow_wrapping() {
         let store = Arc::new(MemoryStore::new());
         let mut counter = Counter::new(
             store.clone(),
@@ -1388,7 +1389,7 @@ mod tests {
         .unwrap();
         counter.merge(&ctx, &delta1).await.unwrap();
 
-        // Try to decrement beyond minimum - should saturate
+        // Try to decrement beyond minimum - should wrap to positive (matching Go behavior)
         let delta2 = CounterDelta::new_int64(
             b"doc1".to_vec(),
             "count".to_string(),
@@ -1400,10 +1401,11 @@ mod tests {
         .unwrap();
         counter.merge(&ctx, &delta2).await.unwrap();
 
-        // Should saturate at i64::MIN
+        // Should wrap: (i64::MIN + 10) + (-20) = i64::MAX - 9
         let value_bytes = counter.value().await.unwrap();
         let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
-        assert_eq!(value, i64::MIN);
+        assert_eq!(value, (i64::MIN + 10).wrapping_add(-20));
+        assert_eq!(value, i64::MAX - 9); // Verify wrapping behavior
     }
 
     #[tokio::test]
