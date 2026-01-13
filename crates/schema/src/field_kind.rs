@@ -2,8 +2,23 @@
 //!
 //! The numeric values here MUST match the Go implementation to ensure
 //! Rust and Go can read/write the same datastores.
+//!
+//! # JSON Serialization Format (Go-compatible)
+//!
+//! This module implements custom serde serialization that matches Go DefraDB's format:
+//!
+//! - **ScalarKind**: Serialized as just the integer value (e.g., `2` for Bool)
+//! - **ScalarArrayKind**: Serialized as just the integer value (e.g., `3` for BoolArray)
+//! - **CollectionKind**: Serialized as `{"Array": bool, "CollectionID": string}`
+//! - **SelfKind**: Serialized as `{"RelativeID": string, "Array": bool}`
+//! - **NamedKind**: Serialized as `{"Name": string, "Array": bool}`
+//!
+//! For deserialization, the format accepts:
+//! - Numbers → ScalarKind or ScalarArrayKind (based on value)
+//! - Strings → Mapped to FieldKind using Go's string mappings or NamedKind
+//! - Objects → CollectionKind, SelfKind, or NamedKind based on fields present
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 /// Scalar field kinds with numeric values matching Go DefraDB.
 ///
@@ -109,8 +124,9 @@ impl ScalarArrayKind {
 ///
 /// This matches Go's FieldKind interface which can be ScalarKind,
 /// ScalarArrayKind, CollectionKind, SelfKind, or NamedKind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
+///
+/// Uses custom serde implementation for Go compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldKind {
     /// Scalar types (Bool, Int, String, etc.)
     Scalar(ScalarKind),
@@ -299,6 +315,221 @@ impl FieldKind {
     }
 }
 
+// ============================================================================
+// Go-compatible JSON serialization
+// ============================================================================
+
+impl Serialize for FieldKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        match self {
+            // Scalars serialize as just the integer value
+            FieldKind::Scalar(kind) => serializer.serialize_u8(*kind as u8),
+
+            // Arrays serialize as just the integer value
+            FieldKind::ScalarArray(kind) => serializer.serialize_u8(*kind as u8),
+
+            // Relation serializes as {"Array": bool, "CollectionID": string}
+            FieldKind::Relation {
+                collection_id,
+                is_array,
+            } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("Array", is_array)?;
+                map.serialize_entry("CollectionID", collection_id)?;
+                map.end()
+            }
+
+            // SelfRef serializes as {"RelativeID": string, "Array": bool}
+            FieldKind::SelfRef {
+                relative_id,
+                is_array,
+            } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("RelativeID", relative_id)?;
+                map.serialize_entry("Array", is_array)?;
+                map.end()
+            }
+
+            // Named serializes as {"Name": string, "Array": bool}
+            FieldKind::Named { name, is_array } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("Name", name)?;
+                map.serialize_entry("Array", is_array)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FieldKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Use an untagged approach: try different formats
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        match &value {
+            // Number → ScalarKind or ScalarArrayKind
+            serde_json::Value::Number(n) => {
+                let kind = n.as_u64().ok_or_else(|| {
+                    de::Error::custom("FieldKind integer must be a positive number")
+                })? as u8;
+                Ok(int_to_field_kind(kind))
+            }
+
+            // String → Use Go's string mapping or NamedKind
+            serde_json::Value::String(s) => parse_string_kind(s).map_err(de::Error::custom),
+
+            // Object → CollectionKind, SelfKind, or NamedKind
+            serde_json::Value::Object(map) => {
+                // Check for CollectionID → Relation
+                if map.contains_key("CollectionID") {
+                    let collection_id = map
+                        .get("CollectionID")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let is_array = map
+                        .get("Array")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    return Ok(FieldKind::Relation {
+                        collection_id,
+                        is_array,
+                    });
+                }
+
+                // Check for RelativeID → SelfRef
+                if map.contains_key("RelativeID") {
+                    let relative_id = map
+                        .get("RelativeID")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let is_array = map
+                        .get("Array")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    return Ok(FieldKind::SelfRef {
+                        relative_id,
+                        is_array,
+                    });
+                }
+
+                // Check for Name → Named
+                if map.contains_key("Name") {
+                    let name = map
+                        .get("Name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let is_array = map
+                        .get("Array")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    return Ok(FieldKind::Named { name, is_array });
+                }
+
+                Err(de::Error::custom(
+                    "Unknown FieldKind object format: expected CollectionID, RelativeID, or Name",
+                ))
+            }
+
+            // Null → None scalar
+            serde_json::Value::Null => Ok(FieldKind::Scalar(ScalarKind::None)),
+
+            _ => Err(de::Error::custom(format!(
+                "Invalid FieldKind format: expected number, string, or object, got {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+/// Convert an integer to a FieldKind (matches Go's IntToFieldKind)
+fn int_to_field_kind(kind: u8) -> FieldKind {
+    // Array kinds
+    match kind {
+        3 => FieldKind::ScalarArray(ScalarArrayKind::BoolArray),
+        5 => FieldKind::ScalarArray(ScalarArrayKind::IntArray),
+        7 => FieldKind::ScalarArray(ScalarArrayKind::Float64Array),
+        9 => FieldKind::ScalarArray(ScalarArrayKind::Float32Array),
+        12 => FieldKind::ScalarArray(ScalarArrayKind::StringArray),
+        18 => FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray),
+        19 => FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray),
+        20 => FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array),
+        21 => FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray),
+        22 => FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array),
+        // Scalar kinds
+        0 => FieldKind::Scalar(ScalarKind::None),
+        1 => FieldKind::Scalar(ScalarKind::DocID),
+        2 => FieldKind::Scalar(ScalarKind::Bool),
+        4 => FieldKind::Scalar(ScalarKind::Int),
+        6 => FieldKind::Scalar(ScalarKind::Float64),
+        8 => FieldKind::Scalar(ScalarKind::Float32),
+        10 => FieldKind::Scalar(ScalarKind::DateTime),
+        11 => FieldKind::Scalar(ScalarKind::String),
+        13 => FieldKind::Scalar(ScalarKind::Blob),
+        14 => FieldKind::Scalar(ScalarKind::Json),
+        // Unknown → treat as scalar
+        _ => FieldKind::Scalar(ScalarKind::None),
+    }
+}
+
+/// Parse a string to FieldKind (matches Go's FieldKindStringToEnumMapping)
+fn parse_string_kind(s: &str) -> Result<FieldKind, String> {
+    // Go's FieldKindStringToEnumMapping
+    match s {
+        "ID" => Ok(FieldKind::Scalar(ScalarKind::DocID)),
+        "Boolean" => Ok(FieldKind::Scalar(ScalarKind::Bool)),
+        "Int" => Ok(FieldKind::Scalar(ScalarKind::Int)),
+        "DateTime" => Ok(FieldKind::Scalar(ScalarKind::DateTime)),
+        "Float" | "Float64" => Ok(FieldKind::Scalar(ScalarKind::Float64)),
+        "Float32" => Ok(FieldKind::Scalar(ScalarKind::Float32)),
+        "String" => Ok(FieldKind::Scalar(ScalarKind::String)),
+        "Blob" => Ok(FieldKind::Scalar(ScalarKind::Blob)),
+        "JSON" => Ok(FieldKind::Scalar(ScalarKind::Json)),
+        // Arrays
+        "[Boolean]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray)),
+        "[Boolean!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::BoolArray)),
+        "[Int]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray)),
+        "[Int!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::IntArray)),
+        "[Float]" | "[Float64]" => {
+            Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array))
+        }
+        "[Float!]" | "[Float64!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::Float64Array)),
+        "[Float32]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array)),
+        "[Float32!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::Float32Array)),
+        "[String]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray)),
+        "[String!]" => Ok(FieldKind::ScalarArray(ScalarArrayKind::StringArray)),
+        // Self reference
+        "__Self" => Ok(FieldKind::SelfRef {
+            relative_id: String::new(),
+            is_array: false,
+        }),
+        "[__Self]" => Ok(FieldKind::SelfRef {
+            relative_id: String::new(),
+            is_array: true,
+        }),
+        // Otherwise treat as named reference (with array check)
+        _ => {
+            let is_array = s.starts_with('[') && s.ends_with(']');
+            let name = if is_array {
+                s[1..s.len() - 1].to_string()
+            } else {
+                s.to_string()
+            };
+            Ok(FieldKind::Named { name, is_array })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +646,264 @@ mod tests {
 
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
+            let parsed: FieldKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, parsed);
+        }
+    }
+
+    // ========================================================================
+    // Go Compatibility Tests - JSON Serialization Format
+    // ========================================================================
+
+    #[test]
+    fn test_go_compat_scalar_serializes_as_integer() {
+        // Go serializes ScalarKind as just the integer value
+        assert_eq!(serde_json::to_string(&FieldKind::bool()).unwrap(), "2");
+        assert_eq!(serde_json::to_string(&FieldKind::int()).unwrap(), "4");
+        assert_eq!(serde_json::to_string(&FieldKind::float64()).unwrap(), "6");
+        assert_eq!(serde_json::to_string(&FieldKind::string()).unwrap(), "11");
+        assert_eq!(serde_json::to_string(&FieldKind::doc_id()).unwrap(), "1");
+    }
+
+    #[test]
+    fn test_go_compat_array_serializes_as_integer() {
+        // Go serializes ScalarArrayKind as just the integer value
+        assert_eq!(serde_json::to_string(&FieldKind::bool_array()).unwrap(), "3");
+        assert_eq!(serde_json::to_string(&FieldKind::int_array()).unwrap(), "5");
+        assert_eq!(
+            serde_json::to_string(&FieldKind::float64_array()).unwrap(),
+            "7"
+        );
+        assert_eq!(
+            serde_json::to_string(&FieldKind::string_array()).unwrap(),
+            "12"
+        );
+        assert_eq!(
+            serde_json::to_string(&FieldKind::nillable_int_array()).unwrap(),
+            "19"
+        );
+    }
+
+    #[test]
+    fn test_go_compat_relation_serializes_as_object() {
+        // Go serializes CollectionKind as {"Array": bool, "CollectionID": string}
+        let relation = FieldKind::relation("bafkreiabc123", true);
+        let json = serde_json::to_string(&relation).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.is_object());
+        assert_eq!(parsed["Array"], true);
+        assert_eq!(parsed["CollectionID"], "bafkreiabc123");
+    }
+
+    #[test]
+    fn test_go_compat_selfref_serializes_as_object() {
+        // Go serializes SelfKind as {"RelativeID": string, "Array": bool}
+        let self_ref = FieldKind::self_ref("parent", false);
+        let json = serde_json::to_string(&self_ref).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.is_object());
+        assert_eq!(parsed["RelativeID"], "parent");
+        assert_eq!(parsed["Array"], false);
+    }
+
+    #[test]
+    fn test_go_compat_named_serializes_as_object() {
+        // Go serializes NamedKind as {"Name": string, "Array": bool}
+        let named = FieldKind::named("User", true);
+        let json = serde_json::to_string(&named).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.is_object());
+        assert_eq!(parsed["Name"], "User");
+        assert_eq!(parsed["Array"], true);
+    }
+
+    #[test]
+    fn test_go_compat_deserialize_integer() {
+        // Go's parseFieldKind accepts raw integers
+        assert_eq!(
+            serde_json::from_str::<FieldKind>("2").unwrap(),
+            FieldKind::bool()
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldKind>("4").unwrap(),
+            FieldKind::int()
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldKind>("5").unwrap(),
+            FieldKind::int_array()
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldKind>("19").unwrap(),
+            FieldKind::nillable_int_array()
+        );
+    }
+
+    #[test]
+    fn test_go_compat_deserialize_string() {
+        // Go's parseFieldKind accepts string names
+        assert_eq!(
+            serde_json::from_str::<FieldKind>(r#""Boolean""#).unwrap(),
+            FieldKind::bool()
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldKind>(r#""Int""#).unwrap(),
+            FieldKind::int()
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldKind>(r#""String""#).unwrap(),
+            FieldKind::string()
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldKind>(r#""[Int!]""#).unwrap(),
+            FieldKind::int_array()
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldKind>(r#""[Int]""#).unwrap(),
+            FieldKind::nillable_int_array()
+        );
+    }
+
+    #[test]
+    fn test_go_compat_deserialize_self_string() {
+        // Go's __Self type
+        let result: FieldKind = serde_json::from_str(r#""__Self""#).unwrap();
+        assert_eq!(
+            result,
+            FieldKind::SelfRef {
+                relative_id: String::new(),
+                is_array: false
+            }
+        );
+
+        let result_array: FieldKind = serde_json::from_str(r#""[__Self]""#).unwrap();
+        assert_eq!(
+            result_array,
+            FieldKind::SelfRef {
+                relative_id: String::new(),
+                is_array: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_go_compat_deserialize_named_string() {
+        // Unknown strings become NamedKind
+        let result: FieldKind = serde_json::from_str(r#""Author""#).unwrap();
+        assert_eq!(
+            result,
+            FieldKind::Named {
+                name: "Author".to_string(),
+                is_array: false
+            }
+        );
+
+        let result_array: FieldKind = serde_json::from_str(r#""[Author]""#).unwrap();
+        assert_eq!(
+            result_array,
+            FieldKind::Named {
+                name: "Author".to_string(),
+                is_array: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_go_compat_deserialize_collection_object() {
+        // Go's CollectionKind object format
+        let json = r#"{"Array": true, "CollectionID": "bafkrei123"}"#;
+        let result: FieldKind = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result,
+            FieldKind::Relation {
+                collection_id: "bafkrei123".to_string(),
+                is_array: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_go_compat_deserialize_selfkind_object() {
+        // Go's SelfKind object format
+        let json = r#"{"RelativeID": "parent", "Array": false}"#;
+        let result: FieldKind = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result,
+            FieldKind::SelfRef {
+                relative_id: "parent".to_string(),
+                is_array: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_go_compat_deserialize_named_object() {
+        // Go's NamedKind object format
+        let json = r#"{"Name": "User", "Array": true}"#;
+        let result: FieldKind = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result,
+            FieldKind::Named {
+                name: "User".to_string(),
+                is_array: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_go_compat_all_scalar_kinds_roundtrip() {
+        // All scalar kinds should roundtrip through their integer representation
+        let scalars = vec![
+            (FieldKind::Scalar(ScalarKind::None), 0),
+            (FieldKind::Scalar(ScalarKind::DocID), 1),
+            (FieldKind::Scalar(ScalarKind::Bool), 2),
+            (FieldKind::Scalar(ScalarKind::Int), 4),
+            (FieldKind::Scalar(ScalarKind::Float64), 6),
+            (FieldKind::Scalar(ScalarKind::Float32), 8),
+            (FieldKind::Scalar(ScalarKind::DateTime), 10),
+            (FieldKind::Scalar(ScalarKind::String), 11),
+            (FieldKind::Scalar(ScalarKind::Blob), 13),
+            (FieldKind::Scalar(ScalarKind::Json), 14),
+        ];
+
+        for (kind, expected_int) in scalars {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, expected_int.to_string());
+            let parsed: FieldKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, parsed);
+        }
+    }
+
+    #[test]
+    fn test_go_compat_all_array_kinds_roundtrip() {
+        // All array kinds should roundtrip through their integer representation
+        let arrays = vec![
+            (FieldKind::ScalarArray(ScalarArrayKind::BoolArray), 3),
+            (FieldKind::ScalarArray(ScalarArrayKind::IntArray), 5),
+            (FieldKind::ScalarArray(ScalarArrayKind::Float64Array), 7),
+            (FieldKind::ScalarArray(ScalarArrayKind::Float32Array), 9),
+            (FieldKind::ScalarArray(ScalarArrayKind::StringArray), 12),
+            (FieldKind::ScalarArray(ScalarArrayKind::NillableBoolArray), 18),
+            (FieldKind::ScalarArray(ScalarArrayKind::NillableIntArray), 19),
+            (
+                FieldKind::ScalarArray(ScalarArrayKind::NillableFloat64Array),
+                20,
+            ),
+            (
+                FieldKind::ScalarArray(ScalarArrayKind::NillableStringArray),
+                21,
+            ),
+            (
+                FieldKind::ScalarArray(ScalarArrayKind::NillableFloat32Array),
+                22,
+            ),
+        ];
+
+        for (kind, expected_int) in arrays {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, expected_int.to_string());
             let parsed: FieldKind = serde_json::from_str(&json).unwrap();
             assert_eq!(kind, parsed);
         }

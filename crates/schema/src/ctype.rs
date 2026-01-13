@@ -1,11 +1,21 @@
 //! CRDT type definitions
+//!
+//! # JSON Serialization Format (Go-compatible)
+//!
+//! CType is serialized as its integer value to match Go DefraDB:
+//! - 0 = None
+//! - 1 = LwwRegister
+//! - 2 = Object
+//! - 3 = Composite
+//! - 4 = PnCounter
+//! - 5 = PCounter
 
 use crate::FieldKind;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Which CRDT to use for a field
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum CType {
     /// No CRDT (for relations and special fields)
@@ -21,6 +31,55 @@ pub enum CType {
     PnCounter = 4,
     /// Positive Counter (increment only)
     PCounter = 5,
+}
+
+impl Serialize for CType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+impl<'de> Deserialize<'de> for CType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        match &value {
+            // Integer format (Go's default)
+            serde_json::Value::Number(n) => {
+                let kind = n.as_u64().ok_or_else(|| {
+                    de::Error::custom("CType must be a positive integer")
+                })? as u8;
+                Ok(match kind {
+                    0 => CType::None,
+                    1 => CType::LwwRegister,
+                    2 => CType::Object,
+                    3 => CType::Composite,
+                    4 => CType::PnCounter,
+                    5 => CType::PCounter,
+                    _ => CType::None, // Unknown defaults to None
+                })
+            }
+            // String format (for human-readable configs)
+            serde_json::Value::String(s) => match s.as_str() {
+                "None" | "none" | "NONE_CRDT" => Ok(CType::None),
+                "LwwRegister" | "lww" | "LWW_REGISTER" => Ok(CType::LwwRegister),
+                "Object" | "object" | "OBJECT" => Ok(CType::Object),
+                "Composite" | "composite" | "COMPOSITE" => Ok(CType::Composite),
+                "PnCounter" | "pncounter" | "PN_COUNTER" => Ok(CType::PnCounter),
+                "PCounter" | "pcounter" | "P_COUNTER" => Ok(CType::PCounter),
+                _ => Err(de::Error::custom(format!("Unknown CType: {}", s))),
+            },
+            // Null defaults to LwwRegister
+            serde_json::Value::Null => Ok(CType::LwwRegister),
+            _ => Err(de::Error::custom("CType must be a number or string")),
+        }
+    }
 }
 
 impl CType {

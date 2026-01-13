@@ -16,6 +16,7 @@ mod tests {
     use crate::keys::secp256r1::Secp256r1PublicKey;
     use crate::keys::{Key, PrivateKey, PublicKey};
     use hkdf::Hkdf;
+    use serial_test::serial;
     use sha2::Sha256;
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -974,6 +975,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_ecies_encrypt_matches_go_with_deterministic_nonce() {
         // Enable deterministic nonce mode
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1036,6 +1038,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_ecies_ciphertext_format_matches_go() {
         // Verify the ciphertext structure matches what Go expects:
         // [32-byte ephemeral public key][12-byte nonce][ciphertext][16-byte auth tag][32-byte HMAC]
@@ -1084,6 +1087,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aes_encrypt_matches_go_with_deterministic_nonce() {
         // Enable deterministic nonce mode
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1118,6 +1122,7 @@ mod tests {
     // ===== AES-GCM Edge Case Tests =====
 
     #[test]
+    #[serial]
     fn test_aes_empty_plaintext() {
         // Empty plaintext should encrypt/decrypt correctly
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1145,6 +1150,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aes_empty_aad() {
         // Empty AAD should work correctly
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1203,6 +1209,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aes_wrong_key_fails() {
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -1218,6 +1225,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aes_wrong_aad_fails() {
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -1233,6 +1241,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aes_tampered_ciphertext_fails() {
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -1254,6 +1263,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aes_truncated_ciphertext_fails() {
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
 

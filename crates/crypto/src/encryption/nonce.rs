@@ -66,8 +66,10 @@ pub static USE_DETERMINISTIC_NONCE: std::sync::atomic::AtomicBool =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_generate_nonce_random() {
         // Ensure deterministic mode is off
         USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -99,6 +101,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_generate_nonce_deterministic_mode() {
         // Enable deterministic mode
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -120,6 +123,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_nonce_randomness() {
         // Ensure deterministic mode is off
         USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);

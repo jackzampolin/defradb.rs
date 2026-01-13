@@ -152,6 +152,7 @@ mod tests {
     use super::*;
     use crate::encryption::nonce::USE_DETERMINISTIC_NONCE;
     use crate::keys::generation::generate_aes256;
+    use serial_test::serial;
 
     #[test]
     fn test_encrypt_decrypt_round_trip() {
@@ -258,6 +259,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_deterministic_encryption() {
         // Enable deterministic nonces for reproducibility
         USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -501,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_nonce_uniqueness_per_encryption() {
         // Verify that random nonces are unique per encryption call
         // Use 100 samples to better verify PRNG quality
