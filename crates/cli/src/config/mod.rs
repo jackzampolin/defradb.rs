@@ -247,6 +247,93 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{Cli, Command};
+    use crate::commands::VersionArgs;
+    use crate::error::Error;
+
+    /// Helper to create a minimal Cli for testing apply_cli_flags
+    fn cli_with_defaults() -> Cli {
+        Cli {
+            rootdir: None,
+            log_level: None,
+            log_output: None,
+            log_format: None,
+            log_stacktrace: None,
+            log_source: None,
+            log_overrides: None,
+            no_log_color: None,
+            url: None,
+            keyring_namespace: None,
+            keyring_backend: None,
+            keyring_path: None,
+            no_keyring: None,
+            source_hub_address: None,
+            secret_file: None,
+            command: Command::Version(VersionArgs {
+                format: "text".to_string(),
+                full: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_apply_cli_flags_invalid_log_level_returns_error() {
+        let mut config = Config::default();
+        let mut cli = cli_with_defaults();
+        cli.log_level = Some("invalid_level".to_string());
+
+        let result = config.apply_cli_flags(&cli);
+        assert!(matches!(result, Err(Error::InvalidLogLevel(s)) if s == "invalid_level"));
+    }
+
+    #[test]
+    fn test_apply_cli_flags_invalid_log_output_returns_error() {
+        let mut config = Config::default();
+        let mut cli = cli_with_defaults();
+        cli.log_output = Some("file".to_string());
+
+        let result = config.apply_cli_flags(&cli);
+        assert!(matches!(result, Err(Error::InvalidLogOutput(s)) if s == "file"));
+    }
+
+    #[test]
+    fn test_apply_cli_flags_invalid_log_format_returns_error() {
+        let mut config = Config::default();
+        let mut cli = cli_with_defaults();
+        cli.log_format = Some("xml".to_string());
+
+        let result = config.apply_cli_flags(&cli);
+        assert!(matches!(result, Err(Error::InvalidLogFormat(s)) if s == "xml"));
+    }
+
+    #[test]
+    fn test_apply_cli_flags_invalid_keyring_backend_returns_error() {
+        let mut config = Config::default();
+        let mut cli = cli_with_defaults();
+        cli.keyring_backend = Some("vault".to_string());
+
+        let result = config.apply_cli_flags(&cli);
+        assert!(matches!(result, Err(Error::InvalidKeyringBackend(s)) if s == "vault"));
+    }
+
+    #[test]
+    fn test_apply_cli_flags_valid_values_succeed() {
+        let mut config = Config::default();
+        let mut cli = cli_with_defaults();
+        cli.log_level = Some("debug".to_string());
+        cli.log_output = Some("stdout".to_string());
+        cli.log_format = Some("json".to_string());
+        cli.keyring_backend = Some("system".to_string());
+        cli.url = Some("0.0.0.0:8080".to_string());
+
+        let result = config.apply_cli_flags(&cli);
+        assert!(result.is_ok());
+        assert_eq!(config.log.level, LogLevel::Debug);
+        assert_eq!(config.log.output, LogOutput::Stdout);
+        assert_eq!(config.log.format, LogFormat::Json);
+        assert_eq!(config.keyring.backend, KeyringBackend::System);
+        assert_eq!(config.api.address, "0.0.0.0:8080");
+    }
 
     #[test]
     fn test_config_defaults() {
