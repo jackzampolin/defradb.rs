@@ -9,7 +9,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 /// HTTP-layer errors.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum HttpError {
     #[error("invalid request: {0}")]
     BadRequest(String),
@@ -25,7 +25,7 @@ pub enum HttpError {
 }
 
 /// Error response body matching Go DefraDB format.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }

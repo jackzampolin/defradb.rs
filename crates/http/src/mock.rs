@@ -6,12 +6,14 @@ use serde_json::json;
 use query::error::{QueryError, Result};
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 
-/// Mock executor that returns configurable responses.
+/// Mock executor for testing HTTP routes with pattern-matched query responses.
+#[derive(Debug, Clone)]
 pub struct MockQueryExecutor {
     schema_sdl: String,
 }
 
-/// Mock executor that always fails for testing error paths.
+/// Mock executor for testing error paths. Schema errors are optional.
+#[derive(Debug, Clone)]
 pub struct FailingMockExecutor {
     schema_error: Option<String>,
 }
@@ -68,7 +70,6 @@ impl Default for MockQueryExecutor {
 #[async_trait]
 impl QueryExecutor for MockQueryExecutor {
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
-        // Parse the query to determine what mock response to return
         let query = request.query.to_lowercase();
 
         if query.contains("users") {
@@ -79,7 +80,6 @@ impl QueryExecutor for MockQueryExecutor {
                 ]
             }))
         } else if query.contains("__schema") || query.contains("__type") {
-            // Introspection query
             QueryResponse::success(json!({
                 "__schema": {
                     "types": [],
@@ -88,12 +88,10 @@ impl QueryExecutor for MockQueryExecutor {
                 }
             }))
         } else if query.contains("create") || query.contains("update") || query.contains("delete") {
-            // Mutation
             QueryResponse::success(json!({
                 "_docID": "bae-new-789"
             }))
         } else {
-            // Generic success response
             QueryResponse::success(json!({
                 "data": null,
                 "message": "Mock response"

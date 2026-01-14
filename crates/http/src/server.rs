@@ -2,10 +2,12 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::http::{header, HeaderValue, Method};
 use axum::Router;
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use query::executor::QueryExecutor;
@@ -18,7 +20,8 @@ use crate::router::create_router;
 pub struct ServerConfig {
     /// Address to bind to (default: 127.0.0.1:9181).
     pub address: SocketAddr,
-    /// Allowed CORS origins (empty vec = no cross-origin requests allowed).
+    /// Allowed CORS origins. Supports "*" for all origins (matches Go DefraDB).
+    /// Empty vec = no CORS headers (browsers block cross-origin requests).
     pub allowed_origins: Vec<String>,
 }
 
@@ -63,41 +66,83 @@ impl Server {
     }
 
     /// Build the router with all routes and middleware.
+    ///
+    /// CORS configuration matches Go DefraDB behavior:
+    /// - Empty origins = no CORS headers (browsers block cross-origin requests)
+    /// - "*" in origins = allow all origins
+    /// - Otherwise, case-insensitive matching against configured origins
     pub fn router(&self) -> Router {
-        let cors = if self.config.allowed_origins.is_empty() {
-            // No origins configured = no CORS (restrictive default)
-            CorsLayer::new()
-        } else {
-            let mut valid_origins = Vec::new();
-            for origin in &self.config.allowed_origins {
-                match origin.parse() {
-                    Ok(parsed) => valid_origins.push(parsed),
-                    Err(e) => {
-                        tracing::warn!(
-                            origin = %origin,
-                            error = %e,
-                            "Invalid CORS origin in configuration, skipping"
-                        );
-                    }
-                }
-            }
-            CorsLayer::new()
-                .allow_origin(valid_origins)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        };
+        let cors = self.build_cors_layer();
 
         create_router(Arc::clone(&self.executor))
             .layer(TraceLayer::new_for_http())
             .layer(cors)
     }
 
+    /// Build CORS layer matching Go DefraDB behavior.
+    fn build_cors_layer(&self) -> CorsLayer {
+        if self.config.allowed_origins.is_empty() {
+            // No origins configured = no CORS headers (matches Go DefraDB)
+            return CorsLayer::new();
+        }
+
+        // Check for wildcard (matches Go DefraDB: if "*" in origins, allow all)
+        let allow_any = self.config.allowed_origins.iter().any(|o| o == "*");
+
+        // Convert origins to lowercase for case-insensitive matching (matches Go DefraDB)
+        let allowed_lower: Vec<String> = self
+            .config
+            .allowed_origins
+            .iter()
+            .map(|o| o.to_lowercase())
+            .collect();
+
+        // Build CORS layer with Go DefraDB settings
+        let cors = CorsLayer::new()
+            // Methods matching Go DefraDB: GET, HEAD, POST, PATCH, DELETE
+            .allow_methods([
+                Method::GET,
+                Method::HEAD,
+                Method::POST,
+                Method::PATCH,
+                Method::DELETE,
+            ])
+            // Headers matching Go DefraDB: Content-Type, Authorization
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            // MaxAge matching Go DefraDB: 300 seconds
+            .max_age(Duration::from_secs(300));
+
+        if allow_any {
+            cors.allow_origin(tower_http::cors::Any)
+        } else {
+            cors.allow_origin(
+                allowed_lower
+                    .into_iter()
+                    .filter_map(|origin| {
+                        origin.parse::<HeaderValue>().ok().or_else(|| {
+                            tracing::warn!(origin = %origin, "Invalid CORS origin, skipping");
+                            None
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
+    }
+
     /// Run the server (blocks until shutdown).
     pub async fn run(self) -> Result<()> {
         let router = self.router();
-        let listener = TcpListener::bind(self.config.address)
-            .await
-            .map_err(|e| crate::error::HttpError::Internal(e.to_string()))?;
+        let listener = TcpListener::bind(self.config.address).await.map_err(|e| {
+            tracing::error!(
+                address = %self.config.address,
+                error = %e,
+                "Failed to bind HTTP server"
+            );
+            crate::error::HttpError::Internal(format!(
+                "failed to bind to {}: {} (check if port is in use)",
+                self.config.address, e
+            ))
+        })?;
 
         tracing::info!("DefraDB HTTP server listening on {}", self.config.address);
 
@@ -303,5 +348,131 @@ mod tests {
         let config = ServerConfig::default();
         assert_eq!(config.address.port(), 9181);
         assert!(config.allowed_origins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_graphql_post_empty_query() {
+        let router = test_server().router();
+        let body = json!({"query": ""}).to_string();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Empty query should still be accepted (executor handles validation)
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_graphql_get_missing_query_param() {
+        let router = test_server().router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/graphql")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Missing required 'query' param returns 400
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_cors_with_allowed_origin() {
+        let config = ServerConfig {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            allowed_origins: vec!["http://localhost:3000".to_string()],
+        };
+        let server = Server::with_config(MockQueryExecutor::new(), config);
+        let router = server.router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/v0/graphql")
+                    .header("Origin", "http://localhost:3000")
+                    .header("Access-Control-Request-Method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Preflight should succeed with CORS headers
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-origin"));
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-methods"));
+    }
+
+    #[tokio::test]
+    async fn test_cors_wildcard() {
+        let config = ServerConfig {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            allowed_origins: vec!["*".to_string()],
+        };
+        let server = Server::with_config(MockQueryExecutor::new(), config);
+        let router = server.router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/v0/graphql")
+                    .header("Origin", "http://any-origin.com")
+                    .header("Access-Control-Request-Method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Wildcard allows any origin
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn test_cors_case_insensitive() {
+        let config = ServerConfig {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            allowed_origins: vec!["http://LOCALHOST:3000".to_string()],
+        };
+        let server = Server::with_config(MockQueryExecutor::new(), config);
+        let router = server.router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/v0/graphql")
+                    .header("Origin", "http://localhost:3000")
+                    .header("Access-Control-Request-Method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Case-insensitive matching (matches Go DefraDB)
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-origin"));
     }
 }

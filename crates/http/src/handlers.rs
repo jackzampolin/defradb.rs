@@ -19,7 +19,7 @@ pub async fn health_check() -> impl IntoResponse {
 }
 
 /// Version information response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VersionResponse {
     pub version: String,
     pub commit: String,
@@ -48,7 +48,7 @@ pub async fn graphql(
 }
 
 /// GraphQL GET request query parameters.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GraphqlQueryParams {
     pub query: String,
     #[serde(rename = "operationName")]
@@ -97,11 +97,12 @@ pub async fn schema(State(state): State<AppState>) -> impl IntoResponse {
     match state.executor.schema().await {
         Ok(sdl) => (StatusCode::OK, sdl).into_response(),
         Err(e) => {
+            // Log full error details server-side, return generic message to client
             tracing::error!(error = %e, "Schema retrieval failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::error::ErrorResponse {
-                    error: e.to_string(),
+                    error: "Failed to retrieve schema".to_string(),
                 }),
             )
                 .into_response()

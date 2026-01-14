@@ -17,6 +17,14 @@ pub struct AppState {
     pub executor: Arc<dyn QueryExecutor>,
 }
 
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("executor", &"<QueryExecutor>")
+            .finish()
+    }
+}
+
 /// Create the main router with all routes.
 pub fn create_router(executor: Arc<dyn QueryExecutor>) -> Router {
     let state = AppState { executor };
