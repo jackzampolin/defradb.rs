@@ -16,8 +16,9 @@
 //! - Replication status monitoring
 
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
 use std::time::{Duration, Instant};
+
+use parking_lot::RwLock;
 
 use cid::Cid;
 use libp2p::PeerId;
@@ -81,7 +82,7 @@ impl PeerStateTracker {
 
     /// Record that a peer connected.
     pub fn peer_connected(&self, peer_id: PeerId) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write();
         let info = peers.entry(peer_id).or_insert_with(PeerInfo::new);
         info.connected = true;
         info.last_seen = Instant::now();
@@ -89,7 +90,7 @@ impl PeerStateTracker {
 
     /// Record that a peer disconnected.
     pub fn peer_disconnected(&self, peer_id: &PeerId) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write();
         if let Some(info) = peers.get_mut(peer_id) {
             info.connected = false;
             info.last_seen = Instant::now();
@@ -101,26 +102,29 @@ impl PeerStateTracker {
     /// Call this when:
     /// - Receiving a block from a peer (they definitely have it)
     /// - Successfully sending a block to a peer (they now have it)
+    ///
+    /// Creates a peer entry if one doesn't exist (handles race conditions
+    /// where CID announcements arrive before connection events).
     pub fn peer_has_cid(&self, peer_id: &PeerId, cid: Cid) {
-        let mut peers = self.peers.write().unwrap();
-        if let Some(info) = peers.get_mut(peer_id) {
-            info.known_cids.insert(cid);
-            info.last_seen = Instant::now();
-        }
+        let mut peers = self.peers.write();
+        let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
+        info.known_cids.insert(cid);
+        info.last_seen = Instant::now();
     }
 
     /// Record multiple CIDs for a peer.
+    ///
+    /// Creates a peer entry if one doesn't exist.
     pub fn peer_has_cids(&self, peer_id: &PeerId, cids: impl IntoIterator<Item = Cid>) {
-        let mut peers = self.peers.write().unwrap();
-        if let Some(info) = peers.get_mut(peer_id) {
-            info.known_cids.extend(cids);
-            info.last_seen = Instant::now();
-        }
+        let mut peers = self.peers.write();
+        let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
+        info.known_cids.extend(cids);
+        info.last_seen = Instant::now();
     }
 
     /// Record that a peer subscribed to a collection.
     pub fn peer_subscribed(&self, peer_id: &PeerId, collection_id: String) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write();
         let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
         info.subscribed_collections.insert(collection_id);
         info.last_seen = Instant::now();
@@ -128,7 +132,7 @@ impl PeerStateTracker {
 
     /// Record that a peer unsubscribed from a collection.
     pub fn peer_unsubscribed(&self, peer_id: &PeerId, collection_id: &str) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write();
         if let Some(info) = peers.get_mut(peer_id) {
             info.subscribed_collections.remove(collection_id);
             info.last_seen = Instant::now();
@@ -137,7 +141,7 @@ impl PeerStateTracker {
 
     /// Check if a peer likely has a CID.
     pub fn peer_has(&self, peer_id: &PeerId, cid: &Cid) -> bool {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         peers
             .get(peer_id)
             .map(|info| info.known_cids.contains(cid))
@@ -150,7 +154,7 @@ impl PeerStateTracker {
     /// - Are currently connected
     /// - Have announced this CID
     pub fn peers_with_cid(&self, cid: &Cid) -> Vec<PeerId> {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| info.connected && info.known_cids.contains(cid))
@@ -160,7 +164,7 @@ impl PeerStateTracker {
 
     /// Get all connected peers subscribed to a collection.
     pub fn peers_for_collection(&self, collection_id: &str) -> Vec<PeerId> {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| {
@@ -172,7 +176,7 @@ impl PeerStateTracker {
 
     /// Get all connected peers.
     pub fn connected_peers(&self) -> Vec<PeerId> {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| info.connected)
@@ -184,7 +188,7 @@ impl PeerStateTracker {
     ///
     /// Returns connected peers that haven't announced having this CID.
     pub fn peers_without_cid(&self, cid: &Cid) -> Vec<PeerId> {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| info.connected && !info.known_cids.contains(cid))
@@ -194,7 +198,7 @@ impl PeerStateTracker {
 
     /// Get number of CIDs known for a peer.
     pub fn peer_cid_count(&self, peer_id: &PeerId) -> usize {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         peers
             .get(peer_id)
             .map(|info| info.known_cids.len())
@@ -203,7 +207,7 @@ impl PeerStateTracker {
 
     /// Check if a peer is connected.
     pub fn is_connected(&self, peer_id: &PeerId) -> bool {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         peers
             .get(peer_id)
             .map(|info| info.connected)
@@ -212,14 +216,15 @@ impl PeerStateTracker {
 
     /// Remove stale peer entries that have been disconnected longer than TTL.
     pub fn cleanup_stale(&self) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write();
         let now = Instant::now();
-        peers.retain(|_, info| info.connected || now.duration_since(info.last_seen) < self.peer_ttl);
+        peers
+            .retain(|_, info| info.connected || now.duration_since(info.last_seen) < self.peer_ttl);
     }
 
     /// Get statistics about tracked peers.
     pub fn stats(&self) -> PeerStats {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read();
         let connected = peers.values().filter(|info| info.connected).count();
         let total_cids: usize = peers.values().map(|info| info.known_cids.len()).sum();
 
@@ -418,5 +423,61 @@ mod tests {
         let connected = tracker.connected_peers();
         assert_eq!(connected.len(), 1);
         assert!(connected.contains(&peer2));
+    }
+
+    #[test]
+    fn test_peer_has_cid_creates_entry_for_unknown_peer() {
+        // Test that peer_has_cid creates a peer entry if one doesn't exist
+        // This handles race conditions where CID announcements arrive before connection events
+        let tracker = PeerStateTracker::new();
+        let peer = test_peer_id();
+        let cid = test_cid();
+
+        // Peer is not connected yet
+        assert!(!tracker.is_connected(&peer));
+        assert_eq!(tracker.stats().total_peers, 0);
+
+        // Record that the peer has a CID (before peer_connected is called)
+        tracker.peer_has_cid(&peer, cid);
+
+        // Peer entry should be created (but not connected)
+        assert_eq!(tracker.stats().total_peers, 1);
+        assert!(!tracker.is_connected(&peer)); // Still not connected
+        assert!(tracker.peer_has(&peer, &cid)); // But we track the CID
+
+        // peers_with_cid should NOT return this peer since they're not connected
+        assert!(tracker.peers_with_cid(&cid).is_empty());
+
+        // Now connect the peer
+        tracker.peer_connected(peer);
+        assert!(tracker.is_connected(&peer));
+
+        // Now they should appear in peers_with_cid
+        let peers_with = tracker.peers_with_cid(&cid);
+        assert_eq!(peers_with.len(), 1);
+        assert!(peers_with.contains(&peer));
+    }
+
+    #[test]
+    fn test_peer_has_cids_creates_entry_for_unknown_peer() {
+        // Test that peer_has_cids also creates a peer entry if one doesn't exist
+        let tracker = PeerStateTracker::new();
+        let peer = test_peer_id();
+        let cid1 = test_cid();
+        let cid2 =
+            Cid::from_str("bafybeibdqagjfxgsqiafpmyohldmiu4qn6ucudpzqlxkfrmb6dzbggbkxy").unwrap();
+
+        // Record multiple CIDs before peer is connected
+        tracker.peer_has_cids(&peer, vec![cid1, cid2]);
+
+        // Peer entry should be created
+        assert_eq!(tracker.stats().total_peers, 1);
+        assert_eq!(tracker.stats().total_tracked_cids, 2);
+        assert!(tracker.peer_has(&peer, &cid1));
+        assert!(tracker.peer_has(&peer, &cid2));
+
+        // Not connected yet
+        assert!(!tracker.is_connected(&peer));
+        assert!(tracker.peers_with_cid(&cid1).is_empty());
     }
 }

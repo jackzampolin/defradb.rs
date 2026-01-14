@@ -1154,8 +1154,14 @@ async fn test_peer_state_tracking_with_coordinator() {
         .expect("failed to listen");
     wait_for_listening(&mut events2).await;
 
-    let peer_id1 = handle1.local_peer_id().await.expect("failed to get peer id");
-    let peer_id2 = handle2.local_peer_id().await.expect("failed to get peer id");
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+    let peer_id2 = handle2
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
 
     // Initially no peers connected in tracker
     assert!(coordinator1.peer_state().connected_peers().is_empty());
@@ -1207,6 +1213,133 @@ async fn test_peer_state_tracking_with_coordinator() {
     let stats = coordinator1.peer_state().stats();
     assert_eq!(stats.connected_peers, 1);
     assert_eq!(stats.total_peers, 1);
+
+    // Cleanup
+    handle1.shutdown().await.ok();
+    handle2.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_request_block_from_any_peer_no_peers_have_cid() {
+    use blockstore::DefraBlockstore;
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create a coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Try to request a block when no peers have it
+    let unknown_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    let result = coordinator
+        .request_block_from_any_peer(&unknown_cid, "test_doc", "test_collection")
+        .await;
+
+    // Should fail with PeerNotFound error
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    match err {
+        p2p::error::Error::PeerNotFound(msg) => {
+            assert!(
+                msg.contains("No peers found"),
+                "Expected 'No peers found' in error message, got: {}",
+                msg
+            );
+        }
+        other => panic!("Expected PeerNotFound error, got: {:?}", other),
+    }
+
+    // Cleanup
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_peer_state_cid_tracking_before_connection() {
+    use blockstore::DefraBlockstore;
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create two hosts with coordinators
+    let (handle1, mut events1) = create_and_start_host().await;
+    let store1 = Arc::new(MemoryStore::new());
+    let blockstore1 = Arc::new(DefraBlockstore::new(store1, true));
+    let (coordinator1, _sync_events1) =
+        SyncCoordinator::new(handle1.clone(), blockstore1.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 1");
+
+    let (handle2, mut events2) = create_and_start_host().await;
+    let store2 = Arc::new(MemoryStore::new());
+    let blockstore2 = Arc::new(DefraBlockstore::new(store2, true));
+    let (_coordinator2, _sync_events2) =
+        SyncCoordinator::new(handle2.clone(), blockstore2.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 2");
+
+    // Set up networking
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    let addr1 = wait_for_listening(&mut events1).await;
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events2).await;
+
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+    let peer_id2 = handle2
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+
+    // Test: Record CID for peer2 BEFORE connection event is processed
+    // This simulates a race condition where gossip message arrives before PeerConnected
+    let test_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Record CID before connection
+    coordinator1.peer_state().peer_has_cid(&peer_id2, test_cid);
+
+    // Peer entry should be created (bug fix verification)
+    assert!(coordinator1.peer_state().peer_has(&peer_id2, &test_cid));
+    assert_eq!(coordinator1.peer_state().stats().total_peers, 1);
+
+    // But peer is not connected, so shouldn't appear in peers_with_cid
+    assert!(coordinator1
+        .peer_state()
+        .peers_with_cid(&test_cid)
+        .is_empty());
+
+    // Now connect the hosts
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
+
+    // Wait for and process connection events
+    let connected1 = wait_for_peer_connected(&mut events1).await;
+    coordinator1
+        .handle_host_event(HostEvent::PeerConnected(connected1))
+        .await
+        .expect("handle event failed");
+
+    // Now peer2 should appear in peers_with_cid
+    let peers_with = coordinator1.peer_state().peers_with_cid(&test_cid);
+    assert_eq!(peers_with.len(), 1);
+    assert!(peers_with.contains(&peer_id2));
 
     // Cleanup
     handle1.shutdown().await.ok();

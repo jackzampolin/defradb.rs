@@ -39,5 +39,8 @@ cid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# Synchronization (non-poisoning locks)
+parking_lot = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -156,8 +156,18 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 );
 
                 // Parse CID and track that the peer has this block
-                if let Ok(cid) = Cid::try_from(message.cid.as_slice()) {
-                    self.peer_state.peer_has_cid(&propagation_source, cid);
+                match Cid::try_from(message.cid.as_slice()) {
+                    Ok(cid) => {
+                        self.peer_state.peer_has_cid(&propagation_source, cid);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            peer_id = %propagation_source,
+                            cid_bytes_len = message.cid.len(),
+                            error = %e,
+                            "Failed to parse CID from gossip message"
+                        );
+                    }
                 }
 
                 self.manager.process_pushlog(&message).await?;
@@ -174,8 +184,18 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 );
 
                 // Parse CID and track that the peer has this block
-                if let Ok(cid) = Cid::try_from(request.cid.as_slice()) {
-                    self.peer_state.peer_has_cid(&peer_id, cid);
+                match Cid::try_from(request.cid.as_slice()) {
+                    Ok(cid) => {
+                        self.peer_state.peer_has_cid(&peer_id, cid);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            cid_bytes_len = request.cid.len(),
+                            error = %e,
+                            "Failed to parse CID from PushLog request"
+                        );
+                    }
                 }
 
                 // Convert request to broadcast format and process
@@ -396,7 +416,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         // Try each peer until one succeeds
         let mut last_error = None;
         for peer_id in peers {
-            match self.request_block(peer_id, cid, doc_id, collection_id).await {
+            match self
+                .request_block(peer_id, cid, doc_id, collection_id)
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     tracing::debug!(

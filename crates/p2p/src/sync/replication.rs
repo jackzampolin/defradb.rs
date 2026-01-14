@@ -358,10 +358,15 @@ impl ReplicationLoop {
     ///
     /// Call this at startup to process any blocks that were stored
     /// but not yet merged (e.g., due to crash recovery).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unmerged block list cannot be retrieved.
+    /// Individual block processing errors are captured in the returned results.
     pub async fn recover_unmerged<B, H>(
         coordinator: Arc<SyncCoordinator<B>>,
         handler: Arc<H>,
-    ) -> Vec<ReplicationResult>
+    ) -> Result<Vec<ReplicationResult>, crate::error::Error>
     where
         B: Blockstore + 'static,
         H: MergeHandler + 'static,
@@ -371,13 +376,7 @@ impl ReplicationLoop {
             rebroadcast_on_merge: false,
         };
 
-        let unmerged = match coordinator.get_unmerged().await {
-            Ok(cids) => cids,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to get unmerged blocks");
-                return vec![];
-            }
-        };
+        let unmerged = coordinator.get_unmerged().await?;
 
         tracing::info!(count = unmerged.len(), "Recovering unmerged blocks");
 
@@ -399,7 +398,7 @@ impl ReplicationLoop {
             results.push(result);
         }
 
-        results
+        Ok(results)
     }
 }
 
