@@ -1,52 +1,42 @@
 //! CID (Content Identifier) generation for schema definitions.
 //!
 //! This module generates CIDs compatible with Go DefraDB's IPLD block format.
-//! The format uses DAG-CBOR encoding with CIDv1 and SHA2-256 hashing.
-//!
-//! Key compatibility requirements:
-//! - CBOR map keys must be in alphabetical order (serde_cbor does this)
-//! - IPLD uses keyed union representation: {"fieldDefinition": {...}}
-//! - Block structure: {"delta": {"fieldDefinition": {...}}}
+//! Uses defra-core's Block type with serde_ipld_dagcbor for proper DAG-CBOR encoding.
 
 use cid::Cid;
+use defra_core::{
+    Block, CollectionDefinitionDeltaPayload, CrdtDelta, FieldDefinitionDeltaPayload,
+    DAG_CBOR_CODEC, SHA2_256_CODE,
+};
 use multihash::Multihash;
-use serde::ser::{SerializeMap, Serializer};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{FieldDescription, FieldKind};
 
-/// CID codec for DAG-CBOR (matches Go's multicodec.DagCbor)
-const DAG_CBOR_CODEC: u64 = 0x71;
-
-/// Multihash code for SHA2-256 (matches Go's multicodec.Sha2_256)
-const SHA2_256_CODE: u64 = 0x12;
-
 /// Generates a CID for a field definition.
 ///
-/// This matches Go's field definition block structure:
-/// - Block { delta: CRDT { FieldDefinitionDelta }, heads: null, links: null }
+/// This matches Go's field definition block structure using defra-core's Block type.
 pub fn generate_field_cid(field: &FieldDescription) -> crate::Result<Cid> {
-    let delta = FieldDefinitionDelta::from_field(field);
-    let block = FieldBlock { delta };
-    generate_cid(&block)
+    let delta = field_to_delta(field);
+    let block = Block::new(CrdtDelta::FieldDefinition(delta), vec![], vec![]);
+    generate_block_cid(&block)
 }
 
 /// Generates a CID for a collection definition.
 ///
-/// This matches Go's collection definition block structure:
-/// - Block { delta: CRDT { CollectionDefinitionDelta }, heads: null, links: null }
+/// This matches Go's collection definition block structure using defra-core's Block type.
 pub fn generate_collection_cid(name: &str, _field_cids: &[Cid]) -> crate::Result<Cid> {
-    let delta = CollectionDefinitionDelta::new(name);
-    let block = CollectionBlock { delta };
-    generate_cid(&block)
+    let delta = CollectionDefinitionDeltaPayload::new(1).with_name(name);
+    let block = Block::new(CrdtDelta::CollectionDefinition(delta), vec![], vec![]);
+    generate_block_cid(&block)
 }
 
-/// Generates a CID from a serializable block.
-fn generate_cid<T: Serialize>(block: &T) -> crate::Result<Cid> {
-    // Serialize to CBOR
-    let cbor_bytes =
-        serde_cbor::to_vec(block).map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
+/// Generates a CID from a Block using DAG-CBOR encoding.
+fn generate_block_cid(block: &Block) -> crate::Result<Cid> {
+    // Serialize to DAG-CBOR using serde_ipld_dagcbor
+    let cbor_bytes = block
+        .to_dag_cbor()
+        .map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
 
     // Hash with SHA2-256
     let mut hasher = Sha256::new();
@@ -62,201 +52,33 @@ fn generate_cid<T: Serialize>(block: &T) -> crate::Result<Cid> {
     Ok(cid)
 }
 
-/// Block containing a field definition delta.
-/// Serializes to: {"delta": {"fieldDefinition": {...}}}
-struct FieldBlock {
-    delta: FieldDefinitionDelta,
-}
+/// Convert a FieldDescription to a FieldDefinitionDeltaPayload
+fn field_to_delta(field: &FieldDescription) -> FieldDefinitionDeltaPayload {
+    let mut delta = FieldDefinitionDeltaPayload::new(1)
+        .with_name(&field.name)
+        .with_crdt(field.crdt_type as u8);
 
-impl Serialize for FieldBlock {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // Outer block: {"delta": ...}
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("delta", &FieldCrdtWrapper(&self.delta))?;
-        map.end()
-    }
-}
-
-/// CRDT keyed union wrapper for field definition.
-/// Serializes to: {"fieldDefinition": {...}}
-struct FieldCrdtWrapper<'a>(&'a FieldDefinitionDelta);
-
-impl Serialize for FieldCrdtWrapper<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("fieldDefinition", self.0)?;
-        map.end()
-    }
-}
-
-/// Block containing a collection definition delta.
-/// Serializes to: {"delta": {"collectionDefinition": {...}}}
-struct CollectionBlock {
-    delta: CollectionDefinitionDelta,
-}
-
-impl Serialize for CollectionBlock {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("delta", &CollectionCrdtWrapper(&self.delta))?;
-        map.end()
-    }
-}
-
-/// CRDT keyed union wrapper for collection definition.
-/// Serializes to: {"collectionDefinition": {...}}
-struct CollectionCrdtWrapper<'a>(&'a CollectionDefinitionDelta);
-
-impl Serialize for CollectionCrdtWrapper<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("collectionDefinition", self.0)?;
-        map.end()
-    }
-}
-
-/// Field definition delta matching Go's crdt.FieldDefinitionDelta.
-/// Fields must serialize in alphabetical order (crdt, collectionID, name, priority, relativeID, scalarKind).
-#[derive(Debug, Clone)]
-struct FieldDefinitionDelta {
-    crdt: Option<u8>,
-    collection_id: Option<String>,
-    name: Option<String>,
-    priority: u64,
-    relative_id: Option<i32>,
-    scalar_kind: Option<u8>,
-}
-
-impl Serialize for FieldDefinitionDelta {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // Count non-None fields plus priority (always present)
-        let mut count = 1; // priority is always present
-        if self.crdt.is_some() {
-            count += 1;
+    match &field.kind {
+        FieldKind::Scalar(k) => {
+            delta = delta.with_scalar_kind(*k as u8);
         }
-        if self.collection_id.is_some() {
-            count += 1;
+        FieldKind::ScalarArray(k) => {
+            delta = delta.with_scalar_kind(*k as u8);
         }
-        if self.name.is_some() {
-            count += 1;
+        FieldKind::Relation { collection_id, .. } => {
+            delta = delta.with_collection_id(collection_id);
         }
-        if self.relative_id.is_some() {
-            count += 1;
-        }
-        if self.scalar_kind.is_some() {
-            count += 1;
-        }
-
-        let mut map = serializer.serialize_map(Some(count))?;
-
-        // CBOR canonical ordering: shorter keys first, then lexicographic within same length
-        // Key lengths: crdt(4), name(4), priority(8), relativeID(10), scalarKind(10), collectionID(12)
-        // Order: crdt, name, priority, relativeID, scalarKind, collectionID
-
-        // Length 4: crdt, name (lexicographic: crdt < name)
-        if let Some(crdt) = self.crdt {
-            map.serialize_entry("crdt", &crdt)?;
-        }
-        if let Some(ref name) = self.name {
-            map.serialize_entry("name", name)?;
-        }
-        // Length 8: priority
-        map.serialize_entry("priority", &self.priority)?;
-        // Length 10: relativeID, scalarKind (lexicographic: relativeID < scalarKind)
-        if let Some(rid) = self.relative_id {
-            map.serialize_entry("relativeID", &rid)?;
-        }
-        if let Some(sk) = self.scalar_kind {
-            map.serialize_entry("scalarKind", &sk)?;
-        }
-        // Length 12: collectionID
-        if let Some(ref cid) = self.collection_id {
-            map.serialize_entry("collectionID", cid)?;
-        }
-
-        map.end()
-    }
-}
-
-impl FieldDefinitionDelta {
-    fn from_field(field: &FieldDescription) -> Self {
-        let (scalar_kind, collection_id, relative_id) = match &field.kind {
-            FieldKind::Scalar(k) => (Some(*k as u8), None, None),
-            FieldKind::ScalarArray(k) => (Some(*k as u8), None, None),
-            FieldKind::Relation { collection_id, .. } => (None, Some(collection_id.clone()), None),
-            FieldKind::SelfRef { relative_id, .. } => {
-                let rel_id = if relative_id.is_empty() {
-                    None
-                } else {
-                    relative_id.parse::<i32>().ok()
-                };
-                (None, None, rel_id)
+        FieldKind::SelfRef { relative_id, .. } => {
+            if !relative_id.is_empty() {
+                if let Ok(rel_id) = relative_id.parse::<i32>() {
+                    delta = delta.with_relative_id(rel_id);
+                }
             }
-            FieldKind::Named { .. } => (None, None, None),
-        };
-
-        Self {
-            priority: 1, // Default priority for new fields
-            name: Some(field.name.clone()),
-            crdt: Some(field.crdt_type as u8),
-            scalar_kind,
-            collection_id,
-            relative_id,
         }
+        FieldKind::Named { .. } => {}
     }
-}
 
-/// Collection definition delta matching Go's crdt.CollectionDefinitionDelta.
-#[derive(Debug, Clone)]
-struct CollectionDefinitionDelta {
-    name: Option<String>,
-    priority: u64,
-}
-
-impl Serialize for CollectionDefinitionDelta {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut count = 1; // priority always present
-        if self.name.is_some() {
-            count += 1;
-        }
-
-        let mut map = serializer.serialize_map(Some(count))?;
-
-        // Alphabetical: name, priority
-        if let Some(ref name) = self.name {
-            map.serialize_entry("name", name)?;
-        }
-        map.serialize_entry("priority", &self.priority)?;
-
-        map.end()
-    }
-}
-
-impl CollectionDefinitionDelta {
-    fn new(name: &str) -> Self {
-        Self {
-            priority: 1,
-            name: Some(name.to_string()),
-        }
-    }
+    delta
 }
 
 #[cfg(test)]
@@ -393,25 +215,5 @@ mod tests {
             "CID should be base32 encoded: {}",
             cid_str
         );
-    }
-
-    #[test]
-    fn test_cbor_output_for_debugging() {
-        // This test outputs CBOR hex for debugging purposes
-        let delta = FieldDefinitionDelta {
-            priority: 1,
-            name: Some("_docID".to_string()),
-            crdt: Some(1),
-            scalar_kind: Some(1),
-            collection_id: None,
-            relative_id: None,
-        };
-        let block = FieldBlock { delta };
-        let cbor_bytes = serde_cbor::to_vec(&block).unwrap();
-        let hex: String = cbor_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        println!("Rust CBOR hex: {}", hex);
-
-        // Go's expected hex for comparison:
-        // a16564656c7461a16f6669656c64446566696e6974696f6ea4646372647401646e616d65665f646f634944687072696f72697479016a7363616c61724b696e6401
     }
 }

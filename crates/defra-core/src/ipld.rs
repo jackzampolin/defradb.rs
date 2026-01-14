@@ -8,8 +8,9 @@ use std::collections::BTreeMap;
 use libipld::Ipld;
 
 use crate::block::{
-    Block, CollectionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink,
-    Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+    Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
+    CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, FieldDefinitionDeltaPayload,
+    LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
 };
 use crate::{Error, Result};
 
@@ -101,6 +102,12 @@ impl From<&CrdtDelta> for Ipld {
             CrdtDelta::Collection(payload) => {
                 map.insert("collection".to_string(), Ipld::from(payload));
             }
+            CrdtDelta::FieldDefinition(payload) => {
+                map.insert("fieldDefinition".to_string(), Ipld::from(payload));
+            }
+            CrdtDelta::CollectionDefinition(payload) => {
+                map.insert("collectionDefinition".to_string(), Ipld::from(payload));
+            }
         }
         Ipld::Map(map)
     }
@@ -177,6 +184,46 @@ impl From<&CollectionDeltaPayload> for Ipld {
             "priority".to_string(),
             Ipld::Integer(payload.priority as i128),
         );
+        Ipld::Map(map)
+    }
+}
+
+impl From<&FieldDefinitionDeltaPayload> for Ipld {
+    fn from(payload: &FieldDefinitionDeltaPayload) -> Self {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "priority".to_string(),
+            Ipld::Integer(payload.priority as i128),
+        );
+        if let Some(ref name) = payload.name {
+            map.insert("name".to_string(), Ipld::String(name.clone()));
+        }
+        if let Some(crdt) = payload.crdt {
+            map.insert("crdt".to_string(), Ipld::Integer(crdt as i128));
+        }
+        if let Some(sk) = payload.scalar_kind {
+            map.insert("scalarKind".to_string(), Ipld::Integer(sk as i128));
+        }
+        if let Some(ref cid) = payload.collection_id {
+            map.insert("collectionID".to_string(), Ipld::String(cid.clone()));
+        }
+        if let Some(rid) = payload.relative_id {
+            map.insert("relativeID".to_string(), Ipld::Integer(rid as i128));
+        }
+        Ipld::Map(map)
+    }
+}
+
+impl From<&CollectionDefinitionDeltaPayload> for Ipld {
+    fn from(payload: &CollectionDefinitionDeltaPayload) -> Self {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "priority".to_string(),
+            Ipld::Integer(payload.priority as i128),
+        );
+        if let Some(ref name) = payload.name {
+            map.insert("name".to_string(), Ipld::String(name.clone()));
+        }
         Ipld::Map(map)
     }
 }
@@ -310,6 +357,16 @@ impl TryFrom<&Ipld> for CrdtDelta {
                 collection,
             )?));
         }
+        if let Some(field_def) = map.get("fieldDefinition") {
+            return Ok(CrdtDelta::FieldDefinition(
+                FieldDefinitionDeltaPayload::try_from(field_def)?,
+            ));
+        }
+        if let Some(col_def) = map.get("collectionDefinition") {
+            return Ok(CrdtDelta::CollectionDefinition(
+                CollectionDefinitionDeltaPayload::try_from(col_def)?,
+            ));
+        }
 
         Err(Error::IpldError(
             "Unknown CRDT delta type in IPLD".to_string(),
@@ -402,6 +459,68 @@ impl TryFrom<&Ipld> for CollectionDeltaPayload {
         Ok(CollectionDeltaPayload {
             schema_version_id: parse_string(map, "schemaVersionID")?,
             priority: parse_u64(map, "priority")?,
+        })
+    }
+}
+
+impl TryFrom<&Ipld> for FieldDefinitionDeltaPayload {
+    type Error = Error;
+
+    fn try_from(ipld: &Ipld) -> Result<Self> {
+        let map = match ipld {
+            Ipld::Map(m) => m,
+            _ => {
+                return Err(Error::IpldError(
+                    "Expected IPLD map for FieldDefinitionDeltaPayload".to_string(),
+                ))
+            }
+        };
+
+        Ok(FieldDefinitionDeltaPayload {
+            priority: parse_u64(map, "priority")?,
+            name: map.get("name").and_then(|v| match v {
+                Ipld::String(s) => Some(s.clone()),
+                _ => None,
+            }),
+            crdt: map.get("crdt").and_then(|v| match v {
+                Ipld::Integer(i) => Some(*i as u8),
+                _ => None,
+            }),
+            scalar_kind: map.get("scalarKind").and_then(|v| match v {
+                Ipld::Integer(i) => Some(*i as u8),
+                _ => None,
+            }),
+            collection_id: map.get("collectionID").and_then(|v| match v {
+                Ipld::String(s) => Some(s.clone()),
+                _ => None,
+            }),
+            relative_id: map.get("relativeID").and_then(|v| match v {
+                Ipld::Integer(i) => Some(*i as i32),
+                _ => None,
+            }),
+        })
+    }
+}
+
+impl TryFrom<&Ipld> for CollectionDefinitionDeltaPayload {
+    type Error = Error;
+
+    fn try_from(ipld: &Ipld) -> Result<Self> {
+        let map = match ipld {
+            Ipld::Map(m) => m,
+            _ => {
+                return Err(Error::IpldError(
+                    "Expected IPLD map for CollectionDefinitionDeltaPayload".to_string(),
+                ))
+            }
+        };
+
+        Ok(CollectionDefinitionDeltaPayload {
+            priority: parse_u64(map, "priority")?,
+            name: map.get("name").and_then(|v| match v {
+                Ipld::String(s) => Some(s.clone()),
+                _ => None,
+            }),
         })
     }
 }

@@ -12,7 +12,7 @@ defra-core = { path = "../defra-core" }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_cbor.workspace = true
+serde_ipld_dagcbor.workspace = true
 cid.workspace = true
 multihash.workspace = true
 sha2.workspace = true

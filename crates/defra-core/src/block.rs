@@ -129,6 +129,9 @@ impl Block {
     ///
     /// Returns heads first, then named links (in order).
     /// Matches Go's `AllLinks()` method.
+    ///
+    /// For IPLD-based traversal with visitor pattern, use `ipld::collect_block_links()`
+    /// or `ipld::walk_ipld()` with a custom `IpldVisitor`.
     pub fn all_links(&self) -> Vec<Cid> {
         let mut links = Vec::new();
 
@@ -230,6 +233,14 @@ pub enum CrdtDelta {
     /// Collection delta
     #[serde(rename = "collection")]
     Collection(CollectionDeltaPayload),
+
+    /// Field definition delta (schema versioning)
+    #[serde(rename = "fieldDefinition")]
+    FieldDefinition(FieldDefinitionDeltaPayload),
+
+    /// Collection definition delta (schema versioning)
+    #[serde(rename = "collectionDefinition")]
+    CollectionDefinition(CollectionDefinitionDeltaPayload),
 }
 
 impl CrdtDelta {
@@ -240,6 +251,8 @@ impl CrdtDelta {
             CrdtDelta::Counter(d) => d.priority,
             CrdtDelta::Composite(d) => d.priority,
             CrdtDelta::Collection(d) => d.priority,
+            CrdtDelta::FieldDefinition(d) => d.priority,
+            CrdtDelta::CollectionDefinition(d) => d.priority,
         }
     }
 
@@ -250,19 +263,32 @@ impl CrdtDelta {
             CrdtDelta::Counter(d) => d.priority = priority,
             CrdtDelta::Composite(d) => d.priority = priority,
             CrdtDelta::Collection(d) => d.priority = priority,
+            CrdtDelta::FieldDefinition(d) => d.priority = priority,
+            CrdtDelta::CollectionDefinition(d) => d.priority = priority,
         }
     }
 
     /// Get the document ID (if present)
     ///
-    /// Note: CollectionDelta does not have a doc_id, so returns None for that type.
+    /// Note: Collection, FieldDefinition, and CollectionDefinition deltas
+    /// do not have a doc_id, so return None for those types.
     pub fn doc_id(&self) -> Option<&[u8]> {
         match self {
             CrdtDelta::Lww(d) => Some(&d.doc_id),
             CrdtDelta::Counter(d) => Some(&d.doc_id),
             CrdtDelta::Composite(d) => Some(&d.doc_id),
             CrdtDelta::Collection(_) => None,
+            CrdtDelta::FieldDefinition(_) => None,
+            CrdtDelta::CollectionDefinition(_) => None,
         }
+    }
+
+    /// Check if this is a schema definition delta
+    pub fn is_definition(&self) -> bool {
+        matches!(
+            self,
+            CrdtDelta::FieldDefinition(_) | CrdtDelta::CollectionDefinition(_)
+        )
     }
 }
 
@@ -352,6 +378,122 @@ pub struct CollectionDeltaPayload {
 
     /// Priority
     pub priority: u64,
+}
+
+/// Field definition delta payload for schema versioning
+///
+/// Matches Go's `crdt.FieldDefinitionDelta` structure.
+/// Used to track changes to field definitions across schema versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldDefinitionDeltaPayload {
+    /// Priority
+    pub priority: u64,
+
+    /// Field name (optional for updates)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// CRDT type for this field
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crdt: Option<u8>,
+
+    /// Scalar kind (for scalar fields)
+    #[serde(
+        rename = "scalarKind",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scalar_kind: Option<u8>,
+
+    /// Related collection ID (for relation fields)
+    #[serde(
+        rename = "collectionID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub collection_id: Option<String>,
+
+    /// Relative ID (for self-referencing fields)
+    #[serde(
+        rename = "relativeID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub relative_id: Option<i32>,
+}
+
+impl FieldDefinitionDeltaPayload {
+    /// Create a new field definition delta
+    pub fn new(priority: u64) -> Self {
+        Self {
+            priority,
+            name: None,
+            crdt: None,
+            scalar_kind: None,
+            collection_id: None,
+            relative_id: None,
+        }
+    }
+
+    /// Set the field name
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Set the CRDT type
+    pub fn with_crdt(mut self, crdt: u8) -> Self {
+        self.crdt = Some(crdt);
+        self
+    }
+
+    /// Set the scalar kind
+    pub fn with_scalar_kind(mut self, kind: u8) -> Self {
+        self.scalar_kind = Some(kind);
+        self
+    }
+
+    /// Set the related collection ID
+    pub fn with_collection_id(mut self, id: impl Into<String>) -> Self {
+        self.collection_id = Some(id.into());
+        self
+    }
+
+    /// Set the relative ID
+    pub fn with_relative_id(mut self, id: i32) -> Self {
+        self.relative_id = Some(id);
+        self
+    }
+}
+
+/// Collection definition delta payload for schema versioning
+///
+/// Matches Go's `crdt.CollectionDefinitionDelta` structure.
+/// Used to track changes to collection definitions across schema versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionDefinitionDeltaPayload {
+    /// Priority
+    pub priority: u64,
+
+    /// Collection name (optional for updates)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl CollectionDefinitionDeltaPayload {
+    /// Create a new collection definition delta
+    pub fn new(priority: u64) -> Self {
+        Self {
+            priority,
+            name: None,
+        }
+    }
+
+    /// Set the collection name
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
 }
 
 // ============================================================================
