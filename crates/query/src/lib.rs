@@ -24,6 +24,7 @@ pub mod mapper;
 pub mod plan;
 pub mod planner;
 pub mod schema_gen;
+pub mod sdl_parse;
 
 // Re-exports for convenience
 pub use document::{DocumentMapping, RenderKey};
@@ -31,6 +32,7 @@ pub use error::{QueryError, Result};
 pub use mapper::{Filter, Select};
 pub use plan::{CreateInput, CreateNode, LimitNode, ScanNode, SelectNode};
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode};
+pub use sdl_parse::parse_sdl;
 
 #[cfg(test)]
 mod tests {
