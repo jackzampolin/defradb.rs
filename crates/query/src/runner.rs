@@ -4,7 +4,7 @@
 //! with the storage layer, executing queries and returning JSON results.
 
 use async_trait::async_trait;
-use document::{Document, NormalValue};
+use document::Document;
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
@@ -13,7 +13,8 @@ use std::sync::Arc;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-use crate::mapper::Select;
+use crate::json_convert::normal_value_to_json;
+use crate::mapper::{Requestable, Select};
 use crate::plan::{LimitNode, ScanNode, SelectNode};
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::parse_query;
@@ -72,6 +73,9 @@ impl<F: DocFetcher> QueryRunner<F> {
             .get(&select.collection_name)
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
+        // Validate unsupported features
+        self.validate_select(select)?;
+
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
             self.fetcher
@@ -105,6 +109,38 @@ impl<F: DocFetcher> QueryRunner<F> {
         plan.close().await?;
 
         Ok(JsonValue::Array(results))
+    }
+
+    /// Validate that the select doesn't use unsupported features.
+    fn validate_select(&self, select: &Select) -> Result<()> {
+        if select.order_by.is_some() {
+            return Err(QueryError::execution(
+                "ordering is not yet implemented; remove the 'order' argument",
+            ));
+        }
+        if select.group_by.is_some() {
+            return Err(QueryError::execution(
+                "grouping is not yet implemented; remove the 'groupBy' argument",
+            ));
+        }
+        if select.cid.is_some() {
+            return Err(QueryError::execution(
+                "CID-based queries are not yet implemented; remove the 'cid' argument",
+            ));
+        }
+
+        // Check for nested selections (relations)
+        for field in &select.fields {
+            if let Requestable::Select(nested) = field {
+                return Err(QueryError::execution(format!(
+                    "nested selections (relations) are not yet implemented; \
+                     remove the nested '{}' selection",
+                    nested.collection_name
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Build the document mapping for a select operation.
@@ -161,284 +197,13 @@ impl<F: DocFetcher> QueryRunner<F> {
         for field_name in doc.field_names() {
             if let Some(index) = mapping.first_index_of_name(field_name) {
                 if let Some(value) = doc.get(field_name) {
-                    let json = self.normal_value_to_json(value)?;
+                    let json = normal_value_to_json(value)?;
                     fields[index] = Some(json);
                 }
             }
         }
 
         Ok(Doc::with_fields(fields))
-    }
-
-    /// Convert NormalValue to JSON.
-    fn normal_value_to_json(&self, value: &NormalValue) -> Result<JsonValue> {
-        match value {
-            NormalValue::Null => Ok(JsonValue::Null),
-            NormalValue::Bool(b) => Ok(JsonValue::Bool(*b)),
-            NormalValue::Int(i) => Ok(JsonValue::Number((*i).into())),
-            NormalValue::Float64(f) => serde_json::Number::from_f64(*f)
-                .map(JsonValue::Number)
-                .ok_or_else(|| QueryError::execution("non-finite float")),
-            NormalValue::Float32(f) => serde_json::Number::from_f64(*f as f64)
-                .map(JsonValue::Number)
-                .ok_or_else(|| QueryError::execution("non-finite float")),
-            NormalValue::String(s) => Ok(JsonValue::String(s.clone())),
-            NormalValue::Bytes(b) => {
-                // Hex encode bytes
-                use std::fmt::Write;
-                let mut buf = String::with_capacity(b.len() * 2);
-                for byte in b {
-                    write!(buf, "{:02x}", byte)
-                        .map_err(|e| QueryError::execution(format!("failed to encode bytes: {}", e)))?;
-                }
-                Ok(JsonValue::String(buf))
-            }
-            NormalValue::Time(t) => Ok(JsonValue::String(t.to_rfc3339())),
-            NormalValue::Json(j) => Ok(j.clone()),
-            NormalValue::IntArray(arr) => Ok(JsonValue::Array(
-                arr.iter().map(|i| JsonValue::Number((*i).into())).collect(),
-            )),
-            NormalValue::StringArray(arr) => Ok(JsonValue::Array(
-                arr.iter().map(|s| JsonValue::String(s.clone())).collect(),
-            )),
-            NormalValue::BoolArray(arr) => Ok(JsonValue::Array(
-                arr.iter().map(|b| JsonValue::Bool(*b)).collect(),
-            )),
-            NormalValue::Float64Array(arr) => {
-                let values: Result<Vec<_>> = arr
-                    .iter()
-                    .map(|f| {
-                        serde_json::Number::from_f64(*f)
-                            .map(JsonValue::Number)
-                            .ok_or_else(|| QueryError::execution("non-finite float"))
-                    })
-                    .collect();
-                Ok(JsonValue::Array(values?))
-            }
-            // Handle nillable types
-            NormalValue::NillableBool(opt) => {
-                Ok(opt.map(JsonValue::Bool).unwrap_or(JsonValue::Null))
-            }
-            NormalValue::NillableInt(opt) => Ok(opt
-                .map(|i| JsonValue::Number(i.into()))
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableString(opt) => Ok(opt
-                .as_ref()
-                .map(|s| JsonValue::String(s.clone()))
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableFloat64(opt) => Ok(opt
-                .and_then(|f| serde_json::Number::from_f64(f).map(JsonValue::Number))
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableFloat32(opt) => Ok(opt
-                .and_then(|f| serde_json::Number::from_f64(f as f64).map(JsonValue::Number))
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::Float32Array(arr) => {
-                let values: Result<Vec<_>> = arr
-                    .iter()
-                    .map(|f| {
-                        serde_json::Number::from_f64(*f as f64)
-                            .map(JsonValue::Number)
-                            .ok_or_else(|| QueryError::execution("non-finite float"))
-                    })
-                    .collect();
-                Ok(JsonValue::Array(values?))
-            }
-            NormalValue::NillableTime(opt) => Ok(opt
-                .as_ref()
-                .map(|t| JsonValue::String(t.to_rfc3339()))
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::Document(doc) => {
-                Ok(JsonValue::String(format!("<document:{:?}>", doc.id())))
-            }
-            NormalValue::DocumentArray(docs) => Ok(JsonValue::Array(
-                docs.iter()
-                    .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
-                    .collect(),
-            )),
-            NormalValue::NillableBytes(opt) => Ok(opt
-                .as_ref()
-                .map(|b| {
-                    use std::fmt::Write;
-                    let mut buf = String::with_capacity(b.len() * 2);
-                    for byte in b {
-                        let _ = write!(buf, "{:02x}", byte);
-                    }
-                    JsonValue::String(buf)
-                })
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableDocument(opt) => Ok(opt
-                .as_ref()
-                .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::BytesArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|b| {
-                        use std::fmt::Write;
-                        let mut buf = String::with_capacity(b.len() * 2);
-                        for byte in b {
-                            let _ = write!(buf, "{:02x}", byte);
-                        }
-                        JsonValue::String(buf)
-                    })
-                    .collect(),
-            )),
-            NormalValue::TimeArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|t| JsonValue::String(t.to_rfc3339()))
-                    .collect(),
-            )),
-            NormalValue::JsonArray(arr) => Ok(JsonValue::Array(arr.clone())),
-            NormalValue::NillableIntArray(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| {
-                    JsonValue::Array(arr.iter().map(|i| JsonValue::Number((*i).into())).collect())
-                })
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableStringArray(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| {
-                    JsonValue::Array(arr.iter().map(|s| JsonValue::String(s.clone())).collect())
-                })
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableBoolArray(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| JsonValue::Array(arr.iter().map(|b| JsonValue::Bool(*b)).collect()))
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableFloat64Array(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| {
-                    JsonValue::Array(
-                        arr.iter()
-                            .filter_map(|f| serde_json::Number::from_f64(*f).map(JsonValue::Number))
-                            .collect(),
-                    )
-                })
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableFloat32Array(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| {
-                    JsonValue::Array(
-                        arr.iter()
-                            .filter_map(|f| {
-                                serde_json::Number::from_f64(*f as f64).map(JsonValue::Number)
-                            })
-                            .collect(),
-                    )
-                })
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableBytesArray(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| {
-                    JsonValue::Array(
-                        arr.iter()
-                            .map(|b| {
-                                use std::fmt::Write;
-                                let mut buf = String::with_capacity(b.len() * 2);
-                                for byte in b {
-                                    let _ = write!(buf, "{:02x}", byte);
-                                }
-                                JsonValue::String(buf)
-                            })
-                            .collect(),
-                    )
-                })
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableTimeArray(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| {
-                    JsonValue::Array(
-                        arr.iter()
-                            .map(|t| JsonValue::String(t.to_rfc3339()))
-                            .collect(),
-                    )
-                })
-                .unwrap_or(JsonValue::Null)),
-            NormalValue::NillableDocumentArray(opt) => Ok(opt
-                .as_ref()
-                .map(|arr| {
-                    JsonValue::Array(
-                        arr.iter()
-                            .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
-                            .collect(),
-                    )
-                })
-                .unwrap_or(JsonValue::Null)),
-            // Arrays with nillable elements
-            NormalValue::NillableBoolElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| opt.map(JsonValue::Bool).unwrap_or(JsonValue::Null))
-                    .collect(),
-            )),
-            NormalValue::NillableIntElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| {
-                        opt.map(|i| JsonValue::Number(i.into()))
-                            .unwrap_or(JsonValue::Null)
-                    })
-                    .collect(),
-            )),
-            NormalValue::NillableFloat64ElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| {
-                        opt.and_then(|f| serde_json::Number::from_f64(f).map(JsonValue::Number))
-                            .unwrap_or(JsonValue::Null)
-                    })
-                    .collect(),
-            )),
-            NormalValue::NillableFloat32ElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| {
-                        opt.and_then(|f| {
-                            serde_json::Number::from_f64(f as f64).map(JsonValue::Number)
-                        })
-                        .unwrap_or(JsonValue::Null)
-                    })
-                    .collect(),
-            )),
-            NormalValue::NillableStringElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| {
-                        opt.as_ref()
-                            .map(|s| JsonValue::String(s.clone()))
-                            .unwrap_or(JsonValue::Null)
-                    })
-                    .collect(),
-            )),
-            NormalValue::NillableBytesElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| {
-                        opt.as_ref()
-                            .map(|b| {
-                                use std::fmt::Write;
-                                let mut buf = String::with_capacity(b.len() * 2);
-                                for byte in b {
-                                    let _ = write!(buf, "{:02x}", byte);
-                                }
-                                JsonValue::String(buf)
-                            })
-                            .unwrap_or(JsonValue::Null)
-                    })
-                    .collect(),
-            )),
-            NormalValue::NillableTimeElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| {
-                        opt.as_ref()
-                            .map(|t| JsonValue::String(t.to_rfc3339()))
-                            .unwrap_or(JsonValue::Null)
-                    })
-                    .collect(),
-            )),
-            NormalValue::NillableDocumentElementArray(arr) => Ok(JsonValue::Array(
-                arr.iter()
-                    .map(|opt| {
-                        opt.as_ref()
-                            .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
-                            .unwrap_or(JsonValue::Null)
-                    })
-                    .collect(),
-            )),
-        }
     }
 
     /// Build a plan tree from a Select operation and documents.
@@ -511,12 +276,14 @@ impl<F: DocFetcher> QueryExecutor for QueryRunner<F> {
         }
     }
 
-    async fn execute_in_txn(&self, request: QueryRequest, _txn_id: &str) -> QueryResponse {
-        self.execute(request).await
+    async fn execute_in_txn(&self, _request: QueryRequest, txn_id: &str) -> QueryResponse {
+        QueryResponse::error(format!(
+            "execute_in_txn is not yet implemented: transaction '{}' context cannot be used",
+            txn_id
+        ))
     }
 
     async fn schema(&self) -> Result<String> {
-        // Generate GraphQL schema from collections
         let mut schema_str = String::new();
         for collection in self.collections.values() {
             schema_str.push_str(&format!("type {} {{\n", collection.name));
@@ -597,7 +364,6 @@ mod tests {
     async fn test_execute_simple_query() {
         let fetcher = MockFetcher::new();
 
-        // Add a test document
         let mut doc = Document::new();
         doc.set("name", "Alice");
         doc.set("age", 30i64);
@@ -666,7 +432,6 @@ mod tests {
     async fn test_execute_with_limit() {
         let fetcher = MockFetcher::new();
 
-        // Add 5 documents
         for i in 0..5 {
             let mut doc = Document::new();
             doc.set("name", format!("User{}", i));
@@ -708,8 +473,6 @@ mod tests {
         assert!(response.errors.is_empty());
         assert!(response.data.is_some());
     }
-
-    // Additional test coverage
 
     /// Mock fetcher that returns errors
     struct FailingFetcher;
@@ -754,16 +517,13 @@ mod tests {
 
         assert!(response.data.is_none());
         assert_eq!(response.errors.len(), 1);
-        assert!(response.errors[0]
-            .message
-            .contains("collection not found"));
+        assert!(response.errors[0].message.contains("collection not found"));
     }
 
     #[tokio::test]
     async fn test_execute_with_offset() {
         let fetcher = MockFetcher::new();
 
-        // Add 5 documents
         for i in 0..5 {
             let mut doc = Document::new();
             doc.set("name", format!("User{}", i));
@@ -780,14 +540,13 @@ mod tests {
             .unwrap();
 
         let users = result.get("Users").unwrap().as_array().unwrap();
-        assert_eq!(users.len(), 3); // Should skip first 2
+        assert_eq!(users.len(), 3);
     }
 
     #[tokio::test]
     async fn test_execute_with_limit_and_offset() {
         let fetcher = MockFetcher::new();
 
-        // Add 10 documents
         for i in 0..10 {
             let mut doc = Document::new();
             doc.set("name", format!("User{}", i));
@@ -803,7 +562,7 @@ mod tests {
             .unwrap();
 
         let users = result.get("Users").unwrap().as_array().unwrap();
-        assert_eq!(users.len(), 3); // Should return 3 items starting at offset 2
+        assert_eq!(users.len(), 3);
     }
 
     #[tokio::test]
@@ -848,5 +607,167 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("collection not found: Posts"));
+    }
+
+    #[tokio::test]
+    async fn test_order_by_returns_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users(order: {name: ASC}) { name } }")
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ordering is not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn test_group_by_returns_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users(groupBy: [name]) { name } }")
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("grouping is not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn test_nested_selection_returns_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users { name posts { title } } }")
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("nested selections (relations) are not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_in_txn_returns_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let request = QueryRequest::new("{ Users { name } }");
+        let response = runner.execute_in_txn(request, "txn-123").await;
+
+        assert!(response.has_errors());
+        assert!(response.errors[0]
+            .message
+            .contains("execute_in_txn is not yet implemented"));
+        assert!(response.errors[0].message.contains("txn-123"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_query_with_filter() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Charlie");
+        doc3.set("age", 35i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query(r#"{ Users(filter: {age: {_gte: 30}}) { name age } }"#)
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 2);
+
+        let names: Vec<&str> = users
+            .iter()
+            .map(|u| u.get("name").unwrap().as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Alice"));
+        assert!(names.contains(&"Charlie"));
+        assert!(!names.contains(&"Bob"));
+    }
+
+    #[tokio::test]
+    async fn test_field_alias_in_output() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users { userName: name } }")
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert!(users[0].get("userName").is_some());
+        assert!(users[0].get("name").is_none());
+        assert_eq!(users[0].get("userName").unwrap(), "Alice");
+    }
+
+    #[tokio::test]
+    async fn test_collection_alias_in_output() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ allUsers: Users { name } }")
+            .await
+            .unwrap();
+
+        assert!(result.get("allUsers").is_some());
+        assert!(result.get("Users").is_none());
+        let users = result.get("allUsers").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_schema_generation() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let schema = runner.schema().await.unwrap();
+
+        assert!(schema.contains("type Users"));
+        assert!(schema.contains("_docID: ID"));
+        assert!(schema.contains("name: String"));
+        assert!(schema.contains("age: Int"));
     }
 }
