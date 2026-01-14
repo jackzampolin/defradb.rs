@@ -8,17 +8,6 @@ use datastore::{BasicTxn, NamespaceView, RootView, TxnCallback};
 use std::sync::Arc;
 use storage::corekv::Store;
 
-/// Database transaction state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TxnState {
-    /// Transaction is active and can perform operations.
-    Active,
-    /// Transaction has been committed.
-    Committed,
-    /// Transaction has been discarded.
-    Discarded,
-}
-
 /// Database transaction wrapper.
 ///
 /// This wraps a BasicTxn and provides:
@@ -31,13 +20,15 @@ enum TxnState {
 ///
 /// Implicit transactions are created internally by database methods.
 /// They are automatically committed on success and discarded on error.
+///
+/// Transaction liveness is tracked by the `txn` field:
+/// - `Some(txn)` = transaction is active
+/// - `None` = transaction has been committed or discarded
 pub struct DbTxn<S: Store> {
-    /// The underlying BasicTxn.
+    /// The underlying BasicTxn. `None` after commit/discard.
     txn: Option<BasicTxn>,
     /// Whether this is an explicit transaction.
     explicit: bool,
-    /// Current transaction state.
-    state: TxnState,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -48,7 +39,6 @@ impl<S: Store> DbTxn<S> {
         Self {
             txn: Some(txn),
             explicit: false,
-            state: TxnState::Active,
             _marker: std::marker::PhantomData,
         }
     }
@@ -58,7 +48,6 @@ impl<S: Store> DbTxn<S> {
         Self {
             txn: Some(txn),
             explicit: true,
-            state: TxnState::Active,
             _marker: std::marker::PhantomData,
         }
     }
@@ -80,10 +69,7 @@ impl<S: Store> DbTxn<S> {
     ///
     /// Returns an error if the transaction has been committed or discarded.
     pub fn id(&self) -> Result<u64> {
-        self.txn
-            .as_ref()
-            .map(|t| t.id())
-            .ok_or(Error::TxnNotActive)
+        self.txn.as_ref().map(|t| t.id()).ok_or(Error::TxnNotActive)
     }
 
     /// Check if this is a read-only transaction.
@@ -211,15 +197,13 @@ impl<S: Store> DbTxn<S> {
             return Err(Error::ExplicitTxnMustUseForce);
         }
 
-        if self.state != TxnState::Active {
-            return Err(Error::TxnNotActive);
+        match self.txn.take() {
+            Some(txn) => {
+                txn.commit().await.map_err(Error::Datastore)?;
+                Ok(())
+            }
+            None => Err(Error::TxnNotActive),
         }
-
-        if let Some(txn) = self.txn.take() {
-            txn.commit().await.map_err(Error::Datastore)?;
-        }
-        self.state = TxnState::Committed;
-        Ok(())
     }
 
     /// Discard the transaction.
@@ -231,45 +215,39 @@ impl<S: Store> DbTxn<S> {
             return Err(Error::ExplicitTxnMustUseForce);
         }
 
-        if self.state != TxnState::Active {
-            return Err(Error::TxnNotActive);
+        match self.txn.take() {
+            Some(txn) => {
+                txn.discard().map_err(Error::Datastore)?;
+                Ok(())
+            }
+            None => Err(Error::TxnNotActive),
         }
-
-        if let Some(txn) = self.txn.take() {
-            txn.discard().map_err(Error::Datastore)?;
-        }
-        self.state = TxnState::Discarded;
-        Ok(())
     }
 
     /// Actually commit the transaction, even if explicit.
     ///
     /// This should only be called by the transaction creator.
     pub async fn force_commit(mut self) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnNotActive);
+        match self.txn.take() {
+            Some(txn) => {
+                txn.commit().await.map_err(Error::Datastore)?;
+                Ok(())
+            }
+            None => Err(Error::TxnNotActive),
         }
-
-        if let Some(txn) = self.txn.take() {
-            txn.commit().await.map_err(Error::Datastore)?;
-        }
-        self.state = TxnState::Committed;
-        Ok(())
     }
 
     /// Actually discard the transaction, even if explicit.
     ///
     /// This should only be called by the transaction creator.
     pub fn force_discard(mut self) -> Result<()> {
-        if self.state != TxnState::Active {
-            return Err(Error::TxnNotActive);
+        match self.txn.take() {
+            Some(txn) => {
+                txn.discard().map_err(Error::Datastore)?;
+                Ok(())
+            }
+            None => Err(Error::TxnNotActive),
         }
-
-        if let Some(txn) = self.txn.take() {
-            txn.discard().map_err(Error::Datastore)?;
-        }
-        self.state = TxnState::Discarded;
-        Ok(())
     }
 }
 
