@@ -24,6 +24,9 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# Cryptography (for stable ID generation)
+sha2.workspace = true
+
 # Error handling
 thiserror.workspace = true
 
