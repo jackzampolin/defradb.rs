@@ -78,7 +78,8 @@ impl<S: Store> DB<S> {
                 Ok(value)
             }
             Err(e) => {
-                txn.discard();
+                // Best effort discard - if it fails, return original error
+                let _ = txn.discard();
                 Err(e)
             }
         }
@@ -101,7 +102,8 @@ impl<S: Store> DB<S> {
                 Ok(value)
             }
             Err(e) => {
-                txn.discard();
+                // Best effort discard - if it fails, return original error
+                let _ = txn.discard();
                 Err(e)
             }
         }
@@ -147,12 +149,16 @@ mod tests {
 
         // Write in first transaction
         let txn1 = db.new_txn(false).await.unwrap();
-        txn1.datastore().set(b"key", b"value1").await.unwrap();
+        txn1.datastore()
+            .unwrap()
+            .set(b"key", b"value1")
+            .await
+            .unwrap();
         txn1.commit().await.unwrap();
 
         // Read in second transaction
         let txn2 = db.new_txn(true).await.unwrap();
-        let value = txn2.datastore().get(b"key").await.unwrap();
+        let value = txn2.datastore().unwrap().get(b"key").await.unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
     }
 
