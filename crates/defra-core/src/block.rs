@@ -211,10 +211,9 @@ impl Ord for DAGLink {
 
 /// CRDT delta types that can be embedded in a Block
 ///
-/// Matches Go's `crdt.CRDT` interface. Uses serde enum representation
-/// compatible with Go's CBOR encoding.
+/// Matches Go's `crdt.CRDT` IPLD union with "keyed" representation.
+/// Serializes as `{"lww": {...}}` or `{"counter": {...}}` etc.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
 pub enum CrdtDelta {
     /// LWW Register delta
     #[serde(rename = "lww")]
@@ -254,13 +253,15 @@ impl CrdtDelta {
         }
     }
 
-    /// Get the document ID
-    pub fn doc_id(&self) -> &[u8] {
+    /// Get the document ID (if present)
+    ///
+    /// Note: CollectionDelta does not have a doc_id, so returns None for that type.
+    pub fn doc_id(&self) -> Option<&[u8]> {
         match self {
-            CrdtDelta::Lww(d) => &d.doc_id,
-            CrdtDelta::Counter(d) => &d.doc_id,
-            CrdtDelta::Composite(d) => &d.doc_id,
-            CrdtDelta::Collection(d) => &d.doc_id,
+            CrdtDelta::Lww(d) => Some(&d.doc_id),
+            CrdtDelta::Counter(d) => Some(&d.doc_id),
+            CrdtDelta::Composite(d) => Some(&d.doc_id),
+            CrdtDelta::Collection(_) => None,
         }
     }
 }
@@ -271,7 +272,7 @@ impl CrdtDelta {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LwwDeltaPayload {
     /// Document ID
-    #[serde(rename = "docID")]
+    #[serde(rename = "docID", with = "serde_bytes")]
     pub doc_id: Vec<u8>,
 
     /// Field name
@@ -286,6 +287,7 @@ pub struct LwwDeltaPayload {
     pub schema_version_id: String,
 
     /// The value data (empty = deletion/tombstone)
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -295,7 +297,7 @@ pub struct LwwDeltaPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CounterDeltaPayload {
     /// Document ID
-    #[serde(rename = "docID")]
+    #[serde(rename = "docID", with = "serde_bytes")]
     pub doc_id: Vec<u8>,
 
     /// Field name
@@ -313,6 +315,7 @@ pub struct CounterDeltaPayload {
     pub schema_version_id: String,
 
     /// Increment/decrement value (encoded)
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -322,7 +325,7 @@ pub struct CounterDeltaPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompositeDeltaPayload {
     /// Document ID
-    #[serde(rename = "docID")]
+    #[serde(rename = "docID", with = "serde_bytes")]
     pub doc_id: Vec<u8>,
 
     /// Schema version identifier
@@ -340,12 +343,9 @@ pub struct CompositeDeltaPayload {
 /// Collection delta payload for block embedding
 ///
 /// Matches Go's `crdt.CollectionDelta` structure.
+/// Note: CollectionDelta does NOT have a docID field (unlike other delta types).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionDeltaPayload {
-    /// Document ID
-    #[serde(rename = "docID")]
-    pub doc_id: Vec<u8>,
-
     /// Schema version identifier
     #[serde(rename = "schemaVersionID")]
     pub schema_version_id: String,
@@ -364,7 +364,7 @@ pub struct CollectionDeltaPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Encryption {
     /// Document ID bytes
-    #[serde(rename = "docID")]
+    #[serde(rename = "docID", with = "serde_bytes")]
     pub doc_id: Vec<u8>,
 
     /// Field name (None for document-level encryption)
@@ -372,6 +372,7 @@ pub struct Encryption {
     pub field_name: Option<String>,
 
     /// Encryption key
+    #[serde(with = "serde_bytes")]
     pub key: Vec<u8>,
 }
 
@@ -424,6 +425,7 @@ pub struct Signature {
     pub header: SignatureHeader,
 
     /// Signature value bytes
+    #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
 }
 
@@ -460,6 +462,7 @@ pub struct SignatureHeader {
     pub sig_type: SignatureType,
 
     /// Signer identity (public key bytes)
+    #[serde(with = "serde_bytes")]
     pub identity: Vec<u8>,
 }
 
@@ -537,6 +540,251 @@ mod tests {
         let restored = Block::from_dag_cbor(&bytes).unwrap();
 
         assert_eq!(block, restored);
+    }
+
+    // ========================================================================
+    // Go Wire Compatibility Golden Tests (Issue #15)
+    // Test vectors generated from Go DefraDB implementation
+    // ========================================================================
+
+    // Go test vector: Simple LWW Block
+    const GO_LWW_SIMPLE_BYTES: &[u8] = &[
+        0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x63, 0x6C, 0x77, 0x77, 0xA5, 0x64, 0x64,
+        0x61, 0x74, 0x61, 0x44, 0x4A, 0x6F, 0x68, 0x6E, 0x65, 0x64, 0x6F, 0x63, 0x49, 0x44, 0x44,
+        0x64, 0x6F, 0x63, 0x31, 0x68, 0x70, 0x72, 0x69, 0x6F, 0x72, 0x69, 0x74, 0x79, 0x01, 0x69,
+        0x66, 0x69, 0x65, 0x6C, 0x64, 0x4E, 0x61, 0x6D, 0x65, 0x64, 0x6E, 0x61, 0x6D, 0x65, 0x6F,
+        0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x49, 0x44,
+        0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x31,
+    ];
+    const GO_LWW_SIMPLE_CID: &str = "bafyreigzutct4sl23hifnebryxvgdehhmsh3m5aexej2e2jo3wstq7glxi";
+
+    // Go test vector: LWW Block with higher priority
+    const GO_LWW_HIGH_PRIORITY_BYTES: &[u8] = &[
+        0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x63, 0x6C, 0x77, 0x77, 0xA5, 0x64, 0x64,
+        0x61, 0x74, 0x61, 0x42, 0x18, 0x1E, 0x65, 0x64, 0x6F, 0x63, 0x49, 0x44, 0x44, 0x64, 0x6F,
+        0x63, 0x31, 0x68, 0x70, 0x72, 0x69, 0x6F, 0x72, 0x69, 0x74, 0x79, 0x18, 0x64, 0x69, 0x66,
+        0x69, 0x65, 0x6C, 0x64, 0x4E, 0x61, 0x6D, 0x65, 0x63, 0x61, 0x67, 0x65, 0x6F, 0x73, 0x63,
+        0x68, 0x65, 0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x49, 0x44, 0x67, 0x73,
+        0x63, 0x68, 0x65, 0x6D, 0x61, 0x31,
+    ];
+    const GO_LWW_HIGH_PRIORITY_CID: &str =
+        "bafyreifj3pxwi7jf2n2qpoetqj2m72sirocaiy4tx4zjle5pttqcttolry";
+
+    // Go test vector: Counter Block
+    const GO_COUNTER_BYTES: &[u8] = &[
+        0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x67, 0x63, 0x6F, 0x75, 0x6E, 0x74, 0x65,
+        0x72, 0xA6, 0x64, 0x64, 0x61, 0x74, 0x61, 0x41, 0x0A, 0x65, 0x64, 0x6F, 0x63, 0x49, 0x44,
+        0x44, 0x64, 0x6F, 0x63, 0x31, 0x65, 0x6E, 0x6F, 0x6E, 0x63, 0x65, 0x19, 0x30, 0x39, 0x68,
+        0x70, 0x72, 0x69, 0x6F, 0x72, 0x69, 0x74, 0x79, 0x01, 0x69, 0x66, 0x69, 0x65, 0x6C, 0x64,
+        0x4E, 0x61, 0x6D, 0x65, 0x65, 0x63, 0x6F, 0x75, 0x6E, 0x74, 0x6F, 0x73, 0x63, 0x68, 0x65,
+        0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x49, 0x44, 0x67, 0x73, 0x63, 0x68,
+        0x65, 0x6D, 0x61, 0x31,
+    ];
+    const GO_COUNTER_CID: &str = "bafyreiavbuhwh23hcfh2pvgvtnuup6gbtvqamkil3wca46l4xofmzjszn4";
+
+    // Go test vector: Composite Block (active document)
+    const GO_COMPOSITE_ACTIVE_BYTES: &[u8] = &[
+        0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x69, 0x63, 0x6F, 0x6D, 0x70, 0x6F, 0x73,
+        0x69, 0x74, 0x65, 0xA4, 0x65, 0x64, 0x6F, 0x63, 0x49, 0x44, 0x44, 0x64, 0x6F, 0x63, 0x31,
+        0x66, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x01, 0x68, 0x70, 0x72, 0x69, 0x6F, 0x72, 0x69,
+        0x74, 0x79, 0x01, 0x6F, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69,
+        0x6F, 0x6E, 0x49, 0x44, 0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x31,
+    ];
+    const GO_COMPOSITE_ACTIVE_CID: &str =
+        "bafyreia3owq65zslwtr5qpewkwjbvn3w4pulyo4dy4qdrulm3s5jwthzgm";
+
+    // Go test vector: Composite Block (deleted document)
+    const GO_COMPOSITE_DELETED_BYTES: &[u8] = &[
+        0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x69, 0x63, 0x6F, 0x6D, 0x70, 0x6F, 0x73,
+        0x69, 0x74, 0x65, 0xA4, 0x65, 0x64, 0x6F, 0x63, 0x49, 0x44, 0x44, 0x64, 0x6F, 0x63, 0x31,
+        0x66, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x02, 0x68, 0x70, 0x72, 0x69, 0x6F, 0x72, 0x69,
+        0x74, 0x79, 0x02, 0x6F, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69,
+        0x6F, 0x6E, 0x49, 0x44, 0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x31,
+    ];
+    const GO_COMPOSITE_DELETED_CID: &str =
+        "bafyreif76cgwj4cuokkk564uniizeqbeqe6tqr3h6nsieidbtjbzecwutu";
+
+    // Go test vector: Collection Block
+    const GO_COLLECTION_BYTES: &[u8] = &[
+        0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x6A, 0x63, 0x6F, 0x6C, 0x6C, 0x65, 0x63,
+        0x74, 0x69, 0x6F, 0x6E, 0xA2, 0x68, 0x70, 0x72, 0x69, 0x6F, 0x72, 0x69, 0x74, 0x79, 0x01,
+        0x6F, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x49,
+        0x44, 0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x31,
+    ];
+    const GO_COLLECTION_CID: &str = "bafyreigf5dhfj5gxgij5bvycbn5p7jkarmedjqk3bwcst3am3lp5yyqnsi";
+
+    // Go test vector: LWW Block with empty data (deletion)
+    const GO_LWW_DELETION_BYTES: &[u8] = &[
+        0xA1, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x63, 0x6C, 0x77, 0x77, 0xA5, 0x64, 0x64,
+        0x61, 0x74, 0x61, 0x40, 0x65, 0x64, 0x6F, 0x63, 0x49, 0x44, 0x44, 0x64, 0x6F, 0x63, 0x31,
+        0x68, 0x70, 0x72, 0x69, 0x6F, 0x72, 0x69, 0x74, 0x79, 0x02, 0x69, 0x66, 0x69, 0x65, 0x6C,
+        0x64, 0x4E, 0x61, 0x6D, 0x65, 0x64, 0x6E, 0x61, 0x6D, 0x65, 0x6F, 0x73, 0x63, 0x68, 0x65,
+        0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x49, 0x44, 0x67, 0x73, 0x63, 0x68,
+        0x65, 0x6D, 0x61, 0x31,
+    ];
+    const GO_LWW_DELETION_CID: &str = "bafyreihqlzggsqqcokhhugjneworlnh2jpiin4x4gxtvrnmfqtz5kkrio4";
+
+    #[test]
+    fn test_go_wire_compat_lww_simple() {
+        // Deserialize Go bytes
+        let block = Block::from_dag_cbor(GO_LWW_SIMPLE_BYTES).unwrap();
+
+        // Re-serialize and verify byte-identical output
+        let rust_bytes = block.to_dag_cbor().unwrap();
+        assert_eq!(
+            rust_bytes.as_slice(),
+            GO_LWW_SIMPLE_BYTES,
+            "Rust serialization should match Go bytes"
+        );
+
+        // Verify CID matches
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_LWW_SIMPLE_CID,
+            "CID should match Go's CID"
+        );
+
+        // Verify content
+        if let CrdtDelta::Lww(lww) = &block.delta {
+            assert_eq!(lww.doc_id, b"doc1");
+            assert_eq!(lww.field_name, "name");
+            assert_eq!(lww.priority, 1);
+            assert_eq!(lww.schema_version_id, "schema1");
+            assert_eq!(lww.data, b"John");
+        } else {
+            panic!("Expected LWW delta");
+        }
+    }
+
+    #[test]
+    fn test_go_wire_compat_lww_high_priority() {
+        let block = Block::from_dag_cbor(GO_LWW_HIGH_PRIORITY_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_LWW_HIGH_PRIORITY_BYTES);
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_LWW_HIGH_PRIORITY_CID
+        );
+
+        if let CrdtDelta::Lww(lww) = &block.delta {
+            assert_eq!(lww.priority, 100);
+            assert_eq!(lww.field_name, "age");
+        } else {
+            panic!("Expected LWW delta");
+        }
+    }
+
+    #[test]
+    fn test_go_wire_compat_counter() {
+        let block = Block::from_dag_cbor(GO_COUNTER_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_COUNTER_BYTES);
+        assert_eq!(block.generate_cid().unwrap().to_string(), GO_COUNTER_CID);
+
+        if let CrdtDelta::Counter(counter) = &block.delta {
+            assert_eq!(counter.doc_id, b"doc1");
+            assert_eq!(counter.field_name, "count");
+            assert_eq!(counter.priority, 1);
+            assert_eq!(counter.nonce, 12345);
+            assert_eq!(counter.data, &[0x0A]); // CBOR integer 10
+        } else {
+            panic!("Expected Counter delta");
+        }
+    }
+
+    #[test]
+    fn test_go_wire_compat_composite_active() {
+        let block = Block::from_dag_cbor(GO_COMPOSITE_ACTIVE_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_COMPOSITE_ACTIVE_BYTES);
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_COMPOSITE_ACTIVE_CID
+        );
+
+        if let CrdtDelta::Composite(composite) = &block.delta {
+            assert_eq!(composite.doc_id, b"doc1");
+            assert_eq!(composite.priority, 1);
+            assert_eq!(composite.status, 1); // Active
+        } else {
+            panic!("Expected Composite delta");
+        }
+    }
+
+    #[test]
+    fn test_go_wire_compat_composite_deleted() {
+        let block = Block::from_dag_cbor(GO_COMPOSITE_DELETED_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_COMPOSITE_DELETED_BYTES);
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_COMPOSITE_DELETED_CID
+        );
+
+        if let CrdtDelta::Composite(composite) = &block.delta {
+            assert_eq!(composite.priority, 2);
+            assert_eq!(composite.status, 2); // Deleted
+        } else {
+            panic!("Expected Composite delta");
+        }
+    }
+
+    #[test]
+    fn test_go_wire_compat_collection() {
+        let block = Block::from_dag_cbor(GO_COLLECTION_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_COLLECTION_BYTES);
+        assert_eq!(block.generate_cid().unwrap().to_string(), GO_COLLECTION_CID);
+
+        if let CrdtDelta::Collection(collection) = &block.delta {
+            assert_eq!(collection.priority, 1);
+            assert_eq!(collection.schema_version_id, "schema1");
+        } else {
+            panic!("Expected Collection delta");
+        }
+    }
+
+    #[test]
+    fn test_go_wire_compat_lww_deletion() {
+        let block = Block::from_dag_cbor(GO_LWW_DELETION_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_LWW_DELETION_BYTES);
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_LWW_DELETION_CID
+        );
+
+        if let CrdtDelta::Lww(lww) = &block.delta {
+            assert_eq!(lww.priority, 2);
+            assert!(lww.data.is_empty(), "Deletion should have empty data");
+        } else {
+            panic!("Expected LWW delta");
+        }
+    }
+
+    #[test]
+    fn test_rust_produces_go_compatible_lww() {
+        // Create same block structure as Go test
+        let block = Block::new(test_lww_delta(), vec![], vec![]);
+        let bytes = block.to_dag_cbor().unwrap();
+
+        // Should produce identical bytes to Go
+        assert_eq!(
+            bytes.as_slice(),
+            GO_LWW_SIMPLE_BYTES,
+            "Rust-created block should produce Go-compatible bytes"
+        );
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_LWW_SIMPLE_CID,
+            "CID should match Go"
+        );
     }
 
     #[test]
@@ -747,7 +995,6 @@ mod tests {
     #[test]
     fn test_collection_delta_roundtrip() {
         let delta = CrdtDelta::Collection(CollectionDeltaPayload {
-            doc_id: b"doc1".to_vec(),
             schema_version_id: "v2".to_string(),
             priority: 10,
         });
@@ -786,5 +1033,177 @@ mod tests {
         let bytes = block.to_dag_cbor().unwrap();
         let restored = Block::from_dag_cbor(&bytes).unwrap();
         assert_eq!(block, restored);
+    }
+
+    // ========================================================================
+    // Deserialization Error Handling Tests (Issue #16)
+    // ========================================================================
+
+    #[test]
+    fn test_from_dag_cbor_rejects_invalid_cbor() {
+        // Completely invalid bytes - not valid CBOR at all
+        let result = Block::from_dag_cbor(&[0xFF, 0xFF, 0xFF]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_empty_input() {
+        let result = Block::from_dag_cbor(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_truncated_data() {
+        let block = Block::new(test_lww_delta(), vec![], vec![]);
+        let bytes = block.to_dag_cbor().unwrap();
+
+        // Try various truncation points
+        for truncate_at in [1, bytes.len() / 4, bytes.len() / 2, bytes.len() - 1] {
+            let result = Block::from_dag_cbor(&bytes[..truncate_at]);
+            assert!(
+                result.is_err(),
+                "Should reject truncated data at {} bytes",
+                truncate_at
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_wrong_type_integer() {
+        // Valid CBOR integer (42), but not a Block structure
+        let cbor_integer = serde_ipld_dagcbor::to_vec(&42u64).unwrap();
+        let result = Block::from_dag_cbor(&cbor_integer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_wrong_type_string() {
+        // Valid CBOR string, but not a Block structure
+        let cbor_string = serde_ipld_dagcbor::to_vec(&"not a block").unwrap();
+        let result = Block::from_dag_cbor(&cbor_string);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_wrong_type_array() {
+        // Valid CBOR array, but Block expects a map
+        let cbor_array = serde_ipld_dagcbor::to_vec(&vec![1, 2, 3]).unwrap();
+        let result = Block::from_dag_cbor(&cbor_array);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_empty_map() {
+        // Valid CBOR map but missing required 'delta' field
+        use std::collections::BTreeMap;
+        let empty_map: BTreeMap<String, String> = BTreeMap::new();
+        let cbor_empty_map = serde_ipld_dagcbor::to_vec(&empty_map).unwrap();
+        let result = Block::from_dag_cbor(&cbor_empty_map);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_map_with_wrong_delta_type() {
+        // Map with 'delta' field but wrong type (string instead of CrdtDelta)
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<String, String> = BTreeMap::new();
+        map.insert("delta".to_string(), "not a delta".to_string());
+        let cbor_map = serde_ipld_dagcbor::to_vec(&map).unwrap();
+        let result = Block::from_dag_cbor(&cbor_map);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_dag_cbor_rejects_corrupted_block() {
+        // Take valid block bytes and corrupt them in the middle
+        let block = Block::new(test_lww_delta(), vec![test_cid()], vec![]);
+        let mut bytes = block.to_dag_cbor().unwrap();
+
+        // Corrupt bytes in the middle (should break structure)
+        if bytes.len() > 20 {
+            bytes[15] = 0xFF;
+            bytes[16] = 0xFF;
+            bytes[17] = 0xFF;
+        }
+
+        let result = Block::from_dag_cbor(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encryption_from_dag_cbor_rejects_invalid() {
+        let result = Encryption::from_dag_cbor(&[0xFF, 0xFF]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encryption_from_dag_cbor_rejects_truncated() {
+        let enc = Encryption::new(b"doc".to_vec(), b"key".to_vec());
+        let bytes = enc.to_dag_cbor().unwrap();
+        let result = Encryption::from_dag_cbor(&bytes[..bytes.len() / 2]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encryption_from_dag_cbor_rejects_missing_fields() {
+        use std::collections::BTreeMap;
+        // Missing 'key' field
+        let mut map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        map.insert("docID".to_string(), b"doc".to_vec());
+        let cbor = serde_ipld_dagcbor::to_vec(&map).unwrap();
+        let result = Encryption::from_dag_cbor(&cbor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signature_from_dag_cbor_rejects_invalid() {
+        let result = Signature::from_dag_cbor(&[0xFF, 0xFF]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signature_from_dag_cbor_rejects_truncated() {
+        let sig = Signature::new(
+            SignatureHeader::new(SignatureType::EdDSA, b"pk".to_vec()),
+            b"sig".to_vec(),
+        );
+        let bytes = sig.to_dag_cbor().unwrap();
+        let result = Signature::from_dag_cbor(&bytes[..bytes.len() / 2]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signature_from_dag_cbor_rejects_corrupted() {
+        // Take valid signature bytes and corrupt them
+        let sig = Signature::new(
+            SignatureHeader::new(SignatureType::EdDSA, b"pubkey".to_vec()),
+            b"signature".to_vec(),
+        );
+        let mut bytes = sig.to_dag_cbor().unwrap();
+
+        // Corrupt in the middle
+        if bytes.len() > 10 {
+            bytes[5] = 0xFF;
+            bytes[6] = 0xFF;
+        }
+
+        let result = Signature::from_dag_cbor(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_block_with_corrupted_cid_in_heads() {
+        // Create a valid block then corrupt the CID bytes
+        let block = Block::new(test_lww_delta(), vec![test_cid()], vec![]);
+        let mut bytes = block.to_dag_cbor().unwrap();
+
+        // Find and corrupt CID bytes (CIDs have a specific structure)
+        // The corruption should cause deserialization to fail
+        for i in (bytes.len() / 2)..bytes.len() {
+            bytes[i] = 0x00;
+        }
+
+        let result = Block::from_dag_cbor(&bytes);
+        assert!(result.is_err());
     }
 }
