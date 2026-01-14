@@ -2,107 +2,189 @@
 //!
 //! This module provides the `DbTransactionRegistry` which implements the query crate's
 //! `TransactionRegistry` trait, enabling transaction-aware query execution.
+//!
+//! # Architecture
+//!
+//! ```text
+//! query crate                          db crate
+//! ───────────                          ────────
+//! TransactionRegistry (trait)    <--   DbTransactionRegistry (impl)
+//! TransactionContext (trait)     <--   DbTransactionContext (impl)
+//! DocFetcher (trait)             <--   DbDocFetcher (impl)
+//! ```
 
+use async_trait::async_trait;
 use document::Document;
+use query::runner::DocFetcher;
+use query::txn::{TransactionContext, TransactionRegistry};
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use storage::corekv::Store;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
 
+// ============================================================================
+// DocFetcher Implementation
+// ============================================================================
+
 /// Document fetcher that uses a database transaction.
 ///
 /// This fetcher holds a reference to an active transaction and collection
 /// definitions, allowing it to fetch documents within the transaction context.
-pub struct TxnDocFetcher<S: Store> {
-    /// The database transaction
-    txn: Arc<RwLock<Option<DbTxn<S>>>>,
-    /// Collection definitions by name (used by registry methods)
-    #[allow(dead_code)]
+pub struct DbDocFetcher<S: Store> {
+    /// The database transaction (Mutex since DbTxn is not Sync)
+    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    /// Collection definitions by name
     collections: Arc<HashMap<String, Collection>>,
 }
 
-impl<S: Store> TxnDocFetcher<S> {
+impl<S: Store> DbDocFetcher<S> {
     /// Create a new transaction-scoped document fetcher.
     fn new(txn: DbTxn<S>, collections: Arc<HashMap<String, Collection>>) -> Self {
         Self {
-            txn: Arc::new(RwLock::new(Some(txn))),
+            txn: Arc::new(TokioMutex::new(Some(txn))),
             collections,
         }
     }
 
     /// Take the transaction out of the fetcher (for commit/rollback).
-    async fn take_txn(&self) -> Option<DbTxn<S>> {
-        self.txn.write().await.take()
+    pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
+        self.txn.lock().await.take()
     }
 }
 
-/// Error type for query operations.
-#[derive(Debug, Clone)]
-pub struct QueryError(String);
+#[async_trait]
+impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
+    async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
+        let collection = self
+            .collections
+            .get(collection_name)
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-impl std::fmt::Display for QueryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        // Get the NamespaceView from the txn (sync operation)
+        // This must be done while holding the lock, but we only hold &NamespaceView across awaits
+        let datastore = {
+            let txn_guard = self.txn.lock().await;
+            let db_txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction already consumed")
+            })?;
+            db_txn
+                .datastore()
+                .map_err(|e| query::error::QueryError::execution(format!("txn error: {}", e)))?
+        };
+
+        // Now use the NamespaceView directly (which is Send + Sync)
+        collection
+            .get_all_with_datastore(&datastore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
+    }
+
+    async fn get_by_ids(
+        &self,
+        collection_name: &str,
+        doc_ids: &[String],
+    ) -> query::error::Result<Vec<Document>> {
+        let collection = self
+            .collections
+            .get(collection_name)
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Get the NamespaceView from the txn (sync operation)
+        let datastore = {
+            let txn_guard = self.txn.lock().await;
+            let db_txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction already consumed")
+            })?;
+            db_txn
+                .datastore()
+                .map_err(|e| query::error::QueryError::execution(format!("txn error: {}", e)))?
+        };
+
+        // Now use the NamespaceView directly (which is Send + Sync)
+        let mut docs = Vec::new();
+        for id_str in doc_ids {
+            let doc_id = document::DocID::from_string(id_str).map_err(|e| {
+                query::error::QueryError::execution(format!("invalid doc ID '{}': {}", id_str, e))
+            })?;
+
+            if let Some(doc) = collection
+                .get_with_datastore(&datastore, &doc_id)
+                .await
+                .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
+            {
+                docs.push(doc);
+            }
+        }
+
+        Ok(docs)
     }
 }
 
-impl std::error::Error for QueryError {}
-
-impl From<Error> for QueryError {
-    fn from(e: Error) -> Self {
-        QueryError(e.to_string())
-    }
-}
+// ============================================================================
+// TransactionContext Implementation
+// ============================================================================
 
 /// Transaction context for query execution.
+///
+/// Implements `query::TransactionContext` to provide transaction-scoped
+/// document fetching to the query executor.
 pub struct DbTransactionContext<S: Store> {
     /// Transaction ID
     id: String,
     /// Whether this is a read-only transaction
     readonly: bool,
     /// The document fetcher for this transaction
-    fetcher: Arc<TxnDocFetcher<S>>,
+    fetcher: Arc<DbDocFetcher<S>>,
 }
 
 impl<S: Store + 'static> DbTransactionContext<S> {
-    /// Get the transaction ID.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// Check if this is a read-only transaction.
-    pub fn is_readonly(&self) -> bool {
-        self.readonly
-    }
-
-    /// Get the document fetcher.
-    pub fn fetcher(&self) -> Arc<TxnDocFetcher<S>> {
-        self.fetcher.clone()
-    }
-
     /// Take the underlying transaction (for commit/rollback).
-    pub async fn take_txn(&self) -> Option<DbTxn<S>> {
+    pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
         self.fetcher.take_txn().await
     }
 }
 
+impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn is_readonly(&self) -> bool {
+        self.readonly
+    }
+
+    fn doc_fetcher(&self) -> Arc<dyn DocFetcher> {
+        self.fetcher.clone()
+    }
+}
+
+// ============================================================================
+// TransactionRegistry Implementation
+// ============================================================================
+
 /// Transaction registry that manages database transactions for query execution.
 ///
-/// This registry creates and tracks transactions, providing transaction-scoped
-/// document fetchers for query execution.
+/// Implements `query::TransactionRegistry` to provide transaction lifecycle
+/// management to the query executor.
+///
+/// # Thread Safety
+///
+/// Uses `std::sync::RwLock` for the transaction map to allow synchronous
+/// lookups (required by the trait), and `tokio::sync::RwLock` internally
+/// for the transaction state to support async operations.
 pub struct DbTransactionRegistry<S: Store> {
     /// The database instance
     db: Arc<DB<S>>,
     /// Collection definitions by name
     collections: Arc<HashMap<String, Collection>>,
-    /// Active transactions by ID
+    /// Active transactions by ID (std::sync for sync get())
     transactions: RwLock<HashMap<String, Arc<DbTransactionContext<S>>>>,
     /// Counter for generating unique transaction IDs
     id_counter: AtomicU64,
@@ -124,12 +206,33 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         }
     }
 
-    /// Begin a new transaction.
-    pub async fn begin(&self, readonly: bool) -> Result<String> {
+    /// Get the database instance.
+    pub fn db(&self) -> &Arc<DB<S>> {
+        &self.db
+    }
+
+    /// Get the collection definitions.
+    pub fn collections(&self) -> &Arc<HashMap<String, Collection>> {
+        &self.collections
+    }
+
+    /// Get a collection by name.
+    pub fn collection(&self, name: &str) -> Option<&Collection> {
+        self.collections.get(name)
+    }
+}
+
+#[async_trait]
+impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
+    async fn begin(&self, readonly: bool) -> query::error::Result<String> {
         let txn_id = format!("txn-{}", self.id_counter.fetch_add(1, Ordering::SeqCst));
 
-        let db_txn = self.db.new_txn(readonly).await?;
-        let fetcher = Arc::new(TxnDocFetcher::new(db_txn, self.collections.clone()));
+        let db_txn =
+            self.db.new_txn(readonly).await.map_err(|e| {
+                query::error::QueryError::execution(format!("storage error: {}", e))
+            })?;
+
+        let fetcher = Arc::new(DbDocFetcher::new(db_txn, self.collections.clone()));
 
         let ctx = Arc::new(DbTransactionContext {
             id: txn_id.clone(),
@@ -137,69 +240,83 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             fetcher,
         });
 
-        self.transactions.write().await.insert(txn_id.clone(), ctx);
+        self.transactions
+            .write()
+            .map_err(|_| query::error::QueryError::execution("lock poisoned"))?
+            .insert(txn_id.clone(), ctx);
 
         Ok(txn_id)
     }
 
-    /// Get an existing transaction by ID.
-    pub async fn get(&self, txn_id: &str) -> Option<Arc<DbTransactionContext<S>>> {
-        self.transactions.read().await.get(txn_id).cloned()
+    fn get(&self, txn_id: &str) -> Option<Arc<dyn TransactionContext>> {
+        self.transactions
+            .read()
+            .ok()?
+            .get(txn_id)
+            .cloned()
+            .map(|ctx| ctx as Arc<dyn TransactionContext>)
     }
 
-    /// Commit a transaction.
-    pub async fn commit(&self, txn_id: &str) -> Result<()> {
+    async fn commit(&self, txn_id: &str) -> query::error::Result<()> {
         let ctx = self
             .transactions
             .write()
-            .await
+            .map_err(|_| query::error::QueryError::execution("lock poisoned"))?
             .remove(txn_id)
-            .ok_or_else(|| Error::Other(format!("transaction '{}' not found", txn_id)))?;
+            .ok_or_else(|| {
+                query::error::QueryError::execution(format!("transaction '{}' not found", txn_id))
+            })?;
 
         let txn = ctx
             .take_txn()
             .await
-            .ok_or_else(|| Error::Other("transaction already consumed".into()))?;
+            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
 
-        txn.force_commit().await
+        txn.force_commit()
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("commit error: {}", e)))
     }
 
-    /// Rollback a transaction.
-    pub async fn rollback(&self, txn_id: &str) -> Result<()> {
+    async fn rollback(&self, txn_id: &str) -> query::error::Result<()> {
         let ctx = self
             .transactions
             .write()
-            .await
+            .map_err(|_| query::error::QueryError::execution("lock poisoned"))?
             .remove(txn_id)
-            .ok_or_else(|| Error::Other(format!("transaction '{}' not found", txn_id)))?;
+            .ok_or_else(|| {
+                query::error::QueryError::execution(format!("transaction '{}' not found", txn_id))
+            })?;
 
         let txn = ctx
             .take_txn()
             .await
-            .ok_or_else(|| Error::Other("transaction already consumed".into()))?;
+            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
 
         txn.force_discard()
+            .map_err(|e| query::error::QueryError::execution(format!("rollback error: {}", e)))
+    }
+}
+
+// ============================================================================
+// Convenience Methods (for direct db layer usage)
+// ============================================================================
+
+impl<S: Store + 'static> DbTransactionRegistry<S> {
+    /// Get an existing transaction by ID (async version for internal use).
+    pub fn get_ctx(&self, txn_id: &str) -> Option<Arc<DbTransactionContext<S>>> {
+        self.transactions.read().ok()?.get(txn_id).cloned()
     }
 
     /// Get all documents from a collection within a transaction.
     pub async fn get_all_docs(&self, txn_id: &str, collection_name: &str) -> Result<Vec<Document>> {
         let ctx = self
-            .get(txn_id)
-            .await
+            .get_ctx(txn_id)
             .ok_or_else(|| Error::Other(format!("transaction '{}' not found", txn_id)))?;
 
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| Error::Other(format!("collection '{}' not found", collection_name)))?;
-
-        let txn_guard = ctx.fetcher.txn.read().await;
-
-        let txn = txn_guard
-            .as_ref()
-            .ok_or_else(|| Error::Other("transaction already consumed".into()))?;
-
-        collection.get_all(txn).await
+        ctx.fetcher
+            .get_all(collection_name)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
     /// Get documents by IDs from a collection within a transaction.
@@ -210,34 +327,19 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         doc_ids: &[String],
     ) -> Result<Vec<Document>> {
         let ctx = self
-            .get(txn_id)
-            .await
+            .get_ctx(txn_id)
             .ok_or_else(|| Error::Other(format!("transaction '{}' not found", txn_id)))?;
 
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| Error::Other(format!("collection '{}' not found", collection_name)))?;
-
-        let txn_guard = ctx.fetcher.txn.read().await;
-
-        let txn = txn_guard
-            .as_ref()
-            .ok_or_else(|| Error::Other("transaction already consumed".into()))?;
-
-        let mut docs = Vec::new();
-        for id_str in doc_ids {
-            let doc_id = document::DocID::from_string(id_str)
-                .map_err(|e| Error::Other(format!("invalid doc ID '{}': {}", id_str, e)))?;
-
-            if let Some(doc) = collection.get(txn, &doc_id).await? {
-                docs.push(doc);
-            }
-        }
-
-        Ok(docs)
+        ctx.fetcher
+            .get_by_ids(collection_name, doc_ids)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -259,6 +361,10 @@ mod tests {
         )]
     }
 
+    // ========================================================================
+    // Basic Transaction Lifecycle Tests
+    // ========================================================================
+
     #[tokio::test]
     async fn test_begin_transaction() {
         let db = Arc::new(DB::new(MemoryStore::new()));
@@ -266,6 +372,36 @@ mod tests {
 
         let txn_id = registry.begin(false).await.unwrap();
         assert!(txn_id.starts_with("txn-"));
+    }
+
+    #[tokio::test]
+    async fn test_begin_readonly_transaction() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        assert!(ctx.is_readonly());
+    }
+
+    #[tokio::test]
+    async fn test_begin_readwrite_transaction() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(false).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        assert!(!ctx.is_readonly());
+    }
+
+    #[tokio::test]
+    async fn test_transaction_id_matches() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(false).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        assert_eq!(ctx.id(), txn_id);
     }
 
     #[tokio::test]
@@ -288,6 +424,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // ========================================================================
+    // Error Handling Tests
+    // ========================================================================
+
     #[tokio::test]
     async fn test_commit_nonexistent_returns_error() {
         let db = Arc::new(DB::new(MemoryStore::new()));
@@ -295,7 +435,66 @@ mod tests {
 
         let result = registry.commit("nonexistent").await;
         assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
+
+    #[tokio::test]
+    async fn test_rollback_nonexistent_returns_error() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let result = registry.rollback("nonexistent").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_returns_none() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_double_commit_returns_error() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(false).await.unwrap();
+        registry.commit(&txn_id).await.unwrap();
+
+        let result = registry.commit(&txn_id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_double_rollback_returns_error() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(false).await.unwrap();
+        registry.rollback(&txn_id).await.unwrap();
+
+        let result = registry.rollback(&txn_id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_commit_after_rollback_returns_error() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(false).await.unwrap();
+        registry.rollback(&txn_id).await.unwrap();
+
+        let result = registry.commit(&txn_id).await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Transaction State Tests
+    // ========================================================================
 
     #[tokio::test]
     async fn test_get_returns_none_after_commit() {
@@ -303,26 +502,80 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(false).await.unwrap();
-        assert!(registry.get(&txn_id).await.is_some());
+        assert!(registry.get(&txn_id).is_some());
 
         registry.commit(&txn_id).await.unwrap();
-        assert!(registry.get(&txn_id).await.is_none());
+        assert!(registry.get(&txn_id).is_none());
     }
 
     #[tokio::test]
-    async fn test_get_all_docs_empty_collection() {
+    async fn test_get_returns_none_after_rollback() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(false).await.unwrap();
+        assert!(registry.get(&txn_id).is_some());
+
+        registry.rollback(&txn_id).await.unwrap();
+        assert!(registry.get(&txn_id).is_none());
+    }
+
+    // ========================================================================
+    // DocFetcher Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_doc_fetcher_get_all_empty_collection() {
         let db = Arc::new(DB::new(MemoryStore::new()));
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let docs = registry.get_all_docs(&txn_id, "Users").await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        let docs = fetcher.get_all("Users").await.unwrap();
         assert!(docs.is_empty());
 
         registry.rollback(&txn_id).await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_transaction_data_isolation() {
+    async fn test_doc_fetcher_get_all_unknown_collection() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        let result = fetcher.get_all("NonExistent").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("NonExistent"));
+
+        registry.rollback(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_doc_fetcher_get_by_ids_empty() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        let docs = fetcher.get_by_ids("Users", &[]).await.unwrap();
+        assert!(docs.is_empty());
+
+        registry.rollback(&txn_id).await.unwrap();
+    }
+
+    // ========================================================================
+    // Data Isolation Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_transaction_sees_committed_data() {
         let db = Arc::new(DB::new(MemoryStore::new()));
         let registry = DbTransactionRegistry::new(db.clone(), test_schema());
         let collection = Collection::new(test_schema().pop().unwrap());
@@ -338,12 +591,53 @@ mod tests {
 
         // Read via registry
         let txn_id = registry.begin(true).await.unwrap();
-        let docs = registry.get_all_docs(&txn_id, "Users").await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        let docs = fetcher.get_all("Users").await.unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
 
         registry.rollback(&txn_id).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_get_by_ids_returns_matching_docs() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+        let collection = Collection::new(test_schema().pop().unwrap());
+
+        // Create two documents
+        let write_txn = db.new_txn(false).await.unwrap();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", NormalValue::String("Alice".to_string()));
+        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_id = doc1.id().unwrap().to_string();
+        collection.create(&write_txn, &doc1).await.unwrap();
+
+        let mut doc2 = Document::new();
+        doc2.set("name", NormalValue::String("Bob".to_string()));
+        doc2.generate_and_set_doc_id().unwrap();
+        collection.create(&write_txn, &doc2).await.unwrap();
+
+        write_txn.commit().await.unwrap();
+
+        // Query for just one document
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        let docs = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
+
+        registry.rollback(&txn_id).await.unwrap();
+    }
+
+    // ========================================================================
+    // Concurrent Transaction Tests
+    // ========================================================================
 
     #[tokio::test]
     async fn test_multiple_concurrent_transactions() {
@@ -354,9 +648,9 @@ mod tests {
         let txn2 = registry.begin(true).await.unwrap();
         let txn3 = registry.begin(false).await.unwrap();
 
-        assert!(registry.get(&txn1).await.is_some());
-        assert!(registry.get(&txn2).await.is_some());
-        assert!(registry.get(&txn3).await.is_some());
+        assert!(registry.get(&txn1).is_some());
+        assert!(registry.get(&txn2).is_some());
+        assert!(registry.get(&txn3).is_some());
 
         // Different IDs
         assert_ne!(txn1, txn2);
@@ -365,5 +659,23 @@ mod tests {
         registry.rollback(&txn1).await.unwrap();
         registry.rollback(&txn2).await.unwrap();
         registry.rollback(&txn3).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_transaction_ids_are_unique() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let mut ids = Vec::new();
+        for _ in 0..10 {
+            let txn_id = registry.begin(true).await.unwrap();
+            assert!(!ids.contains(&txn_id), "Duplicate ID: {}", txn_id);
+            ids.push(txn_id);
+        }
+
+        // Cleanup
+        for id in ids {
+            registry.rollback(&id).await.unwrap();
+        }
     }
 }

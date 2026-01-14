@@ -33,6 +33,7 @@ storage = { path = "../storage" }
 datastore = { path = "../datastore" }
 schema = { path = "../schema" }
 document = { path = "../document" }
+query = { path = "../query" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

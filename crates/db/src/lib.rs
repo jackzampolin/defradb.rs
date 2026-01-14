@@ -53,7 +53,7 @@ pub use collection::Collection;
 pub use database::{DbOptions, DB};
 pub use error::{Error, Result};
 pub use txn::DbTxn;
-pub use txn_registry::{DbTransactionContext, DbTransactionRegistry, TxnDocFetcher};
+pub use txn_registry::{DbDocFetcher, DbTransactionContext, DbTransactionRegistry};
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};
