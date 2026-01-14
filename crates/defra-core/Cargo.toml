@@ -21,6 +21,7 @@ serde_bytes.workspace = true
 cid.workspace = true
 multihash.workspace = true
 serde_ipld_dagcbor.workspace = true
+libipld.workspace = true
 
 # Cryptography (for CID generation)
 sha2.workspace = true

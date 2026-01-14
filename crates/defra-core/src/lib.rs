@@ -7,16 +7,18 @@ pub mod block;
 pub mod collection;
 pub mod document;
 pub mod error;
+pub mod ipld;
 pub mod store;
 pub mod transaction;
 pub mod types;
 
 pub use block::{
-    Block, CollectionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink,
-    Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType, DAG_CBOR_CODEC,
-    SHA2_256_CODE,
+    Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CompositeDeltaPayload,
+    CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, FieldDefinitionDeltaPayload,
+    LwwDeltaPayload, Signature, SignatureHeader, SignatureType, DAG_CBOR_CODEC, SHA2_256_CODE,
 };
 pub use error::{Error, Result};
+pub use ipld::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
 
 /// Version information for DefraDB
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
