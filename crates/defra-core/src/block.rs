@@ -1252,4 +1252,345 @@ mod tests {
         let result = Block::from_dag_cbor(&bytes);
         assert!(result.is_err());
     }
+
+    // ========================================================================
+    // Go Wire Compatibility: Encryption Tests
+    // ========================================================================
+
+    // Go test vector: Encryption with field name
+    const GO_ENCRYPTION_WITH_FIELD_NAME_BYTES: &[u8] = &[
+        0xA3, 0x63, 0x6B, 0x65, 0x79, 0x52, 0x65, 0x6E, 0x63, 0x72, 0x79, 0x70,
+        0x74, 0x69, 0x6F, 0x6E, 0x2D, 0x6B, 0x65, 0x79, 0x2D, 0x31, 0x32, 0x33,
+        0x65, 0x64, 0x6F, 0x63, 0x49, 0x44, 0x44, 0x64, 0x6F, 0x63, 0x31, 0x69,
+        0x66, 0x69, 0x65, 0x6C, 0x64, 0x4E, 0x61, 0x6D, 0x65, 0x64, 0x6E, 0x61,
+        0x6D, 0x65,
+    ];
+    const GO_ENCRYPTION_WITH_FIELD_NAME_CID: &str =
+        "bafyreif23kai6luix2oimentqgzvipfdwkjp3q25naub747hnuiu54eau4";
+
+    // Go test vector: Encryption without field name
+    const GO_ENCRYPTION_WITHOUT_FIELD_NAME_BYTES: &[u8] = &[
+        0xA2, 0x63, 0x6B, 0x65, 0x79, 0x46, 0x6B, 0x65, 0x79, 0x34, 0x35, 0x36,
+        0x65, 0x64, 0x6F, 0x63, 0x49, 0x44, 0x44, 0x64, 0x6F, 0x63, 0x32,
+    ];
+    const GO_ENCRYPTION_WITHOUT_FIELD_NAME_CID: &str =
+        "bafyreiejyqm4owudbqs6y4zsj72vp6jqwdblsiw75pzvffdttngt7j6mm4";
+
+    #[test]
+    fn test_go_wire_compat_encryption_with_field_name() {
+        let enc = Encryption::from_dag_cbor(GO_ENCRYPTION_WITH_FIELD_NAME_BYTES).unwrap();
+        let rust_bytes = enc.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            rust_bytes.as_slice(),
+            GO_ENCRYPTION_WITH_FIELD_NAME_BYTES,
+            "Rust serialization should match Go bytes"
+        );
+        assert_eq!(
+            enc.generate_cid().unwrap().to_string(),
+            GO_ENCRYPTION_WITH_FIELD_NAME_CID
+        );
+
+        assert_eq!(enc.doc_id, b"doc1");
+        assert_eq!(enc.field_name, Some("name".to_string()));
+        assert_eq!(enc.key, b"encryption-key-123");
+    }
+
+    #[test]
+    fn test_go_wire_compat_encryption_without_field_name() {
+        let enc = Encryption::from_dag_cbor(GO_ENCRYPTION_WITHOUT_FIELD_NAME_BYTES).unwrap();
+        let rust_bytes = enc.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_ENCRYPTION_WITHOUT_FIELD_NAME_BYTES);
+        assert_eq!(
+            enc.generate_cid().unwrap().to_string(),
+            GO_ENCRYPTION_WITHOUT_FIELD_NAME_CID
+        );
+
+        assert_eq!(enc.doc_id, b"doc2");
+        assert_eq!(enc.field_name, None);
+        assert_eq!(enc.key, b"key456");
+    }
+
+    // ========================================================================
+    // Go Wire Compatibility: Signature Tests
+    // ========================================================================
+
+    // Go test vector: Signature Ed25519
+    const GO_SIGNATURE_ED25519_BYTES: &[u8] = &[
+        0xA2, 0x65, 0x76, 0x61, 0x6C, 0x75, 0x65, 0x55, 0x73, 0x69, 0x67, 0x6E,
+        0x61, 0x74, 0x75, 0x72, 0x65, 0x2D, 0x76, 0x61, 0x6C, 0x75, 0x65, 0x2D,
+        0x62, 0x79, 0x74, 0x65, 0x73, 0x66, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
+        0xA2, 0x64, 0x74, 0x79, 0x70, 0x65, 0x65, 0x45, 0x64, 0x44, 0x53, 0x41,
+        0x68, 0x69, 0x64, 0x65, 0x6E, 0x74, 0x69, 0x74, 0x79, 0x4E, 0x65, 0x64,
+        0x32, 0x35, 0x35, 0x31, 0x39, 0x2D, 0x70, 0x75, 0x62, 0x6B, 0x65, 0x79,
+    ];
+    const GO_SIGNATURE_ED25519_CID: &str =
+        "bafyreib4gae2lppbkikyoltcdlepqytwco5cao7xqb7oxpvbtg5arnnfki";
+
+    // Go test vector: Signature ECDSA (Secp256k1)
+    const GO_SIGNATURE_ECDSA_BYTES: &[u8] = &[
+        0xA2, 0x65, 0x76, 0x61, 0x6C, 0x75, 0x65, 0x49, 0x65, 0x63, 0x64, 0x73,
+        0x61, 0x2D, 0x73, 0x69, 0x67, 0x66, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
+        0xA2, 0x64, 0x74, 0x79, 0x70, 0x65, 0x66, 0x45, 0x53, 0x32, 0x35, 0x36,
+        0x4B, 0x68, 0x69, 0x64, 0x65, 0x6E, 0x74, 0x69, 0x74, 0x79, 0x50, 0x73,
+        0x65, 0x63, 0x70, 0x32, 0x35, 0x36, 0x6B, 0x31, 0x2D, 0x70, 0x75, 0x62,
+        0x6B, 0x65, 0x79,
+    ];
+    const GO_SIGNATURE_ECDSA_CID: &str =
+        "bafyreieblfehzbcx5zasm7vbxodsmuhuvlvrj7ajo6k45f6trtrkddu4ve";
+
+    #[test]
+    fn test_go_wire_compat_signature_ed25519() {
+        let sig = Signature::from_dag_cbor(GO_SIGNATURE_ED25519_BYTES).unwrap();
+        let rust_bytes = sig.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            rust_bytes.as_slice(),
+            GO_SIGNATURE_ED25519_BYTES,
+            "Rust serialization should match Go bytes"
+        );
+        assert_eq!(
+            sig.generate_cid().unwrap().to_string(),
+            GO_SIGNATURE_ED25519_CID
+        );
+
+        assert_eq!(sig.header.sig_type, SignatureType::EdDSA);
+        assert_eq!(sig.header.identity, b"ed25519-pubkey");
+        assert_eq!(sig.value, b"signature-value-bytes");
+    }
+
+    #[test]
+    fn test_go_wire_compat_signature_ecdsa() {
+        let sig = Signature::from_dag_cbor(GO_SIGNATURE_ECDSA_BYTES).unwrap();
+        let rust_bytes = sig.to_dag_cbor().unwrap();
+
+        assert_eq!(rust_bytes.as_slice(), GO_SIGNATURE_ECDSA_BYTES);
+        assert_eq!(
+            sig.generate_cid().unwrap().to_string(),
+            GO_SIGNATURE_ECDSA_CID
+        );
+
+        assert_eq!(sig.header.sig_type, SignatureType::ES256K);
+        assert_eq!(sig.header.identity, b"secp256k1-pubkey");
+        assert_eq!(sig.value, b"ecdsa-sig");
+    }
+
+    // ========================================================================
+    // Go Wire Compatibility: Blocks with Heads and Links
+    // ========================================================================
+
+    // Go test vector: Block with one head (update block pointing to previous)
+    const GO_BLOCK_WITH_ONE_HEAD_BYTES: &[u8] = &[
+        0xA2, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x63, 0x6C, 0x77, 0x77,
+        0xA5, 0x64, 0x64, 0x61, 0x74, 0x61, 0x44, 0x4A, 0x61, 0x6E, 0x65, 0x65,
+        0x64, 0x6F, 0x63, 0x49, 0x44, 0x44, 0x64, 0x6F, 0x63, 0x31, 0x68, 0x70,
+        0x72, 0x69, 0x6F, 0x72, 0x69, 0x74, 0x79, 0x02, 0x69, 0x66, 0x69, 0x65,
+        0x6C, 0x64, 0x4E, 0x61, 0x6D, 0x65, 0x64, 0x6E, 0x61, 0x6D, 0x65, 0x6F,
+        0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6F,
+        0x6E, 0x49, 0x44, 0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x31, 0x65,
+        0x68, 0x65, 0x61, 0x64, 0x73, 0x81, 0xD8, 0x2A, 0x58, 0x25, 0x00, 0x01,
+        0x71, 0x12, 0x20, 0xD9, 0xA4, 0xC5, 0x3E, 0x49, 0x7A, 0xD9, 0xD0, 0x56,
+        0x90, 0x31, 0xC5, 0xEA, 0x61, 0x90, 0xE7, 0x64, 0x8F, 0xB6, 0x74, 0x04,
+        0xB9, 0x13, 0xA2, 0x69, 0x2E, 0xDD, 0xA5, 0x38, 0x7C, 0xCB, 0xBA,
+    ];
+    const GO_BLOCK_WITH_ONE_HEAD_CID: &str =
+        "bafyreidnhdcl46zojiq26rby63jbx2deh556mfswuzmhhcvkxukzkk67pm";
+
+    // Go test vector: Composite block with links to field-level blocks
+    const GO_COMPOSITE_BLOCK_WITH_LINKS_BYTES: &[u8] = &[
+        0xA2, 0x65, 0x64, 0x65, 0x6C, 0x74, 0x61, 0xA1, 0x69, 0x63, 0x6F, 0x6D,
+        0x70, 0x6F, 0x73, 0x69, 0x74, 0x65, 0xA4, 0x65, 0x64, 0x6F, 0x63, 0x49,
+        0x44, 0x44, 0x64, 0x6F, 0x63, 0x31, 0x66, 0x73, 0x74, 0x61, 0x74, 0x75,
+        0x73, 0x01, 0x68, 0x70, 0x72, 0x69, 0x6F, 0x72, 0x69, 0x74, 0x79, 0x01,
+        0x6F, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x56, 0x65, 0x72, 0x73, 0x69,
+        0x6F, 0x6E, 0x49, 0x44, 0x67, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x31,
+        0x65, 0x6C, 0x69, 0x6E, 0x6B, 0x73, 0x81, 0xA2, 0x64, 0x6C, 0x69, 0x6E,
+        0x6B, 0xD8, 0x2A, 0x58, 0x25, 0x00, 0x01, 0x71, 0x12, 0x20, 0x2E, 0x44,
+        0x23, 0x79, 0x36, 0xB7, 0xD8, 0x82, 0x24, 0xF7, 0x64, 0x87, 0x4C, 0x70,
+        0xEC, 0xDA, 0xD3, 0xAD, 0xF2, 0x2D, 0x51, 0xEB, 0x1D, 0x18, 0x83, 0xFB,
+        0x6B, 0x97, 0x9C, 0x61, 0x4B, 0xBB, 0x64, 0x6E, 0x61, 0x6D, 0x65, 0x63,
+        0x61, 0x67, 0x65,
+    ];
+    const GO_COMPOSITE_BLOCK_WITH_LINKS_CID: &str =
+        "bafyreid3sud6hv6tycednqo3ybovlquomtfiefxkb2ldmkqns7g3g6utda";
+
+    #[test]
+    fn test_go_wire_compat_block_with_head() {
+        let block = Block::from_dag_cbor(GO_BLOCK_WITH_ONE_HEAD_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            rust_bytes.as_slice(),
+            GO_BLOCK_WITH_ONE_HEAD_BYTES,
+            "Rust serialization should match Go bytes"
+        );
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_BLOCK_WITH_ONE_HEAD_CID
+        );
+
+        // Verify heads
+        assert!(block.heads.is_some());
+        let heads = block.heads.as_ref().unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(
+            heads[0].to_string(),
+            GO_LWW_SIMPLE_CID,
+            "Head should point to the simple LWW block"
+        );
+
+        // Verify delta content
+        if let CrdtDelta::Lww(lww) = &block.delta {
+            assert_eq!(lww.doc_id, b"doc1");
+            assert_eq!(lww.field_name, "name");
+            assert_eq!(lww.priority, 2);
+            assert_eq!(lww.data, b"Jane");
+        } else {
+            panic!("Expected LWW delta");
+        }
+    }
+
+    #[test]
+    fn test_go_wire_compat_composite_with_links() {
+        let block = Block::from_dag_cbor(GO_COMPOSITE_BLOCK_WITH_LINKS_BYTES).unwrap();
+        let rust_bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            rust_bytes.as_slice(),
+            GO_COMPOSITE_BLOCK_WITH_LINKS_BYTES,
+            "Rust serialization should match Go bytes"
+        );
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_COMPOSITE_BLOCK_WITH_LINKS_CID
+        );
+
+        // Verify links
+        assert!(block.links.is_some());
+        let links = block.links.as_ref().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].name, "age");
+
+        // Verify delta content
+        if let CrdtDelta::Composite(composite) = &block.delta {
+            assert_eq!(composite.doc_id, b"doc1");
+            assert_eq!(composite.priority, 1);
+            assert_eq!(composite.status, 1);
+            assert_eq!(composite.schema_version_id, "schema1");
+        } else {
+            panic!("Expected Composite delta");
+        }
+    }
+
+    // ========================================================================
+    // Rust-to-Go Compatibility: Round-Trip Tests
+    // Verifies Rust-created blocks produce Go-compatible bytes
+    // ========================================================================
+
+    #[test]
+    fn test_rust_produces_go_compatible_counter() {
+        let delta = CrdtDelta::Counter(CounterDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            field_name: "count".to_string(),
+            priority: 1,
+            nonce: 12345,
+            schema_version_id: "schema1".to_string(),
+            data: vec![0x0A],
+        });
+        let block = Block::new(delta, vec![], vec![]);
+        let bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            bytes.as_slice(),
+            GO_COUNTER_BYTES,
+            "Rust-created Counter block should match Go bytes"
+        );
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_COUNTER_CID,
+            "CID should match Go's CID"
+        );
+    }
+
+    #[test]
+    fn test_rust_produces_go_compatible_composite() {
+        let delta = CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+            status: 1,
+        });
+        let block = Block::new(delta, vec![], vec![]);
+        let bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            bytes.as_slice(),
+            GO_COMPOSITE_ACTIVE_BYTES,
+            "Rust-created Composite block should match Go bytes"
+        );
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_COMPOSITE_ACTIVE_CID
+        );
+    }
+
+    #[test]
+    fn test_rust_produces_go_compatible_collection() {
+        let delta = CrdtDelta::Collection(CollectionDeltaPayload {
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+        });
+        let block = Block::new(delta, vec![], vec![]);
+        let bytes = block.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            bytes.as_slice(),
+            GO_COLLECTION_BYTES,
+            "Rust-created Collection block should match Go bytes"
+        );
+        assert_eq!(
+            block.generate_cid().unwrap().to_string(),
+            GO_COLLECTION_CID
+        );
+    }
+
+    #[test]
+    fn test_rust_produces_go_compatible_encryption() {
+        let enc = Encryption::new_for_field(
+            b"doc1".to_vec(),
+            "name".to_string(),
+            b"encryption-key-123".to_vec(),
+        );
+        let bytes = enc.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            bytes.as_slice(),
+            GO_ENCRYPTION_WITH_FIELD_NAME_BYTES,
+            "Rust-created Encryption should match Go bytes"
+        );
+        assert_eq!(
+            enc.generate_cid().unwrap().to_string(),
+            GO_ENCRYPTION_WITH_FIELD_NAME_CID
+        );
+    }
+
+    #[test]
+    fn test_rust_produces_go_compatible_signature() {
+        let sig = Signature::new(
+            SignatureHeader::new(SignatureType::EdDSA, b"ed25519-pubkey".to_vec()),
+            b"signature-value-bytes".to_vec(),
+        );
+        let bytes = sig.to_dag_cbor().unwrap();
+
+        assert_eq!(
+            bytes.as_slice(),
+            GO_SIGNATURE_ED25519_BYTES,
+            "Rust-created Signature should match Go bytes"
+        );
+        assert_eq!(
+            sig.generate_cid().unwrap().to_string(),
+            GO_SIGNATURE_ED25519_CID
+        );
+    }
 }
