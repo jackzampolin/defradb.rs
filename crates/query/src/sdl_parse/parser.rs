@@ -14,36 +14,22 @@ use schema::{
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// Parsed directive information from a field
-#[derive(Debug, Default, Clone)]
-pub struct ParsedDirectives {
-    /// Whether this field is the primary side of a relation
-    pub is_primary: bool,
-    /// CRDT type override (default is LwwRegister)
-    pub crdt_type: Option<CType>,
-    /// Index configuration
-    pub index: Option<IndexConfig>,
-    /// Explicit relation name from @relation directive
-    pub relation_name: Option<String>,
-    /// Default value from @default directive
-    pub default_value: Option<serde_json::Value>,
-    /// Array size constraint from @constraints directive
-    pub size_constraint: Option<usize>,
-}
+use super::directives::{
+    default_type_error, get_directive_arg, get_directive_string, get_directive_string_list,
+    known_directive_arguments, IndexConfig, IndexDirection, ParsedDirectives,
+    KNOWN_FIELD_DIRECTIVES, KNOWN_TYPE_DIRECTIVES,
+};
+use super::warnings::{DirectiveLocation, ParseOutput, ParseWarning};
 
-/// Index configuration from @index directive
-#[derive(Debug, Clone)]
-pub struct IndexConfig {
-    pub name: Option<String>,
-    pub unique: bool,
-    pub direction: IndexDirection,
-}
+/// Parse @policy directive arguments
+fn parse_policy_directive(directive: &Directive<'_, String>) -> Result<PolicyConfig> {
+    let id = get_directive_string(directive, "id")
+        .ok_or_else(|| QueryError::parse("@policy directive requires 'id' argument"))?;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub enum IndexDirection {
-    #[default]
-    Asc,
-    Desc,
+    let resource = get_directive_string(directive, "resource")
+        .ok_or_else(|| QueryError::parse("@policy directive requires 'resource' argument"))?;
+
+    Ok(PolicyConfig { id, resource })
 }
 
 /// SDL parser for DefraDB schemas
@@ -51,6 +37,10 @@ pub struct SdlParser<'a> {
     sdl: &'a str,
     /// Parsed type definitions by name
     type_defs: HashMap<String, ParsedTypeDef>,
+    /// Warnings collected during parsing
+    warnings: Vec<ParseWarning>,
+    /// Current type being parsed (for warning context)
+    current_type: Option<String>,
 }
 
 #[derive(Debug)]
@@ -66,6 +56,16 @@ struct ParsedTypeDirectives {
     indexes: Vec<CompositeIndex>,
     is_materialized: bool,
     is_branchable: bool,
+    policy: Option<PolicyConfig>,
+}
+
+/// Policy configuration from @policy directive
+/// Fields are validated during parsing but not yet wired to CollectionVersion
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct PolicyConfig {
+    id: String,
+    resource: String,
 }
 
 #[derive(Debug)]
@@ -95,14 +95,25 @@ impl<'a> SdlParser<'a> {
         Self {
             sdl,
             type_defs: HashMap::new(),
+            warnings: Vec::new(),
+            current_type: None,
         }
     }
 
     /// Parse the SDL and return collection versions
     pub fn parse(&mut self) -> Result<Vec<CollectionVersion>> {
+        let output = self.parse_with_warnings()?;
+        Ok(output.collections)
+    }
+
+    /// Parse the SDL and return collection versions with warnings
+    pub fn parse_with_warnings(&mut self) -> Result<ParseOutput> {
         // Handle empty or whitespace-only input
         if self.sdl.trim().is_empty() {
-            return Ok(Vec::new());
+            return Ok(ParseOutput {
+                collections: Vec::new(),
+                warnings: Vec::new(),
+            });
         }
 
         let doc: Document<'_, String> =
@@ -116,11 +127,17 @@ impl<'a> SdlParser<'a> {
         }
 
         // Second pass: resolve relations and build CollectionVersions
-        self.build_collections()
+        let collections = self.build_collections()?;
+
+        Ok(ParseOutput {
+            collections,
+            warnings: std::mem::take(&mut self.warnings),
+        })
     }
 
     fn parse_object_type(&mut self, obj: &ObjectType<'_, String>) -> Result<()> {
         let name = obj.name.clone();
+        self.current_type = Some(name.clone());
         let mut fields = Vec::new();
 
         for field in &obj.fields {
@@ -139,12 +156,13 @@ impl<'a> SdlParser<'a> {
             },
         );
 
+        self.current_type = None;
         Ok(())
     }
 
-    fn parse_field(&self, field: &Field<'_, String>) -> Result<ParsedField> {
+    fn parse_field(&mut self, field: &Field<'_, String>) -> Result<ParsedField> {
         let field_type = parse_graphql_type(&field.field_type);
-        let directives = self.parse_field_directives(&field.directives)?;
+        let directives = self.parse_field_directives(&field.directives, &field.name)?;
 
         Ok(ParsedField {
             name: field.name.clone(),
@@ -154,30 +172,31 @@ impl<'a> SdlParser<'a> {
     }
 
     fn parse_field_directives(
-        &self,
+        &mut self,
         directives: &[Directive<'_, String>],
+        field_name: &str,
     ) -> Result<ParsedDirectives> {
         let mut result = ParsedDirectives::default();
+        let type_name = self.current_type.clone().unwrap_or_default();
 
         for directive in directives {
-            match directive.name.as_str() {
-                "primary" => {
-                    result.is_primary = true;
-                }
-                "crdt" => {
-                    result.crdt_type = Some(self.parse_crdt_directive(directive)?);
-                }
-                "index" => {
-                    result.index = Some(self.parse_index_directive(directive)?);
-                }
-                "relation" => {
-                    result.relation_name = self.get_directive_string(directive, "name");
-                }
-                "default" => {
-                    result.default_value = Some(self.parse_default_directive(directive)?);
-                }
+            let name = directive.name.as_str();
+
+            // Check arguments for all known directives upfront
+            if KNOWN_FIELD_DIRECTIVES.contains(&name) {
+                self.check_directive_arguments(directive, &type_name, Some(field_name));
+            }
+
+            match name {
+                "primary" => result.is_primary = true,
+                "crdt" => result.crdt_type = Some(self.parse_crdt_directive(directive)?),
+                "index" => result.index = Some(self.parse_index_directive(directive, field_name)?),
+                "relation" => result.relation_name = get_directive_string(directive, "name"),
+                "default" => result.default_value = Some(self.parse_default_directive(directive)?),
                 "constraints" => {
-                    if let Some(size) = self.get_directive_int(directive, "size") {
+                    if let Some(size) =
+                        self.get_int_with_warning(directive, "size", &type_name, Some(field_name))
+                    {
                         if size < 0 {
                             return Err(QueryError::parse(format!(
                                 "@constraints size must be non-negative, got {}",
@@ -187,8 +206,22 @@ impl<'a> SdlParser<'a> {
                         result.size_constraint = Some(size as usize);
                     }
                 }
+                "embedding" | "encryptedIndex" | "policy" => {
+                    // Known but not yet implemented - emit warning so users know
+                    self.warnings.push(ParseWarning::UnimplementedDirective {
+                        directive_name: directive.name.clone(),
+                        type_name: type_name.clone(),
+                        field_name: Some(field_name.to_string()),
+                    });
+                }
                 _ => {
-                    // Unknown directives are ignored for forward compatibility
+                    // Unknown directive - emit warning for forward compatibility
+                    self.warnings.push(ParseWarning::UnknownDirective {
+                        directive_name: directive.name.clone(),
+                        location: DirectiveLocation::Field,
+                        type_name: type_name.clone(),
+                        field_name: Some(field_name.to_string()),
+                    });
                 }
             }
         }
@@ -196,39 +229,181 @@ impl<'a> SdlParser<'a> {
         Ok(result)
     }
 
+    /// Check directive arguments and warn about unknown ones
+    fn check_directive_arguments(
+        &mut self,
+        directive: &Directive<'_, String>,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) {
+        let known_args = known_directive_arguments(&directive.name);
+        for (arg_name, _) in &directive.arguments {
+            if !known_args.contains(&arg_name.as_str()) {
+                self.warnings.push(ParseWarning::UnknownDirectiveArgument {
+                    directive_name: directive.name.clone(),
+                    argument_name: arg_name.clone(),
+                    type_name: type_name.to_string(),
+                    field_name: field_name.map(|s| s.to_string()),
+                });
+            }
+        }
+    }
+
+    /// Get a boolean argument, emitting a warning if the type is wrong.
+    ///
+    /// Returns `None` if the argument is missing or has the wrong type.
+    /// Callers typically use `.unwrap_or(default)` to apply a default value,
+    /// meaning invalid types result in the default being used silently
+    /// (with a warning emitted to `self.warnings`).
+    fn get_bool_with_warning(
+        &mut self,
+        directive: &Directive<'_, String>,
+        arg_name: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Option<bool> {
+        if let Some(value) = get_directive_arg(directive, arg_name) {
+            match value {
+                graphql_parser::schema::Value::Boolean(b) => Some(*b),
+                _ => {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "boolean".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get a string argument, emitting a warning if the type is wrong.
+    ///
+    /// Returns `None` if the argument is missing or has the wrong type.
+    /// Accepts both String and Enum GraphQL values as valid strings.
+    fn get_string_with_warning(
+        &mut self,
+        directive: &Directive<'_, String>,
+        arg_name: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Option<String> {
+        if let Some(value) = get_directive_arg(directive, arg_name) {
+            match value {
+                graphql_parser::schema::Value::String(s)
+                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                _ => {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "string".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get an integer argument, emitting a warning if the type is wrong.
+    ///
+    /// Returns `None` if the argument is missing, has the wrong type, or
+    /// is out of i64 range. A warning is emitted for type mismatches.
+    fn get_int_with_warning(
+        &mut self,
+        directive: &Directive<'_, String>,
+        arg_name: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Option<i64> {
+        if let Some(value) = get_directive_arg(directive, arg_name) {
+            match value {
+                graphql_parser::schema::Value::Int(n) => n.as_i64().or_else(|| {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "integer (within i64 range)".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }),
+                _ => {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "integer".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     fn parse_type_directives(
-        &self,
+        &mut self,
         directives: &[Directive<'_, String>],
     ) -> Result<ParsedTypeDirectives> {
         let mut result = ParsedTypeDirectives::default();
+        let type_name = self.current_type.clone().unwrap_or_default();
 
         for directive in directives {
-            match directive.name.as_str() {
+            let name = directive.name.as_str();
+
+            // Check arguments for all known directives upfront
+            if KNOWN_TYPE_DIRECTIVES.contains(&name) {
+                self.check_directive_arguments(directive, &type_name, None);
+            }
+
+            match name {
                 "index" => {
-                    let fields = self.get_directive_string_list(directive, "fields");
-                    let name = self.get_directive_string(directive, "name");
+                    let fields = get_directive_string_list(directive, "fields");
+                    let idx_name = get_directive_string(directive, "name");
                     let unique = self
-                        .get_directive_bool(directive, "unique")
+                        .get_bool_with_warning(directive, "unique", &type_name, None)
                         .unwrap_or(false);
 
                     if !fields.is_empty() {
                         result.indexes.push(CompositeIndex {
                             fields,
-                            name,
+                            name: idx_name,
                             unique,
                         });
                     }
                 }
                 "materialized" => {
-                    // @materialized or @materialized(if: true)
-                    result.is_materialized =
-                        self.get_directive_bool(directive, "if").unwrap_or(true);
+                    result.is_materialized = self
+                        .get_bool_with_warning(directive, "if", &type_name, None)
+                        .unwrap_or(true);
                 }
                 "branchable" => {
-                    // @branchable or @branchable(if: true)
-                    result.is_branchable = self.get_directive_bool(directive, "if").unwrap_or(true);
+                    result.is_branchable = self
+                        .get_bool_with_warning(directive, "if", &type_name, None)
+                        .unwrap_or(true);
                 }
-                _ => {}
+                "policy" => {
+                    result.policy = Some(parse_policy_directive(directive)?);
+                }
+                _ => {
+                    // Unknown directive - emit warning for forward compatibility
+                    self.warnings.push(ParseWarning::UnknownDirective {
+                        directive_name: directive.name.clone(),
+                        location: DirectiveLocation::Type,
+                        type_name: type_name.clone(),
+                        field_name: None,
+                    });
+                }
             }
         }
 
@@ -236,8 +411,7 @@ impl<'a> SdlParser<'a> {
     }
 
     fn parse_crdt_directive(&self, directive: &Directive<'_, String>) -> Result<CType> {
-        let type_name = self
-            .get_directive_string(directive, "type")
+        let type_name = get_directive_string(directive, "type")
             .ok_or_else(|| QueryError::parse("@crdt directive requires 'type' argument"))?;
 
         match type_name.to_lowercase().as_str() {
@@ -248,12 +422,20 @@ impl<'a> SdlParser<'a> {
         }
     }
 
-    fn parse_index_directive(&self, directive: &Directive<'_, String>) -> Result<IndexConfig> {
-        let name = self.get_directive_string(directive, "name");
+    fn parse_index_directive(
+        &mut self,
+        directive: &Directive<'_, String>,
+        field_name: &str,
+    ) -> Result<IndexConfig> {
+        let type_name = self.current_type.clone().unwrap_or_default();
+        let name = get_directive_string(directive, "name");
         let unique = self
-            .get_directive_bool(directive, "unique")
+            .get_bool_with_warning(directive, "unique", &type_name, Some(field_name))
             .unwrap_or(false);
-        let direction = match self.get_directive_string(directive, "direction").as_deref() {
+        let direction = match self
+            .get_string_with_warning(directive, "direction", &type_name, Some(field_name))
+            .as_deref()
+        {
             Some("DESC") | Some("desc") | Some("Descending") => IndexDirection::Desc,
             _ => IndexDirection::Asc,
         };
@@ -270,7 +452,6 @@ impl<'a> SdlParser<'a> {
         directive: &Directive<'_, String>,
     ) -> Result<serde_json::Value> {
         // Go supports: string, bool, int, float, float32, float64, dateTime, json, blob
-        // We process only the first argument
         let Some((name, value)) = directive.arguments.first() else {
             return Err(QueryError::parse(
                 "@default directive requires a value argument",
@@ -279,20 +460,12 @@ impl<'a> SdlParser<'a> {
 
         match name.as_str() {
             "string" | "value" => match value {
-                graphql_parser::schema::Value::String(s) => {
-                    Ok(serde_json::Value::String(s.clone()))
-                }
-                other => Err(QueryError::parse(format!(
-                    "@default '{}' argument must be a string, got {:?}",
-                    name, other
-                ))),
+                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                other => Err(default_type_error(name, "string", other)),
             },
             "bool" => match value {
                 graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-                other => Err(QueryError::parse(format!(
-                    "@default 'bool' argument must be a boolean, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("bool", "boolean", other)),
             },
             "int" => match value {
                 graphql_parser::schema::Value::Int(n) => {
@@ -301,114 +474,55 @@ impl<'a> SdlParser<'a> {
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(QueryError::parse(format!(
-                    "@default 'int' argument must be an integer, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("int", "integer", other)),
             },
             "float" | "float64" => match value {
+                graphql_parser::schema::Value::Float(f) => serde_json::Number::from_f64(*f)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| {
+                        QueryError::parse(
+                            "@default float value is not a valid JSON number (NaN or Infinity)",
+                        )
+                    }),
+                other => Err(default_type_error("float", "float", other)),
+            },
+            "float32" => match value {
                 graphql_parser::schema::Value::Float(f) => {
-                    serde_json::Number::from_f64(*f)
+                    let f32_val = *f as f32;
+                    if f32_val.is_infinite() && !f.is_infinite() {
+                        return Err(QueryError::parse(
+                            "@default float32 value is out of f32 range",
+                        ));
+                    }
+                    serde_json::Number::from_f64(f32_val as f64)
                         .map(serde_json::Value::Number)
                         .ok_or_else(|| {
                             QueryError::parse(
-                                "@default float value is not a valid JSON number (NaN or Infinity)",
+                                "@default float32 value is not a valid JSON number (NaN or Infinity)",
                             )
                         })
                 }
-                other => Err(QueryError::parse(format!(
-                    "@default 'float' argument must be a float, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("float32", "float", other)),
+            },
+            "dateTime" => match value {
+                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                other => Err(default_type_error("dateTime", "string", other)),
             },
             "json" => match value {
                 graphql_parser::schema::Value::String(s) => serde_json::from_str(s).map_err(|e| {
                     QueryError::parse(format!("@default json contains invalid JSON: {}", e))
                 }),
-                other => Err(QueryError::parse(format!(
-                    "@default 'json' argument must be a string, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("json", "string", other)),
+            },
+            "blob" => match value {
+                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                other => Err(default_type_error("blob", "string", other)),
             },
             unknown => Err(QueryError::parse(format!(
-                "unknown @default argument '{}'. Valid arguments are: string, value, bool, int, float, float64, json",
+                "unknown @default argument '{}'. Valid arguments are: string, value, bool, int, float, float32, float64, dateTime, json, blob",
                 unknown
             ))),
         }
-    }
-
-    fn get_directive_string(
-        &self,
-        directive: &Directive<'_, String>,
-        arg_name: &str,
-    ) -> Option<String> {
-        directive.arguments.iter().find_map(|(name, value)| {
-            if name != arg_name {
-                return None;
-            }
-            match value {
-                graphql_parser::schema::Value::String(s)
-                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
-                _ => None,
-            }
-        })
-    }
-
-    fn get_directive_bool(
-        &self,
-        directive: &Directive<'_, String>,
-        arg_name: &str,
-    ) -> Option<bool> {
-        directive.arguments.iter().find_map(|(name, value)| {
-            if name != arg_name {
-                return None;
-            }
-            match value {
-                graphql_parser::schema::Value::Boolean(b) => Some(*b),
-                _ => None,
-            }
-        })
-    }
-
-    fn get_directive_int(&self, directive: &Directive<'_, String>, arg_name: &str) -> Option<i64> {
-        directive.arguments.iter().find_map(|(name, value)| {
-            if name != arg_name {
-                return None;
-            }
-            match value {
-                graphql_parser::schema::Value::Int(n) => n.as_i64(),
-                _ => None,
-            }
-        })
-    }
-
-    fn get_directive_string_list(
-        &self,
-        directive: &Directive<'_, String>,
-        arg_name: &str,
-    ) -> Vec<String> {
-        directive
-            .arguments
-            .iter()
-            .find_map(|(name, value)| {
-                if name != arg_name {
-                    return None;
-                }
-                match value {
-                    graphql_parser::schema::Value::List(items) => Some(
-                        items
-                            .iter()
-                            .filter_map(|v| match v {
-                                graphql_parser::schema::Value::String(s)
-                                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
-                                _ => None,
-                            })
-                            .collect(),
-                    ),
-                    _ => None,
-                }
-            })
-            .unwrap_or_default()
     }
 
     fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
@@ -506,7 +620,21 @@ impl<'a> SdlParser<'a> {
         }
 
         // Handle type-level @index directives (composite indexes)
+        // Build a set of valid field names for validation
+        let valid_field_names: std::collections::HashSet<_> =
+            type_def.fields.iter().map(|f| f.name.as_str()).collect();
+
         for composite_idx in &type_def.directives.indexes {
+            // Validate that all referenced fields exist
+            for field_ref in &composite_idx.fields {
+                if !valid_field_names.contains(field_ref.as_str()) {
+                    return Err(QueryError::parse(format!(
+                        "@index on type {} references unknown field '{}'",
+                        type_def.name, field_ref
+                    )));
+                }
+            }
+
             let idx_name = composite_idx.name.clone().unwrap_or_else(|| {
                 format!("{}_{}_idx", type_def.name, composite_idx.fields.join("_"))
             });
@@ -677,10 +805,29 @@ fn generate_relation_name(from_type: &str, field_name: &str, to_type: &str) -> S
     format!("{}_{}_{}", first, field_name, second)
 }
 
-/// Parse SDL string into CollectionVersion schemas
+/// Parse SDL string into CollectionVersion schemas.
+///
+/// This convenience function discards all warnings. For production use where
+/// you need visibility into unknown directives, invalid argument types, or
+/// unimplemented features, use [`parse_sdl_with_warnings`] instead.
 pub fn parse_sdl(sdl: &str) -> Result<Vec<CollectionVersion>> {
     let mut parser = SdlParser::new(sdl);
     parser.parse()
+}
+
+/// Parse SDL string into CollectionVersion schemas with warnings.
+///
+/// Returns both the parsed collections and any warnings encountered during parsing.
+/// Warnings are emitted for:
+/// - Unknown directives (forward compatibility - ignored but noted)
+/// - Unknown arguments on known directives (possible typos)
+/// - Invalid argument types (e.g., string where bool expected - default used)
+/// - Unimplemented directives (@embedding, @encryptedIndex, field @policy)
+///
+/// This is the recommended entry point for production use.
+pub fn parse_sdl_with_warnings(sdl: &str) -> Result<ParseOutput> {
+    let mut parser = SdlParser::new(sdl);
+    parser.parse_with_warnings()
 }
 
 #[cfg(test)]
@@ -1476,6 +1623,58 @@ mod tests {
     }
 
     #[test]
+    fn test_default_directive_float32() {
+        let sdl = r#"
+            type Sensor {
+                temp: Float32 @default(float32: 25.5)
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        let sensor = &collections[0];
+        let temp = sensor.field_by_name("temp").unwrap();
+        assert!(temp.default_value.is_some());
+        if let Some(serde_json::Value::Number(n)) = &temp.default_value {
+            assert!((n.as_f64().unwrap() - 25.5).abs() < 0.001);
+        } else {
+            panic!("expected number default value");
+        }
+    }
+
+    #[test]
+    fn test_default_directive_datetime() {
+        let sdl = r#"
+            type Event {
+                created: DateTime @default(dateTime: "2024-01-15T10:30:00Z")
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        let event = &collections[0];
+        let created = event.field_by_name("created").unwrap();
+        assert_eq!(
+            created.default_value,
+            Some(serde_json::Value::String(
+                "2024-01-15T10:30:00Z".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_default_directive_blob() {
+        let sdl = r#"
+            type Document {
+                data: Blob @default(blob: "SGVsbG8gV29ybGQ=")
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        let doc = &collections[0];
+        let data = doc.field_by_name("data").unwrap();
+        assert_eq!(
+            data.default_value,
+            Some(serde_json::Value::String("SGVsbG8gV29ybGQ=".to_string()))
+        );
+    }
+
+    #[test]
     fn test_whitespace_only_sdl() {
         let sdl = "   \n\t\n   ";
         let collections = parse_sdl(sdl).unwrap();
@@ -1492,5 +1691,689 @@ mod tests {
         let collections = parse_sdl(sdl).unwrap();
         let doc = &collections[0];
         assert!(!doc.is_branchable);
+    }
+
+    // =========================================================================
+    // Issue #28 & #29: Warnings and Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_unknown_field_directive_emits_warning() {
+        let sdl = r#"
+            type User {
+                name: String @unknownDirective
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirective {
+                directive_name,
+                location,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "unknownDirective");
+                assert_eq!(*location, DirectiveLocation::Field);
+                assert_eq!(type_name, "User");
+                assert_eq!(field_name.as_deref(), Some("name"));
+            }
+            other => panic!("expected UnknownDirective warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unknown_type_directive_emits_warning() {
+        let sdl = r#"
+            type User @futureFeature {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirective {
+                directive_name,
+                location,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "futureFeature");
+                assert_eq!(*location, DirectiveLocation::Type);
+                assert_eq!(type_name, "User");
+                assert!(field_name.is_none());
+            }
+            other => panic!("expected UnknownDirective warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unknown_directive_argument_emits_warning() {
+        let sdl = r#"
+            type User {
+                email: String @index(unique: true, unknownArg: "value")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "index");
+                assert_eq!(argument_name, "unknownArg");
+                assert_eq!(type_name, "User");
+                assert_eq!(field_name.as_deref(), Some("email"));
+            }
+            other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_multiple_unknown_directives_emit_multiple_warnings() {
+        let sdl = r#"
+            type User @futureTypeDirective @anotherUnknown {
+                name: String @customDirective
+                age: Int @anotherCustom
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // 2 unknown type directives + 2 unknown field directives
+        assert_eq!(output.warnings.len(), 4);
+    }
+
+    #[test]
+    fn test_known_directives_no_warnings() {
+        let sdl = r#"
+            type User @materialized @branchable {
+                name: String @index(unique: true)
+                age: Int @crdt(type: "pncounter")
+                role: String @default(string: "user")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert!(
+            output.warnings.is_empty(),
+            "known directives should not emit warnings: {:?}",
+            output.warnings
+        );
+    }
+
+    #[test]
+    fn test_policy_directive_requires_id() {
+        let sdl = r#"
+            type User @policy(resource: "users") {
+                name: String
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires 'id' argument"),
+            "error should mention missing id argument: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_policy_directive_requires_resource() {
+        let sdl = r#"
+            type User @policy(id: "policy123") {
+                name: String
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires 'resource' argument"),
+            "error should mention missing resource argument: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_policy_directive_valid() {
+        let sdl = r#"
+            type User @policy(id: "policy123", resource: "users") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert!(output.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_composite_index_unknown_field_returns_error() {
+        let sdl = r#"
+            type User @index(fields: ["name", "nonexistent"]) {
+                name: String
+                age: Int
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field 'nonexistent'"),
+            "error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_composite_index_valid_fields() {
+        let sdl = r#"
+            type User @index(fields: ["name", "age"]) {
+                name: String
+                age: Int
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert!(output.warnings.is_empty());
+
+        let user = &output.collections[0];
+        assert_eq!(user.indexes.len(), 1);
+        assert_eq!(user.indexes[0].fields.len(), 2);
+    }
+
+    #[test]
+    fn test_warning_display_format() {
+        let warning = ParseWarning::UnknownDirective {
+            directive_name: "custom".to_string(),
+            location: DirectiveLocation::Field,
+            type_name: "User".to_string(),
+            field_name: Some("name".to_string()),
+        };
+
+        let display = warning.to_string();
+        assert!(display.contains("@custom"));
+        assert!(display.contains("User.name"));
+        assert!(display.contains("forward compatibility"));
+    }
+
+    #[test]
+    fn test_warning_display_format_type_level() {
+        let warning = ParseWarning::UnknownDirective {
+            directive_name: "future".to_string(),
+            location: DirectiveLocation::Type,
+            type_name: "User".to_string(),
+            field_name: None,
+        };
+
+        let display = warning.to_string();
+        assert!(display.contains("@future"));
+        assert!(display.contains("type User"));
+    }
+
+    #[test]
+    fn test_unknown_argument_warning_display() {
+        let warning = ParseWarning::UnknownDirectiveArgument {
+            directive_name: "index".to_string(),
+            argument_name: "badArg".to_string(),
+            type_name: "User".to_string(),
+            field_name: Some("email".to_string()),
+        };
+
+        let display = warning.to_string();
+        assert!(display.contains("badArg"));
+        assert!(display.contains("@index"));
+        assert!(display.contains("User.email"));
+    }
+
+    // =========================================================================
+    // Additional Test Coverage (PR Review Gaps)
+    // =========================================================================
+
+    #[test]
+    fn test_unknown_argument_on_type_directive_emits_warning() {
+        let sdl = r#"
+            type User @materialized(unknownArg: true) {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                field_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "materialized");
+                assert_eq!(argument_name, "unknownArg");
+                assert!(field_name.is_none()); // type-level, not field-level
+            }
+            other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unknown_argument_on_branchable_directive() {
+        let sdl = r#"
+            type User @branchable(if: true, extraArg: "value") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "branchable");
+                assert_eq!(argument_name, "extraArg");
+            }
+            other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_policy_directive_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type User @policy(id: "p1", resource: "users", unknownArg: "value") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "policy");
+                assert_eq!(argument_name, "unknownArg");
+            }
+            other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_embedding_directive_emits_unimplemented_warning() {
+        let sdl = r#"
+            type Document {
+                content: String @embedding(provider: "openai", model: "ada")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // @embedding is recognized but not implemented, should emit UnimplementedDirective
+        assert_eq!(output.warnings.len(), 1);
+        match &output.warnings[0] {
+            ParseWarning::UnimplementedDirective {
+                directive_name,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "embedding");
+                assert_eq!(type_name, "Document");
+                assert_eq!(field_name.as_deref(), Some("content"));
+            }
+            other => panic!("expected UnimplementedDirective, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_embedding_directive_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type Document {
+                content: String @embedding(provider: "openai", unknownArg: "x")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // Should have both UnknownDirectiveArgument and UnimplementedDirective
+        assert_eq!(output.warnings.len(), 2);
+
+        // Find the UnknownDirectiveArgument warning
+        let unknown_arg = output
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ParseWarning::UnknownDirectiveArgument { .. }))
+            .expect("should have UnknownDirectiveArgument warning");
+
+        match unknown_arg {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "embedding");
+                assert_eq!(argument_name, "unknownArg");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_encrypted_index_directive_emits_unimplemented_warning() {
+        let sdl = r#"
+            type Secret {
+                data: String @encryptedIndex(type: "match")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // @encryptedIndex is recognized but not implemented
+        assert_eq!(output.warnings.len(), 1);
+        match &output.warnings[0] {
+            ParseWarning::UnimplementedDirective {
+                directive_name,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "encryptedIndex");
+                assert_eq!(type_name, "Secret");
+                assert_eq!(field_name.as_deref(), Some("data"));
+            }
+            other => panic!("expected UnimplementedDirective, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_encrypted_index_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type Secret {
+                data: String @encryptedIndex(type: "match", badArg: true)
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        // Should have both UnknownDirectiveArgument and UnimplementedDirective
+        assert_eq!(output.warnings.len(), 2);
+
+        let unknown_arg = output
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ParseWarning::UnknownDirectiveArgument { .. }))
+            .expect("should have UnknownDirectiveArgument warning");
+
+        match unknown_arg {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "encryptedIndex");
+                assert_eq!(argument_name, "badArg");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_default_float32_wrong_type_returns_error() {
+        let sdl = r#"
+            type Sensor {
+                temp: Float32 @default(float32: "not a float")
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be a float"),
+            "error should mention type mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_datetime_wrong_type_returns_error() {
+        let sdl = r#"
+            type Event {
+                created: DateTime @default(dateTime: 12345)
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be a string"),
+            "error should mention type mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_blob_wrong_type_returns_error() {
+        let sdl = r#"
+            type Document {
+                data: Blob @default(blob: 12345)
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be a string"),
+            "error should mention type mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_directive_value_alias() {
+        let sdl = r#"
+            type User {
+                role: String @default(value: "member")
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+        let user = &collections[0];
+        let role = user.field_by_name("role").unwrap();
+        assert_eq!(
+            role.default_value,
+            Some(serde_json::Value::String("member".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_type_level_index_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type User @index(fields: ["name"], unknownArg: "value") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                field_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "index");
+                assert_eq!(argument_name, "unknownArg");
+                assert!(field_name.is_none()); // type-level
+            }
+            other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // InvalidArgumentType Warning Tests
+    // =========================================================================
+
+    #[test]
+    fn test_invalid_bool_argument_type_emits_warning() {
+        let sdl = r#"
+            type User @materialized(if: "yes") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::InvalidArgumentType {
+                directive_name,
+                argument_name,
+                expected_type,
+                ..
+            } => {
+                assert_eq!(directive_name, "materialized");
+                assert_eq!(argument_name, "if");
+                assert_eq!(expected_type, "boolean");
+            }
+            other => panic!("expected InvalidArgumentType, got {:?}", other),
+        }
+
+        // Should still work with default value (true)
+        assert!(output.collections[0].is_materialized);
+    }
+
+    #[test]
+    fn test_invalid_int_argument_type_emits_warning() {
+        let sdl = r#"
+            type User {
+                name: String @constraints(size: "ten")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::InvalidArgumentType {
+                directive_name,
+                argument_name,
+                expected_type,
+                ..
+            } => {
+                assert_eq!(directive_name, "constraints");
+                assert_eq!(argument_name, "size");
+                assert_eq!(expected_type, "integer");
+            }
+            other => panic!("expected InvalidArgumentType, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_argument_type_warning_display() {
+        let warning = ParseWarning::InvalidArgumentType {
+            directive_name: "index".to_string(),
+            argument_name: "unique".to_string(),
+            expected_type: "boolean".to_string(),
+            type_name: "User".to_string(),
+            field_name: Some("email".to_string()),
+        };
+
+        let display = warning.to_string();
+        assert!(display.contains("unique"));
+        assert!(display.contains("@index"));
+        assert!(display.contains("User.email"));
+        assert!(display.contains("boolean"));
+    }
+
+    #[test]
+    fn test_unimplemented_directive_warning_display() {
+        let warning = ParseWarning::UnimplementedDirective {
+            directive_name: "embedding".to_string(),
+            type_name: "Document".to_string(),
+            field_name: Some("content".to_string()),
+        };
+
+        let display = warning.to_string();
+        assert!(display.contains("@embedding"));
+        assert!(display.contains("Document.content"));
+        assert!(display.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn test_field_policy_directive_emits_unimplemented_warning() {
+        let sdl = r#"
+            type User {
+                name: String @policy(id: "p1", resource: "r1")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnimplementedDirective {
+                directive_name,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "policy");
+                assert_eq!(type_name, "User");
+                assert_eq!(field_name.as_deref(), Some("name"));
+            }
+            other => panic!("expected UnimplementedDirective, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_index_with_includes_argument_no_warning() {
+        let sdl = r#"
+            type User @index(fields: ["name"], includes: ["email"]) {
+                name: String
+                email: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // includes is a known argument, should not trigger warning
+        assert!(
+            output.warnings.is_empty(),
+            "includes is a known argument but got warnings: {:?}",
+            output.warnings
+        );
     }
 }
