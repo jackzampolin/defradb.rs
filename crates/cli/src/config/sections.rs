@@ -239,7 +239,9 @@ mod tests {
         let mut config = ApiConfig::default();
         config.address = "not-an-address".to_string();
         let result = config.validate();
-        assert!(matches!(result, Err(Error::InvalidApiAddress(addr, _)) if addr == "not-an-address"));
+        assert!(
+            matches!(result, Err(Error::InvalidApiAddress(addr, _)) if addr == "not-an-address")
+        );
     }
 
     #[test]

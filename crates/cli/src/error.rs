@@ -92,6 +92,8 @@ pub enum Error {
     #[error("invalid API address '{0}': {1}")]
     InvalidApiAddress(String, String),
 
-    #[error("incomplete TLS configuration: both pubkey_path and privkey_path must be set, or neither")]
+    #[error(
+        "incomplete TLS configuration: both pubkey_path and privkey_path must be set, or neither"
+    )]
     IncompleteTlsConfig,
 }

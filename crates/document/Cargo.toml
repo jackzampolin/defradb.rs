@@ -1,0 +1,42 @@
+[package]
+name = "document"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime document types for DefraDB"
+
+[dependencies]
+# Internal dependencies
+schema = { path = "../schema" }
+crypto = { path = "../crypto" }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+ciborium = "0.2"
+
+# IPLD
+cid = { workspace = true }
+multihash = { workspace = true }
+sha2 = { workspace = true }
+
+# UUID for DocID
+uuid = { workspace = true, features = ["v5", "serde"] }
+
+# Multibase for DocID string encoding
+multibase = "0.9"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Base64 for bytes encoding
+base64 = "0.22"
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
