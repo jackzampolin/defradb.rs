@@ -1,0 +1,28 @@
+[package]
+name = "datastore"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transaction wrapper for DefraDB providing multistore access and callbacks"
+
+[dependencies]
+# Async runtime
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+futures.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# IPLD
+cid.workspace = true
+
+# Internal crates
+storage = { path = "../storage" }
+
+[dev-dependencies]
+# Testing
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
