@@ -318,4 +318,67 @@ mod tests {
         let result = queue.try_acquire(&cid).await;
         assert!(result.is_ok(), "Should be able to reacquire after drop");
     }
+
+    #[tokio::test]
+    async fn test_cancelled_waiters_handled_gracefully() {
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+
+        // First caller acquires
+        let guard = queue.try_acquire(&cid).await.unwrap();
+
+        // Create waiters then drop them (simulating cancelled tasks)
+        {
+            let rx1 = queue.try_acquire(&cid).await.unwrap_err();
+            let rx2 = queue.try_acquire(&cid).await.unwrap_err();
+            // Drop receivers without awaiting - simulates task cancellation
+            drop(rx1);
+            drop(rx2);
+        }
+
+        // Release should handle cancelled receivers gracefully (not panic)
+        guard.release().await;
+
+        // Queue should be in clean state
+        let result = queue.try_acquire(&cid).await;
+        assert!(
+            result.is_ok(),
+            "Queue should be clean after handling cancelled waiters"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mixed_cancelled_and_waiting() {
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+
+        // First caller acquires
+        let guard = queue.try_acquire(&cid).await.unwrap();
+
+        // Create a waiter that will be cancelled
+        let rx1 = queue.try_acquire(&cid).await.unwrap_err();
+        drop(rx1); // Cancel immediately
+
+        // Create a waiter that will actually wait
+        let queue_clone = queue.clone();
+        let waiter = tokio::spawn(async move {
+            let rx = queue_clone.try_acquire(&cid).await.unwrap_err();
+            rx.await.unwrap();
+            true
+        });
+
+        // Give waiter time to register
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Release - should notify the waiting task even though one was cancelled
+        guard.release().await;
+
+        // Active waiter should still be notified
+        let result = tokio::time::timeout(Duration::from_millis(100), waiter).await;
+        assert!(result.is_ok(), "Active waiter should be notified");
+        assert!(
+            result.unwrap().unwrap(),
+            "Active waiter should complete successfully"
+        );
+    }
 }

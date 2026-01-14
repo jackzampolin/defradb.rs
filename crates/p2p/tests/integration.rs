@@ -1423,11 +1423,21 @@ async fn test_handle_host_event_invalid_cid_in_gossip_message() {
         })
         .await;
 
-    // The event itself processes successfully (the invalid CID is just logged as a warning)
-    // but the block will still be processed by the sync manager
+    // Invalid CID is detected and returns an error - but importantly it doesn't panic
+    // The error is expected and the coordinator handles it gracefully
     assert!(
-        result.is_ok() || result.is_err(),
-        "Should handle gracefully without panic"
+        result.is_err(),
+        "Should return error for invalid CID, got: {:?}",
+        result
+    );
+
+    // Verify it's specifically an InvalidCid error
+    let err = result.unwrap_err();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("CID") || err_str.contains("cid"),
+        "Error should mention CID: {}",
+        err_str
     );
 
     handle.shutdown().await.ok();
@@ -1782,8 +1792,8 @@ async fn test_replicator_registry_access_control() {
     // Register peer1 as a replicator for "users" collection
     registry.add_replicator("users", peer1);
 
-    // Create controller with ACP enabled
-    let controller = BlockAccessController::with_acp(registry);
+    // Create controller with access control enabled
+    let controller = BlockAccessController::controlled(registry);
 
     let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
         .unwrap();

@@ -154,6 +154,21 @@ pub enum Error {
     /// Failed to send response.
     #[error("failed to send response: {0}")]
     ResponseSend(String),
+
+    /// DAG sync failed.
+    #[error("DAG sync failed for CID: {0}")]
+    DagSyncFailed(String),
+
+    /// Recovery completed with failures.
+    #[error("recovery completed with {failed} failures out of {total} blocks")]
+    RecoveryFailed {
+        /// Number of blocks successfully recovered
+        success: usize,
+        /// Number of blocks that failed to recover
+        failed: usize,
+        /// Total blocks attempted
+        total: usize,
+    },
 }
 
 impl From<serde_cbor::Error> for Error {

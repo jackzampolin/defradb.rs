@@ -128,6 +128,33 @@ impl ReplicatorRegistry {
     }
 }
 
+/// Access control mode for block exchange.
+///
+/// Replaces boolean `acp_enabled` flag for better type clarity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccessMode {
+    /// No access control - all requests are allowed.
+    /// This is the default mode when ACP is not configured.
+    #[default]
+    Open,
+
+    /// Access control enabled - check replicator status.
+    /// Only replicators for the collection have access.
+    Controlled,
+}
+
+impl AccessMode {
+    /// Returns true if access control is enabled.
+    pub fn is_controlled(&self) -> bool {
+        matches!(self, AccessMode::Controlled)
+    }
+
+    /// Returns true if access is open (no control).
+    pub fn is_open(&self) -> bool {
+        matches!(self, AccessMode::Open)
+    }
+}
+
 /// Block access controller that combines replicator checks with ACP.
 ///
 /// This is the main entry point for access control decisions.
@@ -135,31 +162,35 @@ pub struct BlockAccessController {
     /// Replicator registry for fast-path checks
     replicators: Arc<ReplicatorRegistry>,
 
-    /// Whether ACP is enabled (if false, all access is allowed)
-    acp_enabled: bool,
+    /// Access control mode
+    mode: AccessMode,
 }
 
 impl BlockAccessController {
-    /// Create a new access controller.
-    pub fn new(replicators: Arc<ReplicatorRegistry>) -> Self {
-        Self {
-            replicators,
-            acp_enabled: false,
-        }
+    /// Create a new access controller with the specified mode.
+    pub fn new(replicators: Arc<ReplicatorRegistry>, mode: AccessMode) -> Self {
+        Self { replicators, mode }
     }
 
-    /// Create a new access controller with ACP enabled.
-    pub fn with_acp(replicators: Arc<ReplicatorRegistry>) -> Self {
-        Self {
-            replicators,
-            acp_enabled: true,
-        }
+    /// Create a new access controller with open access (no ACP).
+    pub fn open(replicators: Arc<ReplicatorRegistry>) -> Self {
+        Self::new(replicators, AccessMode::Open)
+    }
+
+    /// Create a new access controller with controlled access (ACP enabled).
+    pub fn controlled(replicators: Arc<ReplicatorRegistry>) -> Self {
+        Self::new(replicators, AccessMode::Controlled)
+    }
+
+    /// Get the current access mode.
+    pub fn mode(&self) -> AccessMode {
+        self.mode
     }
 
     /// Check if a peer has access to a block.
     ///
     /// This mirrors Go's `hasAccess` function logic:
-    /// 1. If ACP not enabled → allow
+    /// 1. If mode is Open → allow
     /// 2. If peer is replicator for block's collection → allow
     /// 3. If no replicator match, deny access
     ///
@@ -173,8 +204,8 @@ impl BlockAccessController {
         _cid: &Cid,
         collection_id: Option<&str>,
     ) -> bool {
-        // Fast path: ACP not enabled
-        if !self.acp_enabled {
+        // Fast path: Open mode allows all access
+        if self.mode.is_open() {
             return true;
         }
 
@@ -191,7 +222,7 @@ impl BlockAccessController {
             return true;
         }
 
-        // Default: deny if ACP enabled and no replicator match
+        // Default: deny in Controlled mode when no replicator match
         false
     }
 
@@ -253,14 +284,15 @@ mod tests {
     }
 
     #[test]
-    fn test_access_controller_acp_disabled() {
+    fn test_access_controller_open_mode() {
         let registry = Arc::new(ReplicatorRegistry::new());
-        let controller = BlockAccessController::new(registry);
+        let controller = BlockAccessController::open(registry);
         let peer = PeerId::random();
         let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
             .unwrap();
 
-        // With ACP disabled, all access should be allowed
+        // With Open mode, all access should be allowed
+        assert!(controller.mode().is_open());
         assert!(controller.has_access(&peer, &cid, None));
         assert!(controller.has_access(&peer, &cid, Some("users")));
     }
@@ -271,11 +303,12 @@ mod tests {
         let peer = PeerId::random();
         registry.add_replicator("users", peer);
 
-        let controller = BlockAccessController::with_acp(registry);
+        let controller = BlockAccessController::controlled(registry);
         let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
             .unwrap();
 
         // Replicator should have access to their collection
+        assert!(controller.mode().is_controlled());
         assert!(controller.has_access(&peer, &cid, Some("users")));
 
         // And to any block when collection is unknown (is_any_replicator)
@@ -289,11 +322,11 @@ mod tests {
         let stranger = PeerId::random();
         registry.add_replicator("users", replicator);
 
-        let controller = BlockAccessController::with_acp(registry);
+        let controller = BlockAccessController::controlled(registry);
         let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
             .unwrap();
 
-        // Stranger should be denied when ACP is enabled
+        // Stranger should be denied in Controlled mode
         assert!(!controller.has_access(&stranger, &cid, Some("users")));
         assert!(!controller.has_access(&stranger, &cid, None));
     }
@@ -304,7 +337,7 @@ mod tests {
         let peer = PeerId::random();
         registry.add_replicator("users", peer);
 
-        let controller = Arc::new(BlockAccessController::with_acp(registry));
+        let controller = Arc::new(BlockAccessController::controlled(registry));
         let access_fn = controller.as_access_fn();
 
         let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
@@ -313,5 +346,96 @@ mod tests {
         // Test the closure
         assert!(access_fn(&peer, &cid));
         assert!(!access_fn(&PeerId::random(), &cid));
+    }
+
+    #[test]
+    fn test_access_mode_helpers() {
+        assert!(AccessMode::Open.is_open());
+        assert!(!AccessMode::Open.is_controlled());
+        assert!(AccessMode::Controlled.is_controlled());
+        assert!(!AccessMode::Controlled.is_open());
+        assert_eq!(AccessMode::default(), AccessMode::Open);
+    }
+
+    #[test]
+    fn test_access_controller_new_with_mode() {
+        let registry = Arc::new(ReplicatorRegistry::new());
+
+        let open = BlockAccessController::new(Arc::clone(&registry), AccessMode::Open);
+        assert!(open.mode().is_open());
+
+        let controlled = BlockAccessController::new(registry, AccessMode::Controlled);
+        assert!(controlled.mode().is_controlled());
+    }
+
+    #[test]
+    fn test_replicator_registry_add_same_peer_twice() {
+        // Test idempotency - adding the same peer twice should work
+        let registry = ReplicatorRegistry::new();
+        let peer = PeerId::random();
+
+        registry.add_replicator("users", peer);
+        registry.add_replicator("users", peer); // Add again
+
+        // Should still only have one entry
+        let replicators = registry.get_replicators("users");
+        assert_eq!(replicators.len(), 1);
+        assert!(replicators.contains(&peer));
+    }
+
+    #[test]
+    fn test_replicator_registry_remove_nonexistent() {
+        // Removing a non-existent replicator should not panic
+        let registry = ReplicatorRegistry::new();
+        let peer = PeerId::random();
+
+        // Remove from non-existent collection
+        registry.remove_replicator("nonexistent", &peer);
+
+        // Remove non-existent peer from existing collection
+        let other_peer = PeerId::random();
+        registry.add_replicator("users", other_peer);
+        registry.remove_replicator("users", &peer); // peer was never added
+
+        // other_peer should still be there
+        assert!(registry.is_replicator("users", &other_peer));
+    }
+
+    #[test]
+    fn test_replicator_registry_concurrent_modifications() {
+        use std::thread;
+
+        let registry = Arc::new(ReplicatorRegistry::new());
+        let mut handles = vec![];
+
+        // Spawn multiple threads modifying the registry concurrently
+        for i in 0..10 {
+            let registry_clone = Arc::clone(&registry);
+            let handle = thread::spawn(move || {
+                let peer = PeerId::random();
+                let collection = format!("collection_{}", i % 3);
+
+                // Add and remove operations
+                registry_clone.add_replicator(&collection, peer);
+                assert!(registry_clone.is_any_replicator(&peer));
+
+                // Sometimes remove
+                if i % 2 == 0 {
+                    registry_clone.remove_replicator(&collection, &peer);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Registry should be in a consistent state (no panic, no corruption)
+        // We can't assert specific state due to non-deterministic interleaving
+        let _ = registry.get_replicators("collection_0");
+        let _ = registry.get_replicators("collection_1");
+        let _ = registry.get_replicators("collection_2");
     }
 }

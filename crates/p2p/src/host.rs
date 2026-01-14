@@ -627,6 +627,7 @@ impl P2PHost {
             SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Discovered(peers))) => {
                 for (peer_id, addr) in peers {
                     debug!("mDNS discovered peer: {} at {}", peer_id, addr);
+                    debug!(peer_id = %peer_id, address = %addr, "Adding external address from mDNS discovery");
                     self.swarm.add_external_address(addr);
                     if self.event_tx.send(HostEvent::PeerDiscovered(peer_id)).await.is_err() {
                         warn!(peer_id = %peer_id, "Failed to send PeerDiscovered event - receiver dropped");
@@ -652,7 +653,73 @@ impl P2PHost {
                 self.handle_gossipsub_event(gossipsub_event).await;
             }
 
-            _ => {}
+            SwarmEvent::OutgoingConnectionError {
+                peer_id, error, ..
+            } => {
+                warn!(
+                    peer_id = ?peer_id,
+                    error = %error,
+                    "Outgoing connection failed"
+                );
+            }
+
+            SwarmEvent::IncomingConnectionError {
+                local_addr,
+                send_back_addr,
+                error,
+                ..
+            } => {
+                warn!(
+                    local_addr = %local_addr,
+                    remote_addr = %send_back_addr,
+                    error = %error,
+                    "Incoming connection failed"
+                );
+            }
+
+            SwarmEvent::ListenerError { listener_id, error } => {
+                error!(
+                    listener_id = ?listener_id,
+                    error = %error,
+                    "Listener error"
+                );
+            }
+
+            SwarmEvent::ListenerClosed {
+                listener_id,
+                reason,
+                ..
+            } => {
+                warn!(
+                    listener_id = ?listener_id,
+                    reason = ?reason,
+                    "Listener closed"
+                );
+            }
+
+            SwarmEvent::ExpiredListenAddr { listener_id, address } => {
+                debug!(
+                    listener_id = ?listener_id,
+                    address = %address,
+                    "Listen address expired"
+                );
+            }
+
+            SwarmEvent::Dialing {
+                peer_id: Some(peer_id),
+                ..
+            } => {
+                debug!(peer_id = %peer_id, "Dialing peer");
+            }
+
+            SwarmEvent::Dialing { peer_id: None, .. } => {
+                // Dialing without a specific peer ID (rare, usually has peer_id)
+            }
+
+            _ => {
+                // Other swarm events (e.g., Dialing, NewExternalAddrCandidate) are
+                // handled by libp2p internally and don't require explicit handling
+            }
         }
     }
 
@@ -666,6 +733,9 @@ impl P2PHost {
                     info.agent_version,
                     info.listen_addrs.len()
                 );
+                for addr in &info.listen_addrs {
+                    debug!(peer_id = %peer_id, address = %addr, "Adding external address from identify");
+                }
                 for addr in info.listen_addrs {
                     self.swarm.add_external_address(addr);
                 }

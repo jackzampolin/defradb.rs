@@ -40,6 +40,7 @@
 //! ```
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,23 +56,96 @@ use crate::sync::PeerStateTracker;
 #[derive(Debug, Clone)]
 pub struct DagSyncConfig {
     /// Timeout for fetching a single block via Bitswap.
-    pub block_fetch_timeout: Duration,
+    block_fetch_timeout: Duration,
 
-    /// Maximum depth to recursively sync (0 = unlimited).
-    pub max_depth: usize,
+    /// Maximum depth to recursively sync (None = unlimited).
+    max_depth: Option<NonZeroUsize>,
 
-    /// Maximum concurrent block fetches.
-    pub max_concurrent_fetches: usize,
+    /// Maximum concurrent block fetches (guaranteed non-zero).
+    max_concurrent_fetches: NonZeroUsize,
+}
+
+impl DagSyncConfig {
+    /// Create a new DagSyncConfig with validation.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_fetch_timeout` - Timeout for fetching blocks (must be > 0)
+    /// * `max_depth` - Maximum sync depth (None = unlimited)
+    /// * `max_concurrent_fetches` - Max concurrent fetches (guaranteed non-zero)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `block_fetch_timeout` is zero.
+    pub fn new(
+        block_fetch_timeout: Duration,
+        max_depth: Option<NonZeroUsize>,
+        max_concurrent_fetches: NonZeroUsize,
+    ) -> Self {
+        assert!(
+            !block_fetch_timeout.is_zero(),
+            "block_fetch_timeout must be greater than zero"
+        );
+        Self {
+            block_fetch_timeout,
+            max_depth,
+            max_concurrent_fetches,
+        }
+    }
+
+    /// Get the block fetch timeout.
+    pub fn block_fetch_timeout(&self) -> Duration {
+        self.block_fetch_timeout
+    }
+
+    /// Get the maximum sync depth (None = unlimited).
+    pub fn max_depth(&self) -> Option<NonZeroUsize> {
+        self.max_depth
+    }
+
+    /// Get the maximum concurrent fetches.
+    pub fn max_concurrent_fetches(&self) -> NonZeroUsize {
+        self.max_concurrent_fetches
+    }
+
+    /// Builder method to set block fetch timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        assert!(!timeout.is_zero(), "timeout must be greater than zero");
+        self.block_fetch_timeout = timeout;
+        self
+    }
+
+    /// Builder method to set max depth.
+    pub fn with_max_depth(mut self, depth: Option<NonZeroUsize>) -> Self {
+        self.max_depth = depth;
+        self
+    }
+
+    /// Builder method to set max concurrent fetches.
+    pub fn with_max_concurrent_fetches(mut self, count: NonZeroUsize) -> Self {
+        self.max_concurrent_fetches = count;
+        self
+    }
 }
 
 impl Default for DagSyncConfig {
     fn default() -> Self {
         Self {
             block_fetch_timeout: Duration::from_secs(30),
-            max_depth: 0, // Unlimited
-            max_concurrent_fetches: 16,
+            max_depth: None, // Unlimited
+            // SAFETY: 16 is non-zero
+            max_concurrent_fetches: NonZeroUsize::new(16).unwrap(),
         }
     }
+}
+
+/// Internal state for DagSyncState, protected by a single lock.
+#[derive(Default)]
+struct SyncStateInner {
+    /// CIDs currently being synced
+    syncing: HashSet<Cid>,
+    /// CIDs that have been synced in this session
+    synced: HashSet<Cid>,
 }
 
 /// Tracks ongoing DAG sync operations.
@@ -80,12 +154,13 @@ impl Default for DagSyncConfig {
 /// - Prevent duplicate sync requests for the same CID
 /// - Track which blocks are being fetched
 /// - Cancel sync operations when needed
+///
+/// All state is protected by a single lock to prevent race conditions
+/// between checking and modifying sync state.
 #[derive(Default)]
 pub struct DagSyncState {
-    /// CIDs currently being synced
-    syncing: RwLock<HashSet<Cid>>,
-    /// CIDs that have been synced in this session
-    synced: RwLock<HashSet<Cid>>,
+    /// Combined state protected by a single lock
+    state: RwLock<SyncStateInner>,
 }
 
 impl DagSyncState {
@@ -96,51 +171,52 @@ impl DagSyncState {
 
     /// Check if a CID is currently being synced.
     pub async fn is_syncing(&self, cid: &Cid) -> bool {
-        self.syncing.read().await.contains(cid)
+        self.state.read().await.syncing.contains(cid)
     }
 
     /// Check if a CID has already been synced.
     pub async fn is_synced(&self, cid: &Cid) -> bool {
-        self.synced.read().await.contains(cid)
+        self.state.read().await.synced.contains(cid)
     }
 
     /// Mark a CID as currently syncing.
     ///
     /// Returns false if already syncing or synced.
+    /// This operation is atomic - no race condition between check and insert.
     pub async fn start_sync(&self, cid: Cid) -> bool {
-        if self.is_synced(&cid).await {
+        let mut state = self.state.write().await;
+
+        // Atomically check both conditions and insert
+        if state.synced.contains(&cid) || state.syncing.contains(&cid) {
             return false;
         }
 
-        let mut syncing = self.syncing.write().await;
-        syncing.insert(cid)
+        state.syncing.insert(cid)
     }
 
     /// Mark a CID as successfully synced.
     pub async fn complete_sync(&self, cid: Cid) {
-        let mut syncing = self.syncing.write().await;
-        syncing.remove(&cid);
-        drop(syncing);
-
-        let mut synced = self.synced.write().await;
-        synced.insert(cid);
+        let mut state = self.state.write().await;
+        state.syncing.remove(&cid);
+        state.synced.insert(cid);
     }
 
     /// Cancel a sync operation (e.g., on error).
     pub async fn cancel_sync(&self, cid: &Cid) {
-        let mut syncing = self.syncing.write().await;
-        syncing.remove(cid);
+        let mut state = self.state.write().await;
+        state.syncing.remove(cid);
     }
 
     /// Get all CIDs currently being synced.
     pub async fn syncing_cids(&self) -> Vec<Cid> {
-        self.syncing.read().await.iter().cloned().collect()
+        self.state.read().await.syncing.iter().cloned().collect()
     }
 
     /// Clear all state (for testing or reset).
     pub async fn clear(&self) {
-        self.syncing.write().await.clear();
-        self.synced.write().await.clear();
+        let mut state = self.state.write().await;
+        state.syncing.clear();
+        state.synced.clear();
     }
 }
 
@@ -285,13 +361,20 @@ impl DagSync {
     /// Handle completion of a Bitswap sync query.
     ///
     /// Call this when Bitswap reports a query completed (success or failure).
-    pub async fn handle_sync_complete(&self, root: Cid, success: bool) {
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Sync completed successfully
+    /// * `Err(Error::DagSyncFailed)` - Sync failed, callers should handle retry logic
+    pub async fn handle_sync_complete(&self, root: Cid, success: bool) -> Result<()> {
         if success {
             self.state.complete_sync(root).await;
             debug!("DAG sync completed for {}", root);
+            Ok(())
         } else {
             self.state.cancel_sync(&root).await;
             warn!("DAG sync failed for {}", root);
+            Err(crate::error::Error::DagSyncFailed(root.to_string()))
         }
     }
 
@@ -511,15 +594,17 @@ mod tests {
         let root = test_cid();
         dag_sync.state.start_sync(root).await;
 
-        // Success case
-        dag_sync.handle_sync_complete(root, true).await;
+        // Success case - should return Ok
+        let result = dag_sync.handle_sync_complete(root, true).await;
+        assert!(result.is_ok());
         assert!(dag_sync.state.is_synced(&root).await);
         assert!(!dag_sync.state.is_syncing(&root).await);
 
-        // Failure case
+        // Failure case - should return Err
         let root2 = test_cid2();
         dag_sync.state.start_sync(root2).await;
-        dag_sync.handle_sync_complete(root2, false).await;
+        let result = dag_sync.handle_sync_complete(root2, false).await;
+        assert!(result.is_err());
         assert!(!dag_sync.state.is_synced(&root2).await);
         assert!(!dag_sync.state.is_syncing(&root2).await);
     }
@@ -572,5 +657,71 @@ mod tests {
             }
             _ => panic!("Expected NeedsFetch"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_dag_sync_state_concurrent_operations() {
+        // Test that concurrent start_sync operations are handled atomically
+        let state = Arc::new(DagSyncState::new());
+        let cid = test_cid();
+
+        // Spawn multiple tasks trying to start sync for the same CID
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let state_clone = Arc::clone(&state);
+            handles.push(tokio::spawn(async move { state_clone.start_sync(cid).await }));
+        }
+
+        // Collect results
+        let mut successes = 0;
+        let mut failures = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                successes += 1;
+            } else {
+                failures += 1;
+            }
+        }
+
+        // Exactly one task should have succeeded
+        assert_eq!(
+            successes, 1,
+            "Exactly one task should acquire the sync lock"
+        );
+        assert_eq!(failures, 9, "Other tasks should fail to acquire");
+
+        // CID should be syncing
+        assert!(state.is_syncing(&cid).await);
+        assert!(!state.is_synced(&cid).await);
+    }
+
+    #[tokio::test]
+    async fn test_dag_sync_state_concurrent_complete() {
+        let state = Arc::new(DagSyncState::new());
+        let cid = test_cid();
+
+        // Start sync
+        assert!(state.start_sync(cid).await);
+
+        // Spawn multiple tasks trying to complete sync
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let state_clone = Arc::clone(&state);
+            handles.push(tokio::spawn(async move {
+                state_clone.complete_sync(cid).await;
+            }));
+        }
+
+        // Wait for all to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // CID should be synced (not syncing)
+        assert!(!state.is_syncing(&cid).await);
+        assert!(state.is_synced(&cid).await);
+
+        // Can't start sync again
+        assert!(!state.start_sync(cid).await);
     }
 }
