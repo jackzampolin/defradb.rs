@@ -2129,3 +2129,220 @@ async fn test_bitswap_store_adapter_insert_and_retrieve_roundtrip() {
     assert!(from_blockstore.is_some());
     assert_eq!(from_blockstore.unwrap(), block_data.to_vec());
 }
+
+// ============================================================================
+// Rebroadcast on Merge Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_rebroadcast_on_merge_enabled() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop,
+        ReplicationResult, SyncConfig, SyncCoordinator, SyncEvent,
+    };
+    use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Subscribe to a collection so broadcast has a topic
+    let collection_id = "test-rebroadcast-collection";
+    coordinator
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+
+    // Store a test block
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let block_data = b"test block for rebroadcast";
+    blockstore.put(&cid, block_data).await.unwrap();
+
+    // Track if merge handler was called
+    let merge_called = Arc::new(AtomicBool::new(false));
+    let merge_called_clone = merge_called.clone();
+
+    struct TestHandler {
+        called: Arc<AtomicBool>,
+    }
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _doc_id: &str,
+            _collection_id: &str,
+            _creator: &str,
+        ) -> Result<MergeOutcome, TestError> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(TestHandler {
+        called: merge_called_clone,
+    });
+
+    // Create event channel with BlockReceived event
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.send(SyncEvent::BlockReceived {
+        cid,
+        doc_id: "test-doc".to_string(),
+        collection_id: collection_id.to_string(),
+        creator: "test-creator".to_string(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+
+    // Run with rebroadcast_on_merge ENABLED
+    let config = ReplicationConfig {
+        continue_on_error: true,
+        rebroadcast_on_merge: true, // This is the key setting we're testing
+    };
+
+    let results = ReplicationLoop::drain(coordinator.clone(), &mut rx, handler, config).await;
+
+    // Verify merge handler was called
+    assert!(merge_called.load(Ordering::SeqCst), "Merge handler should have been called");
+
+    // Should have exactly one result
+    assert_eq!(results.len(), 1, "Should have exactly one result");
+
+    // Result should be Merged or MergedButBroadcastFailed
+    // (MergedButBroadcastFailed happens when no peers are connected to receive the broadcast)
+    match &results[0] {
+        ReplicationResult::Merged { cid: result_cid, .. } => {
+            assert_eq!(*result_cid, cid);
+        }
+        ReplicationResult::MergedButBroadcastFailed {
+            cid: result_cid,
+            broadcast_error,
+            ..
+        } => {
+            assert_eq!(*result_cid, cid);
+            // This is expected when no peers are connected
+            assert!(
+                !broadcast_error.is_empty(),
+                "Broadcast error should have details"
+            );
+        }
+        other => panic!(
+            "Expected Merged or MergedButBroadcastFailed, got {:?}",
+            other
+        ),
+    }
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_rebroadcast_on_merge_disabled_no_broadcast_attempt() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop, ReplicationResult,
+        SyncConfig, SyncCoordinator, SyncEvent,
+    };
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Store a test block
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let block_data = b"test block no rebroadcast";
+    blockstore.put(&cid, block_data).await.unwrap();
+
+    struct SimpleHandler;
+
+    #[derive(Debug)]
+    struct SimpleError;
+    impl std::fmt::Display for SimpleError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "SimpleError")
+        }
+    }
+    impl std::error::Error for SimpleError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for SimpleHandler {
+        type Error = SimpleError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _doc_id: &str,
+            _collection_id: &str,
+            _creator: &str,
+        ) -> Result<MergeOutcome, SimpleError> {
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(SimpleHandler);
+
+    // Create event channel
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.send(SyncEvent::BlockReceived {
+        cid,
+        doc_id: "test-doc".to_string(),
+        collection_id: "test-collection".to_string(),
+        creator: "test-creator".to_string(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+
+    // Run with rebroadcast_on_merge DISABLED (default)
+    let config = ReplicationConfig {
+        continue_on_error: true,
+        rebroadcast_on_merge: false, // Disabled - no broadcast should be attempted
+    };
+
+    let results = ReplicationLoop::drain(coordinator.clone(), &mut rx, handler, config).await;
+
+    assert_eq!(results.len(), 1);
+
+    // Should be plain Merged (NOT MergedButBroadcastFailed since no broadcast was attempted)
+    match &results[0] {
+        ReplicationResult::Merged { cid: result_cid, .. } => {
+            assert_eq!(*result_cid, cid);
+        }
+        other => panic!("Expected Merged result when rebroadcast disabled, got {:?}", other),
+    }
+
+    handle.shutdown().await.ok();
+}
