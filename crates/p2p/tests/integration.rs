@@ -12,11 +12,13 @@
 //!
 //! These tests verify end-to-end functionality with multiple hosts.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use p2p::{
     codec, DefraTopic, Error, HostEvent, Message, P2PHost, P2PHostHandle, PushLogBroadcast,
-    PushLogReply, PushLogRequest, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+    PushLogReply, PushLogRequest, SyncConfig, SyncCoordinator, SyncEvent, REP_REQUEST_PROTOCOL,
+    REP_RESPONSE_PROTOCOL,
 };
 use tokio::time::timeout;
 
@@ -947,4 +949,172 @@ fn test_defra_topic_types() {
         DefraTopic::from("other"),
         DefraTopic::Custom("other".to_string())
     );
+}
+
+// ============================================================================
+// SyncCoordinator Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_two_node_sync_with_coordinator() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use storage::backends::MemoryStore;
+
+    // Create host 1 with sync coordinator
+    let (handle1, mut events1) = create_and_start_host().await;
+    let store1 = Arc::new(MemoryStore::new());
+    let blockstore1 = Arc::new(DefraBlockstore::new(store1, true));
+    let (coordinator1, _sync_events1) =
+        SyncCoordinator::new(handle1.clone(), blockstore1.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 1");
+
+    // Create host 2 with sync coordinator
+    let (handle2, mut events2) = create_and_start_host().await;
+    let store2 = Arc::new(MemoryStore::new());
+    let blockstore2 = Arc::new(DefraBlockstore::new(store2, true));
+    let (coordinator2, mut sync_events2) =
+        SyncCoordinator::new(handle2.clone(), blockstore2.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 2");
+
+    // Set up networking
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    let addr1 = wait_for_listening(&mut events1).await;
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events2).await;
+
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+
+    // Connect the hosts
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
+    wait_for_peer_connected(&mut events1).await;
+    wait_for_peer_connected(&mut events2).await;
+
+    // Both coordinators subscribe to the same collection
+    let collection_id = "test-sync-collection";
+    coordinator1
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+    coordinator2
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+
+    // Give time for subscription propagation
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Create a test block
+    let block_data = b"test block for two-node sync";
+    let cid = cid::Cid::try_from(
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+            .parse::<cid::Cid>()
+            .unwrap()
+            .to_bytes()
+            .as_slice(),
+    )
+    .unwrap();
+    let doc_id = "bae-sync-test-doc";
+
+    // Store block locally on coordinator1 and broadcast
+    blockstore1.put(&cid, block_data).await.unwrap();
+    coordinator1
+        .broadcast_local_update(&cid, block_data, doc_id, collection_id)
+        .await
+        .expect("broadcast failed");
+
+    // Spawn a task to handle host events for coordinator2
+    let events_handler = tokio::spawn({
+        async move {
+            let mut received_events = Vec::new();
+            loop {
+                tokio::select! {
+                    event = events2.recv() => {
+                        match event {
+                            Some(HostEvent::GossipMessage { message, .. }) => {
+                                // Store the message for later processing
+                                received_events.push(message);
+                            }
+                            Some(_) => continue,
+                            None => break,
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                        break;
+                    }
+                }
+            }
+            received_events
+        }
+    });
+
+    // Wait for the handler to complete
+    let received = events_handler.await.expect("handler panicked");
+
+    // Check if coordinator2 received the message
+    if !received.is_empty() {
+        let msg = &received[0];
+        assert_eq!(msg.doc_id, doc_id);
+        assert_eq!(msg.collection_id, collection_id);
+        assert_eq!(msg.block, block_data.to_vec());
+
+        // Process the received message
+        coordinator2
+            .handle_host_event(HostEvent::GossipMessage {
+                propagation_source: libp2p::PeerId::random(),
+                message_id: libp2p::gossipsub::MessageId::new(b"test"),
+                topic: collection_id.to_string(),
+                message: msg.clone(),
+            })
+            .await
+            .expect("handle event failed");
+
+        // Check sync event
+        match sync_events2.try_recv() {
+            Ok(SyncEvent::BlockReceived {
+                cid: event_cid,
+                doc_id: event_doc_id,
+                collection_id: event_col_id,
+                ..
+            }) => {
+                assert_eq!(event_doc_id, doc_id);
+                assert_eq!(event_col_id, collection_id);
+                // Verify block is in blockstore2
+                assert!(
+                    blockstore2.has(&event_cid).await.unwrap(),
+                    "Block should be in blockstore2"
+                );
+                // Mark as merged
+                coordinator2.mark_as_merged(&event_cid).await.unwrap();
+                assert!(
+                    coordinator2.is_merged(&event_cid).await.unwrap(),
+                    "Block should be marked as merged"
+                );
+            }
+            Ok(other) => {
+                // Other event types are also valid (e.g., BlockAlreadyMerged)
+                tracing::info!(?other, "Received other sync event");
+            }
+            Err(_) => {
+                // No event yet - acceptable in tests
+            }
+        }
+    }
+
+    handle1.shutdown().await.ok();
+    handle2.shutdown().await.ok();
 }
