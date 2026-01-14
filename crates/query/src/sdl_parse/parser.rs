@@ -11,8 +11,8 @@ use schema::{
     CType, CollectionVersion, FieldDescription, FieldKind, IndexDescription,
     IndexedFieldDescription, ScalarKind,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 /// Parsed directive information from a field
 #[derive(Debug, Default, Clone)]
@@ -178,6 +178,12 @@ impl<'a> SdlParser<'a> {
                 }
                 "constraints" => {
                     if let Some(size) = self.get_directive_int(directive, "size") {
+                        if size < 0 {
+                            return Err(QueryError::parse(format!(
+                                "@constraints size must be non-negative, got {}",
+                                size
+                            )));
+                        }
                         result.size_constraint = Some(size as usize);
                     }
                 }
@@ -265,47 +271,71 @@ impl<'a> SdlParser<'a> {
         directive: &Directive<'_, String>,
     ) -> Result<serde_json::Value> {
         // Go supports: string, bool, int, float, float32, float64, dateTime, json, blob
-        // We check each argument type
-        for (name, value) in &directive.arguments {
-            match name.as_str() {
-                "string" | "value" => {
-                    if let graphql_parser::schema::Value::String(s) = value {
-                        return Ok(serde_json::Value::String(s.clone()));
-                    }
-                }
-                "bool" => {
-                    if let graphql_parser::schema::Value::Boolean(b) = value {
-                        return Ok(serde_json::Value::Bool(*b));
-                    }
-                }
-                "int" => {
-                    if let graphql_parser::schema::Value::Int(n) = value {
-                        return Ok(serde_json::Value::Number(
-                            serde_json::Number::from(n.as_i64().unwrap_or(0)),
-                        ));
-                    }
-                }
-                "float" | "float64" => {
-                    if let graphql_parser::schema::Value::Float(f) = value {
-                        if let Some(n) = serde_json::Number::from_f64(*f) {
-                            return Ok(serde_json::Value::Number(n));
-                        }
-                    }
-                }
-                "json" => {
-                    if let graphql_parser::schema::Value::String(s) = value {
-                        if let Ok(parsed) = serde_json::from_str(s) {
-                            return Ok(parsed);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        // We process only the first argument
+        let Some((name, value)) = directive.arguments.first() else {
+            return Err(QueryError::parse(
+                "@default directive requires a value argument",
+            ));
+        };
 
-        Err(QueryError::parse(
-            "@default directive requires a value argument",
-        ))
+        match name.as_str() {
+            "string" | "value" => match value {
+                graphql_parser::schema::Value::String(s) => {
+                    Ok(serde_json::Value::String(s.clone()))
+                }
+                other => Err(QueryError::parse(format!(
+                    "@default '{}' argument must be a string, got {:?}",
+                    name, other
+                ))),
+            },
+            "bool" => match value {
+                graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
+                other => Err(QueryError::parse(format!(
+                    "@default 'bool' argument must be a boolean, got {:?}",
+                    other
+                ))),
+            },
+            "int" => match value {
+                graphql_parser::schema::Value::Int(n) => {
+                    let int_val = n.as_i64().ok_or_else(|| {
+                        QueryError::parse("@default int value is out of i64 range")
+                    })?;
+                    Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
+                }
+                other => Err(QueryError::parse(format!(
+                    "@default 'int' argument must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            "float" | "float64" => match value {
+                graphql_parser::schema::Value::Float(f) => {
+                    serde_json::Number::from_f64(*f)
+                        .map(serde_json::Value::Number)
+                        .ok_or_else(|| {
+                            QueryError::parse(
+                                "@default float value is not a valid JSON number (NaN or Infinity)",
+                            )
+                        })
+                }
+                other => Err(QueryError::parse(format!(
+                    "@default 'float' argument must be a float, got {:?}",
+                    other
+                ))),
+            },
+            "json" => match value {
+                graphql_parser::schema::Value::String(s) => serde_json::from_str(s).map_err(|e| {
+                    QueryError::parse(format!("@default json contains invalid JSON: {}", e))
+                }),
+                other => Err(QueryError::parse(format!(
+                    "@default 'json' argument must be a string, got {:?}",
+                    other
+                ))),
+            },
+            unknown => Err(QueryError::parse(format!(
+                "unknown @default argument '{}'. Valid arguments are: string, value, bool, int, float, float64, json",
+                unknown
+            ))),
+        }
     }
 
     fn get_directive_string(
@@ -600,36 +630,42 @@ fn graphql_to_scalar_kind(name: &str) -> Option<ScalarKind> {
     }
 }
 
-/// Generate a deterministic collection ID from the type name
+/// Generate a deterministic collection ID from the type name.
+/// Uses SHA-256 for stable output across Rust versions and platforms.
 fn generate_collection_id(type_name: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-
-    let mut hasher = DefaultHasher::new();
-    type_name.hash(&mut hasher);
-    format!("coll_{:x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(b"collection:");
+    hasher.update(type_name.as_bytes());
+    let hash = hasher.finalize();
+    format!("coll_{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
 }
 
-/// Generate a deterministic field ID from collection name and field name
+/// Generate a deterministic field ID from collection name and field name.
+/// Uses SHA-256 for stable output across Rust versions and platforms.
 fn generate_field_id(type_name: &str, field_name: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-
-    let mut hasher = DefaultHasher::new();
-    type_name.hash(&mut hasher);
-    field_name.hash(&mut hasher);
-    format!("field_{:x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(b"field:");
+    hasher.update(type_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(field_name.as_bytes());
+    let hash = hasher.finalize();
+    format!("field_{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
 }
 
-/// Generate a deterministic version ID from collection name and fields
+/// Generate a deterministic version ID from collection name and fields.
+/// Uses SHA-256 for stable output across Rust versions and platforms.
 fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-
-    let mut hasher = DefaultHasher::new();
-    name.hash(&mut hasher);
+    let mut hasher = Sha256::new();
+    hasher.update(b"version:");
+    hasher.update(name.as_bytes());
     for field in fields {
-        field.name.hash(&mut hasher);
-        field.id.hash(&mut hasher);
+        hasher.update(b":");
+        hasher.update(field.name.as_bytes());
+        hasher.update(b":");
+        hasher.update(field.id.as_bytes());
     }
-    format!("v{:x}", hasher.finish())
+    let hash = hasher.finalize();
+    format!("v{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
 }
 
 /// Generate a relation name following Go DefraDB conventions.
@@ -1298,5 +1334,166 @@ mod tests {
 
         assert_eq!(event.indexes.len(), 1);
         assert!(event.indexes[0].fields[0].descending);
+    }
+
+    // =========================================================================
+    // Error Path Tests
+    // =========================================================================
+
+    #[test]
+    fn test_crdt_directive_unknown_type_returns_error() {
+        let sdl = r#"
+            type Counter {
+                value: Int @crdt(type: "invalid_crdt")
+            }
+        "#;
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown CRDT type"),
+            "error should mention unknown CRDT type: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_crdt_directive_missing_type_argument_returns_error() {
+        let sdl = r#"
+            type Counter {
+                value: Int @crdt
+            }
+        "#;
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires 'type' argument"),
+            "error should mention missing type argument: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_directive_missing_value_returns_error() {
+        let sdl = r#"
+            type User {
+                role: String @default
+            }
+        "#;
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires a value argument"),
+            "error should mention missing value: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_directive_unknown_argument_returns_error() {
+        let sdl = r#"
+            type User {
+                role: String @default(invalid_arg: "test")
+            }
+        "#;
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown @default argument"),
+            "error should mention unknown argument: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_directive_invalid_json_returns_error() {
+        let sdl = r#"
+            type Config {
+                settings: JSON @default(json: "{ invalid json }")
+            }
+        "#;
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid JSON"),
+            "error should mention invalid JSON: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_constraints_directive_negative_size_returns_error() {
+        let sdl = r#"
+            type Article {
+                tags: [String!] @constraints(size: -1)
+            }
+        "#;
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-negative"),
+            "error should mention non-negative requirement: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_directive_float() {
+        let sdl = r#"
+            type Measurement {
+                value: Float @default(float: 3.14)
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        let m = &collections[0];
+        let value = m.field_by_name("value").unwrap();
+        assert!(value.default_value.is_some());
+        if let Some(serde_json::Value::Number(n)) = &value.default_value {
+            assert!((n.as_f64().unwrap() - 3.14).abs() < 0.001);
+        } else {
+            panic!("expected number default value");
+        }
+    }
+
+    #[test]
+    fn test_default_directive_json() {
+        let sdl = r#"
+            type Config {
+                settings: JSON @default(json: "{\"key\": \"value\"}")
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        let config = &collections[0];
+        let settings = config.field_by_name("settings").unwrap();
+        assert!(settings.default_value.is_some());
+        if let Some(serde_json::Value::Object(obj)) = &settings.default_value {
+            assert_eq!(obj.get("key").unwrap(), "value");
+        } else {
+            panic!("expected object default value");
+        }
+    }
+
+    #[test]
+    fn test_whitespace_only_sdl() {
+        let sdl = "   \n\t\n   ";
+        let collections = parse_sdl(sdl).unwrap();
+        assert!(collections.is_empty());
+    }
+
+    #[test]
+    fn test_branchable_directive_with_if_false() {
+        let sdl = r#"
+            type Doc @branchable(if: false) {
+                content: String
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        let doc = &collections[0];
+        assert!(!doc.is_branchable);
     }
 }
