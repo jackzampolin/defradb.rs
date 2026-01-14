@@ -24,7 +24,7 @@ use crate::mapper::{Requestable, Select};
 use crate::plan::{LimitNode, ScanNode, SelectNode};
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::parse_query;
-use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
+use crate::txn::{NoOpTransactionRegistry, TransactionHandle, TransactionRegistry};
 
 /// Storage abstraction for fetching documents.
 #[async_trait]
@@ -319,14 +319,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         }
     }
 
-    async fn execute_in_txn(&self, request: QueryRequest, txn_id: &str) -> QueryResponse {
+    async fn execute_in_txn(&self, request: QueryRequest, handle: &TransactionHandle) -> QueryResponse {
         // Look up the transaction in the registry
-        let txn_ctx = match self.registry.get(txn_id) {
+        let txn_ctx = match self.registry.get(handle) {
             Some(ctx) => ctx,
             None => {
                 return QueryResponse::error(format!(
                     "transaction '{}' not found or has been committed/rolled back",
-                    txn_id
+                    handle
                 ));
             }
         };
@@ -352,23 +352,23 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         }
     }
 
-    async fn begin_txn(&self, readonly: bool) -> std::result::Result<String, String> {
+    async fn begin_txn(&self, readonly: bool) -> std::result::Result<TransactionHandle, String> {
         self.registry
             .begin(readonly)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn commit_txn(&self, txn_id: &str) -> std::result::Result<(), String> {
+    async fn commit_txn(&self, handle: &TransactionHandle) -> std::result::Result<(), String> {
         self.registry
-            .commit(txn_id)
+            .commit(handle)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn rollback_txn(&self, txn_id: &str) -> std::result::Result<(), String> {
+    async fn rollback_txn(&self, handle: &TransactionHandle) -> std::result::Result<(), String> {
         self.registry
-            .rollback(txn_id)
+            .rollback(handle)
             .await
             .map_err(|e| e.to_string())
     }
@@ -753,7 +753,8 @@ mod tests {
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
         let request = QueryRequest::new("{ Users { name } }");
-        let response = runner.execute_in_txn(request, "txn-123").await;
+        let handle: TransactionHandle = "txn-123".parse().unwrap();
+        let response = runner.execute_in_txn(request, &handle).await;
 
         // Without a proper registry, transactions are not found
         assert!(response.has_errors());
@@ -906,7 +907,7 @@ mod tests {
 
     #[async_trait]
     impl TransactionRegistry for MockTxnRegistry {
-        async fn begin(&self, readonly: bool) -> Result<String> {
+        async fn begin(&self, readonly: bool) -> Result<TransactionHandle> {
             let id = self.counter.fetch_add(1, Ordering::SeqCst);
             let txn_id = format!("txn-{}", id);
 
@@ -920,29 +921,29 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(txn_id.clone(), ctx);
-            Ok(txn_id)
+            Ok(TransactionHandle::new(txn_id))
         }
 
-        fn get(&self, txn_id: &str) -> Option<Arc<dyn TransactionContext>> {
-            self.transactions.lock().unwrap().get(txn_id).cloned()
+        fn get(&self, handle: &TransactionHandle) -> Option<Arc<dyn TransactionContext>> {
+            self.transactions.lock().unwrap().get(handle.as_str()).cloned()
         }
 
-        async fn commit(&self, txn_id: &str) -> Result<()> {
-            match self.transactions.lock().unwrap().remove(txn_id) {
+        async fn commit(&self, handle: &TransactionHandle) -> Result<()> {
+            match self.transactions.lock().unwrap().remove(handle.as_str()) {
                 Some(_) => Ok(()),
                 None => Err(QueryError::execution(format!(
                     "transaction '{}' not found",
-                    txn_id
+                    handle
                 ))),
             }
         }
 
-        async fn rollback(&self, txn_id: &str) -> Result<()> {
-            match self.transactions.lock().unwrap().remove(txn_id) {
+        async fn rollback(&self, handle: &TransactionHandle) -> Result<()> {
+            match self.transactions.lock().unwrap().remove(handle.as_str()) {
                 Some(_) => Ok(()),
                 None => Err(QueryError::execution(format!(
                     "transaction '{}' not found",
-                    txn_id
+                    handle
                 ))),
             }
         }
@@ -986,7 +987,8 @@ mod tests {
         let registry = MockTxnRegistry::new(MockFetcher::new());
         let runner = QueryRunner::with_registry(fetcher, vec![make_test_collection()], registry);
 
-        let result = runner.commit_txn("nonexistent-txn").await;
+        let nonexistent_handle: TransactionHandle = "nonexistent-txn".parse().unwrap();
+        let result = runner.commit_txn(&nonexistent_handle).await;
         assert!(result.is_err());
     }
 
