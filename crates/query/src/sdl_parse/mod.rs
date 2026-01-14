@@ -5,4 +5,7 @@
 
 mod parser;
 
-pub use parser::{parse_sdl, ParsedDirectives, SdlParser};
+pub use parser::{
+    parse_sdl, parse_sdl_with_warnings, DirectiveLocation, ParseOutput, ParseWarning,
+    ParsedDirectives, SdlParser,
+};
