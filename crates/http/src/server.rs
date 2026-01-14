@@ -71,31 +71,25 @@ impl Server {
     /// - Empty origins = no CORS headers (browsers block cross-origin requests)
     /// - "*" in origins = allow all origins
     /// - Otherwise, case-insensitive matching against configured origins
-    pub fn router(&self) -> Router {
-        let cors = self.build_cors_layer();
+    ///
+    /// Returns an error if any configured CORS origins are invalid.
+    pub fn router(&self) -> Result<Router> {
+        let cors = self.build_cors_layer()?;
 
-        create_router(Arc::clone(&self.executor))
+        Ok(create_router(Arc::clone(&self.executor))
             .layer(TraceLayer::new_for_http())
-            .layer(cors)
+            .layer(cors))
     }
 
     /// Build CORS layer matching Go DefraDB behavior.
-    fn build_cors_layer(&self) -> CorsLayer {
+    fn build_cors_layer(&self) -> Result<CorsLayer> {
         if self.config.allowed_origins.is_empty() {
             // No origins configured = no CORS headers (matches Go DefraDB)
-            return CorsLayer::new();
+            return Ok(CorsLayer::new());
         }
 
         // Check for wildcard (matches Go DefraDB: if "*" in origins, allow all)
         let allow_any = self.config.allowed_origins.iter().any(|o| o == "*");
-
-        // Convert origins to lowercase for case-insensitive matching (matches Go DefraDB)
-        let allowed_lower: Vec<String> = self
-            .config
-            .allowed_origins
-            .iter()
-            .map(|o| o.to_lowercase())
-            .collect();
 
         // Build CORS layer with Go DefraDB settings
         let cors = CorsLayer::new()
@@ -113,42 +107,73 @@ impl Server {
             .max_age(Duration::from_secs(300));
 
         if allow_any {
-            cors.allow_origin(tower_http::cors::Any)
+            Ok(cors.allow_origin(tower_http::cors::Any))
         } else {
-            cors.allow_origin(
-                allowed_lower
-                    .into_iter()
-                    .filter_map(|origin| {
-                        origin.parse::<HeaderValue>().ok().or_else(|| {
-                            tracing::warn!(origin = %origin, "Invalid CORS origin, skipping");
-                            None
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            // Validate and convert all origins upfront - fail fast on invalid origins
+            let valid_origins = self.validate_cors_origins()?;
+            Ok(cors.allow_origin(valid_origins))
         }
+    }
+
+    /// Validate CORS origins and convert to HeaderValues.
+    /// Fails fast if any origin is invalid rather than silently skipping.
+    fn validate_cors_origins(&self) -> Result<Vec<HeaderValue>> {
+        let mut valid_origins = Vec::new();
+        let mut invalid_origins = Vec::new();
+
+        for origin in &self.config.allowed_origins {
+            // Skip wildcard (handled separately)
+            if origin == "*" {
+                continue;
+            }
+            // Lowercase for case-insensitive matching (matches Go DefraDB)
+            let lower = origin.to_lowercase();
+            match lower.parse::<HeaderValue>() {
+                Ok(hv) => valid_origins.push(hv),
+                Err(_) => invalid_origins.push(origin.clone()),
+            }
+        }
+
+        if !invalid_origins.is_empty() {
+            let msg = format!(
+                "invalid CORS origins: {:?}. Origins must be valid HTTP header values.",
+                invalid_origins
+            );
+            tracing::error!("{}", msg);
+            return Err(crate::error::HttpError::BadRequest(msg));
+        }
+
+        Ok(valid_origins)
     }
 
     /// Run the server (blocks until shutdown).
     pub async fn run(self) -> Result<()> {
-        let router = self.router();
+        let router = self.router()?;
         let listener = TcpListener::bind(self.config.address).await.map_err(|e| {
+            let hint = match e.kind() {
+                std::io::ErrorKind::AddrInUse => "port is already in use",
+                std::io::ErrorKind::PermissionDenied => "permission denied (try port > 1024)",
+                std::io::ErrorKind::AddrNotAvailable => "address not available on this host",
+                _ => "check network configuration",
+            };
             tracing::error!(
                 address = %self.config.address,
                 error = %e,
+                hint = hint,
                 "Failed to bind HTTP server"
             );
             crate::error::HttpError::Internal(format!(
-                "failed to bind to {}: {} (check if port is in use)",
-                self.config.address, e
+                "failed to bind to {}: {} ({})",
+                self.config.address, e, hint
             ))
         })?;
 
         tracing::info!("DefraDB HTTP server listening on {}", self.config.address);
 
-        axum::serve(listener, router)
-            .await
-            .map_err(|e| crate::error::HttpError::Internal(e.to_string()))?;
+        axum::serve(listener, router).await.map_err(|e| {
+            tracing::error!(error = %e, "HTTP server encountered fatal error");
+            crate::error::HttpError::Internal(format!("server error: {}", e))
+        })?;
 
         Ok(())
     }
@@ -169,7 +194,7 @@ mod tests {
     use serde_json::json;
     use tower::util::ServiceExt;
 
-    use crate::mock::MockQueryExecutor;
+    use crate::mock::{FailingMockExecutor, MockQueryExecutor};
 
     fn test_server() -> Server {
         Server::new(MockQueryExecutor::new())
@@ -177,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_check_route() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
 
         let response = router
             .oneshot(
@@ -194,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_version_route() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
 
         let response = router
             .oneshot(
@@ -211,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_post_route() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
         let body = json!({"query": "{ users { name } }"}).to_string();
 
         let response = router
@@ -231,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_post_invalid_json() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
 
         let response = router
             .oneshot(
@@ -251,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_get_route() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
 
         let response = router
             .oneshot(
@@ -268,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_get_with_variables() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
         let vars = urlencoding::encode(r#"{"limit":10}"#);
 
         let response = router
@@ -289,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_get_invalid_variables() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
         let invalid_vars = urlencoding::encode("{invalid}");
 
         let response = router
@@ -311,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schema_route() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
 
         let response = router
             .oneshot(
@@ -328,7 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_not_found_route() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
 
         let response = router
             .oneshot(
@@ -352,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_post_empty_query() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
         let body = json!({"query": ""}).to_string();
 
         let response = router
@@ -373,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_get_missing_query_param() {
-        let router = test_server().router();
+        let router = test_server().router().unwrap();
 
         let response = router
             .oneshot(
@@ -396,7 +421,7 @@ mod tests {
             allowed_origins: vec!["http://localhost:3000".to_string()],
         };
         let server = Server::with_config(MockQueryExecutor::new(), config);
-        let router = server.router();
+        let router = server.router().unwrap();
 
         let response = router
             .oneshot(
@@ -427,7 +452,7 @@ mod tests {
             allowed_origins: vec!["*".to_string()],
         };
         let server = Server::with_config(MockQueryExecutor::new(), config);
-        let router = server.router();
+        let router = server.router().unwrap();
 
         let response = router
             .oneshot(
@@ -455,7 +480,7 @@ mod tests {
             allowed_origins: vec!["http://LOCALHOST:3000".to_string()],
         };
         let server = Server::with_config(MockQueryExecutor::new(), config);
-        let router = server.router();
+        let router = server.router().unwrap();
 
         let response = router
             .oneshot(
@@ -474,5 +499,153 @@ mod tests {
         assert!(response
             .headers()
             .contains_key("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn test_cors_invalid_origin_fails_fast() {
+        let config = ServerConfig {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            // Non-ASCII characters are invalid in HTTP header values
+            allowed_origins: vec![
+                "http://localhost:3000".to_string(),
+                "http://invalid\x00origin".to_string(),
+            ],
+        };
+        let server = Server::with_config(MockQueryExecutor::new(), config);
+
+        // router() should return an error for invalid origins
+        let result = server.router();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid CORS origins"));
+    }
+
+    #[tokio::test]
+    async fn test_graphql_post_returns_errors_in_body() {
+        let server = Server::new(FailingMockExecutor::with_schema_error("ignored"));
+        let router = server.router().unwrap();
+        let body = json!({"query": "{ users { name } }"}).to_string();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // GraphQL spec: errors return 200 OK with errors in body
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify response body contains errors
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(
+            body_str.contains("errors"),
+            "Response should contain errors: {}",
+            body_str
+        );
+    }
+
+    #[tokio::test]
+    async fn test_graphql_post_response_body_structure() {
+        let router = test_server().router().unwrap();
+        let body = json!({"query": "{ users { name } }"}).to_string();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify response body has correct structure
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(
+            json.get("data").is_some(),
+            "Response should contain 'data' field"
+        );
+        assert!(
+            json.get("data").unwrap().get("users").is_some(),
+            "Response should contain 'users' in data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_version_response_body() {
+        let router = test_server().router().unwrap();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify version response has required fields
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(
+            json.get("version").is_some(),
+            "Response should contain 'version' field"
+        );
+        assert!(
+            json.get("commit").is_some(),
+            "Response should contain 'commit' field"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schema_response_body() {
+        let router = test_server().router().unwrap();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify schema response contains SDL content
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(
+            body_str.contains("type User"),
+            "Schema should contain User type"
+        );
+        assert!(
+            body_str.contains("type Query"),
+            "Schema should contain Query type"
+        );
     }
 }

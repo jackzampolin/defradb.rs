@@ -97,16 +97,33 @@ pub async fn schema(State(state): State<AppState>) -> impl IntoResponse {
     match state.executor.schema().await {
         Ok(sdl) => (StatusCode::OK, sdl).into_response(),
         Err(e) => {
-            // Log full error details server-side, return generic message to client
+            // Log full error details server-side
             tracing::error!(error = %e, "Schema retrieval failed");
+
+            // Provide categorized user-facing message based on error type
+            let user_message = categorize_schema_error(&e);
+
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::error::ErrorResponse {
-                    error: "Failed to retrieve schema".to_string(),
+                    error: user_message,
                 }),
             )
                 .into_response()
         }
+    }
+}
+
+/// Categorize schema errors for user-facing messages.
+fn categorize_schema_error(e: &query::error::QueryError) -> String {
+    use query::error::QueryError;
+    match e {
+        QueryError::Storage(_) => {
+            "Schema unavailable due to storage error. Please try again.".to_string()
+        }
+        QueryError::Schema(_) => "Schema validation error. Check schema definition.".to_string(),
+        QueryError::Parse(_) => "Schema parse error. Check schema syntax.".to_string(),
+        _ => "Failed to retrieve schema. Check server logs for details.".to_string(),
     }
 }
 
