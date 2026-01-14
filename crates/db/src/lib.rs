@@ -46,12 +46,14 @@ pub mod collection;
 pub mod database;
 pub mod error;
 pub mod txn;
+pub mod txn_registry;
 
 // Re-export commonly used types
 pub use collection::Collection;
 pub use database::{DbOptions, DB};
 pub use error::{Error, Result};
 pub use txn::DbTxn;
+pub use txn_registry::{DbTransactionContext, DbTransactionRegistry, TxnDocFetcher};
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};
