@@ -44,6 +44,10 @@ pub enum Error {
     #[error("block error: {0}")]
     BlockError(String),
 
+    /// IPLD conversion/traversal errors
+    #[error("ipld error: {0}")]
+    IpldError(String),
+
     /// Network/P2P errors
     #[error("network error: {0}")]
     Network(String),
