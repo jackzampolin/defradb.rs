@@ -948,6 +948,52 @@ mod tests {
     }
 
     #[test]
+    fn test_crdt_delta_doc_id_returns_some_for_most_types() {
+        // LWW has doc_id
+        let lww = CrdtDelta::Lww(LwwDeltaPayload {
+            doc_id: b"lww-doc".to_vec(),
+            field_name: "f".to_string(),
+            priority: 1,
+            schema_version_id: "v1".to_string(),
+            data: vec![],
+        });
+        assert_eq!(lww.doc_id(), Some(b"lww-doc".as_slice()));
+
+        // Counter has doc_id
+        let counter = CrdtDelta::Counter(CounterDeltaPayload {
+            doc_id: b"counter-doc".to_vec(),
+            field_name: "f".to_string(),
+            priority: 1,
+            nonce: 0,
+            schema_version_id: "v1".to_string(),
+            data: vec![],
+        });
+        assert_eq!(counter.doc_id(), Some(b"counter-doc".as_slice()));
+
+        // Composite has doc_id
+        let composite = CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"composite-doc".to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            status: 1,
+        });
+        assert_eq!(composite.doc_id(), Some(b"composite-doc".as_slice()));
+    }
+
+    #[test]
+    fn test_crdt_delta_doc_id_returns_none_for_collection() {
+        // Collection does NOT have doc_id (matches Go behavior)
+        let collection = CrdtDelta::Collection(CollectionDeltaPayload {
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+        });
+        assert!(
+            collection.doc_id().is_none(),
+            "CollectionDelta should not have doc_id"
+        );
+    }
+
+    #[test]
     fn test_composite_delta_roundtrip() {
         let delta = CrdtDelta::Composite(CompositeDeltaPayload {
             doc_id: b"doc1".to_vec(),
