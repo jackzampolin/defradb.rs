@@ -45,6 +45,9 @@ pub enum Error {
     #[error("transaction not found: {0}")]
     TransactionNotFound(String),
 
+    #[error("transaction registry lock poisoned: {0}")]
+    LockPoisoned(String),
+
     #[error("{0}")]
     Other(String),
 }

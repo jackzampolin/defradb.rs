@@ -8,7 +8,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::error::Result;
+use crate::error::{Result, TransactionError};
 use crate::runner::DocFetcher;
 
 /// An opaque handle to an active transaction.
@@ -172,12 +172,13 @@ impl TransactionRegistry for NoOpTransactionRegistry {
 ///
 /// ```ignore
 /// use query::{QueryExecutor, QueryRequest, TransactionGuard};
+/// use query::error::TransactionError;
 ///
 /// async fn batch_operations<E: QueryExecutor>(
 ///     executor: &E,
 ///     queries: Vec<QueryRequest>,
-/// ) -> Result<Vec<QueryResponse>, String> {
-///     let mut guard = TransactionGuard::begin(executor, false).await?;
+/// ) -> Result<Vec<QueryResponse>, TransactionError> {
+///     let guard = TransactionGuard::begin(executor, false).await?;
 ///     let mut responses = Vec::new();
 ///
 ///     for query in queries {
@@ -185,7 +186,7 @@ impl TransactionRegistry for NoOpTransactionRegistry {
 ///         if resp.has_errors() {
 ///             // Guard is consumed, transaction rolled back
 ///             guard.rollback().await?;
-///             return Err("query failed".to_string());
+///             return Err(TransactionError::execution("query failed"));
 ///         }
 ///         responses.push(resp);
 ///     }
@@ -202,7 +203,10 @@ pub struct TransactionGuard<'a, E: crate::QueryExecutor + ?Sized> {
 
 impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
     /// Begin a new transaction and return a guard for it.
-    pub async fn begin(executor: &'a E, readonly: bool) -> std::result::Result<Self, String> {
+    pub async fn begin(
+        executor: &'a E,
+        readonly: bool,
+    ) -> std::result::Result<Self, TransactionError> {
         let handle = executor.begin_txn(readonly).await?;
         Ok(Self {
             executor,
@@ -226,20 +230,24 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
     /// Commit the transaction and consume the guard.
     ///
     /// After calling this, the guard cannot be used again (compile-time enforced).
-    pub async fn commit(mut self) -> std::result::Result<(), String> {
+    pub async fn commit(mut self) -> std::result::Result<(), TransactionError> {
         match self.handle.take() {
             Some(handle) => self.executor.commit_txn(&handle).await,
-            None => Err("transaction already finalized".to_string()),
+            None => Err(TransactionError::already_finalized(
+                "transaction already finalized",
+            )),
         }
     }
 
     /// Rollback the transaction and consume the guard.
     ///
     /// After calling this, the guard cannot be used again (compile-time enforced).
-    pub async fn rollback(mut self) -> std::result::Result<(), String> {
+    pub async fn rollback(mut self) -> std::result::Result<(), TransactionError> {
         match self.handle.take() {
             Some(handle) => self.executor.rollback_txn(&handle).await,
-            None => Err("transaction already finalized".to_string()),
+            None => Err(TransactionError::already_finalized(
+                "transaction already finalized",
+            )),
         }
     }
 }
@@ -361,17 +369,26 @@ mod tests {
             crate::QueryResponse::success(serde_json::json!({"in_txn": true}))
         }
 
-        async fn begin_txn(&self, _readonly: bool) -> std::result::Result<TransactionHandle, String> {
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
             let id = self.txn_counter.fetch_add(1, Ordering::SeqCst);
             Ok(TransactionHandle::new(format!("mock-txn-{}", id)))
         }
 
-        async fn commit_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
             self.committed.store(true, Ordering::SeqCst);
             Ok(())
         }
 
-        async fn rollback_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
             self.rolled_back.store(true, Ordering::SeqCst);
             Ok(())
         }

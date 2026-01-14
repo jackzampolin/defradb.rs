@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::document::DocumentMapping;
-use crate::error::{QueryError, Result};
+use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::json_convert::normal_value_to_json;
 use crate::mapper::{Requestable, Select};
@@ -26,6 +26,45 @@ use crate::planner::{Doc, PlanNode};
 use crate::query_parse::parse_query;
 use crate::txn::{NoOpTransactionRegistry, TransactionHandle, TransactionRegistry};
 
+/// Result of fetching documents by ID, including information about missing documents.
+#[derive(Debug, Clone)]
+pub struct FetchByIdsResult {
+    /// The documents that were found.
+    pub docs: Vec<Document>,
+    /// IDs that were requested but not found.
+    pub missing_ids: Vec<String>,
+}
+
+impl FetchByIdsResult {
+    /// Create a new result with no missing IDs.
+    pub fn all_found(docs: Vec<Document>) -> Self {
+        Self {
+            docs,
+            missing_ids: Vec::new(),
+        }
+    }
+
+    /// Create a new result with some missing IDs.
+    pub fn partial(docs: Vec<Document>, missing_ids: Vec<String>) -> Self {
+        Self { docs, missing_ids }
+    }
+
+    /// Check if all requested documents were found.
+    pub fn is_complete(&self) -> bool {
+        self.missing_ids.is_empty()
+    }
+
+    /// Get the number of documents found.
+    pub fn found_count(&self) -> usize {
+        self.docs.len()
+    }
+
+    /// Get the number of missing documents.
+    pub fn missing_count(&self) -> usize {
+        self.missing_ids.len()
+    }
+}
+
 /// Storage abstraction for fetching documents.
 #[async_trait]
 pub trait DocFetcher: Send + Sync {
@@ -33,7 +72,14 @@ pub trait DocFetcher: Send + Sync {
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
 
     /// Get documents by their IDs.
-    async fn get_by_ids(&self, collection_name: &str, doc_ids: &[String]) -> Result<Vec<Document>>;
+    ///
+    /// Returns both the found documents and the IDs that were not found.
+    /// This allows callers to handle missing documents appropriately.
+    async fn get_by_ids(
+        &self,
+        collection_name: &str,
+        doc_ids: &[String],
+    ) -> Result<FetchByIdsResult>;
 }
 
 /// Query runner that executes GraphQL queries against storage.
@@ -123,7 +169,10 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
-            fetcher.get_by_ids(&select.collection_name, doc_ids).await?
+            let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            // Note: We currently return only found documents, but missing_ids is available
+            // for future use (e.g., partial error responses, logging, etc.)
+            result.docs
         } else {
             fetcher.get_all(&select.collection_name).await?
         };
@@ -319,7 +368,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         }
     }
 
-    async fn execute_in_txn(&self, request: QueryRequest, handle: &TransactionHandle) -> QueryResponse {
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        handle: &TransactionHandle,
+    ) -> QueryResponse {
         // Look up the transaction in the registry
         let txn_ctx = match self.registry.get(handle) {
             Some(ctx) => ctx,
@@ -352,25 +405,50 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         }
     }
 
-    async fn begin_txn(&self, readonly: bool) -> std::result::Result<TransactionHandle, String> {
-        self.registry
-            .begin(readonly)
-            .await
-            .map_err(|e| e.to_string())
+    async fn begin_txn(
+        &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.registry.begin(readonly).await.map_err(|e| {
+            // Convert QueryError to TransactionError
+            TransactionError::execution(e.to_string())
+        })
     }
 
-    async fn commit_txn(&self, handle: &TransactionHandle) -> std::result::Result<(), String> {
-        self.registry
-            .commit(handle)
-            .await
-            .map_err(|e| e.to_string())
+    async fn commit_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.commit(handle).await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                TransactionError::not_found(msg)
+            } else if msg.contains("already consumed") || msg.contains("double") {
+                TransactionError::already_finalized(msg)
+            } else if msg.contains("poisoned") {
+                TransactionError::lock_poisoned(msg)
+            } else {
+                TransactionError::execution(msg)
+            }
+        })
     }
 
-    async fn rollback_txn(&self, handle: &TransactionHandle) -> std::result::Result<(), String> {
-        self.registry
-            .rollback(handle)
-            .await
-            .map_err(|e| e.to_string())
+    async fn rollback_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.rollback(handle).await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                TransactionError::not_found(msg)
+            } else if msg.contains("already consumed") || msg.contains("double") {
+                TransactionError::already_finalized(msg)
+            } else if msg.contains("poisoned") {
+                TransactionError::lock_poisoned(msg)
+            } else {
+                TransactionError::execution(msg)
+            }
+        })
     }
 
     async fn schema(&self) -> Result<String> {
@@ -422,18 +500,26 @@ mod tests {
             &self,
             collection_name: &str,
             doc_ids: &[String],
-        ) -> Result<Vec<Document>> {
+        ) -> Result<FetchByIdsResult> {
             let docs = self.docs.lock().unwrap();
             let all = docs.get(collection_name).cloned().unwrap_or_default();
-            let filtered: Vec<_> = all
-                .into_iter()
-                .filter(|d| {
+
+            let mut found = Vec::new();
+            let mut missing = Vec::new();
+
+            for id in doc_ids {
+                if let Some(doc) = all.iter().find(|d| {
                     d.id()
-                        .map(|id| doc_ids.contains(&id.to_string()))
+                        .map(|doc_id| doc_id.to_string() == *id)
                         .unwrap_or(false)
-                })
-                .collect();
-            Ok(filtered)
+                }) {
+                    found.push(doc.clone());
+                } else {
+                    missing.push(id.clone());
+                }
+            }
+
+            Ok(FetchByIdsResult::partial(found, missing))
         }
     }
 
@@ -577,7 +663,7 @@ mod tests {
             &self,
             _collection_name: &str,
             _doc_ids: &[String],
-        ) -> Result<Vec<Document>> {
+        ) -> Result<FetchByIdsResult> {
             Err(QueryError::execution("storage failure"))
         }
     }
@@ -925,7 +1011,11 @@ mod tests {
         }
 
         fn get(&self, handle: &TransactionHandle) -> Option<Arc<dyn TransactionContext>> {
-            self.transactions.lock().unwrap().get(handle.as_str()).cloned()
+            self.transactions
+                .lock()
+                .unwrap()
+                .get(handle.as_str())
+                .cloned()
         }
 
         async fn commit(&self, handle: &TransactionHandle) -> Result<()> {
@@ -1103,6 +1193,6 @@ mod tests {
 
         let result = runner.begin_txn(false).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not supported"));
+        assert!(result.unwrap_err().to_string().contains("not supported"));
     }
 }

@@ -3,6 +3,7 @@
 use query::runner::DocFetcher;
 use query::txn::TransactionContext;
 use std::sync::Arc;
+use std::time::Instant;
 use storage::corekv::Store;
 
 use crate::doc_fetcher::DbDocFetcher;
@@ -16,6 +17,7 @@ pub struct DbTransactionContext<S: Store> {
     id: String,
     readonly: bool,
     fetcher: Arc<DbDocFetcher<S>>,
+    created_at: Instant,
 }
 
 impl<S: Store> DbTransactionContext<S> {
@@ -25,7 +27,13 @@ impl<S: Store> DbTransactionContext<S> {
             id,
             readonly,
             fetcher,
+            created_at: Instant::now(),
         }
+    }
+
+    /// Get the instant when this transaction was created.
+    pub fn created_at(&self) -> Instant {
+        self.created_at
     }
 }
 

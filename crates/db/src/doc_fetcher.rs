@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use document::Document;
-use query::runner::DocFetcher;
+use query::runner::{DocFetcher, FetchByIdsResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use storage::corekv::Store;
@@ -90,7 +90,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         &self,
         collection_name: &str,
         doc_ids: &[String],
-    ) -> query::error::Result<Vec<Document>> {
+    ) -> query::error::Result<FetchByIdsResult> {
         let collection = self
             .collections
             .get(collection_name)
@@ -142,6 +142,6 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             );
         }
 
-        Ok(docs)
+        Ok(FetchByIdsResult::partial(docs, missing_ids))
     }
 }

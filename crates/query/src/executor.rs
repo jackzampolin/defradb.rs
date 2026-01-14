@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::error::Result;
+use crate::error::{Result, TransactionError};
 use crate::txn::TransactionHandle;
 
 /// A GraphQL query request.
@@ -170,7 +170,7 @@ pub struct ErrorLocation {
 /// async fn handle_transaction<E: QueryExecutor>(
 ///     executor: &E,
 ///     queries: Vec<QueryRequest>,
-/// ) -> Result<Vec<QueryResponse>, String> {
+/// ) -> Result<Vec<QueryResponse>, TransactionError> {
 ///     let handle = executor.begin_txn(false).await?;
 ///     let mut responses = Vec::new();
 ///
@@ -178,7 +178,7 @@ pub struct ErrorLocation {
 ///         let resp = executor.execute_in_txn(query, &handle).await;
 ///         if resp.has_errors() {
 ///             executor.rollback_txn(&handle).await.ok();
-///             return Err("query failed".to_string());
+///             return Err(TransactionError::execution("query failed"));
 ///         }
 ///         responses.push(resp);
 ///     }
@@ -203,7 +203,11 @@ pub trait QueryExecutor: Send + Sync {
     ///
     /// Returns an error response if the transaction handle is invalid or
     /// the transaction has already been committed/rolled back.
-    async fn execute_in_txn(&self, request: QueryRequest, handle: &TransactionHandle) -> QueryResponse;
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        handle: &TransactionHandle,
+    ) -> QueryResponse;
 
     /// Begin a new transaction.
     ///
@@ -212,19 +216,28 @@ pub trait QueryExecutor: Send + Sync {
     ///
     /// # Arguments
     /// * `readonly` - If true, the transaction cannot perform write operations
-    async fn begin_txn(&self, readonly: bool) -> std::result::Result<TransactionHandle, String>;
+    async fn begin_txn(
+        &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError>;
 
     /// Commit a transaction.
     ///
     /// All operations performed within the transaction become permanent.
     /// After commit, the transaction handle is no longer valid.
-    async fn commit_txn(&self, handle: &TransactionHandle) -> std::result::Result<(), String>;
+    async fn commit_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError>;
 
     /// Rollback a transaction.
     ///
     /// All operations performed within the transaction are discarded.
     /// After rollback, the transaction handle is no longer valid.
-    async fn rollback_txn(&self, handle: &TransactionHandle) -> std::result::Result<(), String>;
+    async fn rollback_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError>;
 
     /// Get the GraphQL schema for introspection.
     async fn schema(&self) -> Result<String>;

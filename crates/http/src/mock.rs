@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use query::error::{QueryError, Result};
+use query::error::{QueryError, Result, TransactionError};
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 use query::TransactionHandle;
 
@@ -34,20 +34,39 @@ impl QueryExecutor for FailingMockExecutor {
         QueryResponse::error("execution failed")
     }
 
-    async fn execute_in_txn(&self, request: QueryRequest, _handle: &TransactionHandle) -> QueryResponse {
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        _handle: &TransactionHandle,
+    ) -> QueryResponse {
         self.execute(request).await
     }
 
-    async fn begin_txn(&self, _readonly: bool) -> std::result::Result<TransactionHandle, String> {
-        Err("mock executor does not support transactions".to_string())
+    async fn begin_txn(
+        &self,
+        _readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        Err(TransactionError::not_supported(
+            "mock executor does not support transactions",
+        ))
     }
 
-    async fn commit_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
-        Err("mock executor does not support transactions".to_string())
+    async fn commit_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError::not_supported(
+            "mock executor does not support transactions",
+        ))
     }
 
-    async fn rollback_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
-        Err("mock executor does not support transactions".to_string())
+    async fn rollback_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError::not_supported(
+            "mock executor does not support transactions",
+        ))
     }
 
     async fn schema(&self) -> Result<String> {
@@ -112,19 +131,32 @@ impl QueryExecutor for MockQueryExecutor {
         }
     }
 
-    async fn execute_in_txn(&self, request: QueryRequest, _handle: &TransactionHandle) -> QueryResponse {
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        _handle: &TransactionHandle,
+    ) -> QueryResponse {
         self.execute(request).await
     }
 
-    async fn begin_txn(&self, _readonly: bool) -> std::result::Result<TransactionHandle, String> {
+    async fn begin_txn(
+        &self,
+        _readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
         Ok(TransactionHandle::new("mock-txn-001".to_string()))
     }
 
-    async fn commit_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
+    async fn commit_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         Ok(())
     }
 
-    async fn rollback_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
+    async fn rollback_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         Ok(())
     }
 

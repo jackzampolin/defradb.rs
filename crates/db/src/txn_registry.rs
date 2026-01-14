@@ -20,8 +20,9 @@ use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use storage::corekv::Store;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::collection::Collection;
 use crate::database::DB;
@@ -87,17 +88,21 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
     /// Get an existing transaction by ID (for internal use).
     ///
-    /// Returns `None` if the transaction doesn't exist or if the lock is poisoned.
-    pub fn get_ctx(&self, txn_id: &str) -> Option<Arc<DbTransactionContext<S>>> {
+    /// Returns `Ok(None)` if the transaction doesn't exist.
+    /// Returns `Err(LockPoisoned)` if the lock is poisoned (indicates a panic elsewhere).
+    pub fn get_ctx(&self, txn_id: &str) -> Result<Option<Arc<DbTransactionContext<S>>>> {
         match self.transactions.read() {
-            Ok(guard) => guard.get(txn_id).cloned(),
+            Ok(guard) => Ok(guard.get(txn_id).cloned()),
             Err(poisoned) => {
                 error!(
                     txn_id = %txn_id,
                     error = ?poisoned,
-                    "Transaction registry lock poisoned - returning None for safety"
+                    "Transaction registry lock poisoned - system may be in corrupted state"
                 );
-                None
+                Err(Error::LockPoisoned(format!(
+                    "failed to acquire read lock for transaction '{}': a panic occurred elsewhere",
+                    txn_id
+                )))
             }
         }
     }
@@ -105,7 +110,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Get all documents from a collection within a transaction.
     pub async fn get_all_docs(&self, txn_id: &str, collection_name: &str) -> Result<Vec<Document>> {
         let ctx = self
-            .get_ctx(txn_id)
+            .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
 
         ctx.doc_fetcher()
@@ -115,6 +120,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 
     /// Get documents by IDs from a collection within a transaction.
+    ///
+    /// Note: This convenience method returns only the found documents.
+    /// For information about missing IDs, use the DocFetcher's get_by_ids directly.
     pub async fn get_docs_by_ids(
         &self,
         txn_id: &str,
@@ -122,13 +130,87 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         doc_ids: &[String],
     ) -> Result<Vec<Document>> {
         let ctx = self
-            .get_ctx(txn_id)
+            .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
 
         ctx.doc_fetcher()
             .get_by_ids(collection_name, doc_ids)
             .await
+            .map(|result| result.docs)
             .map_err(Error::Query)
+    }
+
+    /// Cleanup transactions older than the given duration.
+    ///
+    /// This method finds all transactions that were created more than `max_age` ago
+    /// and rolls them back, freeing resources. This should be called periodically
+    /// by a background task to prevent resource leaks from dropped `TransactionGuard`s.
+    ///
+    /// Returns the number of transactions that were cleaned up.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lock is poisoned, indicating a panic elsewhere.
+    pub async fn cleanup_stale_transactions(&self, max_age: Duration) -> Result<usize> {
+        let now = std::time::Instant::now();
+
+        // Collect stale transaction IDs while holding the read lock briefly
+        let stale_ids: Vec<String> = {
+            let guard = self.transactions.read().map_err(|_| {
+                Error::LockPoisoned("failed to acquire read lock during cleanup".to_string())
+            })?;
+
+            guard
+                .iter()
+                .filter(|(_, ctx)| now.duration_since(ctx.created_at()) > max_age)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let mut cleaned = 0;
+        for txn_id in stale_ids {
+            // Remove and rollback each stale transaction
+            let ctx = {
+                let mut guard = self.transactions.write().map_err(|_| {
+                    Error::LockPoisoned("failed to acquire write lock during cleanup".to_string())
+                })?;
+                guard.remove(&txn_id)
+            };
+
+            if let Some(ctx) = ctx {
+                warn!(
+                    txn_id = %txn_id,
+                    age_secs = ?now.duration_since(ctx.created_at()).as_secs(),
+                    "Cleaning up stale transaction (leaked TransactionGuard?)"
+                );
+
+                // Try to take and discard the transaction
+                if let Some(txn) = ctx.take_txn().await {
+                    if let Err(e) = txn.force_discard() {
+                        error!(
+                            txn_id = %txn_id,
+                            error = %e,
+                            "Failed to discard stale transaction during cleanup"
+                        );
+                    }
+                }
+                cleaned += 1;
+            }
+        }
+
+        Ok(cleaned)
+    }
+
+    /// Get the number of active transactions in the registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lock is poisoned.
+    pub fn active_transaction_count(&self) -> Result<usize> {
+        self.transactions
+            .read()
+            .map(|guard| guard.len())
+            .map_err(|_| Error::LockPoisoned("failed to acquire read lock for count".to_string()))
     }
 }
 
@@ -454,8 +536,9 @@ mod tests {
         let ctx = registry.get(&txn_id).unwrap();
         let fetcher = ctx.doc_fetcher();
 
-        let docs = fetcher.get_by_ids("Users", &[]).await.unwrap();
-        assert!(docs.is_empty());
+        let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
+        assert!(result.docs.is_empty());
+        assert!(result.missing_ids.is_empty());
 
         registry.rollback(&txn_id).await.unwrap();
     }
@@ -484,7 +567,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get_ctx(&txn_id).unwrap();
+        let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
 
         assert!(
             !ctx.is_consumed().await,
@@ -500,7 +583,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get_ctx(&txn_id).unwrap();
+        let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
 
         // Take the transaction
         let _txn = ctx.take_txn().await;
@@ -517,7 +600,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get_ctx(&txn_id).unwrap();
+        let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         // Manually take the transaction to simulate commit/rollback having consumed it
@@ -586,9 +669,10 @@ mod tests {
         let ctx = registry.get(&txn_id).unwrap();
         let fetcher = ctx.doc_fetcher();
 
-        let docs = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
+        let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
+        assert_eq!(result.docs.len(), 1);
+        assert!(result.missing_ids.is_empty());
+        assert_eq!(result.docs[0].get("name").unwrap().as_str(), Some("Alice"));
 
         registry.rollback(&txn_id).await.unwrap();
     }
@@ -762,14 +846,179 @@ mod tests {
         let ctx = registry.get(&txn_id).unwrap();
         let fetcher = ctx.doc_fetcher();
 
-        let docs = fetcher
-            .get_by_ids("Users", &[existing_id, nonexistent_id])
+        let result = fetcher
+            .get_by_ids("Users", &[existing_id, nonexistent_id.clone()])
             .await
             .unwrap();
 
-        assert_eq!(docs.len(), 1, "Should only return existing document");
-        assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Exists"));
+        assert_eq!(result.docs.len(), 1, "Should only return existing document");
+        assert_eq!(result.docs[0].get("name").unwrap().as_str(), Some("Exists"));
+
+        // Verify missing IDs are reported
+        assert_eq!(result.missing_ids.len(), 1, "Should report one missing ID");
+        assert_eq!(result.missing_ids[0], nonexistent_id);
+        assert!(!result.is_complete(), "Result should not be complete");
 
         registry.rollback(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_commit_same_transaction() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+
+        let txn_id = registry.begin(false).await.unwrap();
+
+        // Spawn two tasks trying to commit the same transaction
+        let reg1 = registry.clone();
+        let txn1 = txn_id.clone();
+        let handle1 = tokio::spawn(async move { reg1.commit(&txn1).await });
+
+        let reg2 = registry.clone();
+        let txn2 = txn_id.clone();
+        let handle2 = tokio::spawn(async move { reg2.commit(&txn2).await });
+
+        let (r1, r2) = tokio::join!(handle1, handle2);
+        let results = [r1.unwrap(), r2.unwrap()];
+
+        // Exactly one should succeed, one should fail
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+        assert_eq!(successes, 1, "Exactly one commit should succeed");
+        assert_eq!(failures, 1, "Exactly one commit should fail");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_rollback_same_transaction() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+
+        let txn_id = registry.begin(false).await.unwrap();
+
+        // Spawn two tasks trying to rollback the same transaction
+        let reg1 = registry.clone();
+        let txn1 = txn_id.clone();
+        let handle1 = tokio::spawn(async move { reg1.rollback(&txn1).await });
+
+        let reg2 = registry.clone();
+        let txn2 = txn_id.clone();
+        let handle2 = tokio::spawn(async move { reg2.rollback(&txn2).await });
+
+        let (r1, r2) = tokio::join!(handle1, handle2);
+        let results = [r1.unwrap(), r2.unwrap()];
+
+        // Exactly one should succeed, one should fail
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+        assert_eq!(successes, 1, "Exactly one rollback should succeed");
+        assert_eq!(failures, 1, "Exactly one rollback should fail");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_commit_and_rollback_same_transaction() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+
+        let txn_id = registry.begin(false).await.unwrap();
+
+        // Spawn one task trying to commit, another trying to rollback
+        let reg1 = registry.clone();
+        let txn1 = txn_id.clone();
+        let handle1 = tokio::spawn(async move { reg1.commit(&txn1).await });
+
+        let reg2 = registry.clone();
+        let txn2 = txn_id.clone();
+        let handle2 = tokio::spawn(async move { reg2.rollback(&txn2).await });
+
+        let (r1, r2) = tokio::join!(handle1, handle2);
+        let results = [r1.unwrap(), r2.unwrap()];
+
+        // Exactly one should succeed, one should fail
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+        assert_eq!(successes, 1, "Exactly one operation should succeed");
+        assert_eq!(failures, 1, "Exactly one operation should fail");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_stale_transactions() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        // Begin some transactions
+        let _txn1 = registry.begin(true).await.unwrap();
+        let _txn2 = registry.begin(false).await.unwrap();
+
+        assert_eq!(registry.active_transaction_count().unwrap(), 2);
+
+        // Wait a bit so transactions become "stale"
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Cleanup with a very short max_age (0 means everything is stale)
+        let cleaned = registry
+            .cleanup_stale_transactions(std::time::Duration::from_millis(0))
+            .await
+            .unwrap();
+
+        assert_eq!(cleaned, 2, "Should have cleaned up 2 transactions");
+        assert_eq!(
+            registry.active_transaction_count().unwrap(),
+            0,
+            "No transactions should remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_only_old_transactions() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        // Begin an "old" transaction
+        let _old_txn = registry.begin(true).await.unwrap();
+
+        // Wait a bit
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Begin a "new" transaction
+        let new_txn = registry.begin(true).await.unwrap();
+
+        assert_eq!(registry.active_transaction_count().unwrap(), 2);
+
+        // Cleanup with max_age that only catches the old transaction
+        let cleaned = registry
+            .cleanup_stale_transactions(std::time::Duration::from_millis(40))
+            .await
+            .unwrap();
+
+        assert_eq!(cleaned, 1, "Should have cleaned up 1 old transaction");
+        assert_eq!(
+            registry.active_transaction_count().unwrap(),
+            1,
+            "One new transaction should remain"
+        );
+
+        // The new transaction should still be usable
+        assert!(registry.get(&new_txn).is_some());
+        registry.rollback(&new_txn).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_active_transaction_count() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        assert_eq!(registry.active_transaction_count().unwrap(), 0);
+
+        let txn1 = registry.begin(true).await.unwrap();
+        assert_eq!(registry.active_transaction_count().unwrap(), 1);
+
+        let txn2 = registry.begin(false).await.unwrap();
+        assert_eq!(registry.active_transaction_count().unwrap(), 2);
+
+        registry.commit(&txn1).await.unwrap();
+        assert_eq!(registry.active_transaction_count().unwrap(), 1);
+
+        registry.rollback(&txn2).await.unwrap();
+        assert_eq!(registry.active_transaction_count().unwrap(), 0);
     }
 }

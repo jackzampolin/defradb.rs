@@ -5,6 +5,75 @@ use thiserror::Error;
 /// Result type alias for query operations
 pub type Result<T> = std::result::Result<T, QueryError>;
 
+/// Error type for transaction operations.
+///
+/// This provides structured errors for transaction lifecycle operations
+/// (`begin_txn`, `commit_txn`, `rollback_txn`) enabling callers to handle
+/// different error conditions appropriately.
+#[derive(Debug, Error)]
+pub enum TransactionError {
+    /// The transaction was not found (may have been committed/rolled back).
+    #[error("transaction not found: {0}")]
+    NotFound(String),
+
+    /// The transaction was already finalized (double commit/rollback).
+    #[error("transaction already finalized: {0}")]
+    AlreadyFinalized(String),
+
+    /// Transactions are not supported in this configuration.
+    #[error("transactions not supported: {0}")]
+    NotSupported(String),
+
+    /// A storage or execution error occurred.
+    #[error("transaction error: {0}")]
+    Execution(String),
+
+    /// The transaction registry lock is poisoned (indicates a panic elsewhere).
+    #[error("lock poisoned: {0}")]
+    LockPoisoned(String),
+}
+
+impl TransactionError {
+    /// Create a not found error.
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::NotFound(msg.into())
+    }
+
+    /// Create an already finalized error.
+    pub fn already_finalized(msg: impl Into<String>) -> Self {
+        Self::AlreadyFinalized(msg.into())
+    }
+
+    /// Create a not supported error.
+    pub fn not_supported(msg: impl Into<String>) -> Self {
+        Self::NotSupported(msg.into())
+    }
+
+    /// Create an execution error.
+    pub fn execution(msg: impl Into<String>) -> Self {
+        Self::Execution(msg.into())
+    }
+
+    /// Create a lock poisoned error.
+    pub fn lock_poisoned(msg: impl Into<String>) -> Self {
+        Self::LockPoisoned(msg.into())
+    }
+
+    /// Check if this is a retryable error.
+    ///
+    /// Some errors (like lock poisoning) indicate unrecoverable state,
+    /// while others (like not found) may be due to timing issues.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::NotFound(_) => true,
+            Self::AlreadyFinalized(_) => false,
+            Self::NotSupported(_) => false,
+            Self::Execution(_) => true,
+            Self::LockPoisoned(_) => false,
+        }
+    }
+}
+
 /// Query error types
 #[derive(Debug, Error)]
 pub enum QueryError {

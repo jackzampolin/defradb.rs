@@ -33,13 +33,13 @@ pub mod txn;
 
 // Re-exports for convenience
 pub use document::{DocumentMapping, RenderKey};
-pub use error::{QueryError, Result};
+pub use error::{QueryError, Result, TransactionError};
 pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 pub use mapper::{Filter, Select};
 pub use plan::{CreateInput, CreateNode, LimitNode, ScanNode, SelectNode};
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::parse_query;
-pub use runner::{DocFetcher, QueryRunner};
+pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::parse_sdl;
 pub use txn::{
     NoOpTransactionRegistry, TransactionContext, TransactionGuard, TransactionHandle,
