@@ -226,8 +226,7 @@ impl<'a> SdlParser<'a> {
                 }
                 "branchable" => {
                     // @branchable or @branchable(if: true)
-                    result.is_branchable =
-                        self.get_directive_bool(directive, "if").unwrap_or(true);
+                    result.is_branchable = self.get_directive_bool(directive, "if").unwrap_or(true);
                 }
                 _ => {}
             }
@@ -344,14 +343,13 @@ impl<'a> SdlParser<'a> {
         arg_name: &str,
     ) -> Option<String> {
         directive.arguments.iter().find_map(|(name, value)| {
-            if name == arg_name {
-                match value {
-                    graphql_parser::schema::Value::String(s) => Some(s.clone()),
-                    graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
-                    _ => None,
-                }
-            } else {
-                None
+            if name != arg_name {
+                return None;
+            }
+            match value {
+                graphql_parser::schema::Value::String(s)
+                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                _ => None,
             }
         })
     }
@@ -362,26 +360,24 @@ impl<'a> SdlParser<'a> {
         arg_name: &str,
     ) -> Option<bool> {
         directive.arguments.iter().find_map(|(name, value)| {
-            if name == arg_name {
-                match value {
-                    graphql_parser::schema::Value::Boolean(b) => Some(*b),
-                    _ => None,
-                }
-            } else {
-                None
+            if name != arg_name {
+                return None;
+            }
+            match value {
+                graphql_parser::schema::Value::Boolean(b) => Some(*b),
+                _ => None,
             }
         })
     }
 
     fn get_directive_int(&self, directive: &Directive<'_, String>, arg_name: &str) -> Option<i64> {
         directive.arguments.iter().find_map(|(name, value)| {
-            if name == arg_name {
-                match value {
-                    graphql_parser::schema::Value::Int(n) => n.as_i64(),
-                    _ => None,
-                }
-            } else {
-                None
+            if name != arg_name {
+                return None;
+            }
+            match value {
+                graphql_parser::schema::Value::Int(n) => n.as_i64(),
+                _ => None,
             }
         })
     }
@@ -395,22 +391,21 @@ impl<'a> SdlParser<'a> {
             .arguments
             .iter()
             .find_map(|(name, value)| {
-                if name == arg_name {
-                    match value {
-                        graphql_parser::schema::Value::List(items) => Some(
-                            items
-                                .iter()
-                                .filter_map(|v| match v {
-                                    graphql_parser::schema::Value::String(s) => Some(s.clone()),
-                                    graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
-                                    _ => None,
-                                })
-                                .collect(),
-                        ),
-                        _ => None,
-                    }
-                } else {
-                    None
+                if name != arg_name {
+                    return None;
+                }
+                match value {
+                    graphql_parser::schema::Value::List(items) => Some(
+                        items
+                            .iter()
+                            .filter_map(|v| match v {
+                                graphql_parser::schema::Value::String(s)
+                                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
                 }
             })
             .unwrap_or_default()
@@ -531,7 +526,6 @@ impl<'a> SdlParser<'a> {
                 fields: indexed_fields,
                 unique: composite_idx.unique,
             });
-            field_id_counter += 1;
         }
 
         // Generate version ID from content
@@ -630,30 +624,33 @@ fn graphql_to_scalar_kind(name: &str) -> Option<ScalarKind> {
     }
 }
 
+/// Convert first 8 bytes of a SHA-256 hash to a hex string
+fn hash_to_hex(hash: &[u8]) -> String {
+    format!(
+        "{:x}",
+        hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64)
+    )
+}
+
 /// Generate a deterministic collection ID from the type name.
-/// Uses SHA-256 for stable output across Rust versions and platforms.
 fn generate_collection_id(type_name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"collection:");
     hasher.update(type_name.as_bytes());
-    let hash = hasher.finalize();
-    format!("coll_{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
+    format!("coll_{}", hash_to_hex(&hasher.finalize()))
 }
 
 /// Generate a deterministic field ID from collection name and field name.
-/// Uses SHA-256 for stable output across Rust versions and platforms.
 fn generate_field_id(type_name: &str, field_name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"field:");
     hasher.update(type_name.as_bytes());
     hasher.update(b":");
     hasher.update(field_name.as_bytes());
-    let hash = hasher.finalize();
-    format!("field_{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
+    format!("field_{}", hash_to_hex(&hasher.finalize()))
 }
 
 /// Generate a deterministic version ID from collection name and fields.
-/// Uses SHA-256 for stable output across Rust versions and platforms.
 fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"version:");
@@ -664,18 +661,18 @@ fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
         hasher.update(b":");
         hasher.update(field.id.as_bytes());
     }
-    let hash = hasher.finalize();
-    format!("v{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
+    format!("v{}", hash_to_hex(&hasher.finalize()))
 }
 
 /// Generate a relation name following Go DefraDB conventions.
 /// Go uses lexicographic sort of type names to create deterministic relation names.
 fn generate_relation_name(from_type: &str, field_name: &str, to_type: &str) -> String {
-    // Go convention: sort type names lexicographically for deterministic naming
-    let (first, second) = if from_type.to_lowercase() < to_type.to_lowercase() {
-        (from_type.to_lowercase(), to_type.to_lowercase())
+    let from_lower = from_type.to_lowercase();
+    let to_lower = to_type.to_lowercase();
+    let (first, second) = if from_lower < to_lower {
+        (from_lower, to_lower)
     } else {
-        (to_type.to_lowercase(), from_type.to_lowercase())
+        (to_lower, from_lower)
     };
     format!("{}_{}_{}", first, field_name, second)
 }
@@ -1302,17 +1299,17 @@ mod tests {
         assert_eq!(id1, id2, "same type name should produce same collection ID");
 
         let id3 = generate_collection_id("Post");
-        assert_ne!(id1, id3, "different type names should produce different IDs");
+        assert_ne!(
+            id1, id3,
+            "different type names should produce different IDs"
+        );
     }
 
     #[test]
     fn test_field_ids_are_deterministic() {
         let id1 = generate_field_id("User", "name");
         let id2 = generate_field_id("User", "name");
-        assert_eq!(
-            id1, id2,
-            "same type+field should produce same field ID"
-        );
+        assert_eq!(id1, id2, "same type+field should produce same field ID");
 
         let id3 = generate_field_id("User", "email");
         assert_ne!(
