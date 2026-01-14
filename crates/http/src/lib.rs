@@ -13,11 +13,12 @@
 //! # Example
 //!
 //! ```ignore
-//! use defra_http::{Server, MockQueryExecutor};
+//! use defra_http::Server;
+//! use query::executor::QueryExecutor;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let executor = MockQueryExecutor::new();
+//!     let executor = MyQueryExecutor::new();
 //!     let server = Server::new(executor);
 //!     server.run().await.unwrap();
 //! }
@@ -25,11 +26,15 @@
 
 pub mod error;
 pub mod handlers;
-pub mod mock;
 pub mod router;
 pub mod server;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
+
 pub use error::{HttpError, Result};
-pub use mock::MockQueryExecutor;
 pub use router::{create_router, AppState};
 pub use server::{Server, ServerConfig};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use mock::MockQueryExecutor;

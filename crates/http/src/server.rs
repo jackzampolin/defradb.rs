@@ -2,7 +2,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Router;
 use tokio::net::TcpListener;
@@ -19,21 +18,15 @@ use crate::router::create_router;
 pub struct ServerConfig {
     /// Address to bind to (default: 127.0.0.1:9181).
     pub address: SocketAddr,
-    /// Allowed CORS origins (None = allow any).
-    pub allowed_origins: Option<Vec<String>>,
-    /// Read timeout.
-    pub read_timeout: Duration,
-    /// Write timeout.
-    pub write_timeout: Duration,
+    /// Allowed CORS origins (empty vec = no cross-origin requests allowed).
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             address: SocketAddr::from(([127, 0, 0, 1], 9181)),
-            allowed_origins: None,
-            read_timeout: Duration::from_secs(30),
-            write_timeout: Duration::from_secs(30),
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -71,15 +64,27 @@ impl Server {
 
     /// Build the router with all routes and middleware.
     pub fn router(&self) -> Router {
-        let cors = match &self.config.allowed_origins {
-            Some(origins) => {
-                let origins: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
-                CorsLayer::new()
-                    .allow_origin(origins)
-                    .allow_methods(Any)
-                    .allow_headers(Any)
+        let cors = if self.config.allowed_origins.is_empty() {
+            // No origins configured = no CORS (restrictive default)
+            CorsLayer::new()
+        } else {
+            let mut valid_origins = Vec::new();
+            for origin in &self.config.allowed_origins {
+                match origin.parse() {
+                    Ok(parsed) => valid_origins.push(parsed),
+                    Err(e) => {
+                        tracing::warn!(
+                            origin = %origin,
+                            error = %e,
+                            "Invalid CORS origin in configuration, skipping"
+                        );
+                    }
+                }
             }
-            None => CorsLayer::permissive(),
+            CorsLayer::new()
+                .allow_origin(valid_origins)
+                .allow_methods(Any)
+                .allow_headers(Any)
         };
 
         create_router(Arc::clone(&self.executor))
@@ -106,5 +111,197 @@ impl Server {
     /// Get the configured address.
     pub fn address(&self) -> SocketAddr {
         self.config.address
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use serde_json::json;
+    use tower::util::ServiceExt;
+
+    use crate::mock::MockQueryExecutor;
+
+    fn test_server() -> Server {
+        Server::new(MockQueryExecutor::new())
+    }
+
+    #[tokio::test]
+    async fn test_health_check_route() {
+        let router = test_server().router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/health-check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_version_route() {
+        let router = test_server().router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_graphql_post_route() {
+        let router = test_server().router();
+        let body = json!({"query": "{ users { name } }"}).to_string();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_graphql_post_invalid_json() {
+        let router = test_server().router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{invalid json}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Axum returns 400 Bad Request for JSON parse errors
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_graphql_get_route() {
+        let router = test_server().router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/graphql?query=%7B%20users%20%7B%20name%20%7D%20%7D")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_graphql_get_with_variables() {
+        let router = test_server().router();
+        let vars = urlencoding::encode(r#"{"limit":10}"#);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(&format!(
+                        "/api/v0/graphql?query=%7B%20users%20%7D&variables={}",
+                        vars
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_graphql_get_invalid_variables() {
+        let router = test_server().router();
+        let invalid_vars = urlencoding::encode("{invalid}");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(&format!(
+                        "/api/v0/graphql?query=%7B%20users%20%7D&variables={}",
+                        invalid_vars
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should still return 200 but with error in body
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_schema_route() {
+        let router = test_server().router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_not_found_route() {
+        let router = test_server().router();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_server_config_default() {
+        let config = ServerConfig::default();
+        assert_eq!(config.address.port(), 9181);
+        assert!(config.allowed_origins.is_empty());
     }
 }

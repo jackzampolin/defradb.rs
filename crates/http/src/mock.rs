@@ -3,12 +3,44 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use query::error::Result;
+use query::error::{QueryError, Result};
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 
 /// Mock executor that returns configurable responses.
 pub struct MockQueryExecutor {
     schema_sdl: String,
+}
+
+/// Mock executor that always fails for testing error paths.
+pub struct FailingMockExecutor {
+    schema_error: Option<String>,
+}
+
+impl FailingMockExecutor {
+    /// Create a mock that fails schema() calls.
+    pub fn with_schema_error(msg: impl Into<String>) -> Self {
+        Self {
+            schema_error: Some(msg.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl QueryExecutor for FailingMockExecutor {
+    async fn execute(&self, _request: QueryRequest) -> QueryResponse {
+        QueryResponse::error("execution failed")
+    }
+
+    async fn execute_in_txn(&self, request: QueryRequest, _txn_id: &str) -> QueryResponse {
+        self.execute(request).await
+    }
+
+    async fn schema(&self) -> Result<String> {
+        match &self.schema_error {
+            Some(msg) => Err(QueryError::internal(msg.clone())),
+            None => Ok("type Query { ping: String }".to_string()),
+        }
+    }
 }
 
 impl MockQueryExecutor {

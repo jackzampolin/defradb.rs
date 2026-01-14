@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+test-utils = []
+
 [dependencies]
 # Internal crates
 query = { path = "../query" }
@@ -34,3 +38,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true, features = ["util"] }
+urlencoding = "2.1"
