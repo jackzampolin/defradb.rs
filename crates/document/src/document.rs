@@ -24,6 +24,9 @@ const SHA2_256_CODE: u64 = 0x12;
 /// Raw codec for CID
 const RAW_CODEC: u64 = 0x55;
 
+use crate::encoding::{
+    canonical_cbor_key_order, json_to_normal_value, normal_value_to_cbor, normal_value_to_json,
+};
 use crate::error::{Error, Result};
 use crate::field::special::DOC_ID;
 use crate::{DocID, Field, FieldValue, NormalValue};
@@ -118,12 +121,17 @@ impl Document {
         if let Some(id_value) = map.remove(DOC_ID) {
             if let Some(id_str) = id_value.as_str() {
                 doc.id = Some(DocID::from_string(id_str)?);
+            } else {
+                return Err(Error::InvalidFieldValue {
+                    field: DOC_ID.to_string(),
+                    message: format!("_docID must be a string, got: {}", id_value),
+                });
             }
         }
 
         // Convert remaining fields
         for (key, value) in map {
-            let normal_value = json_to_normal_value(value);
+            let normal_value = json_to_normal_value(value)?;
             let field = Field::lww(&key);
             doc.fields.insert(key.clone(), field);
             doc.values
@@ -277,7 +285,10 @@ impl Document {
     }
 
     /// Convert the document to a map of values.
-    pub fn to_map(&self) -> HashMap<String, serde_json::Value> {
+    ///
+    /// Returns an error if any field contains non-finite floats (NaN, Infinity),
+    /// matching Go's encoding/json behavior.
+    pub fn to_map(&self) -> Result<HashMap<String, serde_json::Value>> {
         let mut map = HashMap::new();
 
         if let Some(ref id) = self.id {
@@ -288,16 +299,16 @@ impl Document {
         }
 
         for (key, field_value) in &self.values {
-            map.insert(key.clone(), normal_value_to_json(field_value.value()));
+            map.insert(key.clone(), normal_value_to_json(field_value.value())?);
         }
 
-        map
+        Ok(map)
     }
 
     /// Encode the document to CBOR bytes.
     ///
     /// This encodes only the values, not the metadata (id, head, dirty flag).
-    /// Uses canonical CBOR ordering (RFC 7049 Section 3.9) for Go compatibility:
+    /// Uses canonical CBOR ordering (RFC 8949, previously RFC 7049 Section 3.9) for Go compatibility:
     /// - Keys sorted by length first (shorter keys first)
     /// - Then lexicographically (bytewise) within same length
     pub fn to_cbor(&self) -> Result<Vec<u8>> {
@@ -306,14 +317,13 @@ impl Document {
         keys.sort_by(canonical_cbor_key_order);
 
         // Build CBOR map using ciborium::Value for proper map encoding
-        let map_entries: Vec<(ciborium::Value, ciborium::Value)> = keys
-            .into_iter()
-            .map(|k| {
-                let key = ciborium::Value::Text(k.to_string());
-                let value = normal_value_to_cbor(self.values.get(k).unwrap().value());
-                (key, value)
-            })
-            .collect();
+        let mut map_entries: Vec<(ciborium::Value, ciborium::Value)> =
+            Vec::with_capacity(keys.len());
+        for k in keys {
+            let key = ciborium::Value::Text(k.to_string());
+            let value = normal_value_to_cbor(self.values.get(k).unwrap().value())?;
+            map_entries.push((key, value));
+        }
 
         let cbor_map = ciborium::Value::Map(map_entries);
 
@@ -388,410 +398,6 @@ impl PartialEq for Document {
     }
 }
 
-// === Helper functions ===
-
-/// Convert a JSON value to a NormalValue.
-fn json_to_normal_value(value: serde_json::Value) -> NormalValue {
-    match value {
-        serde_json::Value::Null => NormalValue::Null,
-        serde_json::Value::Bool(b) => NormalValue::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                NormalValue::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                NormalValue::Float64(f)
-            } else {
-                NormalValue::Null
-            }
-        }
-        serde_json::Value::String(s) => NormalValue::String(s),
-        serde_json::Value::Array(arr) => {
-            // Try to infer array type from first element
-            if arr.is_empty() {
-                return NormalValue::JsonArray(vec![]);
-            }
-
-            match &arr[0] {
-                serde_json::Value::Bool(_) => {
-                    let bools: Vec<bool> = arr.into_iter().filter_map(|v| v.as_bool()).collect();
-                    NormalValue::BoolArray(bools)
-                }
-                serde_json::Value::Number(n) if n.is_i64() => {
-                    let ints: Vec<i64> = arr.into_iter().filter_map(|v| v.as_i64()).collect();
-                    NormalValue::IntArray(ints)
-                }
-                serde_json::Value::Number(_) => {
-                    let floats: Vec<f64> = arr.into_iter().filter_map(|v| v.as_f64()).collect();
-                    NormalValue::Float64Array(floats)
-                }
-                serde_json::Value::String(_) => {
-                    let strings: Vec<String> = arr
-                        .into_iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    NormalValue::StringArray(strings)
-                }
-                _ => {
-                    // Fall back to JSON array for complex types
-                    NormalValue::JsonArray(arr)
-                }
-            }
-        }
-        serde_json::Value::Object(_) => {
-            // Store complex objects as JSON
-            NormalValue::Json(value)
-        }
-    }
-}
-
-/// Convert a NormalValue to a JSON value.
-fn normal_value_to_json(value: &NormalValue) -> serde_json::Value {
-    match value {
-        NormalValue::Null => serde_json::Value::Null,
-        NormalValue::Bool(b) => serde_json::Value::Bool(*b),
-        NormalValue::Int(i) => serde_json::Value::Number((*i).into()),
-        NormalValue::Float64(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        NormalValue::Float32(f) => serde_json::Number::from_f64(*f as f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        NormalValue::String(s) => serde_json::Value::String(s.clone()),
-        NormalValue::Bytes(b) => {
-            // Encode bytes as base64
-            serde_json::Value::String(base64_encode(b))
-        }
-        NormalValue::Time(t) => serde_json::Value::String(t.to_rfc3339()),
-        NormalValue::Json(v) => v.clone(),
-        NormalValue::IntArray(arr) => serde_json::Value::Array(
-            arr.iter()
-                .map(|i| serde_json::Value::Number((*i).into()))
-                .collect(),
-        ),
-        NormalValue::StringArray(arr) => serde_json::Value::Array(
-            arr.iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        ),
-        NormalValue::BoolArray(arr) => {
-            serde_json::Value::Array(arr.iter().map(|b| serde_json::Value::Bool(*b)).collect())
-        }
-        NormalValue::Float64Array(arr) => serde_json::Value::Array(
-            arr.iter()
-                .filter_map(|f| serde_json::Number::from_f64(*f).map(serde_json::Value::Number))
-                .collect(),
-        ),
-        NormalValue::JsonArray(arr) => serde_json::Value::Array(arr.clone()),
-        // Nillable variants
-        NormalValue::NillableBool(opt) => opt
-            .map(serde_json::Value::Bool)
-            .unwrap_or(serde_json::Value::Null),
-        NormalValue::NillableInt(opt) => opt
-            .map(|i| serde_json::Value::Number(i.into()))
-            .unwrap_or(serde_json::Value::Null),
-        NormalValue::NillableString(opt) => opt
-            .as_ref()
-            .map(|s| serde_json::Value::String(s.clone()))
-            .unwrap_or(serde_json::Value::Null),
-        // For other types, use JSON serialization
-        _ => serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
-    }
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-/// Convert a NormalValue to a ciborium::Value for CBOR encoding.
-fn normal_value_to_cbor(value: &NormalValue) -> ciborium::Value {
-    match value {
-        NormalValue::Null => ciborium::Value::Null,
-        NormalValue::Bool(b) => ciborium::Value::Bool(*b),
-        NormalValue::Int(i) => ciborium::Value::Integer((*i).into()),
-        NormalValue::Float64(f) => ciborium::Value::Float(*f),
-        NormalValue::Float32(f) => ciborium::Value::Float(*f as f64),
-        NormalValue::String(s) => ciborium::Value::Text(s.clone()),
-        NormalValue::Bytes(b) => ciborium::Value::Bytes(b.clone()),
-        NormalValue::Time(t) => ciborium::Value::Text(t.to_rfc3339()),
-        NormalValue::Json(v) => json_to_cbor_value(v),
-        NormalValue::IntArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|i| ciborium::Value::Integer((*i).into()))
-                .collect(),
-        ),
-        NormalValue::StringArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|s| ciborium::Value::Text(s.clone()))
-                .collect(),
-        ),
-        NormalValue::BoolArray(arr) => {
-            ciborium::Value::Array(arr.iter().map(|b| ciborium::Value::Bool(*b)).collect())
-        }
-        NormalValue::Float64Array(arr) => {
-            ciborium::Value::Array(arr.iter().map(|f| ciborium::Value::Float(*f)).collect())
-        }
-        NormalValue::Float32Array(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|f| ciborium::Value::Float(*f as f64))
-                .collect(),
-        ),
-        NormalValue::JsonArray(arr) => {
-            ciborium::Value::Array(arr.iter().map(json_to_cbor_value).collect())
-        }
-        // Nillable variants - encode as value or null
-        NormalValue::NillableBool(opt) => opt
-            .map(ciborium::Value::Bool)
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableInt(opt) => opt
-            .map(|i| ciborium::Value::Integer(i.into()))
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableFloat64(opt) => opt
-            .map(ciborium::Value::Float)
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableFloat32(opt) => opt
-            .map(|f| ciborium::Value::Float(f as f64))
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableString(opt) => opt
-            .as_ref()
-            .map(|s| ciborium::Value::Text(s.clone()))
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableBytes(opt) => opt
-            .as_ref()
-            .map(|b| ciborium::Value::Bytes(b.clone()))
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableTime(opt) => opt
-            .map(|t| ciborium::Value::Text(t.to_rfc3339()))
-            .unwrap_or(ciborium::Value::Null),
-        // Document value
-        NormalValue::Document(doc) => {
-            // For nested documents, encode their values as a map
-            doc.to_cbor()
-                .ok()
-                .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
-                .unwrap_or(ciborium::Value::Null)
-        }
-        NormalValue::NillableDocument(opt) => opt
-            .as_ref()
-            .and_then(|doc| {
-                doc.to_cbor()
-                    .ok()
-                    .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
-            })
-            .unwrap_or(ciborium::Value::Null),
-        // Additional array types
-        NormalValue::BytesArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|b| ciborium::Value::Bytes(b.clone()))
-                .collect(),
-        ),
-        NormalValue::TimeArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|t| ciborium::Value::Text(t.to_rfc3339()))
-                .collect(),
-        ),
-        NormalValue::DocumentArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|doc| {
-                    doc.to_cbor()
-                        .ok()
-                        .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        // Nillable array types
-        NormalValue::NillableBoolArray(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(arr.iter().map(|b| ciborium::Value::Bool(*b)).collect())
-            })
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableIntArray(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(
-                    arr.iter()
-                        .map(|i| ciborium::Value::Integer((*i).into()))
-                        .collect(),
-                )
-            })
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableFloat64Array(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(arr.iter().map(|f| ciborium::Value::Float(*f)).collect())
-            })
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableFloat32Array(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(
-                    arr.iter()
-                        .map(|f| ciborium::Value::Float(*f as f64))
-                        .collect(),
-                )
-            })
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableStringArray(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(
-                    arr.iter()
-                        .map(|s| ciborium::Value::Text(s.clone()))
-                        .collect(),
-                )
-            })
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableBytesArray(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(
-                    arr.iter()
-                        .map(|b| ciborium::Value::Bytes(b.clone()))
-                        .collect(),
-                )
-            })
-            .unwrap_or(ciborium::Value::Null),
-        NormalValue::NillableTimeArray(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(
-                    arr.iter()
-                        .map(|t| ciborium::Value::Text(t.to_rfc3339()))
-                        .collect(),
-                )
-            })
-            .unwrap_or(ciborium::Value::Null),
-        // Arrays with nillable elements
-        NormalValue::NillableBoolElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.map(ciborium::Value::Bool)
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableIntElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.map(|i| ciborium::Value::Integer(i.into()))
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableFloat64ElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.map(ciborium::Value::Float)
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableFloat32ElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.map(|f| ciborium::Value::Float(f as f64))
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableStringElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.as_ref()
-                        .map(|s| ciborium::Value::Text(s.clone()))
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableBytesElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.as_ref()
-                        .map(|b| ciborium::Value::Bytes(b.clone()))
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableTimeElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.map(|t| ciborium::Value::Text(t.to_rfc3339()))
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableDocumentElementArray(arr) => ciborium::Value::Array(
-            arr.iter()
-                .map(|opt| {
-                    opt.as_ref()
-                        .and_then(|doc| {
-                            doc.to_cbor()
-                                .ok()
-                                .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
-                        })
-                        .unwrap_or(ciborium::Value::Null)
-                })
-                .collect(),
-        ),
-        NormalValue::NillableDocumentArray(opt) => opt
-            .as_ref()
-            .map(|arr| {
-                ciborium::Value::Array(
-                    arr.iter()
-                        .map(|doc| {
-                            doc.to_cbor()
-                                .ok()
-                                .and_then(|bytes| ciborium::from_reader(&bytes[..]).ok())
-                                .unwrap_or(ciborium::Value::Null)
-                        })
-                        .collect(),
-                )
-            })
-            .unwrap_or(ciborium::Value::Null),
-    }
-}
-
-/// Convert a JSON value to a ciborium::Value.
-fn json_to_cbor_value(value: &serde_json::Value) -> ciborium::Value {
-    match value {
-        serde_json::Value::Null => ciborium::Value::Null,
-        serde_json::Value::Bool(b) => ciborium::Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                ciborium::Value::Integer(i.into())
-            } else if let Some(f) = n.as_f64() {
-                ciborium::Value::Float(f)
-            } else {
-                ciborium::Value::Null
-            }
-        }
-        serde_json::Value::String(s) => ciborium::Value::Text(s.clone()),
-        serde_json::Value::Array(arr) => {
-            ciborium::Value::Array(arr.iter().map(json_to_cbor_value).collect())
-        }
-        serde_json::Value::Object(obj) => {
-            let entries: Vec<(ciborium::Value, ciborium::Value)> = obj
-                .iter()
-                .map(|(k, v)| (ciborium::Value::Text(k.clone()), json_to_cbor_value(v)))
-                .collect();
-            ciborium::Value::Map(entries)
-        }
-    }
-}
-
-/// Canonical CBOR key ordering (RFC 7049 Section 3.9).
-/// Keys are sorted by:
-/// 1. Length first (shorter keys come first)
-/// 2. Lexicographically (bytewise) within same length
-fn canonical_cbor_key_order(a: &&str, b: &&str) -> std::cmp::Ordering {
-    match a.len().cmp(&b.len()) {
-        std::cmp::Ordering::Equal => a.cmp(b),
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,12 +453,33 @@ mod tests {
         doc.set("name", "Charlie");
         doc.set("count", 42i64);
 
-        let map = doc.to_map();
+        let map = doc.to_map().unwrap();
         assert_eq!(
             map.get("name"),
             Some(&serde_json::Value::String("Charlie".into()))
         );
         assert_eq!(map.get("count"), Some(&serde_json::json!(42)));
+    }
+
+    #[test]
+    fn test_to_map_non_finite_float_error() {
+        let mut doc = Document::new();
+        doc.set("name", "test");
+        doc.set("value", f64::NAN);
+
+        let result = doc.to_map();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::NonFiniteFloat(_)));
+    }
+
+    #[test]
+    fn test_to_map_infinity_error() {
+        let mut doc = Document::new();
+        doc.set("value", f64::INFINITY);
+
+        let result = doc.to_map();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::NonFiniteFloat(_)));
     }
 
     #[test]

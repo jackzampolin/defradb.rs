@@ -35,6 +35,7 @@
 
 mod doc_id;
 mod document;
+mod encoding;
 mod error;
 mod field;
 mod normal;

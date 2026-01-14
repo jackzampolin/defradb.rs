@@ -36,12 +36,30 @@ pub struct FieldValue {
 impl FieldValue {
     /// Create a new FieldValue with the given CRDT type and value.
     /// New values are marked as dirty by default.
+    ///
+    /// Note: This does not validate CRDT/value compatibility.
+    /// Use `new_validated` for validation.
     pub fn new(crdt_type: CType, value: NormalValue) -> Self {
         Self {
             crdt_type,
             value,
             is_dirty: true,
         }
+    }
+
+    /// Create a new FieldValue with validation of CRDT/value compatibility.
+    ///
+    /// Returns an error if the value type is incompatible with the CRDT type:
+    /// - `PnCounter` and `PCounter` require numeric values (Int, Float64, Float32)
+    /// - `Object` and `Composite` require Document values
+    /// - `LwwRegister` and `None` accept any value type
+    pub fn new_validated(crdt_type: CType, value: NormalValue) -> Result<Self> {
+        Self::validate_compatibility(crdt_type, &value)?;
+        Ok(Self {
+            crdt_type,
+            value,
+            is_dirty: true,
+        })
     }
 
     /// Create a new FieldValue that is not marked as dirty.
@@ -51,6 +69,74 @@ impl FieldValue {
             crdt_type,
             value,
             is_dirty: false,
+        }
+    }
+
+    /// Validate that a value is compatible with a CRDT type.
+    fn validate_compatibility(crdt_type: CType, value: &NormalValue) -> Result<()> {
+        match crdt_type {
+            CType::PnCounter | CType::PCounter => {
+                // Counters require numeric values
+                if !Self::is_numeric_value(value) {
+                    return Err(Error::IncompatibleCrdtType {
+                        crdt_type,
+                        value_type: Self::value_type_name(value),
+                    });
+                }
+            }
+            CType::Object | CType::Composite => {
+                // Object/Composite require document values
+                if value.as_document().is_none() && !value.is_nil() {
+                    return Err(Error::IncompatibleCrdtType {
+                        crdt_type,
+                        value_type: Self::value_type_name(value),
+                    });
+                }
+            }
+            CType::LwwRegister | CType::None => {
+                // LWW Register and None accept any value
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if a value is a numeric type suitable for counters.
+    fn is_numeric_value(value: &NormalValue) -> bool {
+        matches!(
+            value,
+            NormalValue::Int(_)
+                | NormalValue::Float64(_)
+                | NormalValue::Float32(_)
+                | NormalValue::NillableInt(_)
+                | NormalValue::NillableFloat64(_)
+                | NormalValue::NillableFloat32(_)
+                | NormalValue::Null
+        )
+    }
+
+    /// Get a human-readable name for a value's type.
+    fn value_type_name(value: &NormalValue) -> String {
+        match value {
+            NormalValue::Null => "Null".to_string(),
+            NormalValue::Bool(_) => "Bool".to_string(),
+            NormalValue::Int(_) => "Int".to_string(),
+            NormalValue::Float64(_) => "Float64".to_string(),
+            NormalValue::Float32(_) => "Float32".to_string(),
+            NormalValue::String(_) => "String".to_string(),
+            NormalValue::Bytes(_) => "Bytes".to_string(),
+            NormalValue::Time(_) => "Time".to_string(),
+            NormalValue::Document(_) => "Document".to_string(),
+            NormalValue::Json(_) => "Json".to_string(),
+            NormalValue::NillableBool(_) => "NillableBool".to_string(),
+            NormalValue::NillableInt(_) => "NillableInt".to_string(),
+            NormalValue::NillableFloat64(_) => "NillableFloat64".to_string(),
+            NormalValue::NillableFloat32(_) => "NillableFloat32".to_string(),
+            NormalValue::NillableString(_) => "NillableString".to_string(),
+            NormalValue::NillableBytes(_) => "NillableBytes".to_string(),
+            NormalValue::NillableTime(_) => "NillableTime".to_string(),
+            NormalValue::NillableDocument(_) => "NillableDocument".to_string(),
+            _ if value.is_array() => "Array".to_string(),
+            _ => "Unknown".to_string(),
         }
     }
 
@@ -77,8 +163,20 @@ impl FieldValue {
     }
 
     /// Set the CRDT type for this field.
+    ///
+    /// Note: This does not validate CRDT/value compatibility.
+    /// Use `set_crdt_type_validated` for validation.
     pub fn set_crdt_type(&mut self, crdt_type: CType) {
         self.crdt_type = crdt_type;
+    }
+
+    /// Set the CRDT type with validation of CRDT/value compatibility.
+    ///
+    /// Returns an error if the current value is incompatible with the new CRDT type.
+    pub fn set_crdt_type_validated(&mut self, crdt_type: CType) -> Result<()> {
+        Self::validate_compatibility(crdt_type, &self.value)?;
+        self.crdt_type = crdt_type;
+        Ok(())
     }
 
     /// Returns true if this value is a document.
@@ -214,5 +312,86 @@ mod tests {
         assert_eq!(fv.crdt_type(), CType::LwwRegister);
         assert!(fv.value().is_nil());
         assert!(!fv.is_dirty());
+    }
+
+    // === Validation tests ===
+
+    #[test]
+    fn test_new_validated_counter_with_int() {
+        let fv = FieldValue::new_validated(CType::PnCounter, NormalValue::Int(42));
+        assert!(fv.is_ok());
+    }
+
+    #[test]
+    fn test_new_validated_counter_with_float() {
+        let fv = FieldValue::new_validated(CType::PnCounter, NormalValue::Float64(3.14));
+        assert!(fv.is_ok());
+    }
+
+    #[test]
+    fn test_new_validated_counter_with_string_fails() {
+        let result =
+            FieldValue::new_validated(CType::PnCounter, NormalValue::String("hello".into()));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::IncompatibleCrdtType { .. }
+        ));
+    }
+
+    #[test]
+    fn test_new_validated_counter_with_null_ok() {
+        // Null is allowed for counters (represents unset)
+        let fv = FieldValue::new_validated(CType::PnCounter, NormalValue::Null);
+        assert!(fv.is_ok());
+    }
+
+    #[test]
+    fn test_new_validated_lww_accepts_any() {
+        // LWW Register accepts any value type
+        assert!(FieldValue::new_validated(CType::LwwRegister, NormalValue::Int(42)).is_ok());
+        assert!(
+            FieldValue::new_validated(CType::LwwRegister, NormalValue::String("hello".into()))
+                .is_ok()
+        );
+        assert!(FieldValue::new_validated(CType::LwwRegister, NormalValue::Bool(true)).is_ok());
+    }
+
+    #[test]
+    fn test_set_crdt_type_validated_fails_incompatible() {
+        let mut fv = FieldValue::new(CType::LwwRegister, NormalValue::String("hello".into()));
+        let result = fv.set_crdt_type_validated(CType::PnCounter);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_crdt_type_validated_succeeds_compatible() {
+        let mut fv = FieldValue::new(CType::LwwRegister, NormalValue::Int(42));
+        let result = fv.set_crdt_type_validated(CType::PnCounter);
+        assert!(result.is_ok());
+        assert_eq!(fv.crdt_type(), CType::PnCounter);
+    }
+
+    // === CBOR error path tests ===
+
+    #[test]
+    fn test_from_cbor_invalid_bytes() {
+        // Random garbage bytes should fail
+        let result = FieldValue::from_cbor(CType::LwwRegister, &[0xff, 0xfe, 0xfd]);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::CborDecode(_)));
+    }
+
+    #[test]
+    fn test_from_cbor_empty_bytes() {
+        let result = FieldValue::from_cbor(CType::LwwRegister, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_cbor_truncated() {
+        // Start of a CBOR map but truncated
+        let result = FieldValue::from_cbor(CType::LwwRegister, &[0xa2, 0x63]);
+        assert!(result.is_err());
     }
 }

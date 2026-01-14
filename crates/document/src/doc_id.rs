@@ -33,7 +33,7 @@ pub const SDN_NAMESPACE_V0: Uuid = Uuid::from_bytes([
 /// - Optionally, the original CID (not always available when parsing from string)
 ///
 /// The string format is: `{base32(version)}-{uuid}`
-/// Example: `bafybeif...-c94acbfa-dd53-40d0-97f3-29ce16c333fc`
+/// Example: `bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc`
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DocID {
     version: u16,
@@ -335,6 +335,7 @@ mod tests {
     fn test_invalid_string_bad_uuid() {
         let result = DocID::from_string("bae-not-a-uuid");
         assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::UuidParse(_)));
     }
 
     #[test]
@@ -344,5 +345,83 @@ mod tests {
         assert_eq!(varint_size(1), 1);
         assert_eq!(varint_size(127), 1);
         assert_eq!(varint_size(128), 2);
+    }
+
+    // === Error path tests ===
+
+    #[test]
+    fn test_from_bytes_too_short_empty() {
+        let result = DocID::from_bytes(&[]);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::MalformedDocID));
+    }
+
+    #[test]
+    fn test_from_bytes_too_short_partial() {
+        // Only 10 bytes (need at least 17: 1 version + 16 uuid)
+        let result =
+            DocID::from_bytes(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::MalformedDocID));
+    }
+
+    #[test]
+    fn test_from_bytes_invalid_version() {
+        // Version 0x02 is invalid (only 0x01 is valid)
+        let mut bytes = vec![0x02];
+        bytes.extend_from_slice(&[0x00; 16]); // 16 bytes for UUID
+        let result = DocID::from_bytes(&bytes);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidDocIDVersion(2)));
+    }
+
+    #[test]
+    fn test_from_bytes_version_zero_invalid() {
+        // Version 0x00 is also invalid
+        let mut bytes = vec![0x00];
+        bytes.extend_from_slice(&[0x00; 16]);
+        let result = DocID::from_bytes(&bytes);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidDocIDVersion(0)));
+    }
+
+    #[test]
+    fn test_from_string_empty_version() {
+        // Empty version part "-uuid-here"
+        let result = DocID::from_string("-c94acbfa-dd53-40d0-97f3-29ce16c333fc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_string_invalid_base32_version() {
+        // Invalid base32 characters in version
+        let result = DocID::from_string("!!!-c94acbfa-dd53-40d0-97f3-29ce16c333fc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_varint_overflow_10_bytes() {
+        // 10 continuation bytes would overflow u64
+        let bytes = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+        assert_eq!(read_uvarint(&bytes), None);
+    }
+
+    #[test]
+    fn test_varint_overflow_10_bytes_high_final_byte() {
+        // 10 bytes with final byte > 1 would overflow (exceeds u64::MAX)
+        // The 10th byte (index 9) must be <= 1 for a valid u64
+        let bytes = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
+        assert_eq!(read_uvarint(&bytes), None);
+    }
+
+    #[test]
+    fn test_varint_size_zero() {
+        assert_eq!(varint_size(0), 1);
+    }
+
+    #[test]
+    fn test_varint_size_max_u64() {
+        // u64::MAX needs 10 bytes in varint encoding
+        assert_eq!(varint_size(u64::MAX), 10);
     }
 }

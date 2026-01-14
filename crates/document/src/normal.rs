@@ -122,8 +122,10 @@ pub enum NormalValue {
 }
 
 impl NormalValue {
-    /// Returns the underlying value, unwrapping Options.
-    /// For nillable values, returns None if the option is None.
+    /// Returns a reference to self wrapped in Some, or None if this is the Null variant.
+    ///
+    /// Note: This does NOT unwrap nillable variants like `NillableInt(None)`.
+    /// For accessing inner values, use type-specific accessors like `as_int()`, `as_str()`, etc.
     pub fn unwrap(&self) -> Option<&NormalValue> {
         match self {
             NormalValue::Null => None,

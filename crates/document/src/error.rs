@@ -39,11 +39,23 @@ pub enum Error {
     #[error("JSON parse error: {0}")]
     JsonParse(#[from] serde_json::Error),
 
+    #[error("JSON number out of range: {0}")]
+    JsonNumberOutOfRange(String),
+
+    #[error("non-finite float value not supported in JSON: {0}")]
+    NonFiniteFloat(String),
+
     #[error("CBOR encode error: {0}")]
     CborEncode(String),
 
     #[error("CBOR decode error: {0}")]
     CborDecode(String),
+
+    #[error("incompatible CRDT type {crdt_type:?} for value type {value_type}")]
+    IncompatibleCrdtType {
+        crdt_type: schema::CType,
+        value_type: String,
+    },
 
     #[error("CID error: {0}")]
     Cid(#[from] cid::Error),
