@@ -148,10 +148,10 @@ mod tests {
         let db = DB::new(store);
 
         let txn = db.new_txn(false).await.unwrap();
-        assert_eq!(txn.id(), 1);
+        assert_eq!(txn.id().unwrap(), 1);
 
         let txn2 = db.new_txn(false).await.unwrap();
-        assert_eq!(txn2.id(), 2);
+        assert_eq!(txn2.id().unwrap(), 2);
     }
 
     #[tokio::test]
@@ -200,5 +200,53 @@ mod tests {
 
         assert_eq!(db.options().max_txn_retries, Some(5));
         assert_eq!(db.options().chunk_size, Some(1024 * 1024));
+    }
+
+    #[tokio::test]
+    async fn test_db_with_txn_async_commits_on_success() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+
+        // Execute async operation that succeeds
+        db.with_txn_async(false, |txn| async move {
+            txn.datastore()
+                .unwrap()
+                .set(b"key", b"value")
+                .await
+                .unwrap();
+            (txn, Ok(()))
+        })
+        .await
+        .unwrap();
+
+        // Verify data was committed
+        let txn = db.new_txn(true).await.unwrap();
+        let value = txn.datastore().unwrap().get(b"key").await.unwrap();
+        assert_eq!(value, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_db_with_txn_async_discards_on_error() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+
+        // Execute async operation that fails
+        let result: Result<()> = db
+            .with_txn_async(false, |txn| async move {
+                txn.datastore()
+                    .unwrap()
+                    .set(b"key", b"value")
+                    .await
+                    .unwrap();
+                (txn, Err(Error::Other("test error".into())))
+            })
+            .await;
+
+        assert!(result.is_err());
+
+        // Verify data was NOT committed (discarded)
+        let txn = db.new_txn(true).await.unwrap();
+        let value = txn.datastore().unwrap().get(b"key").await.unwrap();
+        assert_eq!(value, None);
     }
 }

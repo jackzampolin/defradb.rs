@@ -512,4 +512,80 @@ mod tests {
             Some(b"sys".to_vec())
         );
     }
+
+    #[tokio::test]
+    async fn test_basic_txn_commit_with_outstanding_view_fails() {
+        let store = MemoryStore::new();
+        let txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        // Hold a reference to a namespace view
+        let _view = txn.datastore();
+
+        // Commit should fail because there are outstanding references
+        let result = txn.commit().await;
+        assert!(result.is_err());
+        // The error message should mention references
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("references"));
+    }
+
+    #[tokio::test]
+    async fn test_basic_txn_discard_with_outstanding_view_fails() {
+        let store = MemoryStore::new();
+        let txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        // Hold a reference to a namespace view
+        let _view = txn.datastore();
+
+        // Discard should fail because there are outstanding references
+        let result = txn.discard();
+        assert!(result.is_err());
+        assert!(matches!(result, Err(crate::Error::TxnStillInUse)));
+    }
+
+    #[tokio::test]
+    async fn test_basic_txn_async_success_callback() {
+        use std::time::Duration;
+
+        let store = MemoryStore::new();
+        let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        txn.on_success_async(Box::new(move || {
+            Box::pin(async move {
+                tx.send(()).unwrap();
+            })
+        }));
+
+        txn.commit().await.unwrap();
+
+        // Wait for async callback to complete
+        tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("Timeout waiting for async callback")
+            .expect("Failed to receive from callback");
+    }
+
+    #[tokio::test]
+    async fn test_basic_txn_async_discard_callback() {
+        use std::time::Duration;
+
+        let store = MemoryStore::new();
+        let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        txn.on_discard_async(Box::new(move || {
+            Box::pin(async move {
+                tx.send(()).unwrap();
+            })
+        }));
+
+        txn.discard().unwrap();
+
+        // Wait for async callback to complete
+        tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("Timeout waiting for async callback")
+            .expect("Failed to receive from callback");
+    }
 }

@@ -9,14 +9,6 @@ use storage::corekv::{Error, IterOptions, Iterator, Result, Txn};
 use storage::namespace::Namespace;
 use tokio::sync::RwLock;
 
-/// Store namespace prefixes matching Go DefraDB's internal/datastore/multi.go
-pub const SYSTEM_STORE_PREFIX: u8 = b's';
-pub const DATA_STORE_PREFIX: u8 = b'd';
-pub const HEAD_STORE_PREFIX: u8 = b'h';
-pub const BLOCK_STORE_PREFIX: u8 = b'b';
-pub const PEER_STORE_PREFIX: u8 = b'p';
-pub const ENC_STORE_PREFIX: u8 = b'e';
-
 /// Shared transaction wrapper allowing multiple namespace views.
 pub struct SharedTxn {
     txn: RwLock<Box<dyn Txn>>,
@@ -194,9 +186,10 @@ fn unprefix_key(namespace: Namespace, key: &[u8]) -> Result<Vec<u8>> {
     }
     if key[0] != namespace.prefix() {
         return Err(Error::Other(format!(
-            "Key has wrong prefix: expected {}, got {}",
+            "Key has wrong prefix: expected {:?} (0x{:02x}), got 0x{:02x}",
             namespace.prefix() as char,
-            key[0] as char
+            namespace.prefix(),
+            key[0]
         )));
     }
     Ok(key[1..].to_vec())

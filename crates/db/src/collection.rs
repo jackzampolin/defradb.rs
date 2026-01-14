@@ -171,8 +171,13 @@ impl Collection {
             .map_err(Error::Storage)?;
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-            let doc = Document::from_cbor(&pair.value)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
+            let doc = Document::from_cbor(&pair.value).map_err(|e| {
+                Error::Serialization(format!(
+                    "failed to deserialize document at key {:?}: {}",
+                    String::from_utf8_lossy(&pair.key),
+                    e
+                ))
+            })?;
 
             // Callback returns true to continue, false to stop
             if !callback(doc).await? {
