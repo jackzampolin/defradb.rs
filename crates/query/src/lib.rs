@@ -20,6 +20,7 @@
 
 pub mod document;
 pub mod error;
+pub mod executor;
 pub mod mapper;
 pub mod plan;
 pub mod planner;
@@ -29,6 +30,7 @@ pub mod sdl_parse;
 // Re-exports for convenience
 pub use document::{DocumentMapping, RenderKey};
 pub use error::{QueryError, Result};
+pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 pub use mapper::{Filter, Select};
 pub use plan::{CreateInput, CreateNode, LimitNode, ScanNode, SelectNode};
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode};
