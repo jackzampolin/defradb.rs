@@ -6,6 +6,7 @@
 /// - Lifecycle callbacks (on_success, on_error, on_discard)
 use crate::error::{Error, Result};
 use crate::multistore::{NamespaceView, RootView, SharedTxn};
+use futures::FutureExt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -178,9 +179,21 @@ impl BasicTxn {
             (self.error_fns, self.error_async_fns)
         };
 
-        // Execute async callbacks concurrently
+        // Execute async callbacks concurrently, logging any failures
         for callback in async_fns {
-            tokio::spawn(callback());
+            let txn_id = self.id;
+            tokio::spawn(async move {
+                let result = std::panic::AssertUnwindSafe(callback())
+                    .catch_unwind()
+                    .await;
+                if let Err(e) = result {
+                    tracing::error!(
+                        txn_id = txn_id,
+                        error = ?e,
+                        "Transaction async callback panicked"
+                    );
+                }
+            });
         }
 
         // Execute sync callbacks
@@ -212,9 +225,21 @@ impl BasicTxn {
 
         self.state = TxnState::Discarded;
 
-        // Execute async callbacks concurrently
+        // Execute async callbacks concurrently, logging any failures
+        let txn_id = self.id;
         for callback in self.discard_async_fns {
-            tokio::spawn(callback());
+            tokio::spawn(async move {
+                let result = std::panic::AssertUnwindSafe(callback())
+                    .catch_unwind()
+                    .await;
+                if let Err(e) = result {
+                    tracing::error!(
+                        txn_id = txn_id,
+                        error = ?e,
+                        "Transaction discard async callback panicked"
+                    );
+                }
+            });
         }
 
         // Execute sync callbacks
