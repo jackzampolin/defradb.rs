@@ -12,6 +12,8 @@ members = [
     "crates/crypto",
     "crates/http",
     "crates/cli",
+    "crates/datastore",
+    "crates/db",
 ]
 
 [workspace.package]

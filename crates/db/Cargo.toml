@@ -1,0 +1,35 @@
+[package]
+name = "db"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DefraDB database and collection management"
+
+[dependencies]
+# Async runtime
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_cbor.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# IPLD
+cid.workspace = true
+
+# Internal crates
+storage = { path = "../storage" }
+datastore = { path = "../datastore" }
+schema = { path = "../schema" }
+document = { path = "../document" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
