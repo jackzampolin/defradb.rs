@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::debug;
+use tracing::warn;
 
 use crate::collection::Collection;
 use crate::txn::DbTxn;
@@ -16,6 +16,16 @@ use crate::txn::DbTxn;
 ///
 /// This fetcher holds a reference to an active transaction and collection
 /// definitions, allowing it to fetch documents within the transaction context.
+///
+/// # Ownership Model
+///
+/// The transaction is wrapped in `Arc<TokioMutex<Option<...>>>` because:
+/// - `Arc`: Shared ownership between `DbDocFetcher` and `DbTransactionContext`
+/// - `TokioMutex`: Async-safe interior mutability for concurrent queries
+/// - `Option`: Enables `take_txn()` to extract the transaction for commit/rollback
+///
+/// After `take_txn()` is called, all fetcher operations will return an error
+/// indicating the transaction was consumed. Use `is_consumed()` to check state.
 pub struct DbDocFetcher<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     collections: Arc<HashMap<String, Collection>>,
@@ -31,8 +41,19 @@ impl<S: Store> DbDocFetcher<S> {
     }
 
     /// Take the transaction out of the fetcher (for commit/rollback).
+    ///
+    /// After calling this, `is_consumed()` will return `true` and all
+    /// fetcher operations will return an error.
     pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
         self.txn.lock().await.take()
+    }
+
+    /// Check if the transaction has been consumed (via `take_txn()`).
+    ///
+    /// Returns `true` if `take_txn()` was called and the transaction is
+    /// no longer available for queries.
+    pub async fn is_consumed(&self) -> bool {
+        self.txn.lock().await.is_none()
     }
 }
 
@@ -51,9 +72,12 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction already consumed")
             })?;
-            db_txn
-                .datastore()
-                .map_err(|e| query::error::QueryError::execution(format!("txn error: {}", e)))?
+            db_txn.datastore().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to get datastore for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?
         };
 
         collection
@@ -79,12 +103,17 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction already consumed")
             })?;
-            db_txn
-                .datastore()
-                .map_err(|e| query::error::QueryError::execution(format!("txn error: {}", e)))?
+            db_txn.datastore().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to get datastore for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?
         };
 
         let mut docs = Vec::new();
+        let mut missing_ids = Vec::new();
+
         for id_str in doc_ids {
             let doc_id = document::DocID::from_string(id_str).map_err(|e| {
                 query::error::QueryError::execution(format!("invalid doc ID '{}': {}", id_str, e))
@@ -97,13 +126,20 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             {
                 Some(doc) => docs.push(doc),
                 None => {
-                    debug!(
-                        collection = %collection_name,
-                        doc_id = %id_str,
-                        "Requested document not found in collection"
-                    );
+                    missing_ids.push(id_str.clone());
                 }
             }
+        }
+
+        if !missing_ids.is_empty() {
+            warn!(
+                collection = %collection_name,
+                requested_count = doc_ids.len(),
+                found_count = docs.len(),
+                missing_count = missing_ids.len(),
+                missing_ids = ?missing_ids,
+                "Some explicitly requested documents were not found"
+            );
         }
 
         Ok(docs)

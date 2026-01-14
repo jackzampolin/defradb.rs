@@ -43,8 +43,10 @@ use crate::txn_context::DbTransactionContext;
 /// # Error Handling
 ///
 /// If the internal lock becomes poisoned (due to a panic in another thread),
-/// `get()` and `get_ctx()` will recover the guard and log an error via tracing.
-/// This prevents cascading failures but indicates system instability.
+/// all operations will fail-fast: `get()` and `get_ctx()` return `None`,
+/// while `begin()`, `commit()`, and `rollback()` return errors. A poisoned
+/// lock indicates a panic and potential data corruption - continuing operation
+/// would be unsafe.
 pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
     collections: Arc<HashMap<String, Collection>>,
@@ -84,6 +86,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 
     /// Get an existing transaction by ID (for internal use).
+    ///
+    /// Returns `None` if the transaction doesn't exist or if the lock is poisoned.
     pub fn get_ctx(&self, txn_id: &str) -> Option<Arc<DbTransactionContext<S>>> {
         match self.transactions.read() {
             Ok(guard) => guard.get(txn_id).cloned(),
@@ -91,9 +95,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 error!(
                     txn_id = %txn_id,
                     error = ?poisoned,
-                    "Transaction registry lock poisoned in get_ctx - recovering guard but system may be unstable"
+                    "Transaction registry lock poisoned - returning None for safety"
                 );
-                poisoned.into_inner().get(txn_id).cloned()
+                None
             }
         }
     }
@@ -102,12 +106,12 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     pub async fn get_all_docs(&self, txn_id: &str, collection_name: &str) -> Result<Vec<Document>> {
         let ctx = self
             .get_ctx(txn_id)
-            .ok_or_else(|| Error::Other(format!("transaction '{}' not found", txn_id)))?;
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
 
         ctx.doc_fetcher()
             .get_all(collection_name)
             .await
-            .map_err(|e| Error::Other(e.to_string()))
+            .map_err(Error::Query)
     }
 
     /// Get documents by IDs from a collection within a transaction.
@@ -119,12 +123,12 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     ) -> Result<Vec<Document>> {
         let ctx = self
             .get_ctx(txn_id)
-            .ok_or_else(|| Error::Other(format!("transaction '{}' not found", txn_id)))?;
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
 
         ctx.doc_fetcher()
             .get_by_ids(collection_name, doc_ids)
             .await
-            .map_err(|e| Error::Other(e.to_string()))
+            .map_err(Error::Query)
     }
 }
 
@@ -159,13 +163,9 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 error!(
                     txn_id = %handle,
                     error = ?poisoned,
-                    "Transaction registry lock poisoned - recovering guard but system may be unstable"
+                    "Transaction registry lock poisoned - returning None for safety"
                 );
-                poisoned
-                    .into_inner()
-                    .get(handle.as_str())
-                    .cloned()
-                    .map(|ctx| ctx as Arc<dyn TransactionContext>)
+                None
             }
         }
     }
@@ -479,6 +479,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_is_consumed_returns_false_before_take() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get_ctx(&txn_id).unwrap();
+
+        assert!(
+            !ctx.is_consumed().await,
+            "Transaction should not be consumed before take_txn"
+        );
+
+        registry.rollback(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_is_consumed_returns_true_after_take() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get_ctx(&txn_id).unwrap();
+
+        // Take the transaction
+        let _txn = ctx.take_txn().await;
+
+        assert!(
+            ctx.is_consumed().await,
+            "Transaction should be consumed after take_txn"
+        );
+    }
+
+    #[tokio::test]
     async fn test_doc_fetcher_after_txn_consumed_returns_error() {
         let db = Arc::new(DB::new(MemoryStore::new()));
         let registry = DbTransactionRegistry::new(db, test_schema());
@@ -683,6 +716,24 @@ mod tests {
         for handle in handles {
             handle.await.expect("Task should complete without panic");
         }
+    }
+
+    #[tokio::test]
+    async fn test_doc_fetcher_get_by_ids_unknown_collection() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        let result = fetcher
+            .get_by_ids("NonExistent", &["some-id".to_string()])
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("NonExistent"));
+
+        registry.rollback(&txn_id).await.unwrap();
     }
 
     #[tokio::test]

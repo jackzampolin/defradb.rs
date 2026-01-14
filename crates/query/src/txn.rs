@@ -13,9 +13,11 @@ use crate::runner::DocFetcher;
 
 /// An opaque handle to an active transaction.
 ///
-/// This type can only be created by `TransactionRegistry::begin()`, providing
-/// compile-time assurance that transaction IDs passed to `get()`, `commit()`,
-/// and `rollback()` came from a valid `begin()` call.
+/// Handles should be obtained from `TransactionRegistry::begin()`. While the
+/// `new()` constructor and `FromStr` implementation are public (for registry
+/// implementors and HTTP deserialization), handles not registered with a
+/// registry will fail validation when used with `get()`, `commit()`, or
+/// `rollback()`.
 ///
 /// The handle is serializable (implements `Display` and `FromStr`) for use in
 /// HTTP APIs and other contexts where string serialization is needed.
@@ -25,8 +27,14 @@ pub struct TransactionHandle(String);
 impl TransactionHandle {
     /// Create a new transaction handle.
     ///
-    /// This should only be called by `TransactionRegistry::begin()` implementations.
-    /// External code should obtain handles through the registry, not by direct construction.
+    /// # For `TransactionRegistry` Implementors Only
+    ///
+    /// This constructor is intended for use by `TransactionRegistry::begin()`
+    /// implementations. Application code should obtain handles through
+    /// `TransactionRegistry::begin()`, not by direct construction.
+    ///
+    /// Handles created outside of a registry will fail when used with
+    /// `get()`, `commit()`, or `rollback()` - the registry won't find them.
     pub fn new(id: String) -> Self {
         Self(id)
     }
@@ -151,8 +159,14 @@ impl TransactionRegistry for NoOpTransactionRegistry {
 /// A guard that ensures a transaction is properly finalized.
 ///
 /// This type provides compile-time safety by consuming itself on `commit()` or
-/// `rollback()`, preventing use-after-finalization bugs. If dropped without
-/// explicit finalization, the transaction is automatically rolled back.
+/// `rollback()`, preventing use-after-finalization bugs.
+///
+/// # Warning
+///
+/// If dropped without explicit `commit()` or `rollback()`, the guard will log
+/// a warning but **cannot perform async rollback**. The transaction will be
+/// leaked in the registry. Always ensure you call `commit()` or `rollback()`
+/// explicitly before the guard goes out of scope.
 ///
 /// # Example
 ///
@@ -232,12 +246,15 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
 
 impl<E: crate::QueryExecutor + ?Sized> Drop for TransactionGuard<'_, E> {
     fn drop(&mut self) {
-        if self.handle.is_some() {
+        if let Some(handle) = &self.handle {
             // Transaction was not finalized - this is a bug in user code.
-            // We can't do async rollback in drop, so we log a warning.
-            // In a real system, you might want to spawn a task to clean up.
-            tracing::warn!(
-                "TransactionGuard dropped without commit/rollback - transaction may be leaked"
+            // We can't do async rollback in drop, so we log an error.
+            // The transaction will remain in the registry until it times out
+            // or is explicitly cleaned up.
+            tracing::error!(
+                txn_id = %handle,
+                "TransactionGuard dropped without commit/rollback - transaction leaked! \
+                 This is a BUG: always call commit() or rollback() explicitly."
             );
         }
     }
@@ -427,5 +444,42 @@ mod tests {
 
         guard.commit().await.unwrap();
         assert!(executor.was_committed());
+    }
+
+    #[tokio::test]
+    async fn test_guard_drop_without_finalization_does_not_commit_or_rollback() {
+        let executor = MockExecutor::new();
+
+        // Create a guard but don't call commit() or rollback()
+        {
+            let _guard = TransactionGuard::begin(&executor, false).await.unwrap();
+            // Guard is dropped here without finalization
+        }
+
+        // Verify that neither commit nor rollback was called
+        assert!(
+            !executor.was_committed(),
+            "Dropping guard should not commit the transaction"
+        );
+        assert!(
+            !executor.was_rolled_back(),
+            "Dropping guard should not rollback (async not possible in Drop)"
+        );
+        // Note: The drop will log an error, but we can't easily verify that in tests
+    }
+
+    #[tokio::test]
+    async fn test_guard_execute_after_commit_returns_error() {
+        let executor = MockExecutor::new();
+        let mut guard = TransactionGuard::begin(&executor, false).await.unwrap();
+
+        // Take the handle to simulate commit having consumed it
+        let handle = guard.handle.take();
+        assert!(handle.is_some());
+
+        // Now execute should return an error response
+        let request = crate::QueryRequest::new("{ test }");
+        let response = guard.execute(request).await;
+        assert!(response.has_errors());
     }
 }
