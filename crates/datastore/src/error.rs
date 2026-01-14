@@ -11,6 +11,9 @@ pub enum Error {
 
     #[error("transaction already discarded")]
     TxnAlreadyDiscarded,
+
+    #[error("transaction still has active references")]
+    TxnStillInUse,
 }
 
 /// Result type for datastore operations.

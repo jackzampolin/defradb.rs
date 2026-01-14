@@ -212,7 +212,7 @@ impl<S: Store> DbTxn<S> {
         }
 
         if let Some(txn) = self.txn.take() {
-            txn.discard();
+            txn.discard().map_err(Error::Datastore)?;
         }
         self.state = TxnState::Discarded;
         Ok(())
@@ -236,15 +236,16 @@ impl<S: Store> DbTxn<S> {
     /// Actually discard the transaction, even if explicit.
     ///
     /// This should only be called by the transaction creator.
-    pub fn force_discard(mut self) {
+    pub fn force_discard(mut self) -> Result<()> {
         if self.state != TxnState::Active {
-            return;
+            return Err(Error::TxnNotActive);
         }
 
         if let Some(txn) = self.txn.take() {
-            txn.discard();
+            txn.discard().map_err(Error::Datastore)?;
         }
         self.state = TxnState::Discarded;
+        Ok(())
     }
 }
 
@@ -392,7 +393,7 @@ mod tests {
             .unwrap();
 
         // Force discard even though explicit
-        txn.force_discard();
+        txn.force_discard().unwrap();
 
         // Verify data NOT persisted
         let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
@@ -415,5 +416,174 @@ mod tests {
         assert!(txn.peerstore().is_ok());
         assert!(txn.systemstore().is_ok());
         assert!(txn.rootstore().is_ok());
+    }
+
+    // Transaction state and callback tests
+
+    #[tokio::test]
+    async fn test_db_txn_callbacks_executed_on_commit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let mut txn = DbTxn::new(basic_txn, store.clone());
+
+        let success_called = Arc::new(AtomicBool::new(false));
+        let success_clone = success_called.clone();
+        txn.on_success(Box::new(move || {
+            success_clone.store(true, Ordering::SeqCst);
+        }));
+
+        txn.commit().await.unwrap();
+        assert!(success_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_callbacks_executed_on_discard() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let mut txn = DbTxn::new(basic_txn, store.clone());
+
+        let discard_called = Arc::new(AtomicBool::new(false));
+        let discard_clone = discard_called.clone();
+        txn.on_discard(Box::new(move || {
+            discard_clone.store(true, Ordering::SeqCst);
+        }));
+
+        txn.discard().unwrap();
+        assert!(discard_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_readonly_cannot_write() {
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, true).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+
+        assert!(txn.is_readonly());
+
+        // Attempting to write should fail
+        let result = txn.datastore().unwrap().set(b"key", b"value").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_id_increments() {
+        let store = Arc::new(MemoryStore::new());
+
+        let basic_txn1 = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn1 = DbTxn::new(basic_txn1, store.clone());
+        assert_eq!(txn1.id(), 1);
+
+        let basic_txn2 = BasicTxn::new(&*store, 2, false).await.unwrap();
+        let txn2 = DbTxn::new(basic_txn2, store.clone());
+        assert_eq!(txn2.id(), 2);
+
+        let basic_txn3 = BasicTxn::new(&*store, 100, false).await.unwrap();
+        let txn3 = DbTxn::new(basic_txn3, store.clone());
+        assert_eq!(txn3.id(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_multiple_writes_single_commit() {
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+
+        // Multiple writes in single transaction
+        txn.datastore()
+            .unwrap()
+            .set(b"key1", b"value1")
+            .await
+            .unwrap();
+        txn.datastore()
+            .unwrap()
+            .set(b"key2", b"value2")
+            .await
+            .unwrap();
+        txn.datastore()
+            .unwrap()
+            .set(b"key3", b"value3")
+            .await
+            .unwrap();
+
+        txn.commit().await.unwrap();
+
+        // Verify all persisted
+        let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        assert_eq!(
+            txn.datastore().unwrap().get(b"key1").await.unwrap(),
+            Some(b"value1".to_vec())
+        );
+        assert_eq!(
+            txn.datastore().unwrap().get(b"key2").await.unwrap(),
+            Some(b"value2".to_vec())
+        );
+        assert_eq!(
+            txn.datastore().unwrap().get(b"key3").await.unwrap(),
+            Some(b"value3".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_overwrite_value() {
+        let store = Arc::new(MemoryStore::new());
+
+        // Write initial value
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        txn.datastore()
+            .unwrap()
+            .set(b"key", b"initial")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Overwrite value
+        let basic_txn = BasicTxn::new(&*store, 2, false).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        txn.datastore()
+            .unwrap()
+            .set(b"key", b"updated")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Verify updated value
+        let basic_txn = BasicTxn::new(&*store, 3, true).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        assert_eq!(
+            txn.datastore().unwrap().get(b"key").await.unwrap(),
+            Some(b"updated".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_delete_value() {
+        let store = Arc::new(MemoryStore::new());
+
+        // Write initial value
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        txn.datastore()
+            .unwrap()
+            .set(b"key", b"value")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Delete value
+        let basic_txn = BasicTxn::new(&*store, 2, false).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        txn.datastore().unwrap().delete(b"key").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Verify deleted
+        let basic_txn = BasicTxn::new(&*store, 3, true).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        assert_eq!(txn.datastore().unwrap().get(b"key").await.unwrap(), None);
     }
 }

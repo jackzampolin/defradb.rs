@@ -193,17 +193,22 @@ impl BasicTxn {
 
     /// Discard the transaction.
     ///
-    /// All on_discard callbacks are executed.
-    pub fn discard(mut self) {
+    /// All on_discard callbacks are executed on success.
+    /// Returns an error if the transaction is not active or still has references.
+    pub fn discard(mut self) -> Result<()> {
         if self.state != TxnState::Active {
-            return;
+            return Err(match self.state {
+                TxnState::Committed => Error::TxnAlreadyCommitted,
+                TxnState::Discarded => Error::TxnAlreadyDiscarded,
+                TxnState::Active => unreachable!(),
+            });
         }
 
-        // Try to extract and discard the underlying transaction
-        if let Ok(shared) = Arc::try_unwrap(self.shared_txn) {
-            let txn = shared.into_txn();
-            txn.discard();
-        }
+        // Extract and discard the underlying transaction
+        let shared = Arc::try_unwrap(self.shared_txn).map_err(|_| Error::TxnStillInUse)?;
+
+        let txn = shared.into_txn();
+        txn.discard();
 
         self.state = TxnState::Discarded;
 
@@ -216,6 +221,8 @@ impl BasicTxn {
         for callback in self.discard_fns {
             callback();
         }
+
+        Ok(())
     }
 }
 
@@ -328,7 +335,7 @@ mod tests {
         txn.datastore().set(b"key", b"value").await.unwrap();
 
         // Discard
-        txn.discard();
+        txn.discard().unwrap();
 
         assert!(called.load(Ordering::SeqCst));
 
@@ -350,5 +357,134 @@ mod tests {
         assert_eq!(value, Some(b"value".to_vec()));
 
         txn.commit().await.unwrap();
+    }
+
+    // Error callback tests
+
+    #[tokio::test]
+    async fn test_basic_txn_error_callback_not_called_on_success() {
+        let store = MemoryStore::new();
+        let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        let error_called = Arc::new(AtomicBool::new(false));
+        let error_called_clone = error_called.clone();
+        txn.on_error(Box::new(move || {
+            error_called_clone.store(true, Ordering::SeqCst);
+        }));
+
+        let success_called = Arc::new(AtomicBool::new(false));
+        let success_called_clone = success_called.clone();
+        txn.on_success(Box::new(move || {
+            success_called_clone.store(true, Ordering::SeqCst);
+        }));
+
+        txn.commit().await.unwrap();
+
+        // Success should be called, error should not
+        assert!(success_called.load(Ordering::SeqCst));
+        assert!(!error_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_basic_txn_discard_callback_not_called_on_commit() {
+        let store = MemoryStore::new();
+        let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        let discard_called = Arc::new(AtomicBool::new(false));
+        let discard_called_clone = discard_called.clone();
+        txn.on_discard(Box::new(move || {
+            discard_called_clone.store(true, Ordering::SeqCst);
+        }));
+
+        txn.commit().await.unwrap();
+
+        // Discard callback should not be called on commit
+        assert!(!discard_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_basic_txn_success_callback_not_called_on_discard() {
+        let store = MemoryStore::new();
+        let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        let success_called = Arc::new(AtomicBool::new(false));
+        let success_called_clone = success_called.clone();
+        txn.on_success(Box::new(move || {
+            success_called_clone.store(true, Ordering::SeqCst);
+        }));
+
+        txn.discard().unwrap();
+
+        // Success callback should not be called on discard
+        assert!(!success_called.load(Ordering::SeqCst));
+    }
+
+    // Transaction state transition tests
+
+    #[tokio::test]
+    async fn test_basic_txn_double_commit_returns_error() {
+        let store = MemoryStore::new();
+        let txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        // First commit succeeds
+        txn.commit().await.unwrap();
+
+        // Cannot commit twice - txn is consumed after first commit
+        // This is enforced by Rust's ownership system
+    }
+
+    #[tokio::test]
+    async fn test_basic_txn_discard_already_discarded_returns_error() {
+        let store = MemoryStore::new();
+        let txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        // First discard succeeds
+        txn.discard().unwrap();
+
+        // Cannot discard twice - txn is consumed after first discard
+        // This is enforced by Rust's ownership system
+    }
+
+    #[tokio::test]
+    async fn test_basic_txn_all_stores_accessible() {
+        let store = MemoryStore::new();
+        let txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+        // All stores should be accessible and work
+        txn.datastore().set(b"d", b"data").await.unwrap();
+        txn.blockstore().set(b"b", b"block").await.unwrap();
+        txn.encstore().set(b"e", b"enc").await.unwrap();
+        txn.headstore().set(b"h", b"head").await.unwrap();
+        txn.peerstore().set(b"p", b"peer").await.unwrap();
+        txn.systemstore().set(b"s", b"sys").await.unwrap();
+
+        txn.commit().await.unwrap();
+
+        // Verify all stores persisted
+        let txn = BasicTxn::new(&store, 2, true).await.unwrap();
+        assert_eq!(
+            txn.datastore().get(b"d").await.unwrap(),
+            Some(b"data".to_vec())
+        );
+        assert_eq!(
+            txn.blockstore().get(b"b").await.unwrap(),
+            Some(b"block".to_vec())
+        );
+        assert_eq!(
+            txn.encstore().get(b"e").await.unwrap(),
+            Some(b"enc".to_vec())
+        );
+        assert_eq!(
+            txn.headstore().get(b"h").await.unwrap(),
+            Some(b"head".to_vec())
+        );
+        assert_eq!(
+            txn.peerstore().get(b"p").await.unwrap(),
+            Some(b"peer".to_vec())
+        );
+        assert_eq!(
+            txn.systemstore().get(b"s").await.unwrap(),
+            Some(b"sys".to_vec())
+        );
     }
 }

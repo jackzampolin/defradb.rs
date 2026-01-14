@@ -338,4 +338,157 @@ mod tests {
             Some("Robert")
         );
     }
+
+    // Edge case tests
+
+    #[tokio::test]
+    async fn test_collection_create_duplicate_returns_error() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = test_collection();
+
+        // Create a document
+        let txn = db.new_txn(false).await.unwrap();
+        let doc = Document::from_json_str(r#"{"name": "Alice"}"#).unwrap();
+        doc.generate_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+        col.create(&txn, &doc).await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Try to create the same document again
+        let txn = db.new_txn(false).await.unwrap();
+        let doc2 = Document::with_id(doc_id);
+        let result = col.create(&txn, &doc2).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidDocument(_)));
+    }
+
+    #[tokio::test]
+    async fn test_collection_update_nonexistent_returns_error() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = test_collection();
+
+        // Create a document to get a valid DocID, but don't save it
+        let doc = Document::from_json_str(r#"{"name": "Ghost"}"#).unwrap();
+        doc.generate_doc_id().unwrap();
+
+        // Try to update a non-existent document
+        let txn = db.new_txn(false).await.unwrap();
+        let result = col.update(&txn, &doc).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::DocumentNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_collection_delete_nonexistent_returns_false() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = test_collection();
+
+        // Create a document to get a valid DocID, but don't save it
+        let doc = Document::from_json_str(r#"{"name": "Ghost"}"#).unwrap();
+        doc.generate_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+
+        // Delete should return false for non-existent
+        let txn = db.new_txn(false).await.unwrap();
+        let deleted = col.delete(&txn, &doc_id).await.unwrap();
+        assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn test_collection_get_nonexistent_returns_none() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = test_collection();
+
+        // Create a document to get a valid DocID, but don't save it
+        let doc = Document::from_json_str(r#"{"name": "Ghost"}"#).unwrap();
+        doc.generate_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+
+        // Get should return None for non-existent
+        let txn = db.new_txn(true).await.unwrap();
+        let result = col.get(&txn, &doc_id).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_collection_get_all_empty() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = test_collection();
+
+        // Get all from empty collection
+        let txn = db.new_txn(true).await.unwrap();
+        let docs = col.get_all(&txn).await.unwrap();
+        assert!(docs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collection_get_all_multiple() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = test_collection();
+
+        // Create multiple documents
+        let txn = db.new_txn(false).await.unwrap();
+        for i in 0..5 {
+            let doc =
+                Document::from_json_str(&format!(r#"{{"name": "User{}", "index": {}}}"#, i, i))
+                    .unwrap();
+            doc.generate_doc_id().unwrap();
+            col.create(&txn, &doc).await.unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        // Get all should return all 5
+        let txn = db.new_txn(true).await.unwrap();
+        let docs = col.get_all(&txn).await.unwrap();
+        assert_eq!(docs.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_collection_create_without_id_returns_error() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = test_collection();
+
+        // Create a document without an ID using Document::new()
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("NoID".to_string()));
+        // Don't set an ID
+
+        let txn = db.new_txn(false).await.unwrap();
+        let result = col.create(&txn, &doc).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidDocument(_)));
+    }
+
+    #[tokio::test]
+    async fn test_collection_isolation_between_collections() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+
+        // Create two different collections
+        let col1 = Collection::new(CollectionVersion::new("users", "v1", "col-users", vec![]));
+        let col2 = Collection::new(CollectionVersion::new("posts", "v1", "col-posts", vec![]));
+
+        // Create document in col1
+        let txn = db.new_txn(false).await.unwrap();
+        let doc = Document::from_json_str(r#"{"name": "Alice"}"#).unwrap();
+        doc.generate_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().clone();
+        col1.create(&txn, &doc).await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Document should exist in col1 but not col2
+        let txn = db.new_txn(true).await.unwrap();
+        assert!(col1.exists(&txn, &doc_id).await.unwrap());
+        assert!(!col2.exists(&txn, &doc_id).await.unwrap());
+    }
 }
