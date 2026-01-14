@@ -592,3 +592,64 @@ fn test_crdt_delta_doc_id_returns_none_for_definitions() {
     let col_def = CrdtDelta::CollectionDefinition(CollectionDefinitionDeltaPayload::new(1));
     assert!(col_def.doc_id().is_none());
 }
+
+// ============================================================================
+// Additional Edge Case Tests
+// ============================================================================
+
+#[test]
+fn test_counter_delta_nonce_i64_overflow_fails() {
+    let mut map = BTreeMap::new();
+    map.insert("docID".to_string(), Ipld::Bytes(b"doc".to_vec()));
+    map.insert("fieldName".to_string(), Ipld::String("count".to_string()));
+    map.insert("priority".to_string(), Ipld::Integer(1));
+    map.insert("nonce".to_string(), Ipld::Integer(i128::MAX)); // out of i64 range
+    map.insert(
+        "schemaVersionID".to_string(),
+        Ipld::String("v1".to_string()),
+    );
+    map.insert("data".to_string(), Ipld::Bytes(vec![]));
+    let ipld = Ipld::Map(map);
+    let result = CounterDeltaPayload::try_from(&ipld);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("out of i64 range"));
+}
+
+#[test]
+fn test_dag_link_missing_name_fails() {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "link".to_string(),
+        Ipld::Link(cid_to_libipld(&test_cid()).unwrap()),
+    );
+    // missing "name"
+    let ipld = Ipld::Map(map);
+    let result = DAGLink::try_from(&ipld);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Missing field 'name'"));
+}
+
+#[test]
+fn test_block_with_encryption_and_signature_ipld_roundtrip() {
+    let enc_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+    let sig_cid =
+        cid::Cid::from_str("bafkreidgvpkjawlxz6sffxzwgooowe5zt6dcz3rfz4j6mmzclvggsluaby").unwrap();
+
+    let block = Block::new_with_options(
+        test_lww_delta(),
+        vec![test_cid()],
+        vec![],
+        Some(enc_cid),
+        Some(sig_cid),
+    );
+
+    let ipld = Ipld::try_from(&block).unwrap();
+    let restored = Block::try_from(&ipld).unwrap();
+
+    assert_eq!(block.encryption, restored.encryption);
+    assert_eq!(block.signature, restored.signature);
+}

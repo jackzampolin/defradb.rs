@@ -249,7 +249,12 @@ impl<'a> SdlParser<'a> {
         }
     }
 
-    /// Get a boolean argument with type coercion warning
+    /// Get a boolean argument, emitting a warning if the type is wrong.
+    ///
+    /// Returns `None` if the argument is missing or has the wrong type.
+    /// Callers typically use `.unwrap_or(default)` to apply a default value,
+    /// meaning invalid types result in the default being used silently
+    /// (with a warning emitted to `self.warnings`).
     fn get_bool_with_warning(
         &mut self,
         directive: &Directive<'_, String>,
@@ -276,7 +281,10 @@ impl<'a> SdlParser<'a> {
         }
     }
 
-    /// Get a string argument with type coercion warning
+    /// Get a string argument, emitting a warning if the type is wrong.
+    ///
+    /// Returns `None` if the argument is missing or has the wrong type.
+    /// Accepts both String and Enum GraphQL values as valid strings.
     fn get_string_with_warning(
         &mut self,
         directive: &Directive<'_, String>,
@@ -304,7 +312,10 @@ impl<'a> SdlParser<'a> {
         }
     }
 
-    /// Get an integer argument with type coercion warning
+    /// Get an integer argument, emitting a warning if the type is wrong.
+    ///
+    /// Returns `None` if the argument is missing, has the wrong type, or
+    /// is out of i64 range. A warning is emitted for type mismatches.
     fn get_int_with_warning(
         &mut self,
         directive: &Directive<'_, String>,
@@ -794,13 +805,26 @@ fn generate_relation_name(from_type: &str, field_name: &str, to_type: &str) -> S
     format!("{}_{}_{}", first, field_name, second)
 }
 
-/// Parse SDL string into CollectionVersion schemas
+/// Parse SDL string into CollectionVersion schemas.
+///
+/// This convenience function discards all warnings. For production use where
+/// you need visibility into unknown directives, invalid argument types, or
+/// unimplemented features, use [`parse_sdl_with_warnings`] instead.
 pub fn parse_sdl(sdl: &str) -> Result<Vec<CollectionVersion>> {
     let mut parser = SdlParser::new(sdl);
     parser.parse()
 }
 
-/// Parse SDL string into CollectionVersion schemas with warnings
+/// Parse SDL string into CollectionVersion schemas with warnings.
+///
+/// Returns both the parsed collections and any warnings encountered during parsing.
+/// Warnings are emitted for:
+/// - Unknown directives (forward compatibility - ignored but noted)
+/// - Unknown arguments on known directives (possible typos)
+/// - Invalid argument types (e.g., string where bool expected - default used)
+/// - Unimplemented directives (@embedding, @encryptedIndex, field @policy)
+///
+/// This is the recommended entry point for production use.
 pub fn parse_sdl_with_warnings(sdl: &str) -> Result<ParseOutput> {
     let mut parser = SdlParser::new(sdl);
     parser.parse_with_warnings()
@@ -2306,5 +2330,50 @@ mod tests {
         assert!(display.contains("@embedding"));
         assert!(display.contains("Document.content"));
         assert!(display.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn test_field_policy_directive_emits_unimplemented_warning() {
+        let sdl = r#"
+            type User {
+                name: String @policy(id: "p1", resource: "r1")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnimplementedDirective {
+                directive_name,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "policy");
+                assert_eq!(type_name, "User");
+                assert_eq!(field_name.as_deref(), Some("name"));
+            }
+            other => panic!("expected UnimplementedDirective, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_index_with_includes_argument_no_warning() {
+        let sdl = r#"
+            type User @index(fields: ["name"], includes: ["email"]) {
+                name: String
+                email: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // includes is a known argument, should not trigger warning
+        assert!(
+            output.warnings.is_empty(),
+            "includes is a known argument but got warnings: {:?}",
+            output.warnings
+        );
     }
 }
