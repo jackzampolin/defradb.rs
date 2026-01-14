@@ -29,6 +29,7 @@ pub mod query_parse;
 pub mod runner;
 pub mod schema_gen;
 pub mod sdl_parse;
+pub mod txn;
 
 // Re-exports for convenience
 pub use document::{DocumentMapping, RenderKey};
@@ -40,6 +41,7 @@ pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::parse_query;
 pub use runner::{DocFetcher, QueryRunner};
 pub use sdl_parse::parse_sdl;
+pub use txn::{NoOpTransactionRegistry, TransactionContext, TransactionRegistry};
 
 #[cfg(test)]
 mod tests {

@@ -37,6 +37,18 @@ impl QueryExecutor for FailingMockExecutor {
         self.execute(request).await
     }
 
+    async fn begin_txn(&self, _readonly: bool) -> std::result::Result<String, String> {
+        Err("mock executor does not support transactions".to_string())
+    }
+
+    async fn commit_txn(&self, _txn_id: &str) -> std::result::Result<(), String> {
+        Err("mock executor does not support transactions".to_string())
+    }
+
+    async fn rollback_txn(&self, _txn_id: &str) -> std::result::Result<(), String> {
+        Err("mock executor does not support transactions".to_string())
+    }
+
     async fn schema(&self) -> Result<String> {
         match &self.schema_error {
             Some(msg) => Err(QueryError::internal(msg.clone())),
@@ -101,6 +113,19 @@ impl QueryExecutor for MockQueryExecutor {
 
     async fn execute_in_txn(&self, request: QueryRequest, _txn_id: &str) -> QueryResponse {
         self.execute(request).await
+    }
+
+    async fn begin_txn(&self, _readonly: bool) -> std::result::Result<String, String> {
+        // Return a mock transaction ID
+        Ok("mock-txn-001".to_string())
+    }
+
+    async fn commit_txn(&self, _txn_id: &str) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn rollback_txn(&self, _txn_id: &str) -> std::result::Result<(), String> {
+        Ok(())
     }
 
     async fn schema(&self) -> Result<String> {

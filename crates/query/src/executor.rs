@@ -146,6 +146,14 @@ pub struct ErrorLocation {
 /// This is the main interface between HTTP/API layer and query execution.
 /// Implementors handle parsing, planning, and executing GraphQL queries.
 ///
+/// # Transaction Support
+///
+/// The executor supports executing queries within transaction contexts:
+///
+/// 1. Call `begin_txn()` to start a new transaction
+/// 2. Execute queries with `execute_in_txn()` using the returned transaction ID
+/// 3. Call `commit_txn()` or `rollback_txn()` to end the transaction
+///
 /// # Example
 ///
 /// ```ignore
@@ -157,18 +165,65 @@ pub struct ErrorLocation {
 /// ) -> QueryResponse {
 ///     executor.execute(request).await
 /// }
+///
+/// async fn handle_transaction<E: QueryExecutor>(
+///     executor: &E,
+///     queries: Vec<QueryRequest>,
+/// ) -> Result<Vec<QueryResponse>, String> {
+///     let txn_id = executor.begin_txn(false).await?;
+///     let mut responses = Vec::new();
+///
+///     for query in queries {
+///         let resp = executor.execute_in_txn(query, &txn_id).await;
+///         if resp.has_errors() {
+///             executor.rollback_txn(&txn_id).await.ok();
+///             return Err("query failed".to_string());
+///         }
+///         responses.push(resp);
+///     }
+///
+///     executor.commit_txn(&txn_id).await?;
+///     Ok(responses)
+/// }
 /// ```
 #[async_trait]
 pub trait QueryExecutor: Send + Sync {
     /// Execute a GraphQL query and return the response.
     ///
     /// This handles the full pipeline: parsing → planning → execution → response.
+    /// Each query runs in its own implicit transaction that is automatically
+    /// committed on success.
     async fn execute(&self, request: QueryRequest) -> QueryResponse;
 
     /// Execute a query within an existing transaction context.
     ///
     /// This allows batching multiple operations in a single transaction.
+    /// The transaction must have been created with `begin_txn()`.
+    ///
+    /// Returns an error response if the transaction ID is invalid or
+    /// the transaction has already been committed/rolled back.
     async fn execute_in_txn(&self, request: QueryRequest, txn_id: &str) -> QueryResponse;
+
+    /// Begin a new transaction.
+    ///
+    /// Returns a transaction ID that can be used with `execute_in_txn()`.
+    /// The transaction remains active until `commit_txn()` or `rollback_txn()` is called.
+    ///
+    /// # Arguments
+    /// * `readonly` - If true, the transaction cannot perform write operations
+    async fn begin_txn(&self, readonly: bool) -> std::result::Result<String, String>;
+
+    /// Commit a transaction.
+    ///
+    /// All operations performed within the transaction become permanent.
+    /// After commit, the transaction ID is no longer valid.
+    async fn commit_txn(&self, txn_id: &str) -> std::result::Result<(), String>;
+
+    /// Rollback a transaction.
+    ///
+    /// All operations performed within the transaction are discarded.
+    /// After rollback, the transaction ID is no longer valid.
+    async fn rollback_txn(&self, txn_id: &str) -> std::result::Result<(), String>;
 
     /// Get the GraphQL schema for introspection.
     async fn schema(&self) -> Result<String>;
