@@ -2080,4 +2080,268 @@ mod tests {
         assert!(display.contains("@index"));
         assert!(display.contains("User.email"));
     }
+
+    // =========================================================================
+    // Additional Test Coverage (PR Review Gaps)
+    // =========================================================================
+
+    #[test]
+    fn test_unknown_argument_on_type_directive_emits_warning() {
+        let sdl = r#"
+            type User @materialized(unknownArg: true) {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                field_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "materialized");
+                assert_eq!(argument_name, "unknownArg");
+                assert!(field_name.is_none()); // type-level, not field-level
+            }
+            other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unknown_argument_on_branchable_directive() {
+        let sdl = r#"
+            type User @branchable(if: true, extraArg: "value") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "branchable");
+                assert_eq!(argument_name, "extraArg");
+            }
+            other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_policy_directive_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type User @policy(id: "p1", resource: "users", unknownArg: "value") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "policy");
+                assert_eq!(argument_name, "unknownArg");
+            }
+            other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_embedding_directive_recognized_no_unknown_directive_warning() {
+        let sdl = r#"
+            type Document {
+                content: String @embedding(provider: "openai", model: "ada")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // @embedding is a known directive, should not emit UnknownDirective warning
+        assert!(
+            output.warnings.is_empty(),
+            "known directive @embedding should not emit warnings: {:?}",
+            output.warnings
+        );
+    }
+
+    #[test]
+    fn test_embedding_directive_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type Document {
+                content: String @embedding(provider: "openai", unknownArg: "x")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "embedding");
+                assert_eq!(argument_name, "unknownArg");
+            }
+            other => panic!("expected UnknownDirectiveArgument, not {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_encrypted_index_directive_recognized() {
+        let sdl = r#"
+            type Secret {
+                data: String @encryptedIndex(type: "match")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        // @encryptedIndex is known, should not emit UnknownDirective warning
+        assert!(
+            output.warnings.is_empty(),
+            "known directive @encryptedIndex should not emit warnings: {:?}",
+            output.warnings
+        );
+    }
+
+    #[test]
+    fn test_encrypted_index_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type Secret {
+                data: String @encryptedIndex(type: "match", badArg: true)
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "encryptedIndex");
+                assert_eq!(argument_name, "badArg");
+            }
+            other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_default_float32_wrong_type_returns_error() {
+        let sdl = r#"
+            type Sensor {
+                temp: Float32 @default(float32: "not a float")
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be a float"),
+            "error should mention type mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_datetime_wrong_type_returns_error() {
+        let sdl = r#"
+            type Event {
+                created: DateTime @default(dateTime: 12345)
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be a string"),
+            "error should mention type mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_blob_wrong_type_returns_error() {
+        let sdl = r#"
+            type Document {
+                data: Blob @default(blob: 12345)
+            }
+        "#;
+
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be a string"),
+            "error should mention type mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_directive_value_alias() {
+        let sdl = r#"
+            type User {
+                role: String @default(value: "member")
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+        let user = &collections[0];
+        let role = user.field_by_name("role").unwrap();
+        assert_eq!(
+            role.default_value,
+            Some(serde_json::Value::String("member".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_type_level_index_unknown_argument_emits_warning() {
+        let sdl = r#"
+            type User @index(fields: ["name"], unknownArg: "value") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::UnknownDirectiveArgument {
+                directive_name,
+                argument_name,
+                field_name,
+                ..
+            } => {
+                assert_eq!(directive_name, "index");
+                assert_eq!(argument_name, "unknownArg");
+                assert!(field_name.is_none()); // type-level
+            }
+            other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
+        }
+    }
 }
