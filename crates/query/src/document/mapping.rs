@@ -98,6 +98,11 @@ impl DocumentMapping {
         self.indexes_by_name.contains_key(name)
     }
 
+    /// Add a render key for the given index
+    pub fn add_render_key(&mut self, index: usize, key: impl Into<String>) {
+        self.render_keys.push(RenderKey::new(index, key));
+    }
+
     /// Try to find the name of a field by its index
     pub fn try_find_name_from_index(&self, target_index: usize) -> Option<&str> {
         for (name, indexes) in &self.indexes_by_name {

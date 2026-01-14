@@ -317,6 +317,53 @@ impl FieldKind {
             _ => None,
         }
     }
+
+    /// Get the GraphQL type name for this field kind
+    pub fn graphql_type_name(&self) -> &'static str {
+        match self {
+            FieldKind::Scalar(s) => match s {
+                ScalarKind::None => "String",
+                ScalarKind::DocID => "ID",
+                ScalarKind::Bool => "Boolean",
+                ScalarKind::Int => "Int",
+                ScalarKind::Float64 | ScalarKind::Float32 => "Float",
+                ScalarKind::DateTime => "DateTime",
+                ScalarKind::String => "String",
+                ScalarKind::Blob => "Blob",
+                ScalarKind::Json => "JSON",
+            },
+            FieldKind::ScalarArray(a) => match a {
+                ScalarArrayKind::BoolArray | ScalarArrayKind::NillableBoolArray => "[Boolean]",
+                ScalarArrayKind::IntArray | ScalarArrayKind::NillableIntArray => "[Int]",
+                ScalarArrayKind::Float64Array
+                | ScalarArrayKind::Float32Array
+                | ScalarArrayKind::NillableFloat64Array
+                | ScalarArrayKind::NillableFloat32Array => "[Float]",
+                ScalarArrayKind::StringArray | ScalarArrayKind::NillableStringArray => "[String]",
+            },
+            FieldKind::Relation { is_array, .. } => {
+                if *is_array {
+                    "[Object]"
+                } else {
+                    "Object"
+                }
+            }
+            FieldKind::SelfRef { is_array, .. } => {
+                if *is_array {
+                    "[Object]"
+                } else {
+                    "Object"
+                }
+            }
+            FieldKind::Named { is_array, .. } => {
+                if *is_array {
+                    "[Object]"
+                } else {
+                    "Object"
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
