@@ -30,6 +30,9 @@ pub enum Error {
     #[error("transaction not active")]
     TxnNotActive,
 
+    #[error("explicit transaction must use force_commit/force_discard")]
+    ExplicitTxnMustUseForce,
+
     #[error("unsupported transaction type")]
     UnsupportedTxnType,
 

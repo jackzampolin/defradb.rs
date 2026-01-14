@@ -88,38 +88,73 @@ impl<S: Store> DbTxn<S> {
     }
 
     /// Get the blockstore.
-    pub fn blockstore(&self) -> NamespaceView {
-        self.txn.as_ref().unwrap().blockstore()
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn blockstore(&self) -> Result<NamespaceView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.blockstore())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Get the datastore.
-    pub fn datastore(&self) -> NamespaceView {
-        self.txn.as_ref().unwrap().datastore()
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn datastore(&self) -> Result<NamespaceView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.datastore())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Get the encstore.
-    pub fn encstore(&self) -> NamespaceView {
-        self.txn.as_ref().unwrap().encstore()
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn encstore(&self) -> Result<NamespaceView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.encstore())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Get the headstore.
-    pub fn headstore(&self) -> NamespaceView {
-        self.txn.as_ref().unwrap().headstore()
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn headstore(&self) -> Result<NamespaceView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.headstore())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Get the peerstore.
-    pub fn peerstore(&self) -> NamespaceView {
-        self.txn.as_ref().unwrap().peerstore()
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn peerstore(&self) -> Result<NamespaceView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.peerstore())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Get the systemstore.
-    pub fn systemstore(&self) -> NamespaceView {
-        self.txn.as_ref().unwrap().systemstore()
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn systemstore(&self) -> Result<NamespaceView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.systemstore())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Get the rootstore.
-    pub fn rootstore(&self) -> RootView {
-        self.txn.as_ref().unwrap().rootstore()
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn rootstore(&self) -> Result<RootView> {
+        self.txn
+            .as_ref()
+            .map(|t| t.rootstore())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Register a callback for successful commit.
@@ -145,12 +180,11 @@ impl<S: Store> DbTxn<S> {
 
     /// Commit the transaction.
     ///
-    /// For explicit transactions, this is a no-op. The transaction
-    /// creator is responsible for committing.
+    /// Returns an error for explicit transactions - use `force_commit()` instead.
+    /// Returns an error if the transaction is not active.
     pub async fn commit(mut self) -> Result<()> {
         if self.explicit {
-            // Explicit transactions should only be committed by the creator.
-            return Ok(());
+            return Err(Error::ExplicitTxnMustUseForce);
         }
 
         if self.state != TxnState::Active {
@@ -166,22 +200,22 @@ impl<S: Store> DbTxn<S> {
 
     /// Discard the transaction.
     ///
-    /// For explicit transactions, this is a no-op. The transaction
-    /// creator is responsible for discarding.
-    pub fn discard(mut self) {
+    /// Returns an error for explicit transactions - use `force_discard()` instead.
+    /// Returns an error if the transaction is not active.
+    pub fn discard(mut self) -> Result<()> {
         if self.explicit {
-            // Explicit transactions should only be discarded by the creator.
-            return;
+            return Err(Error::ExplicitTxnMustUseForce);
         }
 
         if self.state != TxnState::Active {
-            return;
+            return Err(Error::TxnNotActive);
         }
 
         if let Some(txn) = self.txn.take() {
             txn.discard();
         }
         self.state = TxnState::Discarded;
+        Ok(())
     }
 
     /// Actually commit the transaction, even if explicit.
@@ -238,12 +272,6 @@ mod tests {
         let txn = DbTxn::new_explicit(basic_txn, store.clone());
 
         assert!(txn.is_explicit());
-
-        // Explicit commit should be a no-op
-        txn.commit().await.unwrap();
-
-        // Verify data was NOT committed (because we didn't force_commit)
-        // The transaction was consumed but not actually committed
     }
 
     #[tokio::test]
@@ -264,7 +292,11 @@ mod tests {
         let txn = DbTxn::new(basic_txn, store.clone());
 
         // Write data
-        txn.datastore().set(b"key", b"value").await.unwrap();
+        txn.datastore()
+            .unwrap()
+            .set(b"key", b"value")
+            .await
+            .unwrap();
 
         // Commit
         txn.commit().await.unwrap();
@@ -272,7 +304,7 @@ mod tests {
         // Verify data persisted
         let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
         let txn = DbTxn::new(basic_txn, store.clone());
-        let value = txn.datastore().get(b"key").await.unwrap();
+        let value = txn.datastore().unwrap().get(b"key").await.unwrap();
         assert_eq!(value, Some(b"value".to_vec()));
     }
 
@@ -283,15 +315,19 @@ mod tests {
         let txn = DbTxn::new(basic_txn, store.clone());
 
         // Write data
-        txn.datastore().set(b"key", b"value").await.unwrap();
+        txn.datastore()
+            .unwrap()
+            .set(b"key", b"value")
+            .await
+            .unwrap();
 
         // Discard
-        txn.discard();
+        txn.discard().unwrap();
 
         // Verify data NOT persisted
         let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
         let txn = DbTxn::new(basic_txn, store.clone());
-        let value = txn.datastore().get(b"key").await.unwrap();
+        let value = txn.datastore().unwrap().get(b"key").await.unwrap();
         assert_eq!(value, None);
     }
 
@@ -302,7 +338,11 @@ mod tests {
         let txn = DbTxn::new_explicit(basic_txn, store.clone());
 
         // Write data
-        txn.datastore().set(b"key", b"value").await.unwrap();
+        txn.datastore()
+            .unwrap()
+            .set(b"key", b"value")
+            .await
+            .unwrap();
 
         // Force commit even though explicit
         txn.force_commit().await.unwrap();
@@ -310,7 +350,70 @@ mod tests {
         // Verify data persisted
         let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
         let txn = DbTxn::new(basic_txn, store.clone());
-        let value = txn.datastore().get(b"key").await.unwrap();
+        let value = txn.datastore().unwrap().get(b"key").await.unwrap();
         assert_eq!(value, Some(b"value".to_vec()));
+    }
+
+    // Negative tests for error conditions
+
+    #[tokio::test]
+    async fn test_db_txn_explicit_commit_returns_error() {
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new_explicit(basic_txn, store.clone());
+
+        // Commit on explicit transaction should return error
+        let result = txn.commit().await;
+        assert!(matches!(result, Err(Error::ExplicitTxnMustUseForce)));
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_explicit_discard_returns_error() {
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new_explicit(basic_txn, store.clone());
+
+        // Discard on explicit transaction should return error
+        let result = txn.discard();
+        assert!(matches!(result, Err(Error::ExplicitTxnMustUseForce)));
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_force_discard() {
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new_explicit(basic_txn, store.clone());
+
+        // Write data
+        txn.datastore()
+            .unwrap()
+            .set(b"key", b"value")
+            .await
+            .unwrap();
+
+        // Force discard even though explicit
+        txn.force_discard();
+
+        // Verify data NOT persisted
+        let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+        let value = txn.datastore().unwrap().get(b"key").await.unwrap();
+        assert_eq!(value, None);
+    }
+
+    #[tokio::test]
+    async fn test_db_txn_accessor_returns_all_stores() {
+        let store = Arc::new(MemoryStore::new());
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+
+        // All accessor methods should succeed on active transaction
+        assert!(txn.blockstore().is_ok());
+        assert!(txn.datastore().is_ok());
+        assert!(txn.encstore().is_ok());
+        assert!(txn.headstore().is_ok());
+        assert!(txn.peerstore().is_ok());
+        assert!(txn.systemstore().is_ok());
+        assert!(txn.rootstore().is_ok());
     }
 }

@@ -48,12 +48,7 @@ impl Collection {
 
         // Check if document already exists
         let key = self.doc_key(&doc_id);
-        if txn
-            .datastore()
-            .has(&key)
-            .await
-            .map_err(Error::Storage)?
-        {
+        if txn.datastore()?.has(&key).await.map_err(Error::Storage)? {
             return Err(Error::InvalidDocument(format!(
                 "Document with ID {} already exists",
                 doc_id
@@ -66,7 +61,7 @@ impl Collection {
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
         // Store document
-        txn.datastore()
+        txn.datastore()?
             .set(&key, &data)
             .await
             .map_err(Error::Storage)?;
@@ -77,11 +72,7 @@ impl Collection {
     /// Get a document by ID.
     pub async fn get<S: Store>(&self, txn: &DbTxn<S>, doc_id: &DocID) -> Result<Option<Document>> {
         let key = self.doc_key(doc_id);
-        let data = txn
-            .datastore()
-            .get(&key)
-            .await
-            .map_err(Error::Storage)?;
+        let data = txn.datastore()?.get(&key).await.map_err(Error::Storage)?;
 
         match data {
             Some(bytes) => {
@@ -102,12 +93,7 @@ impl Collection {
         let key = self.doc_key(doc_id);
 
         // Check document exists
-        if !txn
-            .datastore()
-            .has(&key)
-            .await
-            .map_err(Error::Storage)?
-        {
+        if !txn.datastore()?.has(&key).await.map_err(Error::Storage)? {
             return Err(Error::DocumentNotFound(doc_id.to_string()));
         }
 
@@ -116,7 +102,7 @@ impl Collection {
             .to_cbor()
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
-        txn.datastore()
+        txn.datastore()?
             .set(&key, &data)
             .await
             .map_err(Error::Storage)?;
@@ -129,16 +115,11 @@ impl Collection {
         let key = self.doc_key(doc_id);
 
         // Check if document exists
-        if !txn
-            .datastore()
-            .has(&key)
-            .await
-            .map_err(Error::Storage)?
-        {
+        if !txn.datastore()?.has(&key).await.map_err(Error::Storage)? {
             return Ok(false);
         }
 
-        txn.datastore()
+        txn.datastore()?
             .delete(&key)
             .await
             .map_err(Error::Storage)?;
@@ -149,10 +130,7 @@ impl Collection {
     /// Check if a document exists.
     pub async fn exists<S: Store>(&self, txn: &DbTxn<S>, doc_id: &DocID) -> Result<bool> {
         let key = self.doc_key(doc_id);
-        txn.datastore()
-            .has(&key)
-            .await
-            .map_err(Error::Storage)
+        txn.datastore()?.has(&key).await.map_err(Error::Storage)
     }
 
     /// Save a document (create or update).
@@ -169,7 +147,7 @@ impl Collection {
             .to_cbor()
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
-        txn.datastore()
+        txn.datastore()?
             .set(&key, &data)
             .await
             .map_err(Error::Storage)?;
@@ -187,7 +165,7 @@ impl Collection {
         let opts = IterOptions::new().with_prefix(prefix);
 
         let mut iter = txn
-            .datastore()
+            .datastore()?
             .iterator(opts)
             .await
             .map_err(Error::Storage)?;
