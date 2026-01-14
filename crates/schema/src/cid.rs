@@ -17,7 +17,7 @@ use crate::{FieldDescription, FieldKind};
 ///
 /// This matches Go's field definition block structure using defra-core's Block type.
 pub fn generate_field_cid(field: &FieldDescription) -> crate::Result<Cid> {
-    let delta = field_to_delta(field);
+    let delta = field_to_delta(field)?;
     let block = Block::new(CrdtDelta::FieldDefinition(delta), vec![], vec![]);
     generate_block_cid(&block)
 }
@@ -53,7 +53,7 @@ fn generate_block_cid(block: &Block) -> crate::Result<Cid> {
 }
 
 /// Convert a FieldDescription to a FieldDefinitionDeltaPayload
-fn field_to_delta(field: &FieldDescription) -> FieldDefinitionDeltaPayload {
+fn field_to_delta(field: &FieldDescription) -> crate::Result<FieldDefinitionDeltaPayload> {
     let mut delta = FieldDefinitionDeltaPayload::new(1)
         .with_name(&field.name)
         .with_crdt(field.crdt_type as u8);
@@ -70,15 +70,19 @@ fn field_to_delta(field: &FieldDescription) -> FieldDefinitionDeltaPayload {
         }
         FieldKind::SelfRef { relative_id, .. } => {
             if !relative_id.is_empty() {
-                if let Ok(rel_id) = relative_id.parse::<i32>() {
-                    delta = delta.with_relative_id(rel_id);
-                }
+                let rel_id = relative_id.parse::<i32>().map_err(|e| {
+                    crate::SchemaError::CidGeneration(format!(
+                        "Invalid relative_id '{}': {}",
+                        relative_id, e
+                    ))
+                })?;
+                delta = delta.with_relative_id(rel_id);
             }
         }
         FieldKind::Named { .. } => {}
     }
 
-    delta
+    Ok(delta)
 }
 
 #[cfg(test)]
