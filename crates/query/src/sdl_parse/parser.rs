@@ -132,6 +132,86 @@ fn known_directive_arguments(directive_name: &str) -> &'static [&'static str] {
     }
 }
 
+// =============================================================================
+// Directive argument helpers (standalone functions)
+// =============================================================================
+
+/// Find a directive argument by name
+fn get_directive_arg<'a, 'b>(
+    directive: &'a Directive<'b, String>,
+    arg_name: &str,
+) -> Option<&'a graphql_parser::schema::Value<'b, String>> {
+    directive
+        .arguments
+        .iter()
+        .find(|(name, _)| name == arg_name)
+        .map(|(_, value)| value)
+}
+
+/// Get a string argument from a directive
+fn get_directive_string(directive: &Directive<'_, String>, arg_name: &str) -> Option<String> {
+    match get_directive_arg(directive, arg_name)? {
+        graphql_parser::schema::Value::String(s) | graphql_parser::schema::Value::Enum(s) => {
+            Some(s.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Get a boolean argument from a directive
+fn get_directive_bool(directive: &Directive<'_, String>, arg_name: &str) -> Option<bool> {
+    match get_directive_arg(directive, arg_name)? {
+        graphql_parser::schema::Value::Boolean(b) => Some(*b),
+        _ => None,
+    }
+}
+
+/// Get an integer argument from a directive
+fn get_directive_int(directive: &Directive<'_, String>, arg_name: &str) -> Option<i64> {
+    match get_directive_arg(directive, arg_name)? {
+        graphql_parser::schema::Value::Int(n) => n.as_i64(),
+        _ => None,
+    }
+}
+
+/// Get a string list argument from a directive
+fn get_directive_string_list(directive: &Directive<'_, String>, arg_name: &str) -> Vec<String> {
+    match get_directive_arg(directive, arg_name) {
+        Some(graphql_parser::schema::Value::List(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                graphql_parser::schema::Value::String(s)
+                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse @policy directive arguments
+fn parse_policy_directive(directive: &Directive<'_, String>) -> Result<PolicyConfig> {
+    let id = get_directive_string(directive, "id")
+        .ok_or_else(|| QueryError::parse("@policy directive requires 'id' argument"))?;
+
+    let resource = get_directive_string(directive, "resource")
+        .ok_or_else(|| QueryError::parse("@policy directive requires 'resource' argument"))?;
+
+    Ok(PolicyConfig { id, resource })
+}
+
+/// Create a type mismatch error for @default directive
+fn default_type_error(
+    arg_name: &str,
+    expected: &str,
+    actual: &graphql_parser::schema::Value<'_, String>,
+) -> QueryError {
+    QueryError::parse(format!(
+        "@default '{}' argument must be a {}, got {:?}",
+        arg_name, expected, actual
+    ))
+}
+
 /// Parsed directive information from a field
 #[derive(Debug, Default, Clone)]
 pub struct ParsedDirectives {
@@ -312,31 +392,21 @@ impl<'a> SdlParser<'a> {
         let type_name = self.current_type.clone().unwrap_or_default();
 
         for directive in directives {
-            match directive.name.as_str() {
-                "primary" => {
-                    self.check_directive_arguments(directive, &type_name, Some(field_name));
-                    result.is_primary = true;
-                }
-                "crdt" => {
-                    self.check_directive_arguments(directive, &type_name, Some(field_name));
-                    result.crdt_type = Some(self.parse_crdt_directive(directive)?);
-                }
-                "index" => {
-                    self.check_directive_arguments(directive, &type_name, Some(field_name));
-                    result.index = Some(self.parse_index_directive(directive)?);
-                }
-                "relation" => {
-                    self.check_directive_arguments(directive, &type_name, Some(field_name));
-                    result.relation_name = self.get_directive_string(directive, "name");
-                }
-                "default" => {
-                    // Check for unknown arguments (beyond the first which is validated in parse_default_directive)
-                    self.check_directive_arguments(directive, &type_name, Some(field_name));
-                    result.default_value = Some(self.parse_default_directive(directive)?);
-                }
+            let name = directive.name.as_str();
+
+            // Check arguments for all known directives upfront
+            if KNOWN_FIELD_DIRECTIVES.contains(&name) {
+                self.check_directive_arguments(directive, &type_name, Some(field_name));
+            }
+
+            match name {
+                "primary" => result.is_primary = true,
+                "crdt" => result.crdt_type = Some(self.parse_crdt_directive(directive)?),
+                "index" => result.index = Some(self.parse_index_directive(directive)?),
+                "relation" => result.relation_name = get_directive_string(directive, "name"),
+                "default" => result.default_value = Some(self.parse_default_directive(directive)?),
                 "constraints" => {
-                    self.check_directive_arguments(directive, &type_name, Some(field_name));
-                    if let Some(size) = self.get_directive_int(directive, "size") {
+                    if let Some(size) = get_directive_int(directive, "size") {
                         if size < 0 {
                             return Err(QueryError::parse(format!(
                                 "@constraints size must be non-negative, got {}",
@@ -347,19 +417,16 @@ impl<'a> SdlParser<'a> {
                     }
                 }
                 "embedding" | "encryptedIndex" | "policy" => {
-                    // Known directives that are parsed but not fully handled yet
-                    self.check_directive_arguments(directive, &type_name, Some(field_name));
+                    // Known directives - argument check already done above
                 }
-                unknown => {
-                    // Unknown directives emit a warning for forward compatibility
-                    if !KNOWN_FIELD_DIRECTIVES.contains(&unknown) {
-                        self.warnings.push(ParseWarning::UnknownDirective {
-                            directive_name: unknown.to_string(),
-                            location: DirectiveLocation::Field,
-                            type_name: type_name.clone(),
-                            field_name: Some(field_name.to_string()),
-                        });
-                    }
+                _ => {
+                    // Unknown directive - emit warning for forward compatibility
+                    self.warnings.push(ParseWarning::UnknownDirective {
+                        directive_name: directive.name.clone(),
+                        location: DirectiveLocation::Field,
+                        type_name: type_name.clone(),
+                        field_name: Some(field_name.to_string()),
+                    });
                 }
             }
         }
@@ -395,48 +462,44 @@ impl<'a> SdlParser<'a> {
         let type_name = self.current_type.clone().unwrap_or_default();
 
         for directive in directives {
-            match directive.name.as_str() {
+            let name = directive.name.as_str();
+
+            // Check arguments for all known directives upfront
+            if KNOWN_TYPE_DIRECTIVES.contains(&name) {
+                self.check_directive_arguments(directive, &type_name, None);
+            }
+
+            match name {
                 "index" => {
-                    self.check_directive_arguments(directive, &type_name, None);
-                    let fields = self.get_directive_string_list(directive, "fields");
-                    let name = self.get_directive_string(directive, "name");
-                    let unique = self
-                        .get_directive_bool(directive, "unique")
-                        .unwrap_or(false);
+                    let fields = get_directive_string_list(directive, "fields");
+                    let idx_name = get_directive_string(directive, "name");
+                    let unique = get_directive_bool(directive, "unique").unwrap_or(false);
 
                     if !fields.is_empty() {
                         result.indexes.push(CompositeIndex {
                             fields,
-                            name,
+                            name: idx_name,
                             unique,
                         });
                     }
                 }
                 "materialized" => {
-                    self.check_directive_arguments(directive, &type_name, None);
-                    // @materialized or @materialized(if: true)
-                    result.is_materialized =
-                        self.get_directive_bool(directive, "if").unwrap_or(true);
+                    result.is_materialized = get_directive_bool(directive, "if").unwrap_or(true);
                 }
                 "branchable" => {
-                    self.check_directive_arguments(directive, &type_name, None);
-                    // @branchable or @branchable(if: true)
-                    result.is_branchable = self.get_directive_bool(directive, "if").unwrap_or(true);
+                    result.is_branchable = get_directive_bool(directive, "if").unwrap_or(true);
                 }
                 "policy" => {
-                    self.check_directive_arguments(directive, &type_name, None);
-                    result.policy = Some(self.parse_policy_directive(directive)?);
+                    result.policy = Some(parse_policy_directive(directive)?);
                 }
-                unknown => {
-                    // Unknown directives emit a warning for forward compatibility
-                    if !KNOWN_TYPE_DIRECTIVES.contains(&unknown) {
-                        self.warnings.push(ParseWarning::UnknownDirective {
-                            directive_name: unknown.to_string(),
-                            location: DirectiveLocation::Type,
-                            type_name: type_name.clone(),
-                            field_name: None,
-                        });
-                    }
+                _ => {
+                    // Unknown directive - emit warning for forward compatibility
+                    self.warnings.push(ParseWarning::UnknownDirective {
+                        directive_name: directive.name.clone(),
+                        location: DirectiveLocation::Type,
+                        type_name: type_name.clone(),
+                        field_name: None,
+                    });
                 }
             }
         }
@@ -445,8 +508,7 @@ impl<'a> SdlParser<'a> {
     }
 
     fn parse_crdt_directive(&self, directive: &Directive<'_, String>) -> Result<CType> {
-        let type_name = self
-            .get_directive_string(directive, "type")
+        let type_name = get_directive_string(directive, "type")
             .ok_or_else(|| QueryError::parse("@crdt directive requires 'type' argument"))?;
 
         match type_name.to_lowercase().as_str() {
@@ -458,11 +520,9 @@ impl<'a> SdlParser<'a> {
     }
 
     fn parse_index_directive(&self, directive: &Directive<'_, String>) -> Result<IndexConfig> {
-        let name = self.get_directive_string(directive, "name");
-        let unique = self
-            .get_directive_bool(directive, "unique")
-            .unwrap_or(false);
-        let direction = match self.get_directive_string(directive, "direction").as_deref() {
+        let name = get_directive_string(directive, "name");
+        let unique = get_directive_bool(directive, "unique").unwrap_or(false);
+        let direction = match get_directive_string(directive, "direction").as_deref() {
             Some("DESC") | Some("desc") | Some("Descending") => IndexDirection::Desc,
             _ => IndexDirection::Asc,
         };
@@ -474,24 +534,11 @@ impl<'a> SdlParser<'a> {
         })
     }
 
-    fn parse_policy_directive(&self, directive: &Directive<'_, String>) -> Result<PolicyConfig> {
-        let id = self
-            .get_directive_string(directive, "id")
-            .ok_or_else(|| QueryError::parse("@policy directive requires 'id' argument"))?;
-
-        let resource = self
-            .get_directive_string(directive, "resource")
-            .ok_or_else(|| QueryError::parse("@policy directive requires 'resource' argument"))?;
-
-        Ok(PolicyConfig { id, resource })
-    }
-
     fn parse_default_directive(
         &self,
         directive: &Directive<'_, String>,
     ) -> Result<serde_json::Value> {
         // Go supports: string, bool, int, float, float32, float64, dateTime, json, blob
-        // We process only the first argument
         let Some((name, value)) = directive.arguments.first() else {
             return Err(QueryError::parse(
                 "@default directive requires a value argument",
@@ -500,20 +547,12 @@ impl<'a> SdlParser<'a> {
 
         match name.as_str() {
             "string" | "value" => match value {
-                graphql_parser::schema::Value::String(s) => {
-                    Ok(serde_json::Value::String(s.clone()))
-                }
-                other => Err(QueryError::parse(format!(
-                    "@default '{}' argument must be a string, got {:?}",
-                    name, other
-                ))),
+                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                other => Err(default_type_error(name, "string", other)),
             },
             "bool" => match value {
                 graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-                other => Err(QueryError::parse(format!(
-                    "@default 'bool' argument must be a boolean, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("bool", "boolean", other)),
             },
             "int" => match value {
                 graphql_parser::schema::Value::Int(n) => {
@@ -522,29 +561,20 @@ impl<'a> SdlParser<'a> {
                     })?;
                     Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
                 }
-                other => Err(QueryError::parse(format!(
-                    "@default 'int' argument must be an integer, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("int", "integer", other)),
             },
             "float" | "float64" => match value {
-                graphql_parser::schema::Value::Float(f) => {
-                    serde_json::Number::from_f64(*f)
-                        .map(serde_json::Value::Number)
-                        .ok_or_else(|| {
-                            QueryError::parse(
-                                "@default float value is not a valid JSON number (NaN or Infinity)",
-                            )
-                        })
-                }
-                other => Err(QueryError::parse(format!(
-                    "@default 'float' argument must be a float, got {:?}",
-                    other
-                ))),
+                graphql_parser::schema::Value::Float(f) => serde_json::Number::from_f64(*f)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| {
+                        QueryError::parse(
+                            "@default float value is not a valid JSON number (NaN or Infinity)",
+                        )
+                    }),
+                other => Err(default_type_error("float", "float", other)),
             },
             "float32" => match value {
                 graphql_parser::schema::Value::Float(f) => {
-                    // Validate it fits in f32 range (but store as f64 in JSON)
                     let f32_val = *f as f32;
                     if f32_val.is_infinite() && !f.is_infinite() {
                         return Err(QueryError::parse(
@@ -559,119 +589,27 @@ impl<'a> SdlParser<'a> {
                             )
                         })
                 }
-                other => Err(QueryError::parse(format!(
-                    "@default 'float32' argument must be a float, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("float32", "float", other)),
             },
             "dateTime" => match value {
-                graphql_parser::schema::Value::String(s) => {
-                    // Store as string - validation of format happens at runtime
-                    Ok(serde_json::Value::String(s.clone()))
-                }
-                other => Err(QueryError::parse(format!(
-                    "@default 'dateTime' argument must be a string, got {:?}",
-                    other
-                ))),
+                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                other => Err(default_type_error("dateTime", "string", other)),
             },
             "json" => match value {
                 graphql_parser::schema::Value::String(s) => serde_json::from_str(s).map_err(|e| {
                     QueryError::parse(format!("@default json contains invalid JSON: {}", e))
                 }),
-                other => Err(QueryError::parse(format!(
-                    "@default 'json' argument must be a string, got {:?}",
-                    other
-                ))),
+                other => Err(default_type_error("json", "string", other)),
             },
             "blob" => match value {
-                graphql_parser::schema::Value::String(s) => {
-                    // Store as string - base64 validation happens at runtime
-                    Ok(serde_json::Value::String(s.clone()))
-                }
-                other => Err(QueryError::parse(format!(
-                    "@default 'blob' argument must be a string, got {:?}",
-                    other
-                ))),
+                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                other => Err(default_type_error("blob", "string", other)),
             },
             unknown => Err(QueryError::parse(format!(
                 "unknown @default argument '{}'. Valid arguments are: string, value, bool, int, float, float32, float64, dateTime, json, blob",
                 unknown
             ))),
         }
-    }
-
-    fn get_directive_string(
-        &self,
-        directive: &Directive<'_, String>,
-        arg_name: &str,
-    ) -> Option<String> {
-        directive.arguments.iter().find_map(|(name, value)| {
-            if name != arg_name {
-                return None;
-            }
-            match value {
-                graphql_parser::schema::Value::String(s)
-                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
-                _ => None,
-            }
-        })
-    }
-
-    fn get_directive_bool(
-        &self,
-        directive: &Directive<'_, String>,
-        arg_name: &str,
-    ) -> Option<bool> {
-        directive.arguments.iter().find_map(|(name, value)| {
-            if name != arg_name {
-                return None;
-            }
-            match value {
-                graphql_parser::schema::Value::Boolean(b) => Some(*b),
-                _ => None,
-            }
-        })
-    }
-
-    fn get_directive_int(&self, directive: &Directive<'_, String>, arg_name: &str) -> Option<i64> {
-        directive.arguments.iter().find_map(|(name, value)| {
-            if name != arg_name {
-                return None;
-            }
-            match value {
-                graphql_parser::schema::Value::Int(n) => n.as_i64(),
-                _ => None,
-            }
-        })
-    }
-
-    fn get_directive_string_list(
-        &self,
-        directive: &Directive<'_, String>,
-        arg_name: &str,
-    ) -> Vec<String> {
-        directive
-            .arguments
-            .iter()
-            .find_map(|(name, value)| {
-                if name != arg_name {
-                    return None;
-                }
-                match value {
-                    graphql_parser::schema::Value::List(items) => Some(
-                        items
-                            .iter()
-                            .filter_map(|v| match v {
-                                graphql_parser::schema::Value::String(s)
-                                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
-                                _ => None,
-                            })
-                            .collect(),
-                    ),
-                    _ => None,
-                }
-            })
-            .unwrap_or_default()
     }
 
     fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
