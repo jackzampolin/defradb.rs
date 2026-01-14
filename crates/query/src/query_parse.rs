@@ -73,6 +73,9 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
             }
             "limit" => {
                 let limit_val = parse_int_value(arg_value)?;
+                if limit_val < 0 {
+                    return Err(QueryError::parse("limit must be non-negative"));
+                }
                 select.limit = Some(Limit::new(
                     Some(limit_val as u64),
                     select.limit.as_ref().map(|l| l.offset).unwrap_or(0),
@@ -80,6 +83,9 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
             }
             "offset" => {
                 let offset_val = parse_int_value(arg_value)?;
+                if offset_val < 0 {
+                    return Err(QueryError::parse("offset must be non-negative"));
+                }
                 select.limit = Some(Limit::new(
                     select.limit.as_ref().and_then(|l| l.limit),
                     offset_val as u64,
@@ -97,18 +103,19 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
                 let doc_ids = parse_doc_ids_value(arg_value)?;
                 select.doc_ids = Some(doc_ids);
             }
-            "cid" => {
-                if let Value::String(s) = arg_value {
-                    select.cid = Some(s.clone());
-                }
-            }
-            "showDeleted" => {
-                if let Value::Boolean(b) = arg_value {
-                    select.show_deleted = *b;
-                }
-            }
+            "cid" => match arg_value {
+                Value::String(s) => select.cid = Some(s.clone()),
+                _ => return Err(QueryError::parse("cid argument must be a string")),
+            },
+            "showDeleted" => match arg_value {
+                Value::Boolean(b) => select.show_deleted = *b,
+                _ => return Err(QueryError::parse("showDeleted argument must be a boolean")),
+            },
             _ => {
-                // Unknown argument - ignore for now
+                return Err(QueryError::parse(format!(
+                    "unknown argument '{}' on collection '{}'. Valid arguments are: filter, limit, offset, order, groupBy, docIDs, docID, cid, showDeleted",
+                    arg_name, collection_name
+                )));
             }
         }
     }
@@ -241,9 +248,18 @@ fn parse_order_value(value: &Value<'_, String>) -> Result<OrderBy> {
             for (field_name, direction_val) in obj {
                 let direction = match direction_val {
                     Value::Enum(s) | Value::String(s) => {
-                        OrderDirection::parse(s).unwrap_or(OrderDirection::Asc)
+                        OrderDirection::parse(s).ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "invalid order direction '{}', expected ASC or DESC",
+                                s
+                            ))
+                        })?
                     }
-                    _ => OrderDirection::Asc,
+                    _ => {
+                        return Err(QueryError::parse(
+                            "order direction must be ASC or DESC",
+                        ))
+                    }
                 };
                 order_by = order_by.with_condition(OrderCondition::new(field_name, direction));
             }
@@ -439,5 +455,128 @@ mod tests {
         let selects = parse_query(query).unwrap();
 
         assert!(selects[0].filter.is_some());
+    }
+
+    // Error path tests
+
+    #[test]
+    fn test_parse_mutation_returns_error() {
+        let query = r#"mutation { createUser(input: {name: "Alice"}) { _docID } }"#;
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("mutations not yet supported"));
+    }
+
+    #[test]
+    fn test_parse_subscription_returns_error() {
+        let query = "subscription { Users { name } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("subscriptions not supported"));
+    }
+
+    #[test]
+    fn test_parse_fragment_definition_returns_error() {
+        let query = "fragment UserFields on User { name } query { Users { ...UserFields } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("fragments not yet supported"));
+    }
+
+    #[test]
+    fn test_parse_inline_fragment_returns_error() {
+        let query = "{ Users { ... on User { name } } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("inline fragments not yet supported"));
+    }
+
+    #[test]
+    fn test_parse_negative_limit_returns_error() {
+        let query = "{ Users(limit: -1) { name } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("limit must be non-negative"));
+    }
+
+    #[test]
+    fn test_parse_negative_offset_returns_error() {
+        let query = "{ Users(offset: -5) { name } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("offset must be non-negative"));
+    }
+
+    #[test]
+    fn test_parse_unknown_argument_returns_error() {
+        let query = "{ Users(unknownArg: 123) { name } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unknown argument 'unknownArg'"));
+    }
+
+    #[test]
+    fn test_parse_cid_wrong_type_returns_error() {
+        let query = "{ Users(cid: 123) { name } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cid argument must be a string"));
+    }
+
+    #[test]
+    fn test_parse_show_deleted_wrong_type_returns_error() {
+        let query = r#"{ Users(showDeleted: "true") { name } }"#;
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("showDeleted argument must be a boolean"));
+    }
+
+    #[test]
+    fn test_parse_invalid_order_direction_returns_error() {
+        let query = "{ Users(order: {name: INVALID}) { name } }";
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid order direction"));
+    }
+
+    #[test]
+    fn test_parse_filter_non_object_returns_error() {
+        let query = r#"{ Users(filter: "not an object") { name } }"#;
+        let result = parse_query(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("filter must be an object"));
     }
 }

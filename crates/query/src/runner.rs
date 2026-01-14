@@ -184,13 +184,14 @@ impl<F: DocFetcher> QueryRunner<F> {
                 .ok_or_else(|| QueryError::execution("non-finite float")),
             NormalValue::String(s) => Ok(JsonValue::String(s.clone())),
             NormalValue::Bytes(b) => {
-                // Base64 encode bytes
-                use std::io::Write;
-                let mut buf = Vec::new();
+                // Hex encode bytes
+                use std::fmt::Write;
+                let mut buf = String::with_capacity(b.len() * 2);
                 for byte in b {
-                    write!(buf, "{:02x}", byte).unwrap();
+                    write!(buf, "{:02x}", byte)
+                        .map_err(|e| QueryError::execution(format!("failed to encode bytes: {}", e)))?;
                 }
-                Ok(JsonValue::String(String::from_utf8(buf).unwrap()))
+                Ok(JsonValue::String(buf))
             }
             NormalValue::Time(t) => Ok(JsonValue::String(t.to_rfc3339())),
             NormalValue::Json(j) => Ok(j.clone()),
@@ -225,8 +226,218 @@ impl<F: DocFetcher> QueryRunner<F> {
                 .as_ref()
                 .map(|s| JsonValue::String(s.clone()))
                 .unwrap_or(JsonValue::Null)),
-            // Fallback for other types
-            _ => Ok(JsonValue::Null),
+            NormalValue::NillableFloat64(opt) => Ok(opt
+                .and_then(|f| serde_json::Number::from_f64(f).map(JsonValue::Number))
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableFloat32(opt) => Ok(opt
+                .and_then(|f| serde_json::Number::from_f64(f as f64).map(JsonValue::Number))
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::Float32Array(arr) => {
+                let values: Result<Vec<_>> = arr
+                    .iter()
+                    .map(|f| {
+                        serde_json::Number::from_f64(*f as f64)
+                            .map(JsonValue::Number)
+                            .ok_or_else(|| QueryError::execution("non-finite float"))
+                    })
+                    .collect();
+                Ok(JsonValue::Array(values?))
+            }
+            NormalValue::NillableTime(opt) => Ok(opt
+                .as_ref()
+                .map(|t| JsonValue::String(t.to_rfc3339()))
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::Document(doc) => {
+                Ok(JsonValue::String(format!("<document:{:?}>", doc.id())))
+            }
+            NormalValue::DocumentArray(docs) => Ok(JsonValue::Array(
+                docs.iter()
+                    .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
+                    .collect(),
+            )),
+            NormalValue::NillableBytes(opt) => Ok(opt
+                .as_ref()
+                .map(|b| {
+                    use std::fmt::Write;
+                    let mut buf = String::with_capacity(b.len() * 2);
+                    for byte in b {
+                        let _ = write!(buf, "{:02x}", byte);
+                    }
+                    JsonValue::String(buf)
+                })
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableDocument(opt) => Ok(opt
+                .as_ref()
+                .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::BytesArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|b| {
+                        use std::fmt::Write;
+                        let mut buf = String::with_capacity(b.len() * 2);
+                        for byte in b {
+                            let _ = write!(buf, "{:02x}", byte);
+                        }
+                        JsonValue::String(buf)
+                    })
+                    .collect(),
+            )),
+            NormalValue::TimeArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|t| JsonValue::String(t.to_rfc3339()))
+                    .collect(),
+            )),
+            NormalValue::JsonArray(arr) => Ok(JsonValue::Array(arr.clone())),
+            NormalValue::NillableIntArray(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| {
+                    JsonValue::Array(arr.iter().map(|i| JsonValue::Number((*i).into())).collect())
+                })
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableStringArray(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| {
+                    JsonValue::Array(arr.iter().map(|s| JsonValue::String(s.clone())).collect())
+                })
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableBoolArray(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| JsonValue::Array(arr.iter().map(|b| JsonValue::Bool(*b)).collect()))
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableFloat64Array(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| {
+                    JsonValue::Array(
+                        arr.iter()
+                            .filter_map(|f| serde_json::Number::from_f64(*f).map(JsonValue::Number))
+                            .collect(),
+                    )
+                })
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableFloat32Array(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| {
+                    JsonValue::Array(
+                        arr.iter()
+                            .filter_map(|f| {
+                                serde_json::Number::from_f64(*f as f64).map(JsonValue::Number)
+                            })
+                            .collect(),
+                    )
+                })
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableBytesArray(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| {
+                    JsonValue::Array(
+                        arr.iter()
+                            .map(|b| {
+                                use std::fmt::Write;
+                                let mut buf = String::with_capacity(b.len() * 2);
+                                for byte in b {
+                                    let _ = write!(buf, "{:02x}", byte);
+                                }
+                                JsonValue::String(buf)
+                            })
+                            .collect(),
+                    )
+                })
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableTimeArray(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| {
+                    JsonValue::Array(
+                        arr.iter()
+                            .map(|t| JsonValue::String(t.to_rfc3339()))
+                            .collect(),
+                    )
+                })
+                .unwrap_or(JsonValue::Null)),
+            NormalValue::NillableDocumentArray(opt) => Ok(opt
+                .as_ref()
+                .map(|arr| {
+                    JsonValue::Array(
+                        arr.iter()
+                            .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
+                            .collect(),
+                    )
+                })
+                .unwrap_or(JsonValue::Null)),
+            // Arrays with nillable elements
+            NormalValue::NillableBoolElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| opt.map(JsonValue::Bool).unwrap_or(JsonValue::Null))
+                    .collect(),
+            )),
+            NormalValue::NillableIntElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| {
+                        opt.map(|i| JsonValue::Number(i.into()))
+                            .unwrap_or(JsonValue::Null)
+                    })
+                    .collect(),
+            )),
+            NormalValue::NillableFloat64ElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| {
+                        opt.and_then(|f| serde_json::Number::from_f64(f).map(JsonValue::Number))
+                            .unwrap_or(JsonValue::Null)
+                    })
+                    .collect(),
+            )),
+            NormalValue::NillableFloat32ElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| {
+                        opt.and_then(|f| {
+                            serde_json::Number::from_f64(f as f64).map(JsonValue::Number)
+                        })
+                        .unwrap_or(JsonValue::Null)
+                    })
+                    .collect(),
+            )),
+            NormalValue::NillableStringElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| {
+                        opt.as_ref()
+                            .map(|s| JsonValue::String(s.clone()))
+                            .unwrap_or(JsonValue::Null)
+                    })
+                    .collect(),
+            )),
+            NormalValue::NillableBytesElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| {
+                        opt.as_ref()
+                            .map(|b| {
+                                use std::fmt::Write;
+                                let mut buf = String::with_capacity(b.len() * 2);
+                                for byte in b {
+                                    let _ = write!(buf, "{:02x}", byte);
+                                }
+                                JsonValue::String(buf)
+                            })
+                            .unwrap_or(JsonValue::Null)
+                    })
+                    .collect(),
+            )),
+            NormalValue::NillableTimeElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| {
+                        opt.as_ref()
+                            .map(|t| JsonValue::String(t.to_rfc3339()))
+                            .unwrap_or(JsonValue::Null)
+                    })
+                    .collect(),
+            )),
+            NormalValue::NillableDocumentElementArray(arr) => Ok(JsonValue::Array(
+                arr.iter()
+                    .map(|opt| {
+                        opt.as_ref()
+                            .map(|d| JsonValue::String(format!("<document:{:?}>", d.id())))
+                            .unwrap_or(JsonValue::Null)
+                    })
+                    .collect(),
+            )),
         }
     }
 
@@ -250,11 +461,8 @@ impl<F: DocFetcher> QueryRunner<F> {
         let mut plan: Box<dyn PlanNode> = Box::new(scan);
 
         // Add SelectNode for filtering
-        if select.filter.is_some() {
-            let mut select_node = SelectNode::new(plan, mapping.clone());
-            if let Some(ref filter) = select.filter {
-                select_node = select_node.with_filter(filter.clone());
-            }
+        if let Some(ref filter) = select.filter {
+            let select_node = SelectNode::new(plan, mapping.clone()).with_filter(filter.clone());
             plan = Box::new(select_node);
         }
 
@@ -304,7 +512,6 @@ impl<F: DocFetcher> QueryExecutor for QueryRunner<F> {
     }
 
     async fn execute_in_txn(&self, request: QueryRequest, _txn_id: &str) -> QueryResponse {
-        // For now, same as execute - transaction support TBD
         self.execute(request).await
     }
 
@@ -500,5 +707,146 @@ mod tests {
 
         assert!(response.errors.is_empty());
         assert!(response.data.is_some());
+    }
+
+    // Additional test coverage
+
+    /// Mock fetcher that returns errors
+    struct FailingFetcher;
+
+    #[async_trait]
+    impl DocFetcher for FailingFetcher {
+        async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
+            Err(QueryError::execution("storage failure"))
+        }
+
+        async fn get_by_ids(
+            &self,
+            _collection_name: &str,
+            _doc_ids: &[String],
+        ) -> Result<Vec<Document>> {
+            Err(QueryError::execution("storage failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetcher_error_propagates() {
+        let runner = QueryRunner::new(FailingFetcher, vec![make_test_collection()]);
+
+        let result = runner.execute_query("{ Users { name } }").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("storage failure"));
+    }
+
+    #[tokio::test]
+    async fn test_query_executor_error_response_format() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let request = QueryRequest {
+            query: "{ InvalidCollection { name } }".to_string(),
+            operation_name: None,
+            variables: None,
+        };
+
+        let response = runner.execute(request).await;
+
+        assert!(response.data.is_none());
+        assert_eq!(response.errors.len(), 1);
+        assert!(response.errors[0]
+            .message
+            .contains("collection not found"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_offset() {
+        let fetcher = MockFetcher::new();
+
+        // Add 5 documents
+        for i in 0..5 {
+            let mut doc = Document::new();
+            doc.set("name", format!("User{}", i));
+            doc.set("age", i as i64);
+            doc.generate_and_set_doc_id().unwrap();
+            fetcher.add_doc("Users", doc);
+        }
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users(offset: 2) { name } }")
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 3); // Should skip first 2
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_limit_and_offset() {
+        let fetcher = MockFetcher::new();
+
+        // Add 10 documents
+        for i in 0..10 {
+            let mut doc = Document::new();
+            doc.set("name", format!("User{}", i));
+            doc.generate_and_set_doc_id().unwrap();
+            fetcher.add_doc("Users", doc);
+        }
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users(limit: 3, offset: 2) { name } }")
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 3); // Should return 3 items starting at offset 2
+    }
+
+    #[tokio::test]
+    async fn test_execute_query_with_doc_ids() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_id = doc1.id().unwrap().to_string();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Charlie");
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let query = format!(r#"{{ Users(docIDs: ["{}"]) {{ name }} }}"#, doc1_id);
+        let result = runner.execute_query(&query).await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+    }
+
+    #[tokio::test]
+    async fn test_unknown_collection_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner.execute_query("{ Posts { title } }").await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("collection not found: Posts"));
     }
 }

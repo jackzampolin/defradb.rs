@@ -77,21 +77,26 @@ impl Planner {
         for requestable in &select.fields {
             match requestable {
                 Requestable::Field(field) => {
-                    // Look up field in schema (validates it exists)
-                    let _field_def = collection.field_by_name(&field.name);
+                    // Validate field exists in schema (skip _docID which is always valid)
+                    if field.name != "_docID" && collection.field_by_name(&field.name).is_none() {
+                        return Err(QueryError::unknown_field(&field.name));
+                    }
                     let index = mapping.next_index();
 
                     mapping.add(index, &field.name);
                     mapping.add_render_key(index, field.output_name());
                 }
                 Requestable::Select(nested_select) => {
-                    // Nested select (relation) - add placeholder for now
+                    // Nested select (relation)
                     let index = mapping.next_index();
                     mapping.add(index, &nested_select.field.name);
                     mapping.add_render_key(index, nested_select.field.output_name());
                 }
-                Requestable::Aggregate(_agg) => {
-                    // Aggregates handled separately
+                Requestable::Aggregate(agg) => {
+                    return Err(QueryError::execution(format!(
+                        "aggregate '{:?}' not yet implemented",
+                        agg.aggregate_type
+                    )));
                 }
             }
         }
