@@ -34,33 +34,32 @@ enum TxnState {
 pub struct DbTxn<S: Store> {
     /// The underlying BasicTxn.
     txn: Option<BasicTxn>,
-    /// Reference to the store (for collection operations).
-    #[allow(dead_code)]
-    store: Arc<S>,
     /// Whether this is an explicit transaction.
     explicit: bool,
     /// Current transaction state.
     state: TxnState,
+    /// Phantom data for the store type.
+    _marker: std::marker::PhantomData<S>,
 }
 
 impl<S: Store> DbTxn<S> {
     /// Create a new implicit DbTxn.
-    pub fn new(txn: BasicTxn, store: Arc<S>) -> Self {
+    pub fn new(txn: BasicTxn, _store: Arc<S>) -> Self {
         Self {
             txn: Some(txn),
-            store,
             explicit: false,
             state: TxnState::Active,
+            _marker: std::marker::PhantomData,
         }
     }
 
     /// Create a new explicit DbTxn.
-    pub fn new_explicit(txn: BasicTxn, store: Arc<S>) -> Self {
+    pub fn new_explicit(txn: BasicTxn, _store: Arc<S>) -> Self {
         Self {
             txn: Some(txn),
-            store,
             explicit: true,
             state: TxnState::Active,
+            _marker: std::marker::PhantomData,
         }
     }
 
@@ -78,13 +77,23 @@ impl<S: Store> DbTxn<S> {
     }
 
     /// Get the transaction ID.
-    pub fn id(&self) -> u64 {
-        self.txn.as_ref().map(|t| t.id()).unwrap_or(0)
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn id(&self) -> Result<u64> {
+        self.txn
+            .as_ref()
+            .map(|t| t.id())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Check if this is a read-only transaction.
-    pub fn is_readonly(&self) -> bool {
-        self.txn.as_ref().map(|t| t.is_readonly()).unwrap_or(true)
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn is_readonly(&self) -> Result<bool> {
+        self.txn
+            .as_ref()
+            .map(|t| t.is_readonly())
+            .ok_or(Error::TxnNotActive)
     }
 
     /// Get the blockstore.
@@ -158,23 +167,38 @@ impl<S: Store> DbTxn<S> {
     }
 
     /// Register a callback for successful commit.
-    pub fn on_success(&mut self, callback: TxnCallback) {
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn on_success(&mut self, callback: TxnCallback) -> Result<()> {
         if let Some(txn) = &mut self.txn {
             txn.on_success(callback);
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
         }
     }
 
     /// Register a callback for commit error.
-    pub fn on_error(&mut self, callback: TxnCallback) {
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn on_error(&mut self, callback: TxnCallback) -> Result<()> {
         if let Some(txn) = &mut self.txn {
             txn.on_error(callback);
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
         }
     }
 
     /// Register a callback for discard.
-    pub fn on_discard(&mut self, callback: TxnCallback) {
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn on_discard(&mut self, callback: TxnCallback) -> Result<()> {
         if let Some(txn) = &mut self.txn {
             txn.on_discard(callback);
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
         }
     }
 
@@ -261,8 +285,8 @@ mod tests {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
         let txn = DbTxn::new(basic_txn, store.clone());
 
-        assert_eq!(txn.id(), 1);
-        assert!(!txn.is_readonly());
+        assert_eq!(txn.id().unwrap(), 1);
+        assert!(!txn.is_readonly().unwrap());
         assert!(!txn.is_explicit());
     }
 
@@ -432,7 +456,8 @@ mod tests {
         let success_clone = success_called.clone();
         txn.on_success(Box::new(move || {
             success_clone.store(true, Ordering::SeqCst);
-        }));
+        }))
+        .unwrap();
 
         txn.commit().await.unwrap();
         assert!(success_called.load(Ordering::SeqCst));
@@ -450,7 +475,8 @@ mod tests {
         let discard_clone = discard_called.clone();
         txn.on_discard(Box::new(move || {
             discard_clone.store(true, Ordering::SeqCst);
-        }));
+        }))
+        .unwrap();
 
         txn.discard().unwrap();
         assert!(discard_called.load(Ordering::SeqCst));
@@ -462,7 +488,7 @@ mod tests {
         let basic_txn = BasicTxn::new(&*store, 1, true).await.unwrap();
         let txn = DbTxn::new(basic_txn, store.clone());
 
-        assert!(txn.is_readonly());
+        assert!(txn.is_readonly().unwrap());
 
         // Attempting to write should fail
         let result = txn.datastore().unwrap().set(b"key", b"value").await;
@@ -475,15 +501,15 @@ mod tests {
 
         let basic_txn1 = BasicTxn::new(&*store, 1, false).await.unwrap();
         let txn1 = DbTxn::new(basic_txn1, store.clone());
-        assert_eq!(txn1.id(), 1);
+        assert_eq!(txn1.id().unwrap(), 1);
 
         let basic_txn2 = BasicTxn::new(&*store, 2, false).await.unwrap();
         let txn2 = DbTxn::new(basic_txn2, store.clone());
-        assert_eq!(txn2.id(), 2);
+        assert_eq!(txn2.id().unwrap(), 2);
 
         let basic_txn3 = BasicTxn::new(&*store, 100, false).await.unwrap();
         let txn3 = DbTxn::new(basic_txn3, store.clone());
-        assert_eq!(txn3.id(), 100);
+        assert_eq!(txn3.id().unwrap(), 100);
     }
 
     #[tokio::test]

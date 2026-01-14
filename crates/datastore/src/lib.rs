@@ -6,7 +6,6 @@
 /// - `BasicTxn`: Transaction wrapper with multistore access and callbacks
 /// - `Txn` trait: Common interface for DefraDB transactions
 /// - `NamespaceView`: View into a specific namespace of a transaction
-/// - `Blockstore` trait: Block storage interface
 ///
 /// # Architecture
 ///
@@ -25,7 +24,7 @@
 /// use storage::backends::MemoryStore;
 ///
 /// let store = MemoryStore::new();
-/// let txn = BasicTxn::new(&store, 1, false).await?;
+/// let mut txn = BasicTxn::new(&store, 1, false).await?;
 ///
 /// // Access namespaced stores
 /// txn.datastore().set(b"key", b"value").await?;
@@ -45,7 +44,7 @@ pub mod txn;
 // Re-export commonly used types
 pub use error::{Error, Result};
 pub use multistore::{NamespaceView, RootView, SharedTxn};
-pub use traits::{Blockstore, Txn};
+pub use traits::Txn;
 pub use txn::{AsyncCallback, BasicTxn};
 
 // Re-export storage types for convenience
