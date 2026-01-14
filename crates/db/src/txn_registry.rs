@@ -24,6 +24,8 @@ use std::sync::{Arc, RwLock};
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
 
+use tracing::{debug, error};
+
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
@@ -67,8 +69,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .get(collection_name)
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        // Get the NamespaceView from the txn (sync operation)
-        // This must be done while holding the lock, but we only hold &NamespaceView across awaits
+        // Extract the NamespaceView (owned) while holding the lock, then release
+        // the lock before awaiting. NamespaceView is Send + Sync so this is safe.
         let datastore = {
             let txn_guard = self.txn.lock().await;
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
@@ -79,7 +81,6 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 .map_err(|e| query::error::QueryError::execution(format!("txn error: {}", e)))?
         };
 
-        // Now use the NamespaceView directly (which is Send + Sync)
         collection
             .get_all_with_datastore(&datastore)
             .await
@@ -96,7 +97,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .get(collection_name)
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        // Get the NamespaceView from the txn (sync operation)
+        // Extract the NamespaceView (owned) while holding the lock, then release
+        // the lock before awaiting. NamespaceView is Send + Sync so this is safe.
         let datastore = {
             let txn_guard = self.txn.lock().await;
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
@@ -107,19 +109,25 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 .map_err(|e| query::error::QueryError::execution(format!("txn error: {}", e)))?
         };
 
-        // Now use the NamespaceView directly (which is Send + Sync)
         let mut docs = Vec::new();
         for id_str in doc_ids {
             let doc_id = document::DocID::from_string(id_str).map_err(|e| {
                 query::error::QueryError::execution(format!("invalid doc ID '{}': {}", id_str, e))
             })?;
 
-            if let Some(doc) = collection
+            match collection
                 .get_with_datastore(&datastore, &doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {
-                docs.push(doc);
+                Some(doc) => docs.push(doc),
+                None => {
+                    debug!(
+                        collection = %collection_name,
+                        doc_id = %id_str,
+                        "Requested document not found in collection"
+                    );
+                }
             }
         }
 
@@ -177,8 +185,14 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
 /// # Thread Safety
 ///
 /// Uses `std::sync::RwLock` for the transaction map to allow synchronous
-/// lookups (required by the trait), and `tokio::sync::RwLock` internally
-/// for the transaction state to support async operations.
+/// lookups (required by the trait), and `tokio::sync::Mutex` for the
+/// underlying transaction to support async document fetching operations.
+///
+/// # Error Handling
+///
+/// If the internal lock becomes poisoned (due to a panic in another thread),
+/// `get()` and `get_ctx()` will recover the guard and log an error via tracing.
+/// This prevents cascading failures but indicates system instability.
 pub struct DbTransactionRegistry<S: Store> {
     /// The database instance
     db: Arc<DB<S>>,
@@ -255,12 +269,19 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 .cloned()
                 .map(|ctx| ctx as Arc<dyn TransactionContext>),
             Err(poisoned) => {
-                // Log critical error - lock is poisoned due to a panic in another thread
-                eprintln!(
-                    "CRITICAL: Transaction registry lock poisoned while getting '{}': {:?}",
-                    txn_id, poisoned
+                // Lock poisoned due to a panic in another thread - this is a critical system error.
+                // We recover the guard to prevent cascading failures, but log for investigation.
+                error!(
+                    txn_id = %txn_id,
+                    error = ?poisoned,
+                    "Transaction registry lock poisoned - recovering guard but system may be unstable"
                 );
-                None
+                // Recover the poisoned lock and attempt to continue
+                poisoned
+                    .into_inner()
+                    .get(txn_id)
+                    .cloned()
+                    .map(|ctx| ctx as Arc<dyn TransactionContext>)
             }
         }
     }
@@ -336,12 +357,15 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         match self.transactions.read() {
             Ok(guard) => guard.get(txn_id).cloned(),
             Err(poisoned) => {
-                // Log critical error - lock is poisoned due to a panic in another thread
-                eprintln!(
-                    "CRITICAL: Transaction registry lock poisoned while getting context '{}': {:?}",
-                    txn_id, poisoned
+                // Lock poisoned due to a panic in another thread - this is a critical system error.
+                // We recover the guard to prevent cascading failures, but log for investigation.
+                error!(
+                    txn_id = %txn_id,
+                    error = ?poisoned,
+                    "Transaction registry lock poisoned in get_ctx - recovering guard but system may be unstable"
                 );
-                None
+                // Recover the poisoned lock and attempt to continue
+                poisoned.into_inner().get(txn_id).cloned()
             }
         }
     }
@@ -769,5 +793,145 @@ mod tests {
         for id in ids {
             registry.rollback(&id).await.unwrap();
         }
+    }
+
+    // ========================================================================
+    // Transaction Isolation and Rollback Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_rollback_discards_uncommitted_writes() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let collection = Collection::new(test_schema().pop().unwrap());
+
+        // Write data in a transaction but rollback instead of commit
+        let write_txn = db.new_txn(false).await.unwrap();
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("RollbackMe".to_string()));
+        doc.set("age", NormalValue::Int(99));
+        doc.generate_and_set_doc_id().unwrap();
+        collection.create(&write_txn, &doc).await.unwrap();
+
+        // Rollback instead of commit
+        write_txn.force_discard().unwrap();
+
+        // Verify data was NOT persisted by reading in a new transaction
+        let read_txn = db.new_txn(true).await.unwrap();
+        let all_docs = collection.get_all(&read_txn).await.unwrap();
+        assert!(
+            all_docs.is_empty(),
+            "Rolled-back data should not be visible, found {} docs",
+            all_docs.len()
+        );
+        read_txn.force_discard().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_transaction_does_not_see_uncommitted_writes() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+        let collection = Collection::new(test_schema().pop().unwrap());
+
+        // Start a reader transaction FIRST
+        let reader_txn_id = registry.begin(true).await.unwrap();
+        let reader_ctx = registry.get(&reader_txn_id).unwrap();
+        let reader_fetcher = reader_ctx.doc_fetcher();
+
+        // Start a writer transaction and write WITHOUT committing
+        let write_txn = db.new_txn(false).await.unwrap();
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("Uncommitted".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        collection.create(&write_txn, &doc).await.unwrap();
+        // Note: NOT committing write_txn
+
+        // Reader should NOT see the uncommitted write (no dirty reads)
+        let docs = reader_fetcher.get_all("Users").await.unwrap();
+        assert!(
+            docs.is_empty(),
+            "Reader should not see uncommitted writes (dirty read protection)"
+        );
+
+        // Cleanup
+        write_txn.force_discard().unwrap();
+        registry.rollback(&reader_txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_parallel_transaction_operations() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+
+        // Launch 10 concurrent transaction lifecycles
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let reg = registry.clone();
+                tokio::spawn(async move {
+                    // Each task: begin -> get -> some work -> rollback
+                    let txn_id = reg.begin(true).await.unwrap();
+
+                    // Small delay to increase chance of concurrent access to the RwLock
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    let ctx = reg.get(&txn_id);
+                    assert!(ctx.is_some(), "Task {} should find its transaction", i);
+
+                    // Another small delay
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    reg.rollback(&txn_id).await.unwrap();
+
+                    // Verify transaction is gone after rollback
+                    assert!(
+                        reg.get(&txn_id).is_none(),
+                        "Task {} transaction should be gone after rollback",
+                        i
+                    );
+                })
+            })
+            .collect();
+
+        // Wait for all to complete
+        for handle in handles {
+            handle.await.expect("Task should complete without panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_by_ids_with_nonexistent_valid_id() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+        let collection = Collection::new(test_schema().pop().unwrap());
+
+        // Create one document
+        let write_txn = db.new_txn(false).await.unwrap();
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("Exists".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        let existing_id = doc.id().unwrap().to_string();
+        collection.create(&write_txn, &doc).await.unwrap();
+        write_txn.commit().await.unwrap();
+
+        // Create a valid-format ID that doesn't exist
+        let mut nonexistent_doc = Document::new();
+        nonexistent_doc.set("name", NormalValue::String("Ghost".to_string()));
+        nonexistent_doc.generate_and_set_doc_id().unwrap();
+        let nonexistent_id = nonexistent_doc.id().unwrap().to_string();
+
+        // Query for both the existing and nonexistent IDs
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        let docs = fetcher
+            .get_by_ids("Users", &[existing_id, nonexistent_id])
+            .await
+            .unwrap();
+
+        // Should only return the one that exists
+        assert_eq!(docs.len(), 1, "Should only return existing document");
+        assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Exists"));
+
+        registry.rollback(&txn_id).await.unwrap();
     }
 }

@@ -13,7 +13,6 @@ use crate::runner::DocFetcher;
 ///
 /// This is implemented by the database layer to provide transaction-scoped
 /// document fetching.
-#[async_trait]
 pub trait TransactionContext: Send + Sync {
     /// Get the transaction ID.
     fn id(&self) -> &str;
