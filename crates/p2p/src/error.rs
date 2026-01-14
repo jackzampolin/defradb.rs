@@ -142,6 +142,14 @@ pub enum Error {
     /// Invalid topic.
     #[error("invalid topic: {0}")]
     InvalidTopic(String),
+
+    /// Invalid CID.
+    #[error("invalid CID: {0}")]
+    InvalidCid(String),
+
+    /// Blockstore error.
+    #[error("blockstore error: {0}")]
+    BlockstoreError(String),
 }
 
 impl From<serde_cbor::Error> for Error {

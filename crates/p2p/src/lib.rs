@@ -63,6 +63,7 @@ pub mod host;
 pub mod message;
 pub mod protocol;
 pub mod signing;
+pub mod sync;
 pub mod topics;
 
 // Re-export main types for convenience
@@ -83,6 +84,9 @@ pub use signing::{sign_message, sign_message_cloned, verify_message};
 
 // Re-export topic types
 pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
+
+// Re-export sync types
+pub use sync::{Broadcaster, ProcessQueue, SyncConfig, SyncCoordinator, SyncEvent, SyncManager};
 
 // Re-export commonly used libp2p types
 pub use libp2p::{gossipsub, Multiaddr, PeerId};
