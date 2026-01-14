@@ -78,8 +78,14 @@ impl<S: Store> DB<S> {
                 Ok(value)
             }
             Err(e) => {
-                // Best effort discard - if it fails, return original error
-                let _ = txn.discard();
+                // Discard and log if it fails - return original error
+                if let Err(discard_err) = txn.discard() {
+                    tracing::warn!(
+                        error = %discard_err,
+                        original_error = %e,
+                        "Transaction discard failed after operation error"
+                    );
+                }
                 Err(e)
             }
         }
@@ -102,8 +108,14 @@ impl<S: Store> DB<S> {
                 Ok(value)
             }
             Err(e) => {
-                // Best effort discard - if it fails, return original error
-                let _ = txn.discard();
+                // Discard and log if it fails - return original error
+                if let Err(discard_err) = txn.discard() {
+                    tracing::warn!(
+                        error = %discard_err,
+                        original_error = %e,
+                        "Transaction discard failed after async operation error"
+                    );
+                }
                 Err(e)
             }
         }

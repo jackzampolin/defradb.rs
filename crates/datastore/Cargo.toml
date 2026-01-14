@@ -17,6 +17,9 @@ futures.workspace = true
 # Error handling
 thiserror.workspace = true
 
+# Logging
+tracing.workspace = true
+
 # IPLD
 cid.workspace = true
 
