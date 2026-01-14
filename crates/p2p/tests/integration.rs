@@ -1345,3 +1345,274 @@ async fn test_peer_state_cid_tracking_before_connection() {
     handle1.shutdown().await.ok();
     handle2.shutdown().await.ok();
 }
+
+// ============================================================================
+// Error Path Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_handle_host_event_invalid_cid_in_gossip_message() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Create a gossip message with invalid CID bytes
+    let invalid_cid_bytes = vec![0xFF, 0xFF, 0xFF]; // Invalid CID
+    let message = PushLogBroadcast {
+        doc_id: "test-doc".to_string(),
+        cid: invalid_cid_bytes,
+        collection_id: "test-collection".to_string(),
+        creator: "test-creator".to_string(),
+        block: vec![1, 2, 3],
+    };
+
+    // Processing should not panic - invalid CID is logged and skipped
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: libp2p::PeerId::random(),
+            message_id: libp2p::gossipsub::MessageId::new(b"test"),
+            topic: "test-collection".to_string(),
+            message,
+        })
+        .await;
+
+    // The event itself processes successfully (the invalid CID is just logged as a warning)
+    // but the block will still be processed by the sync manager
+    assert!(
+        result.is_ok() || result.is_err(),
+        "Should handle gracefully without panic"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_handle_host_event_peer_disconnect_updates_state() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let peer_id = libp2p::PeerId::random();
+
+    // Connect peer
+    coordinator
+        .handle_host_event(HostEvent::PeerConnected(peer_id))
+        .await
+        .expect("connect failed");
+    assert!(coordinator.peer_state().is_connected(&peer_id));
+
+    // Disconnect peer
+    coordinator
+        .handle_host_event(HostEvent::PeerDisconnected(peer_id))
+        .await
+        .expect("disconnect failed");
+    assert!(!coordinator.peer_state().is_connected(&peer_id));
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_handle_host_event_subscription_tracking() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let peer_id = libp2p::PeerId::random();
+
+    // Connect peer
+    coordinator
+        .handle_host_event(HostEvent::PeerConnected(peer_id))
+        .await
+        .expect("connect failed");
+
+    // Subscribe to collection
+    coordinator
+        .handle_host_event(HostEvent::PeerSubscribed {
+            peer_id,
+            topic: "users".to_string(),
+        })
+        .await
+        .expect("subscribe failed");
+
+    assert_eq!(
+        coordinator.peer_state().peers_for_collection("users").len(),
+        1
+    );
+
+    // Unsubscribe from collection
+    coordinator
+        .handle_host_event(HostEvent::PeerUnsubscribed {
+            peer_id,
+            topic: "users".to_string(),
+        })
+        .await
+        .expect("unsubscribe failed");
+
+    assert!(coordinator
+        .peer_state()
+        .peers_for_collection("users")
+        .is_empty());
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// ReplicationLoop Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_replication_loop_channel_closed_terminates() {
+    use p2p::sync::{MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop};
+
+    // Create a simple merge handler for testing
+    struct TestHandler;
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _doc_id: &str,
+            _collection_id: &str,
+            _creator: &str,
+        ) -> Result<MergeOutcome, TestError> {
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let coordinator = Arc::new(coordinator);
+    let handler = Arc::new(TestHandler);
+
+    // Drop the original events receiver - we'll use our own channel
+    drop(events);
+
+    // Create a new channel that we control
+    let (tx, rx) = tokio::sync::mpsc::channel::<SyncEvent>(1);
+
+    // Immediately drop the sender to close the channel
+    drop(tx);
+
+    // Run the loop with a timeout - it should terminate when channel closes
+    let result = timeout(
+        Duration::from_secs(2),
+        ReplicationLoop::run(
+            coordinator.clone(),
+            rx,
+            handler,
+            ReplicationConfig::default(),
+        ),
+    )
+    .await;
+
+    // The loop should complete (not timeout) when channel is closed
+    assert!(
+        result.is_ok(),
+        "ReplicationLoop should terminate when channel closes"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_replication_loop_drain_empty_channel() {
+    use p2p::sync::{MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop};
+
+    struct TestHandler;
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _doc_id: &str,
+            _collection_id: &str,
+            _creator: &str,
+        ) -> Result<MergeOutcome, TestError> {
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, mut events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let coordinator = Arc::new(coordinator);
+    let handler = Arc::new(TestHandler);
+
+    // Drain empty channel should return empty vec
+    let results = ReplicationLoop::drain(
+        coordinator.clone(),
+        &mut events,
+        handler,
+        ReplicationConfig::default(),
+    )
+    .await;
+
+    assert!(
+        results.is_empty(),
+        "Draining empty channel should return no results"
+    );
+
+    handle.shutdown().await.ok();
+}

@@ -327,8 +327,18 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
     /// Request a block from a specific peer.
     ///
-    /// This uses the request-response protocol to fetch a block directly
-    /// from a peer that has it (as tracked by PeerStateTracker).
+    /// # WARNING: Rust-only implementation
+    ///
+    /// This method does NOT interoperate with Go DefraDB. Go DefraDB uses
+    /// **Bitswap** (IPFS's block exchange protocol) for fetching blocks,
+    /// not PushLog request-response. This implementation sends a PushLog
+    /// request with an empty block, which Go will interpret as a push
+    /// notification, not a block request.
+    ///
+    /// This method exists for Rust-to-Rust node communication and testing.
+    /// For Go interop, blocks should be received via:
+    /// 1. PushLog pushes from peers (they send the block data)
+    /// 2. Eventually, Bitswap integration (not yet implemented)
     ///
     /// # Arguments
     ///
@@ -339,7 +349,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ///
     /// # Returns
     ///
-    /// Ok(()) if the block was received and processed, Err otherwise.
+    /// Ok(()) if the request completed, Err otherwise.
+    /// Note: This does NOT fetch the block - it sends a notification.
     pub async fn request_block(
         &self,
         peer_id: libp2p::PeerId,
@@ -394,9 +405,14 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Uses the PeerStateTracker to find connected peers that have announced
     /// having this block, then requests it from the first available peer.
     ///
+    /// # WARNING: Rust-only implementation
+    ///
+    /// See [`request_block`](Self::request_block) for important limitations.
+    /// This does NOT interoperate with Go DefraDB (which uses Bitswap).
+    ///
     /// # Returns
     ///
-    /// Ok(()) if found and retrieved, Err if no peers have it or all requests fail.
+    /// Ok(()) if a peer responded, Err if no peers have it or all requests fail.
     pub async fn request_block_from_any_peer(
         &self,
         cid: &Cid,

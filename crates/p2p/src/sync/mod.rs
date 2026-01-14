@@ -55,4 +55,6 @@ pub use coordinator::SyncCoordinator;
 pub use manager::{SyncConfig, SyncEvent, SyncManager};
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use queue::ProcessQueue;
-pub use replication::{MergeHandler, ReplicationConfig, ReplicationLoop, ReplicationResult};
+pub use replication::{
+    MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop, ReplicationResult,
+};

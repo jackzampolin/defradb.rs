@@ -38,6 +38,39 @@ use tokio::sync::mpsc;
 use super::coordinator::SyncCoordinator;
 use super::manager::SyncEvent;
 
+/// Outcome of a merge operation.
+///
+/// Used by `MergeHandler::handle_block` to communicate the result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// Block was merged successfully into the database.
+    Merged,
+    /// Block was skipped (already applied, rejected by CRDT, etc.).
+    Skipped {
+        /// Human-readable reason for skipping.
+        reason: String,
+    },
+}
+
+impl MergeOutcome {
+    /// Create a skipped outcome with the given reason.
+    pub fn skipped(reason: impl Into<String>) -> Self {
+        Self::Skipped {
+            reason: reason.into(),
+        }
+    }
+
+    /// Returns true if this outcome indicates the block was merged.
+    pub fn is_merged(&self) -> bool {
+        matches!(self, Self::Merged)
+    }
+
+    /// Returns true if this outcome indicates the block was skipped.
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped { .. })
+    }
+}
+
 /// Handler for merging incoming blocks.
 ///
 /// Implement this trait in the database layer to handle CRDT merges.
@@ -53,7 +86,7 @@ pub trait MergeHandler: Send + Sync {
     /// 1. Decode the block data into a CRDT delta
     /// 2. Load/create the appropriate CRDT for the document
     /// 3. Execute the merge within a transaction
-    /// 4. Return Ok(true) if merge was successful, Ok(false) if skipped
+    /// 4. Return the merge outcome
     ///
     /// # Arguments
     ///
@@ -65,8 +98,8 @@ pub trait MergeHandler: Send + Sync {
     ///
     /// # Returns
     ///
-    /// * `Ok(true)` - Block was merged successfully
-    /// * `Ok(false)` - Block was skipped (already applied, rejected by CRDT)
+    /// * `Ok(MergeOutcome::Merged)` - Block was merged successfully
+    /// * `Ok(MergeOutcome::Skipped { reason })` - Block was skipped
     /// * `Err(e)` - Merge failed
     async fn handle_block(
         &self,
@@ -75,7 +108,7 @@ pub trait MergeHandler: Send + Sync {
         doc_id: &str,
         collection_id: &str,
         creator: &str,
-    ) -> Result<bool, Self::Error>;
+    ) -> Result<MergeOutcome, Self::Error>;
 }
 
 /// Result of a replication loop iteration.
@@ -87,6 +120,8 @@ pub enum ReplicationResult {
     Skipped { cid: Cid, reason: String },
     /// Merge failed
     Failed { cid: Cid, error: String },
+    /// Merge succeeded but failed to mark as merged (will be reprocessed on restart)
+    MergedButNotMarked { cid: Cid, error: String },
     /// Event channel closed
     ChannelClosed,
 }
@@ -160,6 +195,14 @@ impl ReplicationLoop {
                         tracing::error!("Stopping replication loop due to error");
                         break;
                     }
+                }
+                ReplicationResult::MergedButNotMarked { cid, error } => {
+                    tracing::error!(
+                        cid = %cid,
+                        error = %error,
+                        "Block merged but failed to mark - will be reprocessed on restart"
+                    );
+                    // Continue processing - the merge succeeded, just the bookkeeping failed
                 }
                 ReplicationResult::ChannelClosed => {
                     tracing::info!("Event channel closed, stopping replication loop");
@@ -249,14 +292,15 @@ impl ReplicationLoop {
             .handle_block(&cid, &block_data, doc_id, collection_id, creator)
             .await
         {
-            Ok(true) => {
+            Ok(MergeOutcome::Merged) => {
                 // Merge successful - mark as merged
                 if let Err(e) = coordinator.mark_as_merged(&cid).await {
-                    tracing::warn!(
-                        cid = %cid,
-                        error = %e,
-                        "Failed to mark block as merged"
-                    );
+                    // Return a distinct result so callers know the merge succeeded
+                    // but bookkeeping failed (block will be reprocessed on restart)
+                    return ReplicationResult::MergedButNotMarked {
+                        cid,
+                        error: e.to_string(),
+                    };
                 }
 
                 // Optionally re-broadcast
@@ -278,20 +322,18 @@ impl ReplicationLoop {
                     doc_id: doc_id.to_string(),
                 }
             }
-            Ok(false) => {
+            Ok(MergeOutcome::Skipped { reason }) => {
                 // Merge skipped - still mark as merged to prevent reprocessing
                 if let Err(e) = coordinator.mark_as_merged(&cid).await {
-                    tracing::warn!(
-                        cid = %cid,
-                        error = %e,
-                        "Failed to mark skipped block as merged"
-                    );
+                    // For skipped blocks, marking failure is less critical since
+                    // re-processing will just skip again, but still report it
+                    return ReplicationResult::MergedButNotMarked {
+                        cid,
+                        error: format!("skipped but failed to mark: {}", e),
+                    };
                 }
 
-                ReplicationResult::Skipped {
-                    cid,
-                    reason: "merge rejected by CRDT".to_string(),
-                }
+                ReplicationResult::Skipped { cid, reason }
             }
             Err(e) => ReplicationResult::Failed {
                 cid,
@@ -457,14 +499,18 @@ mod tests {
             _doc_id: &str,
             _collection_id: &str,
             _creator: &str,
-        ) -> Result<bool, Self::Error> {
+        ) -> Result<MergeOutcome, Self::Error> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
 
             if !self.should_succeed {
                 return Err(TestError("merge failed".to_string()));
             }
 
-            Ok(!self.should_skip)
+            if self.should_skip {
+                Ok(MergeOutcome::skipped("test skip reason"))
+            } else {
+                Ok(MergeOutcome::Merged)
+            }
         }
     }
 
@@ -497,7 +543,7 @@ mod tests {
             .handle_block(&cid, b"test data", "doc1", "col1", "peer1")
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap()); // Should return true (merged)
+        assert!(result.unwrap().is_merged());
         assert_eq!(handler.calls(), 1);
     }
 
@@ -510,7 +556,14 @@ mod tests {
             .handle_block(&cid, b"test", "doc", "col", "peer")
             .await;
         assert!(result.is_ok());
-        assert!(!result.unwrap()); // Should return false (skipped)
+        let outcome = result.unwrap();
+        assert!(outcome.is_skipped());
+        match outcome {
+            MergeOutcome::Skipped { reason } => {
+                assert_eq!(reason, "test skip reason");
+            }
+            _ => panic!("Expected Skipped outcome"),
+        }
     }
 
     #[tokio::test]
@@ -522,5 +575,16 @@ mod tests {
             .handle_block(&cid, b"test", "doc", "col", "peer")
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_merge_outcome_helpers() {
+        let merged = MergeOutcome::Merged;
+        assert!(merged.is_merged());
+        assert!(!merged.is_skipped());
+
+        let skipped = MergeOutcome::skipped("already applied");
+        assert!(!skipped.is_merged());
+        assert!(skipped.is_skipped());
     }
 }
