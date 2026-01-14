@@ -249,51 +249,80 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     }
 
     fn get(&self, txn_id: &str) -> Option<Arc<dyn TransactionContext>> {
-        self.transactions
-            .read()
-            .ok()?
-            .get(txn_id)
-            .cloned()
-            .map(|ctx| ctx as Arc<dyn TransactionContext>)
+        match self.transactions.read() {
+            Ok(guard) => guard
+                .get(txn_id)
+                .cloned()
+                .map(|ctx| ctx as Arc<dyn TransactionContext>),
+            Err(poisoned) => {
+                // Log critical error - lock is poisoned due to a panic in another thread
+                eprintln!(
+                    "CRITICAL: Transaction registry lock poisoned while getting '{}': {:?}",
+                    txn_id, poisoned
+                );
+                None
+            }
+        }
     }
 
     async fn commit(&self, txn_id: &str) -> query::error::Result<()> {
         let ctx = self
             .transactions
             .write()
-            .map_err(|_| query::error::QueryError::execution("lock poisoned"))?
+            .map_err(|_| {
+                query::error::QueryError::execution(format!(
+                    "transaction registry lock poisoned during commit of '{}'",
+                    txn_id
+                ))
+            })?
             .remove(txn_id)
             .ok_or_else(|| {
                 query::error::QueryError::execution(format!("transaction '{}' not found", txn_id))
             })?;
 
-        let txn = ctx
-            .take_txn()
-            .await
-            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
+        let txn = ctx.take_txn().await.ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "transaction '{}' was already consumed (double commit/rollback?)",
+                txn_id
+            ))
+        })?;
 
-        txn.force_commit()
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("commit error: {}", e)))
+        txn.force_commit().await.map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "commit error for transaction '{}': {}",
+                txn_id, e
+            ))
+        })
     }
 
     async fn rollback(&self, txn_id: &str) -> query::error::Result<()> {
         let ctx = self
             .transactions
             .write()
-            .map_err(|_| query::error::QueryError::execution("lock poisoned"))?
+            .map_err(|_| {
+                query::error::QueryError::execution(format!(
+                    "transaction registry lock poisoned during rollback of '{}'",
+                    txn_id
+                ))
+            })?
             .remove(txn_id)
             .ok_or_else(|| {
                 query::error::QueryError::execution(format!("transaction '{}' not found", txn_id))
             })?;
 
-        let txn = ctx
-            .take_txn()
-            .await
-            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
+        let txn = ctx.take_txn().await.ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "transaction '{}' was already consumed (double commit/rollback?)",
+                txn_id
+            ))
+        })?;
 
-        txn.force_discard()
-            .map_err(|e| query::error::QueryError::execution(format!("rollback error: {}", e)))
+        txn.force_discard().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "rollback error for transaction '{}': {}",
+                txn_id, e
+            ))
+        })
     }
 }
 
@@ -302,9 +331,19 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 // ============================================================================
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
-    /// Get an existing transaction by ID (async version for internal use).
+    /// Get an existing transaction by ID (for internal use).
     pub fn get_ctx(&self, txn_id: &str) -> Option<Arc<DbTransactionContext<S>>> {
-        self.transactions.read().ok()?.get(txn_id).cloned()
+        match self.transactions.read() {
+            Ok(guard) => guard.get(txn_id).cloned(),
+            Err(poisoned) => {
+                // Log critical error - lock is poisoned due to a panic in another thread
+                eprintln!(
+                    "CRITICAL: Transaction registry lock poisoned while getting context '{}': {:?}",
+                    txn_id, poisoned
+                );
+                None
+            }
+        }
     }
 
     /// Get all documents from a collection within a transaction.
@@ -492,6 +531,19 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn test_rollback_after_commit_returns_error() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(false).await.unwrap();
+        registry.commit(&txn_id).await.unwrap();
+
+        let result = registry.rollback(&txn_id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
     // ========================================================================
     // Transaction State Tests
     // ========================================================================
@@ -568,6 +620,46 @@ mod tests {
         assert!(docs.is_empty());
 
         registry.rollback(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_doc_fetcher_get_by_ids_invalid_id_returns_error() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        // "not-a-valid-docid" should fail DocID::from_string parsing
+        let result = fetcher
+            .get_by_ids("Users", &["not-a-valid-docid".to_string()])
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid doc ID"));
+
+        registry.rollback(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_doc_fetcher_after_txn_consumed_returns_error() {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db, test_schema());
+
+        let txn_id = registry.begin(true).await.unwrap();
+        let ctx = registry.get_ctx(&txn_id).unwrap();
+        let fetcher = ctx.doc_fetcher();
+
+        // Manually take the transaction to simulate commit/rollback having consumed it
+        let _txn = ctx.take_txn().await;
+
+        // Now try to use the fetcher - should fail with "transaction already consumed"
+        let result = fetcher.get_all("Users").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("transaction already consumed"));
     }
 
     // ========================================================================
