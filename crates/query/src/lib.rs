@@ -24,6 +24,8 @@ pub mod executor;
 pub mod mapper;
 pub mod plan;
 pub mod planner;
+pub mod query_parse;
+pub mod runner;
 pub mod schema_gen;
 pub mod sdl_parse;
 
@@ -33,7 +35,9 @@ pub use error::{QueryError, Result};
 pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 pub use mapper::{Filter, Select};
 pub use plan::{CreateInput, CreateNode, LimitNode, ScanNode, SelectNode};
-pub use planner::{Doc, DocStatus, ExecInfo, PlanNode};
+pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
+pub use query_parse::parse_query;
+pub use runner::{DocFetcher, QueryRunner};
 pub use sdl_parse::parse_sdl;
 
 #[cfg(test)]

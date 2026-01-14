@@ -168,11 +168,7 @@ pub trait QueryExecutor: Send + Sync {
     /// Execute a query within an existing transaction context.
     ///
     /// This allows batching multiple operations in a single transaction.
-    async fn execute_in_txn(
-        &self,
-        request: QueryRequest,
-        txn_id: &str,
-    ) -> QueryResponse;
+    async fn execute_in_txn(&self, request: QueryRequest, txn_id: &str) -> QueryResponse;
 
     /// Get the GraphQL schema for introspection.
     async fn schema(&self) -> Result<String>;
