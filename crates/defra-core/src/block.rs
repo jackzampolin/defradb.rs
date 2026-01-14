@@ -4,7 +4,7 @@
 //! All types match the Go implementation in `internal/core/block/` for wire compatibility.
 
 use cid::Cid;
-use multihash::Multihash;
+use multihash::MultihashGeneric;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -640,7 +640,7 @@ fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     let digest = hasher.finalize();
 
     // Create multihash
-    let mh = Multihash::<64>::wrap(SHA2_256_CODE, &digest)
+    let mh = MultihashGeneric::<64>::wrap(SHA2_256_CODE, &digest)
         .map_err(|e| Error::BlockError(format!("Failed to create multihash: {}", e)))?;
 
     // Create CIDv1 with DAG-CBOR codec

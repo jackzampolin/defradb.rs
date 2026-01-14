@@ -320,7 +320,7 @@ mod tests {
 
     /// Create a CID from data using SHA2-256 (for hash verification tests)
     fn cid_from_data(data: &[u8]) -> Cid {
-        use multihash::Multihash;
+        use multihash::MultihashGeneric;
         use sha2::{Digest, Sha256};
 
         // Compute SHA2-256 hash
@@ -329,7 +329,7 @@ mod tests {
         let digest = hasher.finalize();
 
         // Create multihash with SHA2-256 code (0x12)
-        let hash = Multihash::<64>::wrap(0x12, &digest).unwrap();
+        let hash = MultihashGeneric::<64>::wrap(0x12, &digest).unwrap();
         Cid::new_v1(0x55, hash) // raw codec
     }
 
@@ -985,9 +985,9 @@ mod tests {
         let blockstore = DefraBlockstore::new(store, false);
 
         // Create a CID with identity hash (code 0x00) - no actual hashing
-        use multihash::Multihash;
+        use multihash::MultihashGeneric;
         let data = b"identity hash data";
-        let hash = Multihash::<64>::wrap(0x00, data).unwrap(); // Identity hash
+        let hash = MultihashGeneric::<64>::wrap(0x00, data).unwrap(); // Identity hash
         let cid = Cid::new_v1(0x55, hash); // raw codec
 
         // Store the block
@@ -1007,11 +1007,11 @@ mod tests {
         let store = Arc::new(MemoryStore::new());
         let blockstore = DefraBlockstore::new(store, false);
 
-        use multihash::Multihash;
+        use multihash::MultihashGeneric;
         let data = b"blake2b test data";
         // Create a fake blake2b-256 multihash (just for testing skip behavior)
         let fake_digest = [0u8; 32];
-        let hash = Multihash::<64>::wrap(0xb220, &fake_digest).unwrap();
+        let hash = MultihashGeneric::<64>::wrap(0xb220, &fake_digest).unwrap();
         let cid = Cid::new_v1(0x55, hash);
 
         // Store with this CID

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use cid::Cid;
-use multihash::Multihash;
+use multihash::MultihashGeneric;
 use schema::{CType, CollectionVersion};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -395,7 +395,7 @@ impl Document {
         let hash_bytes = hasher.finalize();
 
         // Create multihash
-        let mh: Multihash<64> = Multihash::wrap(SHA2_256_CODE, &hash_bytes)
+        let mh: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash_bytes)
             .map_err(|e| Error::CborEncode(format!("Failed to create multihash: {}", e)))?;
 
         // Create CID from the hash

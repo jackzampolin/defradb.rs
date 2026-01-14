@@ -17,7 +17,8 @@ crdt = { path = "../crdt" }
 storage = { path = "../storage" }
 
 # P2P
-libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio", "gossipsub"] }
+libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio", "gossipsub", "kad"] }
+libp2p-bitswap-next = { workspace = true }
 multiaddr = { workspace = true }
 
 # Async
@@ -34,6 +35,7 @@ uuid = { workspace = true }
 
 # IPLD
 cid = { workspace = true }
+libipld = { workspace = true }
 
 # Errors
 thiserror = { workspace = true }

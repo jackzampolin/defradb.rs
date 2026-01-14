@@ -57,6 +57,7 @@
 //! - Messages: CBOR encoded using serde
 
 pub mod behaviour;
+pub mod bitswap;
 pub mod codec;
 pub mod error;
 pub mod host;
@@ -87,6 +88,9 @@ pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
 
 // Re-export sync types
 pub use sync::{Broadcaster, ProcessQueue, SyncConfig, SyncCoordinator, SyncEvent, SyncManager};
+
+// Re-export bitswap types
+pub use bitswap::BitswapStoreAdapter;
 
 // Re-export commonly used libp2p types
 pub use libp2p::{gossipsub, Multiaddr, PeerId};

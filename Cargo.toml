@@ -39,6 +39,7 @@ serde_bytes = "0.11"
 
 # P2P networking
 libp2p = { version = "0.54", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns"] }
+libp2p-bitswap-next = "0.26"
 multiaddr = "0.18"
 
 # Storage
@@ -52,8 +53,8 @@ sha2 = "0.10"
 aes-gcm = "0.10"
 
 # IPLD
-cid = { version = "0.11", features = ["serde"] }
-multihash = "0.19"
+cid = { version = "0.10", features = ["serde"] }
+multihash = "0.18"
 serde_ipld_dagcbor = "0.6"
 libipld = { version = "0.16", features = ["serde-codec"] }
 
