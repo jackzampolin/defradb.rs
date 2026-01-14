@@ -31,6 +31,20 @@ pub enum ParseWarning {
         type_name: String,
         field_name: Option<String>,
     },
+    /// Directive is recognized but not yet implemented
+    UnimplementedDirective {
+        directive_name: String,
+        type_name: String,
+        field_name: Option<String>,
+    },
+    /// Argument has wrong type (e.g., string instead of bool)
+    InvalidArgumentType {
+        directive_name: String,
+        argument_name: String,
+        expected_type: String,
+        type_name: String,
+        field_name: Option<String>,
+    },
 }
 
 impl std::fmt::Display for ParseWarning {
@@ -64,18 +78,49 @@ impl std::fmt::Display for ParseWarning {
                 type_name,
                 field_name,
             } => {
-                let location_str = if let Some(fname) = field_name {
-                    format!("{}.{}", type_name, fname)
-                } else {
-                    type_name.clone()
-                };
+                let location_str = format_location(type_name, field_name.as_deref());
                 write!(
                     f,
                     "unknown argument '{}' on directive @{} at {}",
                     argument_name, directive_name, location_str
                 )
             }
+            ParseWarning::UnimplementedDirective {
+                directive_name,
+                type_name,
+                field_name,
+            } => {
+                let location_str = format_location(type_name, field_name.as_deref());
+                write!(
+                    f,
+                    "directive @{} at {} is recognized but not yet implemented",
+                    directive_name, location_str
+                )
+            }
+            ParseWarning::InvalidArgumentType {
+                directive_name,
+                argument_name,
+                expected_type,
+                type_name,
+                field_name,
+            } => {
+                let location_str = format_location(type_name, field_name.as_deref());
+                write!(
+                    f,
+                    "argument '{}' on @{} at {} should be {}, value ignored",
+                    argument_name, directive_name, location_str, expected_type
+                )
+            }
         }
+    }
+}
+
+/// Format a location string for warnings
+fn format_location(type_name: &str, field_name: Option<&str>) -> String {
+    if let Some(fname) = field_name {
+        format!("{}.{}", type_name, fname)
+    } else {
+        type_name.to_string()
     }
 }
 
@@ -154,22 +199,6 @@ fn get_directive_string(directive: &Directive<'_, String>, arg_name: &str) -> Op
         graphql_parser::schema::Value::String(s) | graphql_parser::schema::Value::Enum(s) => {
             Some(s.clone())
         }
-        _ => None,
-    }
-}
-
-/// Get a boolean argument from a directive
-fn get_directive_bool(directive: &Directive<'_, String>, arg_name: &str) -> Option<bool> {
-    match get_directive_arg(directive, arg_name)? {
-        graphql_parser::schema::Value::Boolean(b) => Some(*b),
-        _ => None,
-    }
-}
-
-/// Get an integer argument from a directive
-fn get_directive_int(directive: &Directive<'_, String>, arg_name: &str) -> Option<i64> {
-    match get_directive_arg(directive, arg_name)? {
-        graphql_parser::schema::Value::Int(n) => n.as_i64(),
         _ => None,
     }
 }
@@ -402,11 +431,13 @@ impl<'a> SdlParser<'a> {
             match name {
                 "primary" => result.is_primary = true,
                 "crdt" => result.crdt_type = Some(self.parse_crdt_directive(directive)?),
-                "index" => result.index = Some(self.parse_index_directive(directive)?),
+                "index" => result.index = Some(self.parse_index_directive(directive, field_name)?),
                 "relation" => result.relation_name = get_directive_string(directive, "name"),
                 "default" => result.default_value = Some(self.parse_default_directive(directive)?),
                 "constraints" => {
-                    if let Some(size) = get_directive_int(directive, "size") {
+                    if let Some(size) =
+                        self.get_int_with_warning(directive, "size", &type_name, Some(field_name))
+                    {
                         if size < 0 {
                             return Err(QueryError::parse(format!(
                                 "@constraints size must be non-negative, got {}",
@@ -417,7 +448,12 @@ impl<'a> SdlParser<'a> {
                     }
                 }
                 "embedding" | "encryptedIndex" | "policy" => {
-                    // Known directives - argument check already done above
+                    // Known but not yet implemented - emit warning so users know
+                    self.warnings.push(ParseWarning::UnimplementedDirective {
+                        directive_name: directive.name.clone(),
+                        type_name: type_name.clone(),
+                        field_name: Some(field_name.to_string()),
+                    });
                 }
                 _ => {
                     // Unknown directive - emit warning for forward compatibility
@@ -454,6 +490,97 @@ impl<'a> SdlParser<'a> {
         }
     }
 
+    /// Get a boolean argument with type coercion warning
+    fn get_bool_with_warning(
+        &mut self,
+        directive: &Directive<'_, String>,
+        arg_name: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Option<bool> {
+        if let Some(value) = get_directive_arg(directive, arg_name) {
+            match value {
+                graphql_parser::schema::Value::Boolean(b) => Some(*b),
+                _ => {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "boolean".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get a string argument with type coercion warning
+    fn get_string_with_warning(
+        &mut self,
+        directive: &Directive<'_, String>,
+        arg_name: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Option<String> {
+        if let Some(value) = get_directive_arg(directive, arg_name) {
+            match value {
+                graphql_parser::schema::Value::String(s)
+                | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                _ => {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "string".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get an integer argument with type coercion warning
+    fn get_int_with_warning(
+        &mut self,
+        directive: &Directive<'_, String>,
+        arg_name: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Option<i64> {
+        if let Some(value) = get_directive_arg(directive, arg_name) {
+            match value {
+                graphql_parser::schema::Value::Int(n) => n.as_i64().or_else(|| {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "integer (within i64 range)".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }),
+                _ => {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "integer".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     fn parse_type_directives(
         &mut self,
         directives: &[Directive<'_, String>],
@@ -473,7 +600,9 @@ impl<'a> SdlParser<'a> {
                 "index" => {
                     let fields = get_directive_string_list(directive, "fields");
                     let idx_name = get_directive_string(directive, "name");
-                    let unique = get_directive_bool(directive, "unique").unwrap_or(false);
+                    let unique = self
+                        .get_bool_with_warning(directive, "unique", &type_name, None)
+                        .unwrap_or(false);
 
                     if !fields.is_empty() {
                         result.indexes.push(CompositeIndex {
@@ -484,10 +613,14 @@ impl<'a> SdlParser<'a> {
                     }
                 }
                 "materialized" => {
-                    result.is_materialized = get_directive_bool(directive, "if").unwrap_or(true);
+                    result.is_materialized = self
+                        .get_bool_with_warning(directive, "if", &type_name, None)
+                        .unwrap_or(true);
                 }
                 "branchable" => {
-                    result.is_branchable = get_directive_bool(directive, "if").unwrap_or(true);
+                    result.is_branchable = self
+                        .get_bool_with_warning(directive, "if", &type_name, None)
+                        .unwrap_or(true);
                 }
                 "policy" => {
                     result.policy = Some(parse_policy_directive(directive)?);
@@ -519,10 +652,20 @@ impl<'a> SdlParser<'a> {
         }
     }
 
-    fn parse_index_directive(&self, directive: &Directive<'_, String>) -> Result<IndexConfig> {
+    fn parse_index_directive(
+        &mut self,
+        directive: &Directive<'_, String>,
+        field_name: &str,
+    ) -> Result<IndexConfig> {
+        let type_name = self.current_type.clone().unwrap_or_default();
         let name = get_directive_string(directive, "name");
-        let unique = get_directive_bool(directive, "unique").unwrap_or(false);
-        let direction = match get_directive_string(directive, "direction").as_deref() {
+        let unique = self
+            .get_bool_with_warning(directive, "unique", &type_name, Some(field_name))
+            .unwrap_or(false);
+        let direction = match self
+            .get_string_with_warning(directive, "direction", &type_name, Some(field_name))
+            .as_deref()
+        {
             Some("DESC") | Some("desc") | Some("Descending") => IndexDirection::Desc,
             _ => IndexDirection::Asc,
         };
@@ -2101,7 +2244,7 @@ mod tests {
     }
 
     #[test]
-    fn test_embedding_directive_recognized_no_unknown_directive_warning() {
+    fn test_embedding_directive_emits_unimplemented_warning() {
         let sdl = r#"
             type Document {
                 content: String @embedding(provider: "openai", model: "ada")
@@ -2110,12 +2253,20 @@ mod tests {
 
         let output = parse_sdl_with_warnings(sdl).unwrap();
         assert_eq!(output.collections.len(), 1);
-        // @embedding is a known directive, should not emit UnknownDirective warning
-        assert!(
-            output.warnings.is_empty(),
-            "known directive @embedding should not emit warnings: {:?}",
-            output.warnings
-        );
+        // @embedding is recognized but not implemented, should emit UnimplementedDirective
+        assert_eq!(output.warnings.len(), 1);
+        match &output.warnings[0] {
+            ParseWarning::UnimplementedDirective {
+                directive_name,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "embedding");
+                assert_eq!(type_name, "Document");
+                assert_eq!(field_name.as_deref(), Some("content"));
+            }
+            other => panic!("expected UnimplementedDirective, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2128,9 +2279,17 @@ mod tests {
 
         let output = parse_sdl_with_warnings(sdl).unwrap();
         assert_eq!(output.collections.len(), 1);
-        assert_eq!(output.warnings.len(), 1);
+        // Should have both UnknownDirectiveArgument and UnimplementedDirective
+        assert_eq!(output.warnings.len(), 2);
 
-        match &output.warnings[0] {
+        // Find the UnknownDirectiveArgument warning
+        let unknown_arg = output
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ParseWarning::UnknownDirectiveArgument { .. }))
+            .expect("should have UnknownDirectiveArgument warning");
+
+        match unknown_arg {
             ParseWarning::UnknownDirectiveArgument {
                 directive_name,
                 argument_name,
@@ -2139,12 +2298,12 @@ mod tests {
                 assert_eq!(directive_name, "embedding");
                 assert_eq!(argument_name, "unknownArg");
             }
-            other => panic!("expected UnknownDirectiveArgument, not {:?}", other),
+            _ => unreachable!(),
         }
     }
 
     #[test]
-    fn test_encrypted_index_directive_recognized() {
+    fn test_encrypted_index_directive_emits_unimplemented_warning() {
         let sdl = r#"
             type Secret {
                 data: String @encryptedIndex(type: "match")
@@ -2153,12 +2312,20 @@ mod tests {
 
         let output = parse_sdl_with_warnings(sdl).unwrap();
         assert_eq!(output.collections.len(), 1);
-        // @encryptedIndex is known, should not emit UnknownDirective warning
-        assert!(
-            output.warnings.is_empty(),
-            "known directive @encryptedIndex should not emit warnings: {:?}",
-            output.warnings
-        );
+        // @encryptedIndex is recognized but not implemented
+        assert_eq!(output.warnings.len(), 1);
+        match &output.warnings[0] {
+            ParseWarning::UnimplementedDirective {
+                directive_name,
+                type_name,
+                field_name,
+            } => {
+                assert_eq!(directive_name, "encryptedIndex");
+                assert_eq!(type_name, "Secret");
+                assert_eq!(field_name.as_deref(), Some("data"));
+            }
+            other => panic!("expected UnimplementedDirective, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2170,9 +2337,16 @@ mod tests {
         "#;
 
         let output = parse_sdl_with_warnings(sdl).unwrap();
-        assert_eq!(output.warnings.len(), 1);
+        // Should have both UnknownDirectiveArgument and UnimplementedDirective
+        assert_eq!(output.warnings.len(), 2);
 
-        match &output.warnings[0] {
+        let unknown_arg = output
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ParseWarning::UnknownDirectiveArgument { .. }))
+            .expect("should have UnknownDirectiveArgument warning");
+
+        match unknown_arg {
             ParseWarning::UnknownDirectiveArgument {
                 directive_name,
                 argument_name,
@@ -2181,7 +2355,7 @@ mod tests {
                 assert_eq!(directive_name, "encryptedIndex");
                 assert_eq!(argument_name, "badArg");
             }
-            other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
+            _ => unreachable!(),
         }
     }
 
@@ -2281,5 +2455,97 @@ mod tests {
             }
             other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // InvalidArgumentType Warning Tests
+    // =========================================================================
+
+    #[test]
+    fn test_invalid_bool_argument_type_emits_warning() {
+        let sdl = r#"
+            type User @materialized(if: "yes") {
+                name: String
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::InvalidArgumentType {
+                directive_name,
+                argument_name,
+                expected_type,
+                ..
+            } => {
+                assert_eq!(directive_name, "materialized");
+                assert_eq!(argument_name, "if");
+                assert_eq!(expected_type, "boolean");
+            }
+            other => panic!("expected InvalidArgumentType, got {:?}", other),
+        }
+
+        // Should still work with default value (true)
+        assert!(output.collections[0].is_materialized);
+    }
+
+    #[test]
+    fn test_invalid_int_argument_type_emits_warning() {
+        let sdl = r#"
+            type User {
+                name: String @constraints(size: "ten")
+            }
+        "#;
+
+        let output = parse_sdl_with_warnings(sdl).unwrap();
+        assert_eq!(output.collections.len(), 1);
+        assert_eq!(output.warnings.len(), 1);
+
+        match &output.warnings[0] {
+            ParseWarning::InvalidArgumentType {
+                directive_name,
+                argument_name,
+                expected_type,
+                ..
+            } => {
+                assert_eq!(directive_name, "constraints");
+                assert_eq!(argument_name, "size");
+                assert_eq!(expected_type, "integer");
+            }
+            other => panic!("expected InvalidArgumentType, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_argument_type_warning_display() {
+        let warning = ParseWarning::InvalidArgumentType {
+            directive_name: "index".to_string(),
+            argument_name: "unique".to_string(),
+            expected_type: "boolean".to_string(),
+            type_name: "User".to_string(),
+            field_name: Some("email".to_string()),
+        };
+
+        let display = warning.to_string();
+        assert!(display.contains("unique"));
+        assert!(display.contains("@index"));
+        assert!(display.contains("User.email"));
+        assert!(display.contains("boolean"));
+    }
+
+    #[test]
+    fn test_unimplemented_directive_warning_display() {
+        let warning = ParseWarning::UnimplementedDirective {
+            directive_name: "embedding".to_string(),
+            type_name: "Document".to_string(),
+            field_name: Some("content".to_string()),
+        };
+
+        let display = warning.to_string();
+        assert!(display.contains("@embedding"));
+        assert!(display.contains("Document.content"));
+        assert!(display.contains("not yet implemented"));
     }
 }
