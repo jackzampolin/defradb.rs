@@ -33,6 +33,8 @@
 //! messages. When a peer receives a new block via PushLog, it checks for
 //! missing DAG links and fetches them via Bitswap.
 
+mod access;
 mod store;
 
+pub use access::{BlockAccessController, BlockAccessFn, ReplicatorRegistry};
 pub use store::BitswapStoreAdapter;

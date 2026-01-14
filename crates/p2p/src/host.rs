@@ -17,10 +17,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::StreamExt;
+use libipld::DefaultParams;
 use libp2p::{
     gossipsub, identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
+use libp2p_bitswap_next::BitswapStore;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -339,24 +341,42 @@ pub struct P2PHost {
 }
 
 impl P2PHost {
-    /// Create a new P2P host with a generated identity.
-    pub fn new() -> Result<(Self, P2PHostHandle, mpsc::Receiver<HostEvent>)> {
+    /// Create a new P2P host with a generated identity and the given blockstore.
+    ///
+    /// # Arguments
+    ///
+    /// * `bitswap_store` - The blockstore for Bitswap block exchange
+    pub fn new<S: BitswapStore<Params = DefaultParams>>(
+        bitswap_store: S,
+    ) -> Result<(Self, P2PHostHandle, mpsc::Receiver<HostEvent>)> {
         let keypair = Keypair::generate_ed25519();
-        Self::with_keypair(keypair)
+        Self::with_keypair(keypair, bitswap_store)
     }
 
-    /// Create a new P2P host with the given keypair.
-    pub fn with_keypair(
+    /// Create a new P2P host with the given keypair and blockstore.
+    ///
+    /// # Arguments
+    ///
+    /// * `keypair` - The identity keypair for this node
+    /// * `bitswap_store` - The blockstore for Bitswap block exchange
+    ///
+    /// # Note
+    ///
+    /// This must be called within a tokio runtime context as Bitswap spawns
+    /// a background task for database operations.
+    pub fn with_keypair<S: BitswapStore<Params = DefaultParams>>(
         keypair: Keypair,
+        bitswap_store: S,
     ) -> Result<(Self, P2PHostHandle, mpsc::Receiver<HostEvent>)> {
         let local_peer_id = keypair.public().to_peer_id();
         let local_public_key = keypair.public();
 
         info!("Local peer ID: {}", local_peer_id);
 
-        // Pass keypair to behaviour for message signing/verification
-        let behaviour = DefraBehaviour::new(local_peer_id, local_public_key, keypair.clone())
-            .map_err(|e| Error::Behaviour(e.to_string()))?;
+        // Pass keypair and blockstore to behaviour for message signing and block exchange
+        let behaviour =
+            DefraBehaviour::new(local_peer_id, local_public_key, keypair.clone(), bitswap_store)
+                .map_err(|e| Error::Behaviour(e.to_string()))?;
 
         let swarm = SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
@@ -766,10 +786,57 @@ impl P2PHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use libipld::{Block, Cid, Result as IpldResult};
+    use std::sync::{Arc, Mutex};
+
+    /// Mock BitswapStore for testing.
+    #[derive(Clone)]
+    struct MockBitswapStore {
+        blocks: Arc<Mutex<std::collections::HashMap<Cid, Vec<u8>>>>,
+    }
+
+    impl MockBitswapStore {
+        fn new() -> Self {
+            Self {
+                blocks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BitswapStore for MockBitswapStore {
+        type Params = DefaultParams;
+
+        async fn contains(&mut self, cid: &Cid) -> IpldResult<bool> {
+            Ok(self.blocks.lock().unwrap().contains_key(cid))
+        }
+
+        async fn get(&mut self, cid: &Cid) -> IpldResult<Option<Vec<u8>>> {
+            Ok(self.blocks.lock().unwrap().get(cid).cloned())
+        }
+
+        async fn insert(&mut self, block: &Block<Self::Params>) -> IpldResult<()> {
+            self.blocks
+                .lock()
+                .unwrap()
+                .insert(*block.cid(), block.data().to_vec());
+            Ok(())
+        }
+
+        async fn missing_blocks(&mut self, cid: &Cid) -> IpldResult<Vec<Cid>> {
+            if self.blocks.lock().unwrap().contains_key(cid) {
+                Ok(vec![])
+            } else {
+                Ok(vec![*cid])
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_host_creation() {
-        let result = P2PHost::new();
+        let store = MockBitswapStore::new();
+        let result = P2PHost::new(store);
         assert!(result.is_ok());
 
         let (host, handle, _events) = result.unwrap();

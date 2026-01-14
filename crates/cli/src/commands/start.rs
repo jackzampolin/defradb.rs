@@ -296,7 +296,6 @@ mod tests {
 /// DefraDB Node
 struct Node {
     config: Config,
-    _store: Arc<dyn storage::Store + Send + Sync>,
     p2p_handle: Option<p2p::P2PHostHandle>,
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -309,102 +308,118 @@ impl Node {
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
 
-        // Initialize storage
-        let store: Arc<dyn storage::Store + Send + Sync> = match config.datastore.store {
+        // Initialize storage and P2P together (P2P needs concrete blockstore type)
+        // We use a helper function to avoid code duplication
+        let p2p_handle = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
-                Arc::new(storage::MemoryStore::new())
+                let store = Arc::new(storage::MemoryStore::new());
+
+                if config.net.p2p_disabled {
+                    None
+                } else {
+                    info!("Initializing P2P network");
+                    let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
+                    let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
+                    Some(Self::start_p2p(&config, bitswap_store).await?)
+                }
             }
             DatastoreType::Badger => {
                 info!(
                     "Using RocksDB datastore at {}",
                     config.data_path().display()
                 );
-                let store = storage::RocksDBStore::open(config.data_path())?;
-                Arc::new(store)
-            }
-        };
+                let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
 
-        // Initialize P2P (if not disabled)
-        let p2p_handle = if !config.net.p2p_disabled {
-            info!("Initializing P2P network");
-            let (host, handle, mut events) = p2p::P2PHost::new().map_err(Error::P2P)?;
-
-            // Start listening on configured addresses
-            for addr_str in &config.net.p2p_addresses {
-                let addr: p2p::Multiaddr = addr_str
-                    .parse()
-                    .map_err(|e| Error::InvalidMultiaddr(format!("{}: {}", addr_str, e)))?;
-
-                handle.listen(addr.clone()).await.map_err(Error::P2P)?;
-                info!("P2P listening on {}", addr);
-            }
-
-            // Spawn the host event loop
-            tokio::spawn(host.run());
-
-            // Spawn event handler
-            tokio::spawn(async move {
-                while let Some(event) = events.recv().await {
-                    match event {
-                        p2p::HostEvent::PeerConnected(peer) => {
-                            info!("Peer connected: {}", peer);
-                        }
-                        p2p::HostEvent::PeerDisconnected(peer) => {
-                            info!("Peer disconnected: {}", peer);
-                        }
-                        p2p::HostEvent::PeerDiscovered(peer) => {
-                            info!("Peer discovered: {}", peer);
-                        }
-                        p2p::HostEvent::Listening(addr) => {
-                            info!("Now listening on: {}", addr);
-                        }
-                        p2p::HostEvent::GossipMessage {
-                            propagation_source,
-                            topic,
-                            ..
-                        } => {
-                            info!(
-                                "Received gossip message on {} from {}",
-                                topic, propagation_source
-                            );
-                        }
-                        other => {
-                            tracing::debug!("Unhandled P2P event: {:?}", other);
-                        }
-                    }
+                if config.net.p2p_disabled {
+                    None
+                } else {
+                    info!("Initializing P2P network");
+                    let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
+                    let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
+                    Some(Self::start_p2p(&config, bitswap_store).await?)
                 }
-            });
-
-            // Log bootstrap peers (connection will be handled by mDNS discovery)
-            if !config.net.peers.is_empty() {
-                info!("Bootstrap peers configured: {:?}", config.net.peers);
-                info!(
-                    "Note: Direct peer connection requires peer ID; mDNS will discover local peers"
-                );
             }
-
-            // Get and display peer ID
-            match handle.local_peer_id().await {
-                Ok(peer_id) => info!("Local peer ID: {}", peer_id),
-                Err(e) => error!("Failed to get local peer ID: {}", e),
-            }
-
-            Some(handle)
-        } else {
-            info!("P2P networking disabled");
-            None
         };
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         Ok(Self {
             config,
-            _store: store,
             p2p_handle,
             shutdown_tx,
             shutdown_rx,
         })
+    }
+
+    /// Start P2P networking with the given bitswap store
+    async fn start_p2p<S: p2p::BitswapStore<Params = libipld::DefaultParams>>(
+        config: &Config,
+        bitswap_store: S,
+    ) -> Result<p2p::P2PHostHandle> {
+        let (host, handle, mut events) = p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?;
+
+        // Start listening on configured addresses
+        for addr_str in &config.net.p2p_addresses {
+            let addr: p2p::Multiaddr = addr_str
+                .parse()
+                .map_err(|e| Error::InvalidMultiaddr(format!("{}: {}", addr_str, e)))?;
+
+            handle.listen(addr.clone()).await.map_err(Error::P2P)?;
+            info!("P2P listening on {}", addr);
+        }
+
+        // Spawn the host event loop
+        tokio::spawn(host.run());
+
+        // Spawn event handler
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    p2p::HostEvent::PeerConnected(peer) => {
+                        info!("Peer connected: {}", peer);
+                    }
+                    p2p::HostEvent::PeerDisconnected(peer) => {
+                        info!("Peer disconnected: {}", peer);
+                    }
+                    p2p::HostEvent::PeerDiscovered(peer) => {
+                        info!("Peer discovered: {}", peer);
+                    }
+                    p2p::HostEvent::Listening(addr) => {
+                        info!("Now listening on: {}", addr);
+                    }
+                    p2p::HostEvent::GossipMessage {
+                        propagation_source,
+                        topic,
+                        ..
+                    } => {
+                        info!(
+                            "Received gossip message on {} from {}",
+                            topic, propagation_source
+                        );
+                    }
+                    other => {
+                        tracing::debug!("Unhandled P2P event: {:?}", other);
+                    }
+                }
+            }
+        });
+
+        // Log bootstrap peers (connection will be handled by mDNS discovery)
+        if !config.net.peers.is_empty() {
+            info!("Bootstrap peers configured: {:?}", config.net.peers);
+            info!(
+                "Note: Direct peer connection requires peer ID; mDNS will discover local peers"
+            );
+        }
+
+        // Get and display peer ID
+        match handle.local_peer_id().await {
+            Ok(peer_id) => info!("Local peer ID: {}", peer_id),
+            Err(e) => error!("Failed to get local peer ID: {}", e),
+        }
+
+        Ok(handle)
     }
 
     /// Run the node until shutdown

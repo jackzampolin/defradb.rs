@@ -12,9 +12,13 @@
 //!
 //! These tests verify end-to-end functionality with multiple hosts.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use libipld::{Block, Cid, DefaultParams, Result as IpldResult};
+use libp2p_bitswap_next::BitswapStore;
 use p2p::{
     codec, DefraTopic, Error, HostEvent, Message, P2PHost, P2PHostHandle, PushLogBroadcast,
     PushLogReply, PushLogRequest, SyncConfig, SyncCoordinator, SyncEvent, REP_REQUEST_PROTOCOL,
@@ -22,9 +26,53 @@ use p2p::{
 };
 use tokio::time::timeout;
 
+/// Mock BitswapStore for testing.
+#[derive(Clone)]
+struct MockBitswapStore {
+    blocks: Arc<Mutex<HashMap<Cid, Vec<u8>>>>,
+}
+
+impl MockBitswapStore {
+    fn new() -> Self {
+        Self {
+            blocks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl BitswapStore for MockBitswapStore {
+    type Params = DefaultParams;
+
+    async fn contains(&mut self, cid: &Cid) -> IpldResult<bool> {
+        Ok(self.blocks.lock().unwrap().contains_key(cid))
+    }
+
+    async fn get(&mut self, cid: &Cid) -> IpldResult<Option<Vec<u8>>> {
+        Ok(self.blocks.lock().unwrap().get(cid).cloned())
+    }
+
+    async fn insert(&mut self, block: &Block<Self::Params>) -> IpldResult<()> {
+        self.blocks
+            .lock()
+            .unwrap()
+            .insert(*block.cid(), block.data().to_vec());
+        Ok(())
+    }
+
+    async fn missing_blocks(&mut self, cid: &Cid) -> IpldResult<Vec<Cid>> {
+        if self.blocks.lock().unwrap().contains_key(cid) {
+            Ok(vec![])
+        } else {
+            Ok(vec![*cid])
+        }
+    }
+}
+
 /// Helper to create and start a P2P host, returning the handle and event receiver.
 async fn create_and_start_host() -> (P2PHostHandle, tokio::sync::mpsc::Receiver<HostEvent>) {
-    let (host, handle, events) = P2PHost::new().expect("failed to create host");
+    let store = MockBitswapStore::new();
+    let (host, handle, events) = P2PHost::new(store).expect("failed to create host");
 
     // Spawn the host event loop
     tokio::spawn(host.run());
@@ -310,8 +358,10 @@ async fn test_host_with_custom_keypair() {
 
     let keypair = Keypair::generate_ed25519();
     let expected_peer_id = keypair.public().to_peer_id();
+    let store = MockBitswapStore::new();
 
-    let (host, handle, _events) = P2PHost::with_keypair(keypair).expect("failed to create host");
+    let (host, handle, _events) =
+        P2PHost::with_keypair(keypair, store).expect("failed to create host");
 
     assert_eq!(host.local_peer_id(), expected_peer_id);
 
@@ -1220,41 +1270,31 @@ async fn test_peer_state_tracking_with_coordinator() {
 }
 
 #[tokio::test]
-async fn test_request_block_from_any_peer_no_peers_have_cid() {
-    use blockstore::DefraBlockstore;
+async fn test_dag_sync_prepare_sync_no_missing_blocks() {
+    use p2p::sync::{DagSync, SyncPlan};
     use std::str::FromStr;
-    use storage::backends::MemoryStore;
 
-    // Create a coordinator
+    // Create a coordinator with peer state
     let (handle, _events) = create_and_start_host().await;
-    let store = Arc::new(MemoryStore::new());
-    let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let (coordinator, _sync_events) =
-        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
-            .await
-            .expect("failed to create coordinator");
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
 
-    // Try to request a block when no peers have it
-    let unknown_cid =
+    // Create test CIDs
+    let root_cid =
         cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
 
-    let result = coordinator
-        .request_block_from_any_peer(&unknown_cid, "test_doc", "test_collection")
-        .await;
+    // When all links exist locally, prepare_sync returns Complete
+    let plan = dag_sync
+        .prepare_sync(root_cid, &[link_cid], |_| true) // All CIDs exist locally
+        .await
+        .expect("prepare_sync failed");
 
-    // Should fail with PeerNotFound error
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    match err {
-        p2p::error::Error::PeerNotFound(msg) => {
-            assert!(
-                msg.contains("No peers found"),
-                "Expected 'No peers found' in error message, got: {}",
-                msg
-            );
-        }
-        other => panic!("Expected PeerNotFound error, got: {:?}", other),
-    }
+    assert!(matches!(plan, SyncPlan::Complete));
+
+    // Root should be marked as synced
+    assert!(dag_sync.state().is_synced(&root_cid).await);
 
     // Cleanup
     handle.shutdown().await.ok();
@@ -1615,4 +1655,233 @@ async fn test_replication_loop_drain_empty_channel() {
     );
 
     handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// Bitswap Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_dag_sync_with_missing_blocks() {
+    use p2p::sync::{DagSync, SyncPlan};
+    use std::str::FromStr;
+
+    // Create peer state with a connected peer
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let peer = libp2p::PeerId::random();
+    peer_state.peer_connected(peer);
+
+    let dag_sync = DagSync::new(peer_state);
+
+    // Create test CIDs
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let missing_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // When some links are missing locally, prepare_sync returns NeedsFetch
+    let plan = dag_sync
+        .prepare_sync(root_cid, &[missing_cid], |_| false) // No CIDs exist locally
+        .await
+        .expect("prepare_sync failed");
+
+    match plan {
+        SyncPlan::NeedsFetch {
+            root,
+            missing,
+            providers,
+        } => {
+            assert_eq!(root, root_cid);
+            assert_eq!(missing.len(), 1);
+            assert_eq!(missing[0], missing_cid);
+            assert!(!providers.is_empty(), "Should have providers");
+        }
+        _ => panic!("Expected NeedsFetch, got {:?}", plan),
+    }
+
+    // Root should be marked as syncing
+    assert!(dag_sync.state().is_syncing(&root_cid).await);
+    // Missing block should also be marked as syncing
+    assert!(dag_sync.state().is_syncing(&missing_cid).await);
+}
+
+#[tokio::test]
+async fn test_dag_sync_handle_block_received() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+    assert!(dag_sync.state().is_syncing(&cid).await);
+
+    // Handle block received
+    dag_sync.handle_block_received(cid).await;
+
+    // Should now be synced, not syncing
+    assert!(!dag_sync.state().is_syncing(&cid).await);
+    assert!(dag_sync.state().is_synced(&cid).await);
+}
+
+#[tokio::test]
+async fn test_dag_sync_handle_sync_complete_success() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+
+    // Complete with success
+    dag_sync.handle_sync_complete(cid, true).await;
+
+    assert!(dag_sync.state().is_synced(&cid).await);
+    assert!(!dag_sync.state().is_syncing(&cid).await);
+}
+
+#[tokio::test]
+async fn test_dag_sync_handle_sync_complete_failure() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+
+    // Complete with failure
+    dag_sync.handle_sync_complete(cid, false).await;
+
+    // Should be neither syncing nor synced (can retry)
+    assert!(!dag_sync.state().is_synced(&cid).await);
+    assert!(!dag_sync.state().is_syncing(&cid).await);
+}
+
+#[tokio::test]
+async fn test_replicator_registry_access_control() {
+    use p2p::{BlockAccessController, ReplicatorRegistry};
+
+    let registry = Arc::new(ReplicatorRegistry::new());
+    let peer1 = libp2p::PeerId::random();
+    let peer2 = libp2p::PeerId::random();
+
+    // Register peer1 as a replicator for "users" collection
+    registry.add_replicator("users", peer1);
+
+    // Create controller with ACP enabled
+    let controller = BlockAccessController::with_acp(registry);
+
+    let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        .unwrap();
+
+    // peer1 should have access (is replicator)
+    assert!(controller.has_access(&peer1, &cid, Some("users")));
+
+    // peer2 should NOT have access (not a replicator)
+    assert!(!controller.has_access(&peer2, &cid, Some("users")));
+
+    // peer1 should also have access when collection is unknown (is_any_replicator)
+    assert!(controller.has_access(&peer1, &cid, None));
+}
+
+#[tokio::test]
+async fn test_replicator_registry_multiple_collections() {
+    use p2p::ReplicatorRegistry;
+
+    let registry = ReplicatorRegistry::new();
+    let peer = libp2p::PeerId::random();
+
+    registry.add_replicator("users", peer);
+    registry.add_replicator("posts", peer);
+    registry.add_replicator("comments", peer);
+
+    // Should be replicator for all three
+    assert!(registry.is_replicator("users", &peer));
+    assert!(registry.is_replicator("posts", &peer));
+    assert!(registry.is_replicator("comments", &peer));
+    assert!(!registry.is_replicator("other", &peer));
+
+    // Get collections should return all three
+    let collections = registry.get_collections(&peer);
+    assert_eq!(collections.len(), 3);
+
+    // Remove from one
+    registry.remove_replicator("posts", &peer);
+    assert!(!registry.is_replicator("posts", &peer));
+    assert!(registry.is_replicator("users", &peer));
+
+    // Remove peer entirely
+    registry.remove_peer(&peer);
+    assert!(!registry.is_any_replicator(&peer));
+}
+
+#[tokio::test]
+async fn test_bitswap_store_adapter_contains() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use storage::backends::MemoryStore;
+    use std::str::FromStr;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, false));
+    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Initially should not contain the CID
+    let libipld_cid = libipld::Cid::try_from(cid.to_bytes().as_slice()).unwrap();
+    let contains = adapter.contains(&libipld_cid).await.unwrap();
+    assert!(!contains);
+
+    // Put a block
+    let block_data = vec![1, 2, 3, 4, 5];
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    // Now should contain the CID
+    let contains = adapter.contains(&libipld_cid).await.unwrap();
+    assert!(contains);
+}
+
+#[tokio::test]
+async fn test_bitswap_store_adapter_get() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use storage::backends::MemoryStore;
+    use std::str::FromStr;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, false));
+    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let libipld_cid = libipld::Cid::try_from(cid.to_bytes().as_slice()).unwrap();
+
+    // Initially should return None
+    let data = adapter.get(&libipld_cid).await.unwrap();
+    assert!(data.is_none());
+
+    // Put a block
+    let block_data = vec![1, 2, 3, 4, 5];
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    // Now should return the block data
+    let data = adapter.get(&libipld_cid).await.unwrap();
+    assert!(data.is_some());
+    assert_eq!(data.unwrap(), block_data);
 }

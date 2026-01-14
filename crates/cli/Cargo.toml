@@ -41,3 +41,6 @@ anyhow = { workspace = true }
 
 # File system
 dirs = "5.0"
+
+# IPLD (for Bitswap type parameters)
+libipld = { workspace = true }

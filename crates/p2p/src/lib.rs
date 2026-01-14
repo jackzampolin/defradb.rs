@@ -27,13 +27,19 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
-//! use p2p::{P2PHost, P2PHostHandle};
+//! ```rust,ignore
+//! use p2p::{P2PHost, P2PHostHandle, BitswapStoreAdapter};
+//! use blockstore::DefraBlockstore;
+//! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> p2p::Result<()> {
-//!     // Create a new P2P host
-//!     let (host, handle, mut events) = P2PHost::new()?;
+//!     // Create a blockstore for Bitswap
+//!     let blockstore = Arc::new(DefraBlockstore::new(/* storage backend */));
+//!     let bitswap_store = BitswapStoreAdapter::new(blockstore);
+//!
+//!     // Create a new P2P host with the blockstore
+//!     let (host, handle, mut events) = P2PHost::new(bitswap_store)?;
 //!
 //!     // Spawn the host event loop
 //!     tokio::spawn(host.run());
@@ -87,10 +93,14 @@ pub use signing::{sign_message, sign_message_cloned, verify_message};
 pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
 
 // Re-export sync types
-pub use sync::{Broadcaster, ProcessQueue, SyncConfig, SyncCoordinator, SyncEvent, SyncManager};
+pub use sync::{
+    Broadcaster, DagSync, DagSyncConfig, DagSyncState, ProcessQueue, SyncConfig, SyncCoordinator,
+    SyncEvent, SyncManager, SyncPlan,
+};
 
 // Re-export bitswap types
-pub use bitswap::BitswapStoreAdapter;
+pub use bitswap::{BitswapStoreAdapter, BlockAccessController, BlockAccessFn, ReplicatorRegistry};
+pub use libp2p_bitswap_next::BitswapStore;
 
 // Re-export commonly used libp2p types
 pub use libp2p::{gossipsub, Multiaddr, PeerId};
