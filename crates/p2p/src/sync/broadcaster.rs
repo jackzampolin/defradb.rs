@@ -25,6 +25,23 @@ use crate::host::P2PHostHandle;
 use crate::message::PushLogBroadcast;
 use crate::topics::DefraTopic;
 
+/// Result of a broadcast operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BroadcastResult {
+    /// Both document and collection topics received the message.
+    Success,
+    /// Only the document topic received the message.
+    PartialDocumentOnly {
+        /// Error from the collection topic publish.
+        collection_error: String,
+    },
+    /// Only the collection topic received the message.
+    PartialCollectionOnly {
+        /// Error from the document topic publish.
+        document_error: String,
+    },
+}
+
 /// Broadcaster for sending block updates to the P2P network.
 ///
 /// # Usage
@@ -88,9 +105,9 @@ impl Broadcaster {
     ///
     /// # Returns
     ///
-    /// Returns Ok(()) if at least one topic received the message.
-    /// Returns an error if both publishes fail.
-    pub async fn broadcast_update(&self, broadcast: &PushLogBroadcast) -> Result<()> {
+    /// Returns `Ok(BroadcastResult)` indicating full or partial success.
+    /// Returns an error only if both publishes fail.
+    pub async fn broadcast_update(&self, broadcast: &PushLogBroadcast) -> Result<BroadcastResult> {
         let doc_topic = DefraTopic::document(&broadcast.doc_id);
         let collection_topic = DefraTopic::collection(&broadcast.collection_id);
 
@@ -98,7 +115,7 @@ impl Broadcaster {
         let doc_result = self.host.publish(doc_topic, broadcast.clone()).await;
         let collection_result = self.host.publish(collection_topic, broadcast.clone()).await;
 
-        // Log results
+        // Return appropriate result based on what succeeded
         match (&doc_result, &collection_result) {
             (Ok(doc_msg_id), Ok(col_msg_id)) => {
                 tracing::debug!(
@@ -108,20 +125,31 @@ impl Broadcaster {
                     ?col_msg_id,
                     "Broadcast to both topics"
                 );
+                Ok(BroadcastResult::Success)
             }
             (Ok(_), Err(e)) => {
                 tracing::warn!(
+                    doc_id = %broadcast.doc_id,
                     collection_id = %broadcast.collection_id,
                     error = %e,
-                    "Failed to broadcast to collection topic"
+                    "Partial broadcast: document topic succeeded, collection topic failed - \
+                     some peers may not receive this update"
                 );
+                Ok(BroadcastResult::PartialDocumentOnly {
+                    collection_error: e.to_string(),
+                })
             }
             (Err(e), Ok(_)) => {
                 tracing::warn!(
                     doc_id = %broadcast.doc_id,
+                    collection_id = %broadcast.collection_id,
                     error = %e,
-                    "Failed to broadcast to document topic"
+                    "Partial broadcast: collection topic succeeded, document topic failed - \
+                     some peers may not receive this update"
                 );
+                Ok(BroadcastResult::PartialCollectionOnly {
+                    document_error: e.to_string(),
+                })
             }
             (Err(doc_err), Err(col_err)) => {
                 tracing::error!(
@@ -131,14 +159,12 @@ impl Broadcaster {
                     collection_error = %col_err,
                     "Failed to broadcast to both topics"
                 );
-                return Err(Error::GossipSubPublish(format!(
+                Err(Error::GossipSubPublish(format!(
                     "failed to publish to both topics: doc={}, collection={}",
                     doc_err, col_err
-                )));
+                )))
             }
         }
-
-        Ok(())
     }
 
     /// Create a PushLogBroadcast from block data.

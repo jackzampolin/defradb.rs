@@ -271,8 +271,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Block stored, emitting BlockReceived event"
         );
 
-        // Emit event for database layer to merge
-        // This is the critical event - log at error level if it fails
+        // Emit event for database layer to merge.
+        // This is critical - if the event can't be sent, the block will be stored
+        // but never merged, leading to data inconsistency.
         if self
             .event_tx
             .send(SyncEvent::BlockReceived {
@@ -287,8 +288,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             tracing::error!(
                 ?cid,
                 doc_id = %msg.doc_id,
-                "CRITICAL: Failed to send BlockReceived event - block stored but may not be merged"
+                "CRITICAL: Failed to send BlockReceived event - block stored but will not be merged. \
+                 Event receiver may have been dropped."
             );
+            return Err(Error::ChannelSend);
         }
 
         Ok(())

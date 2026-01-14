@@ -283,19 +283,21 @@ impl DagSync {
     where
         F: Fn(&Cid) -> bool,
     {
-        // Check if we're already syncing this block
-        if self.state.is_syncing(&block_cid).await {
+        // Atomically try to start sync - this prevents race conditions where
+        // multiple concurrent calls could both proceed past separate checks.
+        // start_sync returns false if already syncing or synced.
+        if !self.state.start_sync(block_cid).await {
+            // Already syncing or synced - determine which
+            if self.state.is_synced(&block_cid).await {
+                debug!("Already synced CID: {}", block_cid);
+                return Ok(SyncPlan::AlreadySynced);
+            }
             debug!("Already syncing CID: {}", block_cid);
             return Ok(SyncPlan::AlreadySyncing);
         }
 
-        // Check if already synced
-        if self.state.is_synced(&block_cid).await {
-            debug!("Already synced CID: {}", block_cid);
-            return Ok(SyncPlan::AlreadySynced);
-        }
-
-        // Find missing links
+        // We now have exclusive rights to sync this CID.
+        // Find missing links.
         let mut missing: Vec<Cid> = Vec::new();
         for link in block_links {
             // Skip if we already have it locally
@@ -316,9 +318,6 @@ impl DagSync {
             self.state.complete_sync(block_cid).await;
             return Ok(SyncPlan::Complete);
         }
-
-        // Mark the root block as syncing
-        self.state.start_sync(block_cid).await;
 
         // Mark all missing blocks as syncing
         for cid in &missing {
@@ -723,5 +722,45 @@ mod tests {
 
         // Can't start sync again
         assert!(!state.start_sync(cid).await);
+    }
+
+    #[test]
+    #[should_panic(expected = "block_fetch_timeout must be greater than zero")]
+    fn test_dag_sync_config_zero_timeout_panics() {
+        // DagSyncConfig::new should panic if block_fetch_timeout is zero
+        DagSyncConfig::new(
+            Duration::ZERO,
+            None,
+            NonZeroUsize::new(16).unwrap(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "timeout must be greater than zero")]
+    fn test_dag_sync_config_with_timeout_zero_panics() {
+        // with_timeout builder method should also panic on zero
+        DagSyncConfig::default().with_timeout(Duration::ZERO);
+    }
+
+    #[test]
+    fn test_dag_sync_config_default_values() {
+        let config = DagSyncConfig::default();
+
+        // Verify default values
+        assert_eq!(config.block_fetch_timeout(), Duration::from_secs(30));
+        assert!(config.max_depth().is_none()); // Unlimited
+        assert_eq!(config.max_concurrent_fetches().get(), 16);
+    }
+
+    #[test]
+    fn test_dag_sync_config_builder() {
+        let config = DagSyncConfig::default()
+            .with_timeout(Duration::from_secs(60))
+            .with_max_depth(Some(NonZeroUsize::new(10).unwrap()))
+            .with_max_concurrent_fetches(NonZeroUsize::new(32).unwrap());
+
+        assert_eq!(config.block_fetch_timeout(), Duration::from_secs(60));
+        assert_eq!(config.max_depth(), Some(NonZeroUsize::new(10).unwrap()));
+        assert_eq!(config.max_concurrent_fetches().get(), 32);
     }
 }

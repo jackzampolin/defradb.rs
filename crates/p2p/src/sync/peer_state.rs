@@ -15,7 +15,7 @@
 //! - Avoiding redundant sends (don't send blocks peers already have)
 //! - Replication status monitoring
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
@@ -23,11 +23,17 @@ use parking_lot::RwLock;
 use cid::Cid;
 use libp2p::PeerId;
 
+/// Default maximum number of CIDs to track per peer.
+/// This prevents unbounded memory growth in long-running nodes.
+const DEFAULT_MAX_CIDS_PER_PEER: usize = 10_000;
+
 /// Information about a single peer's sync state.
 #[derive(Debug)]
 struct PeerInfo {
     /// CIDs this peer has announced or we've sent to them
     known_cids: HashSet<Cid>,
+    /// Insertion order for LRU eviction (oldest first)
+    cid_order: VecDeque<Cid>,
     /// Collections this peer is subscribed to
     subscribed_collections: HashSet<String>,
     /// When we last heard from this peer
@@ -40,10 +46,32 @@ impl PeerInfo {
     fn new() -> Self {
         Self {
             known_cids: HashSet::new(),
+            cid_order: VecDeque::new(),
             subscribed_collections: HashSet::new(),
             last_seen: Instant::now(),
             connected: false,
         }
+    }
+
+    /// Add a CID with LRU eviction if at capacity.
+    fn add_cid(&mut self, cid: Cid, max_cids: usize) {
+        // If already present, don't add again (maintains LRU order)
+        if self.known_cids.contains(&cid) {
+            return;
+        }
+
+        // Evict oldest if at capacity
+        while self.known_cids.len() >= max_cids {
+            if let Some(oldest) = self.cid_order.pop_front() {
+                self.known_cids.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        // Add the new CID
+        self.known_cids.insert(cid);
+        self.cid_order.push_back(cid);
     }
 }
 
@@ -55,6 +83,8 @@ pub struct PeerStateTracker {
     peers: RwLock<HashMap<PeerId, PeerInfo>>,
     /// How long to keep peer info after disconnect
     peer_ttl: Duration,
+    /// Maximum CIDs to track per peer (prevents memory exhaustion)
+    max_cids_per_peer: usize,
 }
 
 impl Default for PeerStateTracker {
@@ -64,11 +94,12 @@ impl Default for PeerStateTracker {
 }
 
 impl PeerStateTracker {
-    /// Create a new peer state tracker.
+    /// Create a new peer state tracker with default settings.
     pub fn new() -> Self {
         Self {
             peers: RwLock::new(HashMap::new()),
             peer_ttl: Duration::from_secs(3600), // 1 hour default
+            max_cids_per_peer: DEFAULT_MAX_CIDS_PER_PEER,
         }
     }
 
@@ -77,6 +108,20 @@ impl PeerStateTracker {
         Self {
             peers: RwLock::new(HashMap::new()),
             peer_ttl,
+            max_cids_per_peer: DEFAULT_MAX_CIDS_PER_PEER,
+        }
+    }
+
+    /// Create with custom configuration.
+    pub fn with_config(peer_ttl: Duration, max_cids_per_peer: usize) -> Self {
+        Self {
+            peers: RwLock::new(HashMap::new()),
+            peer_ttl,
+            max_cids_per_peer: if max_cids_per_peer == 0 {
+                DEFAULT_MAX_CIDS_PER_PEER
+            } else {
+                max_cids_per_peer
+            },
         }
     }
 
@@ -105,20 +150,30 @@ impl PeerStateTracker {
     ///
     /// Creates a peer entry if one doesn't exist (handles race conditions
     /// where CID announcements arrive before connection events).
+    ///
+    /// Note: Per-peer CID tracking is bounded by `max_cids_per_peer`.
+    /// When the limit is reached, oldest CIDs are evicted (LRU).
     pub fn peer_has_cid(&self, peer_id: &PeerId, cid: Cid) {
         let mut peers = self.peers.write();
+        let max_cids = self.max_cids_per_peer;
         let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
-        info.known_cids.insert(cid);
+        info.add_cid(cid, max_cids);
         info.last_seen = Instant::now();
     }
 
     /// Record multiple CIDs for a peer.
     ///
     /// Creates a peer entry if one doesn't exist.
+    ///
+    /// Note: Per-peer CID tracking is bounded by `max_cids_per_peer`.
+    /// When the limit is reached, oldest CIDs are evicted (LRU).
     pub fn peer_has_cids(&self, peer_id: &PeerId, cids: impl IntoIterator<Item = Cid>) {
         let mut peers = self.peers.write();
+        let max_cids = self.max_cids_per_peer;
         let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
-        info.known_cids.extend(cids);
+        for cid in cids {
+            info.add_cid(cid, max_cids);
+        }
         info.last_seen = Instant::now();
     }
 
@@ -479,5 +534,84 @@ mod tests {
         // Not connected yet
         assert!(!tracker.is_connected(&peer));
         assert!(tracker.peers_with_cid(&cid1).is_empty());
+    }
+
+    #[test]
+    fn test_lru_eviction_when_max_cids_exceeded() {
+        // Create tracker with a small limit for testing
+        let tracker = PeerStateTracker::with_config(Duration::from_secs(3600), 3);
+        let peer = test_peer_id();
+        tracker.peer_connected(peer);
+
+        // Create 5 different CIDs
+        let cid1 = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+            .unwrap();
+        let cid2 = Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy")
+            .unwrap();
+        let cid3 = Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
+            .unwrap();
+        let cid4 = Cid::from_str("bafybeibdqagjfxgsqiafpmyohldmiu4qn6ucudpzqlxkfrmb6dzbggbkxy")
+            .unwrap();
+        let cid5 = Cid::from_str("bafkreigaknpexyvxt76zgkitavbwx6ejgfheup5oybpm77oxmxbyjaoj4i")
+            .unwrap();
+
+        // Add first 3 CIDs - all should be present
+        tracker.peer_has_cid(&peer, cid1);
+        tracker.peer_has_cid(&peer, cid2);
+        tracker.peer_has_cid(&peer, cid3);
+
+        assert!(tracker.peer_has(&peer, &cid1));
+        assert!(tracker.peer_has(&peer, &cid2));
+        assert!(tracker.peer_has(&peer, &cid3));
+        assert_eq!(tracker.peer_cid_count(&peer), 3);
+
+        // Add 4th CID - should evict cid1 (oldest)
+        tracker.peer_has_cid(&peer, cid4);
+
+        assert!(!tracker.peer_has(&peer, &cid1)); // Evicted
+        assert!(tracker.peer_has(&peer, &cid2));
+        assert!(tracker.peer_has(&peer, &cid3));
+        assert!(tracker.peer_has(&peer, &cid4));
+        assert_eq!(tracker.peer_cid_count(&peer), 3);
+
+        // Add 5th CID - should evict cid2
+        tracker.peer_has_cid(&peer, cid5);
+
+        assert!(!tracker.peer_has(&peer, &cid1)); // Evicted earlier
+        assert!(!tracker.peer_has(&peer, &cid2)); // Evicted now
+        assert!(tracker.peer_has(&peer, &cid3));
+        assert!(tracker.peer_has(&peer, &cid4));
+        assert!(tracker.peer_has(&peer, &cid5));
+        assert_eq!(tracker.peer_cid_count(&peer), 3);
+    }
+
+    #[test]
+    fn test_adding_same_cid_twice_does_not_evict() {
+        let tracker = PeerStateTracker::with_config(Duration::from_secs(3600), 3);
+        let peer = test_peer_id();
+        tracker.peer_connected(peer);
+
+        let cid1 = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+            .unwrap();
+        let cid2 = Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy")
+            .unwrap();
+        let cid3 = Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
+            .unwrap();
+
+        // Add 3 CIDs
+        tracker.peer_has_cid(&peer, cid1);
+        tracker.peer_has_cid(&peer, cid2);
+        tracker.peer_has_cid(&peer, cid3);
+
+        // Re-add cid1 multiple times - should not cause eviction
+        tracker.peer_has_cid(&peer, cid1);
+        tracker.peer_has_cid(&peer, cid1);
+        tracker.peer_has_cid(&peer, cid1);
+
+        // All 3 should still be present
+        assert!(tracker.peer_has(&peer, &cid1));
+        assert!(tracker.peer_has(&peer, &cid2));
+        assert!(tracker.peer_has(&peer, &cid3));
+        assert_eq!(tracker.peer_cid_count(&peer), 3);
     }
 }

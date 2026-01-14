@@ -1752,8 +1752,11 @@ async fn test_dag_sync_handle_sync_complete_success() {
     // Start syncing
     dag_sync.state().start_sync(cid).await;
 
-    // Complete with success
-    dag_sync.handle_sync_complete(cid, true).await;
+    // Complete with success - should return Ok
+    dag_sync
+        .handle_sync_complete(cid, true)
+        .await
+        .expect("sync completion should succeed");
 
     assert!(dag_sync.state().is_synced(&cid).await);
     assert!(!dag_sync.state().is_syncing(&cid).await);
@@ -1773,8 +1776,9 @@ async fn test_dag_sync_handle_sync_complete_failure() {
     // Start syncing
     dag_sync.state().start_sync(cid).await;
 
-    // Complete with failure
-    dag_sync.handle_sync_complete(cid, false).await;
+    // Complete with failure - should return Err
+    let result = dag_sync.handle_sync_complete(cid, false).await;
+    assert!(result.is_err(), "sync failure should return error");
 
     // Should be neither syncing nor synced (can retry)
     assert!(!dag_sync.state().is_synced(&cid).await);

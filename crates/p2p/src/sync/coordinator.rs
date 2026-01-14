@@ -268,13 +268,18 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// * `block` - The raw block data
     /// * `doc_id` - The document ID
     /// * `collection_id` - The collection ID
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(BroadcastResult)` indicating success or partial success.
+    /// Partial success means one topic received the message but not both.
     pub async fn broadcast_local_update(
         &self,
         cid: &Cid,
         block: &[u8],
         doc_id: &str,
         collection_id: &str,
-    ) -> Result<()> {
+    ) -> Result<super::BroadcastResult> {
         let broadcast =
             Broadcaster::create_broadcast(cid, block, doc_id, collection_id, &self.local_peer_id);
         self.broadcaster.broadcast_update(&broadcast).await

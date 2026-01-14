@@ -161,11 +161,14 @@ impl Drop for ProcessGuard {
             });
         } else {
             // If no runtime is available, we can't release asynchronously.
-            // This is a degraded state - the CID will remain in the waiters map.
+            // This is a critical failure - the CID will remain permanently locked
+            // in the waiters map, causing future sync attempts for this CID to hang.
             // Callers should prefer using the explicit `release().await` method.
-            tracing::warn!(
+            tracing::error!(
                 ?cid,
-                "ProcessGuard dropped outside tokio runtime - CID not released from queue"
+                "CRITICAL: ProcessGuard dropped outside tokio runtime - CID {} is PERMANENTLY LOCKED. \
+                 Future sync operations for this CID will hang. Use ProcessGuard::release().await instead of drop.",
+                cid
             );
         }
     }

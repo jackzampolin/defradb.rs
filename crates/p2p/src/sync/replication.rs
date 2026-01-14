@@ -251,16 +251,39 @@ impl ReplicationLoop {
 
                 // Optionally re-broadcast
                 if config.rebroadcast_on_merge {
-                    if let Err(e) = coordinator
+                    match coordinator
                         .broadcast_local_update(&cid, &block_data, doc_id, collection_id)
                         .await
                     {
-                        // Return a distinct result so callers know about the broadcast failure
-                        return ReplicationResult::MergedButBroadcastFailed {
-                            cid,
-                            doc_id: doc_id.to_string(),
-                            broadcast_error: e.to_string(),
-                        };
+                        Ok(super::BroadcastResult::Success) => {
+                            // Both topics succeeded - nothing to report
+                        }
+                        Ok(super::BroadcastResult::PartialDocumentOnly { collection_error }) => {
+                            // Partial success - log warning but don't fail
+                            tracing::warn!(
+                                ?cid,
+                                doc_id,
+                                error = %collection_error,
+                                "Partial broadcast: document topic succeeded but collection topic failed"
+                            );
+                        }
+                        Ok(super::BroadcastResult::PartialCollectionOnly { document_error }) => {
+                            // Partial success - log warning but don't fail
+                            tracing::warn!(
+                                ?cid,
+                                doc_id,
+                                error = %document_error,
+                                "Partial broadcast: collection topic succeeded but document topic failed"
+                            );
+                        }
+                        Err(e) => {
+                            // Total failure - return a distinct result
+                            return ReplicationResult::MergedButBroadcastFailed {
+                                cid,
+                                doc_id: doc_id.to_string(),
+                                broadcast_error: e.to_string(),
+                            };
+                        }
                     }
                 }
 
