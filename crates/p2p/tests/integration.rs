@@ -1118,3 +1118,97 @@ async fn test_two_node_sync_with_coordinator() {
     handle1.shutdown().await.ok();
     handle2.shutdown().await.ok();
 }
+
+#[tokio::test]
+async fn test_peer_state_tracking_with_coordinator() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    // Create two hosts with coordinators
+    let (handle1, mut events1) = create_and_start_host().await;
+    let store1 = Arc::new(MemoryStore::new());
+    let blockstore1 = Arc::new(DefraBlockstore::new(store1, true));
+    let (coordinator1, _sync_events1) =
+        SyncCoordinator::new(handle1.clone(), blockstore1.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 1");
+
+    let (handle2, mut events2) = create_and_start_host().await;
+    let store2 = Arc::new(MemoryStore::new());
+    let blockstore2 = Arc::new(DefraBlockstore::new(store2, true));
+    let (coordinator2, _sync_events2) =
+        SyncCoordinator::new(handle2.clone(), blockstore2.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 2");
+
+    // Set up networking
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    let addr1 = wait_for_listening(&mut events1).await;
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events2).await;
+
+    let peer_id1 = handle1.local_peer_id().await.expect("failed to get peer id");
+    let peer_id2 = handle2.local_peer_id().await.expect("failed to get peer id");
+
+    // Initially no peers connected in tracker
+    assert!(coordinator1.peer_state().connected_peers().is_empty());
+    assert!(coordinator2.peer_state().connected_peers().is_empty());
+
+    // Connect the hosts
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
+
+    // Wait for connection events and process them
+    let connected1 = wait_for_peer_connected(&mut events1).await;
+    let connected2 = wait_for_peer_connected(&mut events2).await;
+
+    // Process the connection events through coordinators
+    coordinator1
+        .handle_host_event(HostEvent::PeerConnected(connected1))
+        .await
+        .expect("handle event failed");
+    coordinator2
+        .handle_host_event(HostEvent::PeerConnected(connected2))
+        .await
+        .expect("handle event failed");
+
+    // Now peer state should track the connections
+    let connected_to_1 = coordinator1.peer_state().connected_peers();
+    let connected_to_2 = coordinator2.peer_state().connected_peers();
+
+    assert_eq!(connected_to_1.len(), 1, "Coordinator 1 should see peer 2");
+    assert_eq!(connected_to_2.len(), 1, "Coordinator 2 should see peer 1");
+    assert!(connected_to_1.contains(&peer_id2));
+    assert!(connected_to_2.contains(&peer_id1));
+
+    // Test peer state for topic subscriptions
+    coordinator1
+        .handle_host_event(HostEvent::PeerSubscribed {
+            peer_id: peer_id2,
+            topic: "users".to_string(),
+        })
+        .await
+        .expect("handle event failed");
+
+    let peers_for_users = coordinator1.peer_state().peers_for_collection("users");
+    assert_eq!(peers_for_users.len(), 1);
+    assert!(peers_for_users.contains(&peer_id2));
+
+    // Test peer stats
+    let stats = coordinator1.peer_state().stats();
+    assert_eq!(stats.connected_peers, 1);
+    assert_eq!(stats.total_peers, 1);
+
+    // Cleanup
+    handle1.shutdown().await.ok();
+    handle2.shutdown().await.ok();
+}

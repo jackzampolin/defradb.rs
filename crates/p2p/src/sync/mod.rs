@@ -46,9 +46,13 @@
 mod broadcaster;
 mod coordinator;
 mod manager;
+mod peer_state;
 mod queue;
+mod replication;
 
 pub use broadcaster::Broadcaster;
 pub use coordinator::SyncCoordinator;
 pub use manager::{SyncConfig, SyncEvent, SyncManager};
+pub use peer_state::{PeerStateTracker, PeerStats};
 pub use queue::ProcessQueue;
+pub use replication::{MergeHandler, ReplicationConfig, ReplicationLoop, ReplicationResult};

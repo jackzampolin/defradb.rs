@@ -150,6 +150,10 @@ pub enum Error {
     /// Blockstore error.
     #[error("blockstore error: {0}")]
     BlockstoreError(String),
+
+    /// Failed to send response.
+    #[error("failed to send response: {0}")]
+    ResponseSend(String),
 }
 
 impl From<serde_cbor::Error> for Error {

@@ -55,6 +55,13 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<PushLogReply>>,
     },
 
+    /// Send a PushLog response through a response channel.
+    SendPushLogResponse {
+        channel: ResponseChannel,
+        reply: PushLogReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Get the local peer ID.
     LocalPeerId { response: oneshot::Sender<PeerId> },
 
@@ -186,6 +193,27 @@ impl P2PHostHandle {
             .send(HostCommand::SendPushLog {
                 peer_id,
                 request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a PushLog response through a response channel.
+    ///
+    /// This is used to respond to incoming PushLog requests received via
+    /// `HostEvent::PushLogRequest`.
+    pub async fn send_pushlog_response(
+        &self,
+        channel: ResponseChannel,
+        reply: PushLogReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendPushLogResponse {
+                channel,
+                reply,
                 response: response_tx,
             })
             .await
@@ -430,6 +458,20 @@ impl P2PHost {
                     .behaviour_mut()
                     .send_pushlog_request(&peer_id, request);
                 self.pending_requests.insert(request_id, response);
+            }
+
+            HostCommand::SendPushLogResponse {
+                channel,
+                reply,
+                response,
+            } => {
+                let result = self
+                    .swarm
+                    .behaviour_mut()
+                    .send_pushlog_response(channel.0, reply)
+                    .map(|_| ())
+                    .map_err(|resp| Error::ResponseSend(format!("{:?}", resp.metadata)));
+                let _ = response.send(result);
             }
 
             HostCommand::LocalPeerId { response } => {
