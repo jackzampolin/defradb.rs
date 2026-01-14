@@ -139,13 +139,22 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 let broadcast = PushLogBroadcast::from_request(&request);
                 self.manager.process_pushlog(&broadcast).await?;
 
-                // Send success response
-                // Note: The actual response sending should be done by the host
-                // This is just processing the content
-                drop(channel); // Will send default response
+                // Response handling limitation:
+                // The ResponseChannel requires access to the swarm to send a response,
+                // but the coordinator only has access to P2PHostHandle. The response
+                // should be sent by having the host handle responses internally, or
+                // by adding a SendResponse command to P2PHostHandle.
+                // For now, we drop the channel which does NOT send a response.
+                tracing::trace!(
+                    peer_id = %peer_id,
+                    doc_id = %request.doc_id,
+                    "PushLog request processed - response channel dropped (no response sent)"
+                );
+                drop(channel);
             }
-            _ => {
+            other => {
                 // Other events (peer discovery, etc.) don't need sync handling
+                tracing::trace!(event = ?other, "Ignoring non-sync host event");
             }
         }
         Ok(())
@@ -192,13 +201,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         doc_id: &str,
         collection_id: &str,
     ) -> Result<()> {
-        let broadcast = Broadcaster::create_broadcast(
-            cid,
-            block,
-            doc_id,
-            collection_id,
-            &self.local_peer_id,
-        );
+        let broadcast =
+            Broadcaster::create_broadcast(cid, block, doc_id, collection_id, &self.local_peer_id);
         self.broadcaster.broadcast_update(&broadcast).await
     }
 

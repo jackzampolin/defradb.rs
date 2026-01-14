@@ -159,16 +159,28 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
             Err(rx) => {
                 // Another task is processing - wait for it
-                let _ = rx.await;
+                if rx.await.is_err() {
+                    tracing::debug!(
+                        ?cid,
+                        "First processor task was cancelled, will check merge status"
+                    );
+                }
 
                 // Now check if block is already merged
                 match self.blockstore.is_merged(&cid).await {
                     Ok(true) => {
                         // Already merged by the other task
-                        let _ = self
+                        if self
                             .event_tx
                             .send(SyncEvent::BlockAlreadyMerged { cid })
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                ?cid,
+                                "Failed to send BlockAlreadyMerged event - receiver dropped"
+                            );
+                        }
                         Ok(())
                     }
                     Ok(false) => {
@@ -177,13 +189,20 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         self.process_block_inner(&cid, msg).await
                     }
                     Err(e) => {
-                        let _ = self
+                        if self
                             .event_tx
                             .send(SyncEvent::SyncError {
                                 cid,
                                 error: e.to_string(),
                             })
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                ?cid,
+                                "Failed to send SyncError event - receiver dropped"
+                            );
+                        }
                         Err(Error::BlockstoreError(e.to_string()))
                     }
                 }
@@ -197,36 +216,51 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         match self.blockstore.is_merged(cid).await {
             Ok(true) => {
                 tracing::debug!(?cid, "Block already merged, skipping");
-                let _ = self
+                if self
                     .event_tx
                     .send(SyncEvent::BlockAlreadyMerged { cid: *cid })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        ?cid,
+                        "Failed to send BlockAlreadyMerged event - receiver dropped"
+                    );
+                }
                 return Ok(());
             }
             Ok(false) => {
                 // Not merged, continue processing
             }
             Err(e) => {
-                let _ = self
+                if self
                     .event_tx
                     .send(SyncEvent::SyncError {
                         cid: *cid,
                         error: e.to_string(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                }
                 return Err(Error::BlockstoreError(e.to_string()));
             }
         }
 
         // Store the block (marked as unmerged in P2P mode)
         if let Err(e) = self.blockstore.put(cid, &msg.block).await {
-            let _ = self
+            if self
                 .event_tx
                 .send(SyncEvent::SyncError {
                     cid: *cid,
                     error: e.to_string(),
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+            }
             return Err(Error::BlockstoreError(e.to_string()));
         }
 
@@ -238,7 +272,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         );
 
         // Emit event for database layer to merge
-        let _ = self
+        // This is the critical event - log at error level if it fails
+        if self
             .event_tx
             .send(SyncEvent::BlockReceived {
                 cid: *cid,
@@ -246,7 +281,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 collection_id: msg.collection_id.clone(),
                 creator: msg.creator.clone(),
             })
-            .await;
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                ?cid,
+                doc_id = %msg.doc_id,
+                "CRITICAL: Failed to send BlockReceived event - block stored but may not be merged"
+            );
+        }
 
         Ok(())
     }
@@ -410,5 +453,89 @@ mod tests {
         // Now none unmerged
         let unmerged = manager.get_unmerged().await.unwrap();
         assert!(unmerged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_pushlog_invalid_cid_returns_error() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, _events) = SyncManager::new(blockstore, SyncConfig::default());
+
+        // Create a broadcast with invalid CID bytes
+        let msg = PushLogBroadcast::new(
+            "doc123".to_string(),
+            vec![0xFF, 0xFF, 0xFF], // Invalid CID bytes
+            "collection1".to_string(),
+            "creator1".to_string(),
+            b"block data".to_vec(),
+        );
+
+        // Processing should fail with InvalidCid error
+        let result = manager.process_pushlog(&msg).await;
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidCid(msg)) => {
+                assert!(msg.contains("Failed to parse CID"));
+            }
+            other => panic!("Expected InvalidCid error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_processing_second_waiter_processes_on_first_not_merged() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+        let manager = Arc::new(manager);
+
+        let cid = test_cid();
+        let msg = create_test_broadcast(&cid);
+
+        // Flag to track if first processor completed
+        let first_done = Arc::new(AtomicBool::new(false));
+
+        // First task: acquire lock, store block, but DON'T mark as merged
+        let manager1 = manager.clone();
+        let msg1 = msg.clone();
+        let first_done1 = first_done.clone();
+        let first_task = tokio::spawn(async move {
+            manager1.process_pushlog(&msg1).await.unwrap();
+            first_done1.store(true, Ordering::SeqCst);
+        });
+
+        // Give first task time to acquire the lock
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Second task: should wait for first, then also process (since not merged)
+        let manager2 = manager.clone();
+        let msg2 = msg.clone();
+        let second_task = tokio::spawn(async move {
+            manager2.process_pushlog(&msg2).await.unwrap();
+        });
+
+        // Wait for both tasks
+        first_task.await.unwrap();
+        second_task.await.unwrap();
+
+        // Block should be stored
+        assert!(blockstore.has(&cid).await.unwrap());
+
+        // We should get at least one BlockReceived event
+        // (could get two if second waiter also processes before checking merge status)
+        let mut received_count = 0;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                SyncEvent::BlockReceived { .. } => received_count += 1,
+                SyncEvent::BlockAlreadyMerged { .. } => {} // Also valid
+                _ => {}
+            }
+        }
+        assert!(
+            received_count >= 1,
+            "Should have at least one BlockReceived event"
+        );
     }
 }

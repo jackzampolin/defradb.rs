@@ -16,7 +16,7 @@
 
 use cid::Cid;
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 
 /// A queue that serializes processing of the same CID.
 ///
@@ -101,8 +101,20 @@ impl ProcessQueue {
         let mut waiters = self.inner.waiters.lock().await;
         if let Some(waiting) = waiters.remove(cid) {
             // Notify all waiters that processing is complete
+            let waiter_count = waiting.len();
+            let mut notified = 0;
             for tx in waiting {
-                let _ = tx.send(());
+                if tx.send(()).is_ok() {
+                    notified += 1;
+                }
+            }
+            if notified < waiter_count {
+                tracing::debug!(
+                    ?cid,
+                    notified,
+                    total = waiter_count,
+                    "Some waiters were cancelled before notification"
+                );
             }
         }
     }
@@ -141,10 +153,21 @@ impl Drop for ProcessGuard {
         let cid = self.cid;
         let queue = self.queue.clone();
 
-        // Spawn a task to handle the async release
-        tokio::spawn(async move {
-            queue.release(&cid).await;
-        });
+        // Only spawn if we're in a tokio runtime context
+        // This prevents panics during shutdown or when used outside async code
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                queue.release(&cid).await;
+            });
+        } else {
+            // If no runtime is available, we can't release asynchronously.
+            // This is a degraded state - the CID will remain in the waiters map.
+            // Callers should prefer using the explicit `release().await` method.
+            tracing::warn!(
+                ?cid,
+                "ProcessGuard dropped outside tokio runtime - CID not released from queue"
+            );
+        }
     }
 }
 
@@ -224,7 +247,10 @@ mod tests {
         // Waiter should complete
         let result = tokio::time::timeout(Duration::from_millis(100), waiter).await;
         assert!(result.is_ok(), "Waiter should be notified");
-        assert!(result.unwrap().unwrap(), "Waiter should complete successfully");
+        assert!(
+            result.unwrap().unwrap(),
+            "Waiter should complete successfully"
+        );
     }
 
     #[tokio::test]
