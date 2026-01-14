@@ -1885,3 +1885,233 @@ async fn test_bitswap_store_adapter_get() {
     assert!(data.is_some());
     assert_eq!(data.unwrap(), block_data);
 }
+
+// ============================================================================
+// Concurrent State Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_dag_sync_state_concurrent_operations() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+    let state = dag_sync.state();
+
+    // Create multiple test CIDs
+    let cid1 =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let cid2 =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+    let cid3 =
+        cid::Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
+
+    // Spawn multiple concurrent tasks that manipulate state
+    let state1 = state.clone();
+    let state2 = state.clone();
+    let state3 = state.clone();
+
+    let handle1 = tokio::spawn(async move {
+        for _ in 0..100 {
+            state1.start_sync(cid1).await;
+            tokio::task::yield_now().await;
+            state1.complete_sync(cid1).await;
+        }
+    });
+
+    let handle2 = tokio::spawn(async move {
+        for _ in 0..100 {
+            state2.start_sync(cid2).await;
+            tokio::task::yield_now().await;
+            state2.cancel_sync(&cid2).await;
+        }
+    });
+
+    let handle3 = tokio::spawn(async move {
+        for _ in 0..100 {
+            let _ = state3.is_syncing(&cid1).await;
+            let _ = state3.is_synced(&cid2).await;
+            let _ = state3.syncing_cids().await;
+            state3.start_sync(cid3).await;
+            state3.complete_sync(cid3).await;
+        }
+    });
+
+    // Wait for all tasks to complete without deadlock
+    let result = timeout(Duration::from_secs(5), async {
+        handle1.await.expect("task 1 panicked");
+        handle2.await.expect("task 2 panicked");
+        handle3.await.expect("task 3 panicked");
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Concurrent state operations should complete without deadlock"
+    );
+
+    // Verify final state is consistent
+    // cid1 and cid3 should be synced (completed many times)
+    assert!(state.is_synced(&cid1).await, "cid1 should be synced");
+    assert!(state.is_synced(&cid3).await, "cid3 should be synced");
+
+    // cid2 was always cancelled, so should not be synced
+    assert!(
+        !state.is_synced(&cid2).await,
+        "cid2 should not be synced (was cancelled)"
+    );
+
+    // No CIDs should be in syncing state (all operations completed)
+    assert!(
+        !state.is_syncing(&cid1).await,
+        "cid1 should not still be syncing"
+    );
+    assert!(
+        !state.is_syncing(&cid2).await,
+        "cid2 should not still be syncing"
+    );
+    assert!(
+        !state.is_syncing(&cid3).await,
+        "cid3 should not still be syncing"
+    );
+}
+
+// ============================================================================
+// ReplicationLoop Error Path Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_replication_handles_missing_block_in_store() {
+    use p2p::sync::{MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop, SyncConfig};
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+    use std::str::FromStr;
+
+    // Create coordinator with an EMPTY blockstore
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let coordinator = Arc::new(coordinator);
+
+    // Test handler that should never be called (block won't be found)
+    struct NeverCalledHandler;
+
+    #[derive(Debug)]
+    struct NeverCalledError;
+    impl std::fmt::Display for NeverCalledError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "NeverCalledError")
+        }
+    }
+    impl std::error::Error for NeverCalledError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for NeverCalledHandler {
+        type Error = NeverCalledError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _doc_id: &str,
+            _collection_id: &str,
+            _creator: &str,
+        ) -> Result<MergeOutcome, NeverCalledError> {
+            panic!("Handler should not be called when block is not in store");
+        }
+    }
+
+    let handler = Arc::new(NeverCalledHandler);
+
+    // Manually inject a BlockReceived event for a CID that's NOT in the blockstore
+    let missing_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Create a channel to send the event
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.send(p2p::sync::SyncEvent::BlockReceived {
+        cid: missing_cid,
+        doc_id: "test-doc".to_string(),
+        collection_id: "test-collection".to_string(),
+        creator: "test-creator".to_string(),
+    })
+    .await
+    .unwrap();
+    drop(tx); // Close channel to trigger drain completion
+
+    // Drain events (should return Failed result)
+    let results = ReplicationLoop::drain(
+        coordinator.clone(),
+        &mut rx,
+        handler,
+        ReplicationConfig::default(),
+    )
+    .await;
+
+    assert_eq!(results.len(), 1, "Should have exactly one result");
+
+    match &results[0] {
+        p2p::sync::ReplicationResult::Failed { cid, error } => {
+            assert_eq!(*cid, missing_cid);
+            assert!(
+                error.contains("not found"),
+                "Error should mention block not found: {}",
+                error
+            );
+        }
+        other => panic!(
+            "Expected Failed result for missing block, got {:?}",
+            other
+        ),
+    }
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_bitswap_store_adapter_insert_and_retrieve_roundtrip() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use storage::backends::MemoryStore;
+    use libipld::{Block, IpldCodec};
+    use libipld::multihash::{Code, MultihashDigest};
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, false));
+    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+
+    // Create block data
+    let block_data = b"test block data for bitswap roundtrip";
+
+    // Create a CID for this data (using raw codec and sha2-256)
+    let multihash = Code::Sha2_256.digest(block_data);
+    let libipld_cid = libipld::Cid::new_v1(IpldCodec::Raw.into(), multihash);
+
+    // Create a Block for insertion
+    let block = Block::<libipld::DefaultParams>::new(libipld_cid, block_data.to_vec()).unwrap();
+
+    // Verify block is not present before insertion
+    assert!(!adapter.contains(&libipld_cid).await.unwrap());
+
+    // Insert via BitswapStore trait (this is what Bitswap does when receiving blocks)
+    adapter.insert(&block).await.unwrap();
+
+    // Verify block is now present
+    assert!(adapter.contains(&libipld_cid).await.unwrap());
+
+    // Retrieve and verify data matches
+    let retrieved = adapter.get(&libipld_cid).await.unwrap();
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap(), block_data.to_vec());
+
+    // Also verify we can read via the underlying blockstore using cid crate's Cid
+    let cid_crate_cid = cid::Cid::try_from(libipld_cid.to_bytes().as_slice()).unwrap();
+    let from_blockstore = blockstore.get(&cid_crate_cid).await.unwrap();
+    assert!(from_blockstore.is_some());
+    assert_eq!(from_blockstore.unwrap(), block_data.to_vec());
+}

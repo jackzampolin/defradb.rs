@@ -116,6 +116,12 @@ pub trait MergeHandler: Send + Sync {
 pub enum ReplicationResult {
     /// Block was merged successfully
     Merged { cid: Cid, doc_id: String },
+    /// Block was merged but re-broadcast failed (replication to other nodes may be incomplete)
+    MergedButBroadcastFailed {
+        cid: Cid,
+        doc_id: String,
+        broadcast_error: String,
+    },
     /// Block was skipped (already applied or rejected)
     Skipped { cid: Cid, reason: String },
     /// Merge failed
@@ -185,6 +191,19 @@ impl ReplicationLoop {
             match &result {
                 ReplicationResult::Merged { cid, doc_id } => {
                     tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
+                }
+                ReplicationResult::MergedButBroadcastFailed {
+                    cid,
+                    doc_id,
+                    broadcast_error,
+                } => {
+                    tracing::error!(
+                        cid = %cid,
+                        doc_id = %doc_id,
+                        error = %broadcast_error,
+                        "Block merged but re-broadcast failed - other nodes may not receive this update"
+                    );
+                    // Continue processing - the local merge succeeded
                 }
                 ReplicationResult::Skipped { cid, reason } => {
                     tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
@@ -309,11 +328,12 @@ impl ReplicationLoop {
                         .broadcast_local_update(&cid, &block_data, doc_id, collection_id)
                         .await
                     {
-                        tracing::warn!(
-                            cid = %cid,
-                            error = %e,
-                            "Failed to re-broadcast merged block"
-                        );
+                        // Return a distinct result so callers know about the broadcast failure
+                        return ReplicationResult::MergedButBroadcastFailed {
+                            cid,
+                            doc_id: doc_id.to_string(),
+                            broadcast_error: e.to_string(),
+                        };
                     }
                 }
 
@@ -401,6 +421,13 @@ impl ReplicationLoop {
     /// Call this at startup to process any blocks that were stored
     /// but not yet merged (e.g., due to crash recovery).
     ///
+    /// # Note
+    ///
+    /// Recovery mode passes empty strings for doc_id, collection_id, and creator
+    /// because this metadata is not persisted with unmerged blocks. The MergeHandler
+    /// implementation must be able to extract this information from the block data
+    /// itself, or handle empty metadata gracefully.
+    ///
     /// # Errors
     ///
     /// Returns an error if the unmerged block list cannot be retrieved.
@@ -420,25 +447,57 @@ impl ReplicationLoop {
 
         let unmerged = coordinator.get_unmerged().await?;
 
-        tracing::info!(count = unmerged.len(), "Recovering unmerged blocks");
+        if unmerged.is_empty() {
+            tracing::info!("No unmerged blocks to recover");
+            return Ok(Vec::new());
+        }
+
+        tracing::warn!(
+            count = unmerged.len(),
+            "Recovering unmerged blocks - metadata (doc_id, collection_id) unavailable, handler must extract from block data"
+        );
 
         let mut results = Vec::new();
+        let mut success_count = 0;
+        let mut failure_count = 0;
+
         for cid in unmerged {
-            // For recovery, we don't have the original metadata
-            // Use empty strings as placeholders - the handler should be able to
-            // determine doc_id and collection_id from the block itself
+            tracing::debug!(cid = %cid, "Recovering unmerged block");
+
             let result = Self::handle_block_received(
                 &coordinator,
                 handler.as_ref(),
                 &config,
                 cid,
-                "", // Unknown doc_id
-                "", // Unknown collection_id
-                "", // Unknown creator
+                "", // Metadata unavailable in recovery mode
+                "",
+                "",
             )
             .await;
+
+            match &result {
+                ReplicationResult::Merged { .. } | ReplicationResult::Skipped { .. } => {
+                    success_count += 1;
+                }
+                ReplicationResult::Failed { cid, error } => {
+                    failure_count += 1;
+                    tracing::error!(
+                        cid = %cid,
+                        error = %error,
+                        "Failed to recover block - manual intervention may be required"
+                    );
+                }
+                _ => {}
+            }
+
             results.push(result);
         }
+
+        tracing::info!(
+            success = success_count,
+            failed = failure_count,
+            "Recovery complete"
+        );
 
         Ok(results)
     }

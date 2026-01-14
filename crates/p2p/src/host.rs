@@ -453,10 +453,12 @@ impl P2PHost {
             HostCommand::Listen { addr, response } => {
                 let result = self
                     .swarm
-                    .listen_on(addr)
+                    .listen_on(addr.clone())
                     .map(|_| ())
                     .map_err(|e| Error::Transport(e.to_string()));
-                let _ = response.send(result);
+                if response.send(result).is_err() {
+                    debug!(addr = %addr, "Listen command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::Dial {
@@ -465,7 +467,9 @@ impl P2PHost {
                 response,
             } => {
                 let result = self.dial_peer(peer_id, addrs);
-                let _ = response.send(result);
+                if response.send(result).is_err() {
+                    debug!(peer_id = %peer_id, "Dial command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::SendPushLog {
@@ -491,21 +495,29 @@ impl P2PHost {
                     .send_pushlog_response(channel.0, reply)
                     .map(|_| ())
                     .map_err(|resp| Error::ResponseSend(format!("{:?}", resp.metadata)));
-                let _ = response.send(result);
+                if response.send(result).is_err() {
+                    debug!("SendPushLogResponse command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::LocalPeerId { response } => {
-                let _ = response.send(*self.swarm.local_peer_id());
+                if response.send(*self.swarm.local_peer_id()).is_err() {
+                    debug!("LocalPeerId command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::ListenAddresses { response } => {
                 let addrs: Vec<_> = self.swarm.listeners().cloned().collect();
-                let _ = response.send(addrs);
+                if response.send(addrs).is_err() {
+                    debug!("ListenAddresses command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::ConnectedPeers { response } => {
                 let peers: Vec<_> = self.swarm.connected_peers().cloned().collect();
-                let _ = response.send(peers);
+                if response.send(peers).is_err() {
+                    debug!("ConnectedPeers command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::Subscribe { topic, response } => {
@@ -515,7 +527,9 @@ impl P2PHost {
                     .behaviour_mut()
                     .subscribe(&ident_topic)
                     .map_err(|e| Error::GossipSubSubscription(e.to_string()));
-                let _ = response.send(result);
+                if response.send(result).is_err() {
+                    debug!(topic = ?topic, "Subscribe command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::Unsubscribe { topic, response } => {
@@ -525,7 +539,9 @@ impl P2PHost {
                     .behaviour_mut()
                     .unsubscribe(&ident_topic)
                     .map_err(|e| Error::GossipSubUnsubscribe(e.to_string()));
-                let _ = response.send(result);
+                if response.send(result).is_err() {
+                    debug!(topic = ?topic, "Unsubscribe command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::Publish {
@@ -542,7 +558,9 @@ impl P2PHost {
                             .publish(ident_topic, data)
                             .map_err(|e| Error::GossipSubPublish(e.to_string()))
                     });
-                let _ = response.send(result);
+                if response.send(result).is_err() {
+                    debug!(topic = ?topic, "Publish command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::SubscribedTopics { response } => {
@@ -552,7 +570,9 @@ impl P2PHost {
                     .subscribed_topics()
                     .map(|t| t.to_string())
                     .collect();
-                let _ = response.send(topics);
+                if response.send(topics).is_err() {
+                    debug!("SubscribedTopics command response dropped - caller cancelled");
+                }
             }
 
             HostCommand::Shutdown => {
@@ -585,27 +605,32 @@ impl P2PHost {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("Listening on {}", address);
-                let _ = self.event_tx.send(HostEvent::Listening(address)).await;
+                if self.event_tx.send(HostEvent::Listening(address.clone())).await.is_err() {
+                    warn!(address = %address, "Failed to send Listening event - receiver dropped");
+                }
             }
 
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 info!("Connected to peer: {}", peer_id);
-                let _ = self.event_tx.send(HostEvent::PeerConnected(peer_id)).await;
+                if self.event_tx.send(HostEvent::PeerConnected(peer_id)).await.is_err() {
+                    warn!(peer_id = %peer_id, "Failed to send PeerConnected event - receiver dropped");
+                }
             }
 
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 info!("Disconnected from peer: {}", peer_id);
-                let _ = self
-                    .event_tx
-                    .send(HostEvent::PeerDisconnected(peer_id))
-                    .await;
+                if self.event_tx.send(HostEvent::PeerDisconnected(peer_id)).await.is_err() {
+                    warn!(peer_id = %peer_id, "Failed to send PeerDisconnected event - receiver dropped");
+                }
             }
 
             SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Discovered(peers))) => {
                 for (peer_id, addr) in peers {
                     debug!("mDNS discovered peer: {} at {}", peer_id, addr);
                     self.swarm.add_external_address(addr);
-                    let _ = self.event_tx.send(HostEvent::PeerDiscovered(peer_id)).await;
+                    if self.event_tx.send(HostEvent::PeerDiscovered(peer_id)).await.is_err() {
+                        warn!(peer_id = %peer_id, "Failed to send PeerDiscovered event - receiver dropped");
+                    }
                 }
             }
 
@@ -668,14 +693,18 @@ impl P2PHost {
                     request, channel, ..
                 } => {
                     debug!("Received PushLog request from {}", peer);
-                    let _ = self
+                    if self
                         .event_tx
                         .send(HostEvent::PushLogRequest {
                             peer_id: peer,
                             request,
                             channel: ResponseChannel(channel),
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        error!(peer_id = %peer, "Failed to send PushLogRequest event - receiver dropped, request will not be processed");
+                    }
                 }
                 request_response::Message::Response {
                     request_id,
@@ -683,7 +712,9 @@ impl P2PHost {
                 } => {
                     debug!("Received PushLog response for request {:?}", request_id);
                     if let Some(sender) = self.pending_requests.remove(&request_id) {
-                        let _ = sender.send(Ok(response));
+                        if sender.send(Ok(response)).is_err() {
+                            debug!(request_id = ?request_id, "PushLog response dropped - caller cancelled");
+                        }
                     }
                 }
             },
@@ -693,7 +724,9 @@ impl P2PHost {
             } => {
                 error!("Outbound request {:?} failed: {:?}", request_id, error);
                 if let Some(sender) = self.pending_requests.remove(&request_id) {
-                    let _ = sender.send(Err(Error::Transport(format!("{:?}", error))));
+                    if sender.send(Err(Error::Transport(format!("{:?}", error)))).is_err() {
+                        debug!(request_id = ?request_id, "PushLog error response dropped - caller cancelled");
+                    }
                 }
             }
 
@@ -724,20 +757,32 @@ impl P2PHost {
                 // Decode the message payload
                 match serde_cbor::from_slice::<PushLogBroadcast>(&message.data) {
                     Ok(broadcast) => {
-                        let _ = self
+                        if self
                             .event_tx
                             .send(HostEvent::GossipMessage {
                                 propagation_source,
-                                message_id,
-                                topic,
+                                message_id: message_id.clone(),
+                                topic: topic.clone(),
                                 message: broadcast,
                             })
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            error!(
+                                peer_id = %propagation_source,
+                                message_id = ?message_id,
+                                topic = %topic,
+                                "Failed to send GossipMessage event - receiver dropped, message will not be processed"
+                            );
+                        }
                     }
                     Err(e) => {
                         warn!(
-                            "Failed to decode gossipsub message from {}: {}",
-                            propagation_source, e
+                            peer_id = %propagation_source,
+                            topic = %topic,
+                            message_size = message.data.len(),
+                            error = %e,
+                            "Failed to decode gossipsub message"
                         );
                     }
                 }
@@ -745,24 +790,32 @@ impl P2PHost {
 
             gossipsub::Event::Subscribed { peer_id, topic } => {
                 debug!("Peer {} subscribed to {}", peer_id, topic);
-                let _ = self
+                if self
                     .event_tx
                     .send(HostEvent::PeerSubscribed {
                         peer_id,
                         topic: topic.to_string(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    warn!(peer_id = %peer_id, topic = %topic, "Failed to send PeerSubscribed event - receiver dropped");
+                }
             }
 
             gossipsub::Event::Unsubscribed { peer_id, topic } => {
                 debug!("Peer {} unsubscribed from {}", peer_id, topic);
-                let _ = self
+                if self
                     .event_tx
                     .send(HostEvent::PeerUnsubscribed {
                         peer_id,
                         topic: topic.to_string(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    warn!(peer_id = %peer_id, topic = %topic, "Failed to send PeerUnsubscribed event - receiver dropped");
+                }
             }
 
             gossipsub::Event::GossipsubNotSupported { peer_id } => {

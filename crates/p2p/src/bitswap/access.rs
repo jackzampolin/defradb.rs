@@ -144,7 +144,7 @@ impl BlockAccessController {
     pub fn new(replicators: Arc<ReplicatorRegistry>) -> Self {
         Self {
             replicators,
-            acp_enabled: false, // ACP integration pending
+            acp_enabled: false,
         }
     }
 
@@ -161,7 +161,7 @@ impl BlockAccessController {
     /// This mirrors Go's `hasAccess` function logic:
     /// 1. If ACP not enabled → allow
     /// 2. If peer is replicator for block's collection → allow
-    /// 3. Check ACP permissions (not yet implemented)
+    /// 3. If no replicator match, deny access
     ///
     /// # Arguments
     /// * `peer_id` - The peer requesting access
@@ -191,15 +191,7 @@ impl BlockAccessController {
             return true;
         }
 
-        // TODO: Full ACP integration
-        // This would involve:
-        // 1. Getting the block from the blockstore
-        // 2. Extracting the document ID from the block
-        // 3. Looking up the collection's ACP policy
-        // 4. Getting the peer's identity (via identity protocol)
-        // 5. Checking document access permissions
-
-        // Default: deny if ACP enabled and no explicit permission
+        // Default: deny if ACP enabled and no replicator match
         false
     }
 
