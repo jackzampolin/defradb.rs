@@ -41,7 +41,10 @@ pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::parse_query;
 pub use runner::{DocFetcher, QueryRunner};
 pub use sdl_parse::parse_sdl;
-pub use txn::{NoOpTransactionRegistry, TransactionContext, TransactionHandle, TransactionRegistry};
+pub use txn::{
+    NoOpTransactionRegistry, TransactionContext, TransactionGuard, TransactionHandle,
+    TransactionRegistry,
+};
 
 #[cfg(test)]
 mod tests {

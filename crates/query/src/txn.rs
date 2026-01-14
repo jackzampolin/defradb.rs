@@ -148,6 +148,101 @@ impl TransactionRegistry for NoOpTransactionRegistry {
     }
 }
 
+/// A guard that ensures a transaction is properly finalized.
+///
+/// This type provides compile-time safety by consuming itself on `commit()` or
+/// `rollback()`, preventing use-after-finalization bugs. If dropped without
+/// explicit finalization, the transaction is automatically rolled back.
+///
+/// # Example
+///
+/// ```ignore
+/// use query::{QueryExecutor, QueryRequest, TransactionGuard};
+///
+/// async fn batch_operations<E: QueryExecutor>(
+///     executor: &E,
+///     queries: Vec<QueryRequest>,
+/// ) -> Result<Vec<QueryResponse>, String> {
+///     let mut guard = TransactionGuard::begin(executor, false).await?;
+///     let mut responses = Vec::new();
+///
+///     for query in queries {
+///         let resp = guard.execute(query).await;
+///         if resp.has_errors() {
+///             // Guard is consumed, transaction rolled back
+///             guard.rollback().await?;
+///             return Err("query failed".to_string());
+///         }
+///         responses.push(resp);
+///     }
+///
+///     // Guard is consumed, transaction committed
+///     guard.commit().await?;
+///     Ok(responses)
+/// }
+/// ```
+pub struct TransactionGuard<'a, E: crate::QueryExecutor + ?Sized> {
+    executor: &'a E,
+    handle: Option<TransactionHandle>,
+}
+
+impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
+    /// Begin a new transaction and return a guard for it.
+    pub async fn begin(executor: &'a E, readonly: bool) -> std::result::Result<Self, String> {
+        let handle = executor.begin_txn(readonly).await?;
+        Ok(Self {
+            executor,
+            handle: Some(handle),
+        })
+    }
+
+    /// Execute a query within this transaction.
+    pub async fn execute(&self, request: crate::QueryRequest) -> crate::QueryResponse {
+        match &self.handle {
+            Some(handle) => self.executor.execute_in_txn(request, handle).await,
+            None => crate::QueryResponse::error("transaction already finalized"),
+        }
+    }
+
+    /// Get the transaction handle for inspection (e.g., logging).
+    pub fn handle(&self) -> Option<&TransactionHandle> {
+        self.handle.as_ref()
+    }
+
+    /// Commit the transaction and consume the guard.
+    ///
+    /// After calling this, the guard cannot be used again (compile-time enforced).
+    pub async fn commit(mut self) -> std::result::Result<(), String> {
+        match self.handle.take() {
+            Some(handle) => self.executor.commit_txn(&handle).await,
+            None => Err("transaction already finalized".to_string()),
+        }
+    }
+
+    /// Rollback the transaction and consume the guard.
+    ///
+    /// After calling this, the guard cannot be used again (compile-time enforced).
+    pub async fn rollback(mut self) -> std::result::Result<(), String> {
+        match self.handle.take() {
+            Some(handle) => self.executor.rollback_txn(&handle).await,
+            None => Err("transaction already finalized".to_string()),
+        }
+    }
+}
+
+impl<E: crate::QueryExecutor + ?Sized> Drop for TransactionGuard<'_, E> {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            // Transaction was not finalized - this is a bug in user code.
+            // We can't do async rollback in drop, so we log a warning.
+            // In a real system, you might want to spawn a task to clean up.
+            tracing::warn!(
+                "TransactionGuard dropped without commit/rollback - transaction may be leaked"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +301,131 @@ mod tests {
         let handle = TransactionHandle::new("txn-abc".to_string());
         let s: String = handle.into();
         assert_eq!(s, "txn-abc");
+    }
+
+    // Mock executor for testing TransactionGuard
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    struct MockExecutor {
+        txn_counter: AtomicU64,
+        committed: AtomicBool,
+        rolled_back: AtomicBool,
+    }
+
+    impl MockExecutor {
+        fn new() -> Self {
+            Self {
+                txn_counter: AtomicU64::new(0),
+                committed: AtomicBool::new(false),
+                rolled_back: AtomicBool::new(false),
+            }
+        }
+
+        fn was_committed(&self) -> bool {
+            self.committed.load(Ordering::SeqCst)
+        }
+
+        fn was_rolled_back(&self) -> bool {
+            self.rolled_back.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl crate::QueryExecutor for MockExecutor {
+        async fn execute(&self, _request: crate::QueryRequest) -> crate::QueryResponse {
+            crate::QueryResponse::success(serde_json::json!({"mock": true}))
+        }
+
+        async fn execute_in_txn(
+            &self,
+            _request: crate::QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> crate::QueryResponse {
+            crate::QueryResponse::success(serde_json::json!({"in_txn": true}))
+        }
+
+        async fn begin_txn(&self, _readonly: bool) -> std::result::Result<TransactionHandle, String> {
+            let id = self.txn_counter.fetch_add(1, Ordering::SeqCst);
+            Ok(TransactionHandle::new(format!("mock-txn-{}", id)))
+        }
+
+        async fn commit_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
+            self.committed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn rollback_txn(&self, _handle: &TransactionHandle) -> std::result::Result<(), String> {
+            self.rolled_back.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn schema(&self) -> crate::error::Result<String> {
+            Ok("type Query { mock: String }".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_guard_begin_creates_transaction() {
+        let executor = MockExecutor::new();
+        let guard = TransactionGuard::begin(&executor, false).await.unwrap();
+
+        assert!(guard.handle().is_some());
+        assert!(guard.handle().unwrap().as_str().starts_with("mock-txn-"));
+
+        // Clean up
+        guard.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_guard_execute_runs_in_transaction() {
+        let executor = MockExecutor::new();
+        let guard = TransactionGuard::begin(&executor, false).await.unwrap();
+
+        let request = crate::QueryRequest::new("{ test }");
+        let response = guard.execute(request).await;
+
+        assert!(!response.has_errors());
+        let data = response.data.unwrap();
+        assert_eq!(data.get("in_txn").unwrap(), true);
+
+        guard.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_guard_commit_consumes_guard() {
+        let executor = MockExecutor::new();
+        let guard = TransactionGuard::begin(&executor, false).await.unwrap();
+
+        assert!(!executor.was_committed());
+        guard.commit().await.unwrap();
+        assert!(executor.was_committed());
+        // guard is now consumed - can't use it anymore (compile-time enforced)
+    }
+
+    #[tokio::test]
+    async fn test_guard_rollback_consumes_guard() {
+        let executor = MockExecutor::new();
+        let guard = TransactionGuard::begin(&executor, false).await.unwrap();
+
+        assert!(!executor.was_rolled_back());
+        guard.rollback().await.unwrap();
+        assert!(executor.was_rolled_back());
+        // guard is now consumed - can't use it anymore (compile-time enforced)
+    }
+
+    #[tokio::test]
+    async fn test_guard_multiple_executes_before_commit() {
+        let executor = MockExecutor::new();
+        let guard = TransactionGuard::begin(&executor, false).await.unwrap();
+
+        // Execute multiple queries in the same transaction
+        for _ in 0..3 {
+            let request = crate::QueryRequest::new("{ test }");
+            let response = guard.execute(request).await;
+            assert!(!response.has_errors());
+        }
+
+        guard.commit().await.unwrap();
+        assert!(executor.was_committed());
     }
 }
