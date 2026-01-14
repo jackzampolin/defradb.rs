@@ -34,26 +34,15 @@ pub struct FieldValue {
 }
 
 impl FieldValue {
-    /// Create a new FieldValue with the given CRDT type and value.
-    /// New values are marked as dirty by default.
-    ///
-    /// Note: This does not validate CRDT/value compatibility.
-    /// Use `new_validated` for validation.
-    pub fn new(crdt_type: CType, value: NormalValue) -> Self {
-        Self {
-            crdt_type,
-            value,
-            is_dirty: true,
-        }
-    }
-
     /// Create a new FieldValue with validation of CRDT/value compatibility.
     ///
     /// Returns an error if the value type is incompatible with the CRDT type:
     /// - `PnCounter` and `PCounter` require numeric values (Int, Float64, Float32)
     /// - `Object` and `Composite` require Document values
     /// - `LwwRegister` and `None` accept any value type
-    pub fn new_validated(crdt_type: CType, value: NormalValue) -> Result<Self> {
+    ///
+    /// New values are marked as dirty by default.
+    pub fn new(crdt_type: CType, value: NormalValue) -> Result<Self> {
         Self::validate_compatibility(crdt_type, &value)?;
         Ok(Self {
             crdt_type,
@@ -62,11 +51,38 @@ impl FieldValue {
         })
     }
 
-    /// Create a new FieldValue that is not marked as dirty.
-    /// Used when loading from storage.
-    pub fn new_clean(crdt_type: CType, value: NormalValue) -> Self {
+    /// Create a new FieldValue with LwwRegister CRDT type.
+    ///
+    /// LwwRegister accepts any value type, so this never fails.
+    /// New values are marked as dirty by default.
+    pub fn new_lww(value: NormalValue) -> Self {
         Self {
+            crdt_type: CType::LwwRegister,
+            value,
+            is_dirty: true,
+        }
+    }
+
+    /// Create a new FieldValue that is not marked as dirty.
+    ///
+    /// Returns an error if the value type is incompatible with the CRDT type.
+    /// Used when loading from storage.
+    pub fn new_clean(crdt_type: CType, value: NormalValue) -> Result<Self> {
+        Self::validate_compatibility(crdt_type, &value)?;
+        Ok(Self {
             crdt_type,
+            value,
+            is_dirty: false,
+        })
+    }
+
+    /// Create a new clean FieldValue with LwwRegister CRDT type.
+    ///
+    /// LwwRegister accepts any value type, so this never fails.
+    /// Used when loading from storage.
+    pub fn new_clean_lww(value: NormalValue) -> Self {
+        Self {
+            crdt_type: CType::LwwRegister,
             value,
             is_dirty: false,
         }
@@ -217,7 +233,7 @@ impl FieldValue {
     pub fn from_cbor(crdt_type: CType, bytes: &[u8]) -> Result<Self> {
         let value: NormalValue =
             ciborium::from_reader(bytes).map_err(|e| Error::CborDecode(e.to_string()))?;
-        Ok(Self::new_clean(crdt_type, value))
+        Self::new_clean(crdt_type, value)
     }
 }
 
@@ -243,19 +259,19 @@ mod tests {
 
     #[test]
     fn test_new_is_dirty() {
-        let fv = FieldValue::new(CType::LwwRegister, NormalValue::Int(42));
+        let fv = FieldValue::new_lww(NormalValue::Int(42));
         assert!(fv.is_dirty());
     }
 
     #[test]
     fn test_new_clean_is_not_dirty() {
-        let fv = FieldValue::new_clean(CType::LwwRegister, NormalValue::Int(42));
+        let fv = FieldValue::new_clean_lww(NormalValue::Int(42));
         assert!(!fv.is_dirty());
     }
 
     #[test]
     fn test_clean() {
-        let mut fv = FieldValue::new(CType::LwwRegister, NormalValue::Int(42));
+        let mut fv = FieldValue::new_lww(NormalValue::Int(42));
         assert!(fv.is_dirty());
         fv.clean();
         assert!(!fv.is_dirty());
@@ -263,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_value_mut_marks_dirty() {
-        let mut fv = FieldValue::new_clean(CType::LwwRegister, NormalValue::Int(42));
+        let mut fv = FieldValue::new_clean_lww(NormalValue::Int(42));
         assert!(!fv.is_dirty());
         let _ = fv.value_mut();
         assert!(fv.is_dirty());
@@ -271,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_set_value_marks_dirty() {
-        let mut fv = FieldValue::new_clean(CType::LwwRegister, NormalValue::Int(42));
+        let mut fv = FieldValue::new_clean_lww(NormalValue::Int(42));
         assert!(!fv.is_dirty());
         fv.set_value(NormalValue::Int(100));
         assert!(fv.is_dirty());
@@ -280,19 +296,19 @@ mod tests {
 
     #[test]
     fn test_crdt_type() {
-        let fv = FieldValue::new(CType::PnCounter, NormalValue::Int(0));
+        let fv = FieldValue::new(CType::PnCounter, NormalValue::Int(0)).unwrap();
         assert_eq!(fv.crdt_type(), CType::PnCounter);
     }
 
     #[test]
     fn test_is_document() {
-        let fv = FieldValue::new(CType::LwwRegister, NormalValue::Int(42));
+        let fv = FieldValue::new_lww(NormalValue::Int(42));
         assert!(!fv.is_document());
     }
 
     #[test]
     fn test_cbor_roundtrip() {
-        let fv = FieldValue::new(CType::LwwRegister, NormalValue::String("hello".into()));
+        let fv = FieldValue::new_lww(NormalValue::String("hello".into()));
         let bytes = fv.to_cbor().unwrap();
         let decoded = FieldValue::from_cbor(CType::LwwRegister, &bytes).unwrap();
         assert_eq!(fv.value(), decoded.value());
@@ -301,8 +317,8 @@ mod tests {
 
     #[test]
     fn test_equality_ignores_dirty() {
-        let fv1 = FieldValue::new(CType::LwwRegister, NormalValue::Int(42));
-        let fv2 = FieldValue::new_clean(CType::LwwRegister, NormalValue::Int(42));
+        let fv1 = FieldValue::new_lww(NormalValue::Int(42));
+        let fv2 = FieldValue::new_clean_lww(NormalValue::Int(42));
         assert_eq!(fv1, fv2); // dirty flag should not affect equality
     }
 
@@ -317,21 +333,20 @@ mod tests {
     // === Validation tests ===
 
     #[test]
-    fn test_new_validated_counter_with_int() {
-        let fv = FieldValue::new_validated(CType::PnCounter, NormalValue::Int(42));
+    fn test_new_counter_with_int() {
+        let fv = FieldValue::new(CType::PnCounter, NormalValue::Int(42));
         assert!(fv.is_ok());
     }
 
     #[test]
-    fn test_new_validated_counter_with_float() {
-        let fv = FieldValue::new_validated(CType::PnCounter, NormalValue::Float64(3.14));
+    fn test_new_counter_with_float() {
+        let fv = FieldValue::new(CType::PnCounter, NormalValue::Float64(3.14));
         assert!(fv.is_ok());
     }
 
     #[test]
-    fn test_new_validated_counter_with_string_fails() {
-        let result =
-            FieldValue::new_validated(CType::PnCounter, NormalValue::String("hello".into()));
+    fn test_new_counter_with_string_fails() {
+        let result = FieldValue::new(CType::PnCounter, NormalValue::String("hello".into()));
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -340,33 +355,30 @@ mod tests {
     }
 
     #[test]
-    fn test_new_validated_counter_with_null_ok() {
+    fn test_new_counter_with_null_ok() {
         // Null is allowed for counters (represents unset)
-        let fv = FieldValue::new_validated(CType::PnCounter, NormalValue::Null);
+        let fv = FieldValue::new(CType::PnCounter, NormalValue::Null);
         assert!(fv.is_ok());
     }
 
     #[test]
-    fn test_new_validated_lww_accepts_any() {
+    fn test_new_lww_accepts_any() {
         // LWW Register accepts any value type
-        assert!(FieldValue::new_validated(CType::LwwRegister, NormalValue::Int(42)).is_ok());
-        assert!(
-            FieldValue::new_validated(CType::LwwRegister, NormalValue::String("hello".into()))
-                .is_ok()
-        );
-        assert!(FieldValue::new_validated(CType::LwwRegister, NormalValue::Bool(true)).is_ok());
+        assert!(FieldValue::new(CType::LwwRegister, NormalValue::Int(42)).is_ok());
+        assert!(FieldValue::new(CType::LwwRegister, NormalValue::String("hello".into())).is_ok());
+        assert!(FieldValue::new(CType::LwwRegister, NormalValue::Bool(true)).is_ok());
     }
 
     #[test]
     fn test_set_crdt_type_validated_fails_incompatible() {
-        let mut fv = FieldValue::new(CType::LwwRegister, NormalValue::String("hello".into()));
+        let mut fv = FieldValue::new_lww(NormalValue::String("hello".into()));
         let result = fv.set_crdt_type_validated(CType::PnCounter);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_set_crdt_type_validated_succeeds_compatible() {
-        let mut fv = FieldValue::new(CType::LwwRegister, NormalValue::Int(42));
+        let mut fv = FieldValue::new_lww(NormalValue::Int(42));
         let result = fv.set_crdt_type_validated(CType::PnCounter);
         assert!(result.is_ok());
         assert_eq!(fv.crdt_type(), CType::PnCounter);

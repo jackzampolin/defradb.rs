@@ -25,7 +25,8 @@ const SHA2_256_CODE: u64 = 0x12;
 const RAW_CODEC: u64 = 0x55;
 
 use crate::encoding::{
-    canonical_cbor_key_order, json_to_normal_value, normal_value_to_cbor, normal_value_to_json,
+    canonical_cbor_key_order, cbor_to_normal_value, json_to_normal_value, normal_value_to_cbor,
+    normal_value_to_json,
 };
 use crate::error::{Error, Result};
 use crate::field::special::DOC_ID;
@@ -132,10 +133,9 @@ impl Document {
         // Convert remaining fields
         for (key, value) in map {
             let normal_value = json_to_normal_value(value)?;
-            let field = Field::lww(&key);
+            let field = Field::lww(&key)?;
             doc.fields.insert(key.clone(), field);
-            doc.values
-                .insert(key, FieldValue::new(CType::LwwRegister, normal_value));
+            doc.values.insert(key, FieldValue::new_lww(normal_value));
         }
 
         // Generate DocID if not provided
@@ -218,37 +218,40 @@ impl Document {
         // Create or update the field
         if !self.fields.contains_key(&field_name) {
             self.fields
-                .insert(field_name.clone(), Field::lww(&field_name));
+                .insert(field_name.clone(), Field::lww_unchecked(&field_name));
         }
 
         // Set the value
         if let Some(fv) = self.values.get_mut(&field_name) {
             fv.set_value(normal_value);
         } else {
-            self.values.insert(
-                field_name,
-                FieldValue::new(CType::LwwRegister, normal_value),
-            );
+            self.values
+                .insert(field_name, FieldValue::new_lww(normal_value));
         }
 
         self.is_dirty = true;
     }
 
     /// Set a field value with a specific CRDT type.
+    ///
+    /// Returns an error if:
+    /// - The field name is empty
+    /// - The value type is incompatible with the CRDT type
     pub fn set_with_crdt(
         &mut self,
         field: impl Into<String>,
         crdt_type: CType,
         value: impl Into<NormalValue>,
-    ) {
+    ) -> Result<()> {
         let field_name = field.into();
         let normal_value = value.into();
 
-        self.fields
-            .insert(field_name.clone(), Field::new(&field_name, crdt_type));
-        self.values
-            .insert(field_name, FieldValue::new(crdt_type, normal_value));
+        let field_def = Field::new(&field_name, crdt_type)?;
+        let field_value = FieldValue::new(crdt_type, normal_value)?;
+        self.fields.insert(field_name.clone(), field_def);
+        self.values.insert(field_name, field_value);
         self.is_dirty = true;
+        Ok(())
     }
 
     /// Remove a field from the document.
@@ -308,7 +311,7 @@ impl Document {
     /// Encode the document to CBOR bytes.
     ///
     /// This encodes only the values, not the metadata (id, head, dirty flag).
-    /// Uses canonical CBOR ordering (RFC 8949, previously RFC 7049 Section 3.9) for Go compatibility:
+    /// Uses canonical CBOR ordering (RFC 7049 Section 3.9) for Go compatibility:
     /// - Keys sorted by length first (shorter keys first)
     /// - Then lexicographically (bytewise) within same length
     pub fn to_cbor(&self) -> Result<Vec<u8>> {
@@ -321,7 +324,12 @@ impl Document {
             Vec::with_capacity(keys.len());
         for k in keys {
             let key = ciborium::Value::Text(k.to_string());
-            let value = normal_value_to_cbor(self.values.get(k).unwrap().value())?;
+            let value = normal_value_to_cbor(
+                self.values
+                    .get(k)
+                    .ok_or_else(|| Error::FieldNotFound(k.to_string()))?
+                    .value(),
+            )?;
             map_entries.push((key, value));
         }
 
@@ -330,6 +338,39 @@ impl Document {
         let mut buf = Vec::new();
         ciborium::into_writer(&cbor_map, &mut buf).map_err(|e| Error::CborEncode(e.to_string()))?;
         Ok(buf)
+    }
+
+    /// Decode a document from CBOR bytes.
+    ///
+    /// This decodes only the values. The document will have no ID, head, or collection set.
+    /// The document is marked as clean (not dirty) since it was loaded from storage.
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self> {
+        let cbor_map: ciborium::Value =
+            ciborium::from_reader(bytes).map_err(|e| Error::CborDecode(e.to_string()))?;
+
+        let map = match cbor_map {
+            ciborium::Value::Map(m) => m,
+            _ => return Err(Error::CborDecode("expected CBOR map".into())),
+        };
+
+        let mut doc = Document::new();
+        doc.is_dirty = false; // Loaded from storage, not dirty
+
+        for (k, v) in map {
+            let key = match k {
+                ciborium::Value::Text(s) => s,
+                _ => return Err(Error::CborDecode("map key must be text".into())),
+            };
+
+            let normal_value = cbor_to_normal_value(v)?;
+            // Data from storage was previously validated
+            let field = Field::lww_unchecked(&key);
+            doc.fields.insert(key.clone(), field);
+            doc.values
+                .insert(key, FieldValue::new_clean_lww(normal_value));
+        }
+
+        Ok(doc)
     }
 
     /// Generate the document ID from its content.
@@ -560,6 +601,43 @@ mod tests {
     }
 
     #[test]
+    fn test_doc_id_field_order_independence() {
+        // Verify that documents with same content but different field insertion order
+        // produce the same DocID (canonical CBOR ordering ensures this)
+        let mut doc1 = Document::new();
+        doc1.set("a", "first");
+        doc1.set("b", "second");
+        doc1.set("c", "third");
+
+        let mut doc2 = Document::new();
+        doc2.set("c", "third"); // Different insertion order
+        doc2.set("a", "first");
+        doc2.set("b", "second");
+
+        let mut doc3 = Document::new();
+        doc3.set("b", "second"); // Another order
+        doc3.set("c", "third");
+        doc3.set("a", "first");
+
+        let id1 = doc1.generate_doc_id().unwrap();
+        let id2 = doc2.generate_doc_id().unwrap();
+        let id3 = doc3.generate_doc_id().unwrap();
+
+        assert_eq!(
+            id1, id2,
+            "DocID should be same regardless of field insertion order"
+        );
+        assert_eq!(
+            id2, id3,
+            "DocID should be same regardless of field insertion order"
+        );
+
+        // Also verify CBOR encoding is identical
+        assert_eq!(doc1.to_cbor().unwrap(), doc2.to_cbor().unwrap());
+        assert_eq!(doc2.to_cbor().unwrap(), doc3.to_cbor().unwrap());
+    }
+
+    #[test]
     fn test_cbor_encoding() {
         let mut doc = Document::new();
         doc.set("name", "Test");
@@ -572,11 +650,95 @@ mod tests {
         let cbor2 = doc.to_cbor().unwrap();
         assert_eq!(cbor, cbor2);
 
-        // Verify canonical CBOR ordering: shorter keys first
-        // "count" (5 chars) should come before "name" (4 chars)? No wait...
-        // "name" (4 chars) should come before "count" (5 chars)
         // First byte should be 0xa2 (map with 2 entries)
         assert_eq!(cbor[0], 0xa2, "CBOR should start with map marker");
+    }
+
+    #[test]
+    fn test_cbor_roundtrip() {
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.set("age", 30i64);
+        doc.set("active", true);
+        doc.set("score", 95.5);
+
+        let cbor = doc.to_cbor().unwrap();
+        let decoded = Document::from_cbor(&cbor).unwrap();
+
+        assert_eq!(
+            doc.get("name").and_then(|v| v.as_str()),
+            decoded.get("name").and_then(|v| v.as_str())
+        );
+        assert_eq!(
+            doc.get("age").and_then(|v| v.as_int()),
+            decoded.get("age").and_then(|v| v.as_int())
+        );
+        assert_eq!(
+            doc.get("active").and_then(|v| v.as_bool()),
+            decoded.get("active").and_then(|v| v.as_bool())
+        );
+        assert_eq!(
+            doc.get("score").and_then(|v| v.as_float64()),
+            decoded.get("score").and_then(|v| v.as_float64())
+        );
+
+        // Decoded document should not be dirty (loaded from storage)
+        assert!(!decoded.is_dirty());
+    }
+
+    #[test]
+    fn test_cbor_roundtrip_empty_doc() {
+        let doc = Document::new();
+        let cbor = doc.to_cbor().unwrap();
+        let decoded = Document::from_cbor(&cbor).unwrap();
+
+        assert!(decoded.is_empty());
+        assert!(!decoded.is_dirty());
+    }
+
+    #[test]
+    fn test_cbor_roundtrip_arrays() {
+        let mut doc = Document::new();
+        doc.set("ints", NormalValue::IntArray(vec![1, 2, 3]));
+        doc.set(
+            "strings",
+            NormalValue::StringArray(vec!["a".into(), "b".into()]),
+        );
+        doc.set("bools", NormalValue::BoolArray(vec![true, false]));
+
+        let cbor = doc.to_cbor().unwrap();
+        let decoded = Document::from_cbor(&cbor).unwrap();
+
+        assert!(decoded.get("ints").unwrap().is_array());
+        assert!(decoded.get("strings").unwrap().is_array());
+        assert!(decoded.get("bools").unwrap().is_array());
+    }
+
+    #[test]
+    fn test_from_cbor_invalid_bytes() {
+        let result = Document::from_cbor(&[0xff, 0xfe, 0xfd]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_cbor_not_a_map() {
+        // CBOR integer instead of map
+        let result = Document::from_cbor(&[0x18, 0x2a]); // Integer 42
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::CborDecode(_)));
+    }
+
+    #[test]
+    fn test_cbor_roundtrip_go_simple_doc() {
+        // Decode Go's CBOR and verify we can read it
+        let decoded = Document::from_cbor(&[
+            0xa2, 0x63, 0x41, 0x67, 0x65, 0x18, 0x1a, 0x64, 0x4e, 0x61, 0x6d, 0x65, 0x64, 0x4a,
+            0x6f, 0x68, 0x6e,
+        ])
+        .unwrap();
+
+        assert_eq!(decoded.get("Name").and_then(|v| v.as_str()), Some("John"));
+        assert_eq!(decoded.get("Age").and_then(|v| v.as_int()), Some(26));
     }
 
     #[test]

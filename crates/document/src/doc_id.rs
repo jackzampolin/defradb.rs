@@ -150,10 +150,11 @@ impl DocID {
 
 impl std::fmt::Display for DocID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Encode version as base32
-        let mut version_buf = [0u8; 1];
+        // Use dynamic buffer sizing based on actual varint requirements
+        let size = varint_size(self.version as u64);
+        let mut version_buf = vec![0u8; size];
         write_uvarint_to_slice(&mut version_buf, self.version as u64);
-        let version_str = multibase::encode(multibase::Base::Base32Lower, version_buf);
+        let version_str = multibase::encode(multibase::Base::Base32Lower, &version_buf);
 
         write!(f, "{}-{}", version_str, self.uuid)
     }
@@ -199,6 +200,12 @@ fn write_uvarint(buf: &mut Vec<u8>, mut x: u64) {
 }
 
 fn write_uvarint_to_slice(buf: &mut [u8], mut x: u64) -> usize {
+    debug_assert!(
+        buf.len() >= varint_size(x),
+        "buffer too small for varint: need {} bytes, got {}",
+        varint_size(x),
+        buf.len()
+    );
     let mut i = 0;
     while x >= 0x80 && i < buf.len() {
         buf[i] = (x as u8) | 0x80;

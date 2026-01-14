@@ -194,7 +194,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::String(s) => Ok(ciborium::Value::Text(s.clone())),
         NormalValue::Bytes(b) => Ok(ciborium::Value::Bytes(b.clone())),
         NormalValue::Time(t) => Ok(ciborium::Value::Text(t.to_rfc3339())),
-        NormalValue::Json(v) => Ok(json_to_cbor_value(v)),
+        NormalValue::Json(v) => json_to_cbor_value(v),
         NormalValue::IntArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
                 .map(|i| ciborium::Value::Integer((*i).into()))
@@ -216,9 +216,11 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
                 .map(|f| ciborium::Value::Float(*f as f64))
                 .collect(),
         )),
-        NormalValue::JsonArray(arr) => Ok(ciborium::Value::Array(
-            arr.iter().map(json_to_cbor_value).collect(),
-        )),
+        NormalValue::JsonArray(arr) => {
+            let cbor_values: Result<Vec<ciborium::Value>> =
+                arr.iter().map(json_to_cbor_value).collect();
+            Ok(ciborium::Value::Array(cbor_values?))
+        }
         // Nillable variants - encode as value or null
         NormalValue::NillableBool(opt) => Ok(opt
             .map(ciborium::Value::Bool)
@@ -433,30 +435,33 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
 }
 
 /// Convert a JSON value to a ciborium::Value.
-fn json_to_cbor_value(value: &serde_json::Value) -> ciborium::Value {
+fn json_to_cbor_value(value: &serde_json::Value) -> Result<ciborium::Value> {
     match value {
-        serde_json::Value::Null => ciborium::Value::Null,
-        serde_json::Value::Bool(b) => ciborium::Value::Bool(*b),
+        serde_json::Value::Null => Ok(ciborium::Value::Null),
+        serde_json::Value::Bool(b) => Ok(ciborium::Value::Bool(*b)),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                ciborium::Value::Integer(i.into())
+                Ok(ciborium::Value::Integer(i.into()))
             } else if let Some(f) = n.as_f64() {
-                ciborium::Value::Float(f)
+                Ok(ciborium::Value::Float(f))
             } else {
-                // This should rarely happen, but preserve as text if it does
-                ciborium::Value::Text(n.to_string())
+                Err(Error::JsonNumberOutOfRange(n.to_string()))
             }
         }
-        serde_json::Value::String(s) => ciborium::Value::Text(s.clone()),
+        serde_json::Value::String(s) => Ok(ciborium::Value::Text(s.clone())),
         serde_json::Value::Array(arr) => {
-            ciborium::Value::Array(arr.iter().map(json_to_cbor_value).collect())
+            let mut result = Vec::with_capacity(arr.len());
+            for v in arr {
+                result.push(json_to_cbor_value(v)?);
+            }
+            Ok(ciborium::Value::Array(result))
         }
         serde_json::Value::Object(obj) => {
-            let entries: Vec<(ciborium::Value, ciborium::Value)> = obj
-                .iter()
-                .map(|(k, v)| (ciborium::Value::Text(k.clone()), json_to_cbor_value(v)))
-                .collect();
-            ciborium::Value::Map(entries)
+            let mut entries = Vec::with_capacity(obj.len());
+            for (k, v) in obj {
+                entries.push((ciborium::Value::Text(k.clone()), json_to_cbor_value(v)?));
+            }
+            Ok(ciborium::Value::Map(entries))
         }
     }
 }
@@ -469,6 +474,197 @@ pub fn canonical_cbor_key_order(a: &&str, b: &&str) -> std::cmp::Ordering {
     match a.len().cmp(&b.len()) {
         std::cmp::Ordering::Equal => a.cmp(b),
         other => other,
+    }
+}
+
+/// Convert a ciborium::Value to a NormalValue.
+///
+/// This is used for decoding CBOR bytes back into document values.
+pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
+    match value {
+        ciborium::Value::Null => Ok(NormalValue::Null),
+        ciborium::Value::Bool(b) => Ok(NormalValue::Bool(b)),
+        ciborium::Value::Integer(i) => {
+            let val: i128 = i.into();
+            if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
+                Ok(NormalValue::Int(val as i64))
+            } else {
+                Err(Error::CborDecode(format!(
+                    "integer out of i64 range: {}",
+                    val
+                )))
+            }
+        }
+        ciborium::Value::Float(f) => Ok(NormalValue::Float64(f)),
+        ciborium::Value::Text(s) => Ok(NormalValue::String(s)),
+        ciborium::Value::Bytes(b) => Ok(NormalValue::Bytes(b)),
+        ciborium::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Ok(NormalValue::JsonArray(vec![]));
+            }
+            // Try to infer array type from first element
+            match &arr[0] {
+                ciborium::Value::Bool(_) => {
+                    let mut bools = Vec::with_capacity(arr.len());
+                    for v in arr {
+                        match v {
+                            ciborium::Value::Bool(b) => bools.push(b),
+                            _ => {
+                                return cbor_array_to_json_array(
+                                    std::iter::once(ciborium::Value::Bool(bools.pop().unwrap()))
+                                        .chain(std::iter::once(v))
+                                        .chain(std::iter::empty()),
+                                )
+                            }
+                        }
+                    }
+                    Ok(NormalValue::BoolArray(bools))
+                }
+                ciborium::Value::Integer(_) => {
+                    let mut ints = Vec::with_capacity(arr.len());
+                    for v in arr {
+                        match v {
+                            ciborium::Value::Integer(i) => {
+                                let val: i128 = i.into();
+                                if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
+                                    ints.push(val as i64);
+                                } else {
+                                    return Err(Error::CborDecode(format!(
+                                        "integer out of i64 range: {}",
+                                        val
+                                    )));
+                                }
+                            }
+                            _ => {
+                                // Mixed types - convert to JSON array
+                                let mut json_arr = Vec::with_capacity(ints.len() + 1);
+                                for i in ints {
+                                    json_arr.push(serde_json::json!(i));
+                                }
+                                json_arr.push(cbor_value_to_json(&v)?);
+                                return Ok(NormalValue::JsonArray(json_arr));
+                            }
+                        }
+                    }
+                    Ok(NormalValue::IntArray(ints))
+                }
+                ciborium::Value::Float(_) => {
+                    let mut floats = Vec::with_capacity(arr.len());
+                    for v in arr {
+                        match v {
+                            ciborium::Value::Float(f) => floats.push(f),
+                            _ => {
+                                let mut json_arr = Vec::with_capacity(floats.len() + 1);
+                                for f in floats {
+                                    json_arr.push(serde_json::json!(f));
+                                }
+                                json_arr.push(cbor_value_to_json(&v)?);
+                                return Ok(NormalValue::JsonArray(json_arr));
+                            }
+                        }
+                    }
+                    Ok(NormalValue::Float64Array(floats))
+                }
+                ciborium::Value::Text(_) => {
+                    let mut strings = Vec::with_capacity(arr.len());
+                    for v in arr {
+                        match v {
+                            ciborium::Value::Text(s) => strings.push(s),
+                            _ => {
+                                let mut json_arr = Vec::with_capacity(strings.len() + 1);
+                                for s in strings {
+                                    json_arr.push(serde_json::json!(s));
+                                }
+                                json_arr.push(cbor_value_to_json(&v)?);
+                                return Ok(NormalValue::JsonArray(json_arr));
+                            }
+                        }
+                    }
+                    Ok(NormalValue::StringArray(strings))
+                }
+                _ => {
+                    // Complex array - convert to JSON array
+                    let mut json_arr = Vec::with_capacity(arr.len());
+                    for v in arr {
+                        json_arr.push(cbor_value_to_json(&v)?);
+                    }
+                    Ok(NormalValue::JsonArray(json_arr))
+                }
+            }
+        }
+        ciborium::Value::Map(map) => {
+            // Convert map to JSON object
+            let mut json_obj = serde_json::Map::new();
+            for (k, v) in map {
+                let key = match k {
+                    ciborium::Value::Text(s) => s,
+                    _ => return Err(Error::CborDecode("map key must be text".into())),
+                };
+                json_obj.insert(key, cbor_value_to_json(&v)?);
+            }
+            Ok(NormalValue::Json(serde_json::Value::Object(json_obj)))
+        }
+        ciborium::Value::Tag(_, _) => Err(Error::CborDecode("CBOR tags not supported".into())),
+        _ => Err(Error::CborDecode("unsupported CBOR value type".into())),
+    }
+}
+
+/// Helper to convert CBOR array to JSON array when types are mixed.
+fn cbor_array_to_json_array<I: Iterator<Item = ciborium::Value>>(iter: I) -> Result<NormalValue> {
+    let mut json_arr = Vec::new();
+    for v in iter {
+        json_arr.push(cbor_value_to_json(&v)?);
+    }
+    Ok(NormalValue::JsonArray(json_arr))
+}
+
+/// Convert a ciborium::Value to a serde_json::Value.
+fn cbor_value_to_json(value: &ciborium::Value) -> Result<serde_json::Value> {
+    match value {
+        ciborium::Value::Null => Ok(serde_json::Value::Null),
+        ciborium::Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+        ciborium::Value::Integer(i) => {
+            let val: i128 = (*i).into();
+            if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
+                Ok(serde_json::json!(val as i64))
+            } else {
+                Err(Error::CborDecode(format!(
+                    "integer out of i64 range: {}",
+                    val
+                )))
+            }
+        }
+        ciborium::Value::Float(f) => {
+            if f.is_finite() {
+                Ok(serde_json::json!(f))
+            } else {
+                // NaN/Infinity can't be represented in JSON
+                Err(Error::NonFiniteFloat(format!("{}", f)))
+            }
+        }
+        ciborium::Value::Text(s) => Ok(serde_json::Value::String(s.clone())),
+        ciborium::Value::Bytes(b) => Ok(serde_json::Value::String(base64_encode(b))),
+        ciborium::Value::Array(arr) => {
+            let mut json_arr = Vec::with_capacity(arr.len());
+            for v in arr {
+                json_arr.push(cbor_value_to_json(v)?);
+            }
+            Ok(serde_json::Value::Array(json_arr))
+        }
+        ciborium::Value::Map(map) => {
+            let mut json_obj = serde_json::Map::new();
+            for (k, v) in map {
+                let key = match k {
+                    ciborium::Value::Text(s) => s.clone(),
+                    _ => return Err(Error::CborDecode("map key must be text".into())),
+                };
+                json_obj.insert(key, cbor_value_to_json(v)?);
+            }
+            Ok(serde_json::Value::Object(json_obj))
+        }
+        _ => Err(Error::CborDecode(
+            "unsupported CBOR value type for JSON conversion".into(),
+        )),
     }
 }
 
@@ -559,10 +755,10 @@ mod tests {
     }
 
     #[test]
-    fn test_json_to_cbor_preserves_large_numbers() {
-        // Numbers that can't fit in i64 should be preserved as text
+    fn test_json_to_cbor_valid_numbers() {
+        // Valid numbers should convert correctly
         let json_val = serde_json::json!({"key": 123});
-        let cbor = json_to_cbor_value(&json_val);
+        let cbor = json_to_cbor_value(&json_val).unwrap();
         assert!(matches!(cbor, ciborium::Value::Map(_)));
     }
 

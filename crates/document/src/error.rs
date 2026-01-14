@@ -27,6 +27,9 @@ pub enum Error {
     #[error("field not found: {0}")]
     FieldNotFound(String),
 
+    #[error("field name cannot be empty")]
+    EmptyFieldName,
+
     #[error("type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: String, actual: String },
 
