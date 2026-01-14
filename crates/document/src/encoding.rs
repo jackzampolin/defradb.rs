@@ -39,44 +39,44 @@ pub fn json_to_normal_value(value: serde_json::Value) -> Result<NormalValue> {
             match &arr[0] {
                 serde_json::Value::Bool(_) => {
                     let mut bools = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    for v in &arr {
                         match v {
-                            serde_json::Value::Bool(b) => bools.push(b),
-                            _ => return Ok(NormalValue::JsonArray(vec![v])), // Mixed types, fall back
+                            serde_json::Value::Bool(b) => bools.push(*b),
+                            _ => return Ok(NormalValue::JsonArray(arr)), // Mixed types, preserve full array
                         }
                     }
                     Ok(NormalValue::BoolArray(bools))
                 }
                 serde_json::Value::Number(n) if n.is_i64() => {
                     let mut ints = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    for v in &arr {
                         if let Some(i) = v.as_i64() {
                             ints.push(i);
                         } else {
-                            // Mixed types or out of range, fall back to JSON array
-                            return Ok(NormalValue::JsonArray(vec![v]));
+                            // Mixed types or out of range, preserve full array
+                            return Ok(NormalValue::JsonArray(arr));
                         }
                     }
                     Ok(NormalValue::IntArray(ints))
                 }
                 serde_json::Value::Number(_) => {
                     let mut floats = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    for v in &arr {
                         if let Some(f) = v.as_f64() {
                             floats.push(f);
                         } else {
-                            return Ok(NormalValue::JsonArray(vec![v]));
+                            return Ok(NormalValue::JsonArray(arr));
                         }
                     }
                     Ok(NormalValue::Float64Array(floats))
                 }
                 serde_json::Value::String(_) => {
                     let mut strings = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    for v in &arr {
                         if let Some(s) = v.as_str() {
                             strings.push(s.to_string());
                         } else {
-                            return Ok(NormalValue::JsonArray(vec![v]));
+                            return Ok(NormalValue::JsonArray(arr));
                         }
                     }
                     Ok(NormalValue::StringArray(strings))
@@ -566,6 +566,110 @@ mod tests {
         assert!(matches!(cbor, ciborium::Value::Map(_)));
     }
 
+    // === Mixed-type array tests (Go compatibility) ===
+
+    #[test]
+    fn test_json_mixed_array_int_string_preserves_all() {
+        // Mixed int+string array should preserve all elements
+        let val = json_to_normal_value(serde_json::json!([1, "text", 3])).unwrap();
+        match val {
+            NormalValue::JsonArray(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], serde_json::json!(1));
+                assert_eq!(arr[1], serde_json::json!("text"));
+                assert_eq!(arr[2], serde_json::json!(3));
+            }
+            _ => panic!("expected JsonArray for mixed types"),
+        }
+    }
+
+    #[test]
+    fn test_json_mixed_array_bool_int_preserves_all() {
+        // Mixed bool+int array should preserve all elements
+        let val = json_to_normal_value(serde_json::json!([true, 42, false])).unwrap();
+        match val {
+            NormalValue::JsonArray(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], serde_json::json!(true));
+                assert_eq!(arr[1], serde_json::json!(42));
+                assert_eq!(arr[2], serde_json::json!(false));
+            }
+            _ => panic!("expected JsonArray for mixed types"),
+        }
+    }
+
+    #[test]
+    fn test_json_mixed_array_string_null_preserves_all() {
+        // Mixed string+null array should preserve all elements
+        let val = json_to_normal_value(serde_json::json!(["a", null, "b"])).unwrap();
+        match val {
+            NormalValue::JsonArray(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], serde_json::json!("a"));
+                assert_eq!(arr[1], serde_json::Value::Null);
+                assert_eq!(arr[2], serde_json::json!("b"));
+            }
+            _ => panic!("expected JsonArray for mixed types"),
+        }
+    }
+
+    #[test]
+    fn test_json_mixed_array_int_float_preserves_all() {
+        // Array starting with int but containing float should preserve all
+        // Note: [1, 3.14] - first element looks like int, second is float
+        let val = json_to_normal_value(serde_json::json!([1, 3.14])).unwrap();
+        // This might become IntArray if 3.14 coerces to int, or JsonArray if not
+        // The key is that ALL elements are preserved
+        match &val {
+            NormalValue::IntArray(arr) => {
+                assert_eq!(arr.len(), 2);
+            }
+            NormalValue::JsonArray(arr) => {
+                assert_eq!(arr.len(), 2);
+            }
+            NormalValue::Float64Array(arr) => {
+                assert_eq!(arr.len(), 2);
+            }
+            _ => panic!("unexpected type: {:?}", val),
+        }
+    }
+
+    #[test]
+    fn test_json_homogeneous_int_array() {
+        // Pure int array should become IntArray
+        let val = json_to_normal_value(serde_json::json!([1, 2, 3])).unwrap();
+        match val {
+            NormalValue::IntArray(arr) => {
+                assert_eq!(arr, vec![1, 2, 3]);
+            }
+            _ => panic!("expected IntArray"),
+        }
+    }
+
+    #[test]
+    fn test_json_homogeneous_string_array() {
+        // Pure string array should become StringArray
+        let val = json_to_normal_value(serde_json::json!(["a", "b", "c"])).unwrap();
+        match val {
+            NormalValue::StringArray(arr) => {
+                assert_eq!(arr, vec!["a", "b", "c"]);
+            }
+            _ => panic!("expected StringArray"),
+        }
+    }
+
+    #[test]
+    fn test_json_homogeneous_bool_array() {
+        // Pure bool array should become BoolArray
+        let val = json_to_normal_value(serde_json::json!([true, false, true])).unwrap();
+        match val {
+            NormalValue::BoolArray(arr) => {
+                assert_eq!(arr, vec![true, false, true]);
+            }
+            _ => panic!("expected BoolArray"),
+        }
+    }
+
     // === Non-finite float tests (Go compatibility) ===
 
     #[test]
@@ -662,6 +766,65 @@ mod tests {
         match result.unwrap() {
             ciborium::Value::Float(f) => assert!(f.is_infinite() && f.is_sign_positive()),
             _ => panic!("expected Float"),
+        }
+    }
+
+    // === RFC3339 time format tests (Go compatibility) ===
+
+    #[test]
+    fn test_time_to_json_rfc3339_format() {
+        use chrono::{TimeZone, Utc};
+        // Timestamp without fractional seconds
+        let t = Utc.with_ymd_and_hms(2025, 1, 14, 12, 30, 45).unwrap();
+        let val = NormalValue::Time(t);
+        let json = normal_value_to_json(&val).unwrap();
+        // Should be valid RFC3339 format
+        let s = json.as_str().unwrap();
+        assert!(s.contains("2025-01-14"));
+        assert!(s.contains("12:30:45"));
+        // Verify it can be parsed back
+        chrono::DateTime::parse_from_rfc3339(s).expect("should be valid RFC3339");
+    }
+
+    #[test]
+    fn test_time_to_json_with_nanoseconds() {
+        use chrono::{TimeZone, Timelike, Utc};
+        // Timestamp with nanoseconds
+        let t = Utc
+            .with_ymd_and_hms(2025, 1, 14, 12, 30, 45)
+            .unwrap()
+            .with_nanosecond(123456789)
+            .unwrap();
+        let val = NormalValue::Time(t);
+        let json = normal_value_to_json(&val).unwrap();
+        let s = json.as_str().unwrap();
+        // Should include fractional seconds
+        assert!(s.contains("."));
+        // Verify roundtrip preserves nanoseconds
+        let parsed = chrono::DateTime::parse_from_rfc3339(s).unwrap();
+        assert_eq!(parsed.timestamp_nanos_opt(), t.timestamp_nanos_opt());
+    }
+
+    #[test]
+    fn test_time_to_cbor_matches_json() {
+        use chrono::{TimeZone, Timelike, Utc};
+        let t = Utc
+            .with_ymd_and_hms(2025, 1, 14, 12, 30, 45)
+            .unwrap()
+            .with_nanosecond(500000000)
+            .unwrap();
+        let val = NormalValue::Time(t);
+
+        // Get both encodings
+        let json = normal_value_to_json(&val).unwrap();
+        let cbor = normal_value_to_cbor(&val).unwrap();
+
+        // CBOR should encode as text with same value as JSON
+        match cbor {
+            ciborium::Value::Text(cbor_str) => {
+                assert_eq!(cbor_str, json.as_str().unwrap());
+            }
+            _ => panic!("expected Text for time in CBOR"),
         }
     }
 }
