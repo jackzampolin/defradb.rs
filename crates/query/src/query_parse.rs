@@ -11,8 +11,9 @@ use std::collections::{BTreeMap, HashMap};
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{
-    parse_mutation_name, Field as SelectField, Filter, GroupBy, Limit, Mutation, MutationType,
-    OrderBy, OrderCondition, OrderDirection, Requestable, Select,
+    parse_mutation_name, Aggregate, AggregateTarget, AggregateType, Field as SelectField, Filter,
+    GroupBy, Limit, Mutation, MutationType, OrderBy, OrderCondition, OrderDirection, Requestable,
+    Select,
 };
 
 /// Result of parsing a GraphQL request.
@@ -204,8 +205,22 @@ fn parse_selection_set(
                 let field_name = field.name.clone();
                 let alias = field.alias.clone();
 
-                // Check if this is a nested selection (relation)
-                if !field.selection_set.items.is_empty() {
+                // Check if this is an aggregate field (_count, _sum, _avg, _min, _max)
+                if let Some(agg_type) = AggregateType::parse(&field_name) {
+                    let mut aggregate = parse_aggregate_field(field, agg_type)?;
+
+                    // Set alias if provided
+                    if let Some(ref a) = alias {
+                        aggregate = aggregate.with_alias(a.clone());
+                    }
+
+                    // Add to document mapping
+                    let index = mapping.next_index();
+                    mapping.add(index, agg_type.as_str());
+                    mapping.add_render_key(index, aggregate.output_name());
+
+                    fields.push(Requestable::Aggregate(aggregate));
+                } else if !field.selection_set.items.is_empty() {
                     // This is a nested select (relation)
                     let nested = parse_field_to_select(field)?;
                     fields.push(Requestable::Select(Box::new(nested)));
@@ -343,6 +358,67 @@ fn parse_group_by_value(value: &Value<'_, String>) -> Result<GroupBy> {
         }
         _ => Err(QueryError::parse("groupBy must be a list")),
     }
+}
+
+/// Parse an aggregate field into an Aggregate.
+///
+/// Handles aggregate functions like `_count`, `_sum(field: "age")`, etc.
+fn parse_aggregate_field(field: &Field<'_, String>, agg_type: AggregateType) -> Result<Aggregate> {
+    let mut target_field: Option<String> = None;
+
+    // Parse arguments (e.g., `field: "age"` for _sum)
+    for (arg_name, arg_value) in &field.arguments {
+        match arg_name.as_str() {
+            "field" => {
+                target_field = Some(match arg_value {
+                    Value::String(s) => s.clone(),
+                    Value::Enum(s) => s.clone(),
+                    _ => return Err(QueryError::parse("field argument must be a string")),
+                });
+            }
+            _ => {
+                return Err(QueryError::parse(format!(
+                    "unknown argument '{}' on aggregate '{}'. Valid arguments are: field",
+                    arg_name,
+                    agg_type.as_str()
+                )));
+            }
+        }
+    }
+
+    // Create the appropriate aggregate
+    let aggregate = match agg_type {
+        AggregateType::Count => {
+            // _count can work without a field argument (counts all docs)
+            if let Some(field_name) = target_field {
+                Aggregate::count().with_target(AggregateTarget::with_field("", field_name))
+            } else {
+                Aggregate::count()
+            }
+        }
+        AggregateType::Sum => {
+            let field_name = target_field
+                .ok_or_else(|| QueryError::parse("_sum requires a 'field' argument"))?;
+            Aggregate::sum(AggregateTarget::with_field("", field_name))
+        }
+        AggregateType::Average => {
+            let field_name = target_field
+                .ok_or_else(|| QueryError::parse("_avg requires a 'field' argument"))?;
+            Aggregate::avg(AggregateTarget::with_field("", field_name))
+        }
+        AggregateType::Min => {
+            let field_name = target_field
+                .ok_or_else(|| QueryError::parse("_min requires a 'field' argument"))?;
+            Aggregate::min(AggregateTarget::with_field("", field_name))
+        }
+        AggregateType::Max => {
+            let field_name = target_field
+                .ok_or_else(|| QueryError::parse("_max requires a 'field' argument"))?;
+            Aggregate::max(AggregateTarget::with_field("", field_name))
+        }
+    };
+
+    Ok(aggregate)
 }
 
 /// Parse docIDs argument into vector of strings.

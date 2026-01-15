@@ -153,6 +153,14 @@ pub trait PlanNode: Send + Sync {
 
     /// Get the node type name (for debugging/explain).
     fn kind(&self) -> &'static str;
+
+    /// Get the documents in the current group (for GROUP BY aggregation).
+    ///
+    /// Returns Some(&[Doc]) if this node is a GroupByNode and is positioned on a group,
+    /// None otherwise. Default implementation returns None.
+    fn current_group_docs(&self) -> Option<&[Doc]> {
+        None
+    }
 }
 
 /// Execution statistics for plan nodes
