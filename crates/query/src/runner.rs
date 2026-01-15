@@ -368,14 +368,21 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
                 data: Some(data),
                 errors: vec![],
             },
-            Err(e) => QueryResponse {
-                data: None,
-                errors: vec![QueryResponseError {
-                    message: e.to_string(),
-                    path: None,
-                    locations: None,
-                }],
-            },
+            Err(e) => {
+                tracing::error!(
+                    query = %request.query,
+                    error = %e,
+                    "Query execution failed"
+                );
+                QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: e.to_string(),
+                        path: None,
+                        locations: None,
+                    }],
+                }
+            }
         }
     }
 
@@ -411,14 +418,22 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
                 data: Some(data),
                 errors: vec![],
             },
-            Err(e) => QueryResponse {
-                data: None,
-                errors: vec![QueryResponseError {
-                    message: e.to_string(),
-                    path: None,
-                    locations: None,
-                }],
-            },
+            Err(e) => {
+                tracing::error!(
+                    query = %request.query,
+                    txn_id = %handle,
+                    error = %e,
+                    "Query execution failed in transaction"
+                );
+                QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: e.to_string(),
+                        path: None,
+                        locations: None,
+                    }],
+                }
+            }
         }
     }
 

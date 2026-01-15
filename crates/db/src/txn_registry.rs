@@ -45,10 +45,10 @@ use crate::txn_context::DbTransactionContext;
 /// # Error Handling
 ///
 /// If the internal lock becomes poisoned (due to a panic in another thread),
-/// all operations will fail-fast: `get()` and `get_ctx()` return `None`,
-/// while `begin()`, `commit()`, and `rollback()` return errors. A poisoned
-/// lock indicates a panic and potential data corruption - continuing operation
-/// would be unsafe.
+/// all operations will fail-fast: `get()` returns `LockPoisoned`, `get_ctx()`
+/// returns an error, and `begin()`, `commit()`, and `rollback()` return errors.
+/// A poisoned lock indicates a panic and potential data corruption - continuing
+/// operation would be unsafe.
 pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
     collections: Arc<HashMap<String, Collection>>,

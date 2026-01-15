@@ -81,10 +81,15 @@ impl From<TransactionHandle> for String {
 /// This allows deserializing transaction IDs from HTTP requests.
 /// Note: This does NOT validate that the transaction exists - that's
 /// done when you actually use the handle with `get()`, `commit()`, etc.
+///
+/// Returns an error if the string is empty, since transaction IDs must be non-empty.
 impl std::str::FromStr for TransactionHandle {
-    type Err = std::convert::Infallible;
+    type Err = TransactionError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Err(TransactionError::execution("transaction ID cannot be empty"));
+        }
         Ok(Self(s.to_string()))
     }
 }
@@ -107,9 +112,14 @@ pub trait TransactionContext: Send + Sync {
     ///
     /// Returns `true` if the transaction can still be used for queries.
     /// Returns `false` if the transaction has been consumed via commit/rollback.
+    ///
+    /// # Implementation Note
+    ///
+    /// Concrete implementations SHOULD override this method if they track
+    /// consumption state. The default returns `true`, which is appropriate
+    /// for implementations that don't track state or where checking state
+    /// synchronously isn't feasible (e.g., when state is behind an async mutex).
     fn is_active(&self) -> bool {
-        // Default implementation returns true - concrete implementations
-        // should override if they track consumption state.
         true
     }
 }
@@ -138,11 +148,33 @@ impl std::fmt::Debug for GetTransactionResult {
 }
 
 impl GetTransactionResult {
-    /// Get the transaction context if found.
+    /// Get the transaction context if found, logging an error if lock was poisoned.
+    ///
+    /// This method logs at ERROR level if `LockPoisoned` is encountered, since
+    /// that indicates potential system corruption. Use `into_result()` if you
+    /// need to handle `LockPoisoned` differently.
     pub fn ok(self) -> Option<Arc<dyn TransactionContext>> {
         match self {
             Self::Found(ctx) => Some(ctx),
-            _ => None,
+            Self::NotFound => None,
+            Self::LockPoisoned => {
+                tracing::error!("Transaction registry lock poisoned during lookup - system may be corrupted");
+                None
+            }
+        }
+    }
+
+    /// Convert to a Result, treating NotFound as None and LockPoisoned as an error.
+    ///
+    /// Use this when you need to distinguish between "not found" and "lock poisoned"
+    /// for proper error handling.
+    pub fn into_result(self) -> std::result::Result<Option<Arc<dyn TransactionContext>>, TransactionError> {
+        match self {
+            Self::Found(ctx) => Ok(Some(ctx)),
+            Self::NotFound => Ok(None),
+            Self::LockPoisoned => Err(TransactionError::lock_poisoned(
+                "transaction registry lock poisoned"
+            )),
         }
     }
 
@@ -382,6 +414,45 @@ mod tests {
     fn test_transaction_handle_from_str() {
         let handle: TransactionHandle = "txn-789".parse().unwrap();
         assert_eq!(handle.as_str(), "txn-789");
+    }
+
+    #[test]
+    fn test_transaction_handle_from_str_empty_returns_error() {
+        let result: std::result::Result<TransactionHandle, _> = "".parse();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_get_transaction_result_into_result() {
+        use std::sync::Arc;
+
+        // Test Found case
+        struct MockCtx;
+        impl TransactionContext for MockCtx {
+            fn id(&self) -> &str { "test" }
+            fn is_readonly(&self) -> bool { false }
+            fn doc_fetcher(&self) -> Arc<dyn crate::runner::DocFetcher> {
+                unimplemented!()
+            }
+        }
+
+        let result = GetTransactionResult::Found(Arc::new(MockCtx));
+        let converted = result.into_result();
+        assert!(converted.is_ok());
+        assert!(converted.unwrap().is_some());
+
+        // Test NotFound case
+        let result = GetTransactionResult::NotFound;
+        let converted = result.into_result();
+        assert!(converted.is_ok());
+        assert!(converted.unwrap().is_none());
+
+        // Test LockPoisoned case
+        let result = GetTransactionResult::LockPoisoned;
+        let converted = result.into_result();
+        assert!(converted.is_err());
     }
 
     #[test]
