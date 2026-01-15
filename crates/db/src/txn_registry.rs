@@ -363,7 +363,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         assert!(ctx.is_readonly());
     }
 
@@ -373,7 +373,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(false).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         assert!(!ctx.is_readonly());
     }
 
@@ -383,7 +383,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(false).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         assert_eq!(ctx.id(), txn_id.as_str());
     }
 
@@ -526,7 +526,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let docs = fetcher.get_all("Users").await.unwrap();
@@ -541,7 +541,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher.get_all("NonExistent").await;
@@ -557,7 +557,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
@@ -573,7 +573,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher
@@ -656,7 +656,7 @@ mod tests {
 
         // Read via registry
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let docs = fetcher.get_all("Users").await.unwrap();
@@ -690,7 +690,7 @@ mod tests {
 
         // Query for just one document
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
@@ -776,7 +776,7 @@ mod tests {
 
         // Start a reader transaction FIRST
         let reader_txn_id = registry.begin(true).await.unwrap();
-        let reader_ctx = registry.get(&reader_txn_id).ok().unwrap();
+        let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
         let reader_fetcher = reader_ctx.doc_fetcher();
 
         // Start a writer transaction and write WITHOUT committing
@@ -838,7 +838,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher
@@ -873,7 +873,7 @@ mod tests {
 
         // Query for both
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).ok().unwrap();
+        let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher
@@ -1073,7 +1073,7 @@ mod tests {
 
         // Step 1: Start reader transaction A FIRST (gets snapshot at this point)
         let reader_txn_id = registry.begin(true).await.unwrap();
-        let reader_ctx = registry.get(&reader_txn_id).ok().unwrap();
+        let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
         let reader_fetcher = reader_ctx.doc_fetcher();
 
         // Verify initially empty
@@ -1105,7 +1105,7 @@ mod tests {
 
         // Step 4: A NEW transaction started after commit SHOULD see the data
         let new_reader_txn_id = registry.begin(true).await.unwrap();
-        let new_reader_ctx = registry.get(&new_reader_txn_id).ok().unwrap();
+        let new_reader_ctx = registry.get(&new_reader_txn_id).into_result().unwrap().unwrap();
         let new_reader_fetcher = new_reader_ctx.doc_fetcher();
 
         let new_docs = new_reader_fetcher.get_all("Users").await.unwrap();

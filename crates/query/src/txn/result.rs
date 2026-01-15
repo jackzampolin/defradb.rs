@@ -30,24 +30,6 @@ impl std::fmt::Debug for GetTransactionResult {
 }
 
 impl GetTransactionResult {
-    /// Get the transaction context if found, logging an error if lock was poisoned.
-    ///
-    /// This method logs at ERROR level if `LockPoisoned` is encountered, since
-    /// that indicates potential system corruption. Use `into_result()` if you
-    /// need to handle `LockPoisoned` differently.
-    pub fn ok(self) -> Option<Arc<dyn TransactionContext>> {
-        match self {
-            Self::Found(ctx) => Some(ctx),
-            Self::NotFound => None,
-            Self::LockPoisoned => {
-                tracing::error!(
-                    "Transaction registry lock poisoned during lookup - system may be corrupted"
-                );
-                None
-            }
-        }
-    }
-
     /// Convert to a Result, treating NotFound as None and LockPoisoned as an error.
     ///
     /// Use this when you need to distinguish between "not found" and "lock poisoned"

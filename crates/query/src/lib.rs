@@ -30,6 +30,7 @@ pub mod query_parse;
 pub mod runner;
 pub mod schema_gen;
 pub mod sdl_parse;
+pub mod test_utils;
 pub mod txn;
 
 // Re-exports for convenience

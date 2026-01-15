@@ -39,3 +39,5 @@ graphql-parser.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+db = { path = "../db" }
+datastore = { path = "../datastore" }
