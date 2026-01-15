@@ -3,18 +3,17 @@
 use async_trait::async_trait;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
-use std::collections::HashMap;
 use std::sync::Arc;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::collection::Collection;
+use crate::collection_snapshot::CollectionSnapshot;
 use crate::txn::DbTxn;
 
 /// Document mutator that uses a database transaction.
 ///
 /// This mutator holds a reference to an active transaction and collection
-/// definitions, allowing it to perform mutations within the transaction context.
+/// snapshot, allowing it to perform mutations within the transaction context.
 ///
 /// # Ownership Model
 ///
@@ -24,20 +23,35 @@ use crate::txn::DbTxn;
 /// - `TokioMutex`: Async-safe interior mutability for concurrent access
 /// - `Option`: Enables `take_txn()` to extract the transaction for commit/rollback
 ///
+/// The mutator can share its transaction with `DbDocFetcher` when created via
+/// `from_shared_txn()`, allowing both read and write operations within the same
+/// transaction context.
+///
 /// After `take_txn()` is called, all mutator operations will return an error
 /// indicating the transaction was consumed. Use `is_consumed()` to check state.
 pub struct DbDocMutator<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    collections: Arc<HashMap<String, Collection>>,
+    collections: CollectionSnapshot,
 }
 
 impl<S: Store> DbDocMutator<S> {
     /// Create a new transaction-scoped document mutator.
-    pub fn new(txn: DbTxn<S>, collections: Arc<HashMap<String, Collection>>) -> Self {
+    pub fn new(txn: DbTxn<S>, collections: CollectionSnapshot) -> Self {
         Self {
             txn: Arc::new(TokioMutex::new(Some(txn))),
             collections,
         }
+    }
+
+    /// Create a mutator that shares a transaction with an existing component.
+    ///
+    /// This is used by `DbTransactionContext` to create a mutator that shares
+    /// the same transaction as the `DbDocFetcher`.
+    pub(crate) fn from_shared_txn(
+        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+        collections: CollectionSnapshot,
+    ) -> Self {
+        Self { txn, collections }
     }
 
     /// Take the transaction out of the mutator (for commit/rollback).
@@ -218,12 +232,14 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collection::Collection;
     use crate::database::DB;
     use document::NormalValue;
     use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use std::collections::HashMap;
     use storage::backends::MemoryStore;
 
-    fn test_collections() -> Arc<HashMap<String, Collection>> {
+    fn test_collections() -> CollectionSnapshot {
         let fields = vec![
             FieldDescription::new("1", "_docID", FieldKind::doc_id()),
             FieldDescription::new("2", "name", FieldKind::string()),
@@ -233,7 +249,7 @@ mod tests {
 
         let mut map = HashMap::new();
         map.insert("Users".to_string(), col);
-        Arc::new(map)
+        CollectionSnapshot::new(map)
     }
 
     #[tokio::test]

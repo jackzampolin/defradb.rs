@@ -55,6 +55,18 @@ impl<S: Store> DbDocFetcher<S> {
     pub async fn is_consumed(&self) -> bool {
         self.txn.lock().await.is_none()
     }
+
+    /// Get the shared transaction reference for use by other components.
+    ///
+    /// This allows DbDocMutator to share the same transaction.
+    pub(crate) fn shared_txn(&self) -> Arc<TokioMutex<Option<DbTxn<S>>>> {
+        self.txn.clone()
+    }
+
+    /// Get a reference to the collection snapshot.
+    pub(crate) fn collections(&self) -> &CollectionSnapshot {
+        &self.collections
+    }
 }
 
 #[async_trait]
