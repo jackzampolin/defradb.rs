@@ -23,8 +23,8 @@ use crate::json_convert::normal_value_to_json;
 use crate::mapper::{Mutation, MutationType, Requestable, Select};
 use crate::mutator::DocMutator;
 use crate::plan::{
-    CreateInput, CreateNode, DeleteNode, LimitNode, ScanNode, SelectNode, UpdateInput, UpdateNode,
-    UpsertInput, UpsertNode,
+    CreateInput, CreateNode, DeleteNode, LimitNode, OrderByNode, ScanNode, SelectNode, UpdateInput,
+    UpdateNode, UpsertInput, UpsertNode,
 };
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::{parse_mutations, parse_query};
@@ -404,11 +404,6 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Validate that the select doesn't use unsupported features.
     fn validate_select(&self, select: &Select) -> Result<()> {
-        if select.order_by.is_some() {
-            return Err(QueryError::execution(
-                "ordering is not yet implemented; remove the 'order' argument",
-            ));
-        }
         if select.group_by.is_some() {
             return Err(QueryError::execution(
                 "grouping is not yet implemented; remove the 'groupBy' argument",
@@ -520,6 +515,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         if let Some(ref filter) = select.filter {
             let select_node = SelectNode::new(plan, mapping.clone()).with_filter(filter.clone());
             plan = Box::new(select_node);
+        }
+
+        // Add OrderByNode for sorting (after filtering, before limit)
+        if let Some(ref order_by) = select.order_by {
+            plan = Box::new(OrderByNode::new(plan, order_by.clone(), mapping.clone()));
         }
 
         // Add LimitNode if needed
@@ -929,19 +929,177 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_order_by_returns_error() {
+    async fn test_order_by_single_field_asc() {
         let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Charlie");
+        doc1.set("age", 35i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Alice");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Bob");
+        doc3.set("age", 30i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
         let result = runner
             .execute_query("{ Users(order: {name: ASC}) { name } }")
-            .await;
+            .await
+            .unwrap();
 
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("ordering is not yet implemented"));
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 3);
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+        assert_eq!(users[1].get("name").unwrap(), "Bob");
+        assert_eq!(users[2].get("name").unwrap(), "Charlie");
+    }
+
+    #[tokio::test]
+    async fn test_order_by_single_field_desc() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 25i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Charlie");
+        doc2.set("age", 35i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Bob");
+        doc3.set("age", 30i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users(order: {name: DESC}) { name } }")
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 3);
+        assert_eq!(users[0].get("name").unwrap(), "Charlie");
+        assert_eq!(users[1].get("name").unwrap(), "Bob");
+        assert_eq!(users[2].get("name").unwrap(), "Alice");
+    }
+
+    #[tokio::test]
+    async fn test_order_by_numeric_field() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Charlie");
+        doc3.set("age", 35i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users(order: {age: ASC}) { name age } }")
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 3);
+        assert_eq!(users[0].get("name").unwrap(), "Bob"); // age 25
+        assert_eq!(users[1].get("name").unwrap(), "Alice"); // age 30
+        assert_eq!(users[2].get("name").unwrap(), "Charlie"); // age 35
+    }
+
+    #[tokio::test]
+    async fn test_order_by_with_limit() {
+        let fetcher = MockFetcher::new();
+
+        for i in 0..10 {
+            let mut doc = Document::new();
+            doc.set("name", format!("User{}", i));
+            doc.set("age", (100 - i) as i64); // age: 100, 99, 98, ...
+            doc.generate_and_set_doc_id().unwrap();
+            fetcher.add_doc("Users", doc);
+        }
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        // Order by age ASC (91, 92, ..., 100), then limit to 3
+        let result = runner
+            .execute_query("{ Users(order: {age: ASC}, limit: 3) { name age } }")
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 3);
+        // Lowest ages first
+        assert_eq!(users[0].get("age").unwrap(), 91);
+        assert_eq!(users[1].get("age").unwrap(), 92);
+        assert_eq!(users[2].get("age").unwrap(), 93);
+    }
+
+    #[tokio::test]
+    async fn test_order_by_with_filter() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 25i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 35i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Charlie");
+        doc3.set("age", 30i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        // Filter age >= 30, then order by name ASC
+        let result = runner
+            .execute_query(
+                r#"{ Users(filter: {age: {_gte: 30}}, order: {name: ASC}) { name age } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 2); // Only Bob and Charlie
+        assert_eq!(users[0].get("name").unwrap(), "Bob"); // B before C
+        assert_eq!(users[1].get("name").unwrap(), "Charlie");
     }
 
     #[tokio::test]

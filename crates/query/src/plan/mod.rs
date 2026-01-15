@@ -2,6 +2,7 @@
 
 mod limit;
 pub mod mutation;
+mod orderby;
 mod scan;
 mod select;
 
@@ -10,5 +11,6 @@ pub use mutation::{
     CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertAction, UpsertInput,
     UpsertNode,
 };
+pub use orderby::OrderByNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
