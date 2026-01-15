@@ -2,16 +2,23 @@
 ///
 /// DbTxn wraps a BasicTxn and adds:
 /// - Explicit/implicit transaction handling
+/// - Transaction-scoped collection cache (lazy loading)
 /// - Reference to the database for collection operations
+use crate::collection::Collection;
+use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
 use datastore::{BasicTxn, NamespaceView, RootView, TxnCallback};
+use schema::CollectionVersion;
+use std::collections::HashMap;
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{IterOptions, Key, Store};
+use storage::keys::systemstore::CollectionNameKey;
 
 /// Database transaction wrapper.
 ///
 /// This wraps a BasicTxn and provides:
 /// - Explicit/implicit transaction handling
+/// - Transaction-scoped collection cache with lazy loading
 /// - Access to the underlying store for collection operations
 ///
 /// Explicit transactions are created by the user and must be explicitly
@@ -24,11 +31,16 @@ use storage::corekv::Store;
 /// Transaction liveness is tracked by the `txn` field:
 /// - `Some(txn)` = transaction is active
 /// - `None` = transaction has been committed or discarded
+///
+/// The collection cache is populated lazily from the SystemStore on first
+/// access, matching the Go DefraDB pattern for transaction isolation.
 pub struct DbTxn<S: Store> {
     /// The underlying BasicTxn. `None` after commit/discard.
     txn: Option<BasicTxn>,
     /// Whether this is an explicit transaction.
     explicit: bool,
+    /// Transaction-scoped collection cache (lazy loading from SystemStore).
+    collection_cache: CollectionCache,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -39,6 +51,7 @@ impl<S: Store> DbTxn<S> {
         Self {
             txn: Some(txn),
             explicit: false,
+            collection_cache: CollectionCache::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -48,6 +61,7 @@ impl<S: Store> DbTxn<S> {
         Self {
             txn: Some(txn),
             explicit: true,
+            collection_cache: CollectionCache::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -187,6 +201,158 @@ impl<S: Store> DbTxn<S> {
             Err(Error::TxnNotActive)
         }
     }
+
+    // =========================================================================
+    // Collection Cache Methods (Transaction-scoped caching)
+    // =========================================================================
+
+    /// Get a collection by name, loading from SystemStore if not in cache.
+    ///
+    /// This implements lazy loading - collections are loaded on first access.
+    /// Returns `None` if the collection doesn't exist in the store.
+    ///
+    /// Note: This method is structured to avoid holding `&mut self` across awaits,
+    /// which allows futures using this method to be `Send`.
+    pub async fn get_collection(&mut self, name: &str) -> Result<Option<&Collection>> {
+        // Check cache first
+        if self.collection_cache.contains(name) {
+            return Ok(self.collection_cache.get(name));
+        }
+
+        // Cache miss: extract systemstore synchronously, then do async operation
+        let systemstore = self.systemstore()?;
+        let key = CollectionNameKey::new(name);
+
+        // Load from store (no &self held during this await)
+        let maybe_data = systemstore
+            .get(&key.bytes())
+            .await
+            .map_err(Error::Storage)?;
+
+        // Process result and update cache
+        if let Some(data) = maybe_data {
+            let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %name,
+                    "Failed to deserialize schema for collection"
+                );
+                Error::Serialization(format!(
+                    "failed to deserialize schema for collection '{}': {}",
+                    name, e
+                ))
+            })?;
+            self.collection_cache
+                .add(name.to_string(), Collection::new(schema));
+            return Ok(self.collection_cache.get(name));
+        }
+
+        Ok(None)
+    }
+
+    /// Load all collections from SystemStore into the cache.
+    ///
+    /// This is called when listing collections or when we need to iterate
+    /// over all collections. After calling this, `is_fully_populated()` returns true.
+    pub async fn load_all_collections(&mut self) -> Result<()> {
+        if self.collection_cache.is_fully_populated() {
+            return Ok(());
+        }
+
+        let prefix = CollectionNameKey::name_prefix();
+        let mut collections = HashMap::new();
+
+        let systemstore = self.systemstore()?;
+        let opts = IterOptions::new().with_prefix(prefix.clone());
+
+        let mut iter = systemstore.iterator(opts).await.map_err(|e| {
+            tracing::error!(error = ?e, "Failed to create iterator during collection load");
+            Error::Storage(e)
+        })?;
+
+        while let Some(pair) = iter.next().await.map_err(|e| {
+            tracing::error!(error = ?e, "Failed to iterate collections during load");
+            Error::Storage(e)
+        })? {
+            // Validate UTF-8 in key
+            let key_str = String::from_utf8(pair.key.to_vec()).map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    key_bytes = ?&pair.key[..pair.key.len().min(50)],
+                    "Collection key contains invalid UTF-8"
+                );
+                Error::Serialization(format!("collection key contains invalid UTF-8: {}", e))
+            })?;
+
+            let prefix_str = String::from_utf8(prefix.clone()).map_err(|e| {
+                Error::Other(format!("internal error: prefix is not valid UTF-8: {}", e))
+            })?;
+
+            let name = key_str
+                .strip_prefix(&prefix_str)
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "collection key '{}' does not match expected prefix '{}'",
+                        key_str, prefix_str
+                    ))
+                })?
+                .to_string();
+
+            let schema: CollectionVersion = serde_json::from_slice(&pair.value).map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %name,
+                    "Failed to deserialize schema for collection"
+                );
+                Error::Serialization(format!(
+                    "failed to deserialize schema for collection '{}': {}",
+                    name, e
+                ))
+            })?;
+
+            collections.insert(name, Collection::new(schema));
+        }
+
+        iter.close().await.map_err(|e| {
+            tracing::error!(error = ?e, "Failed to close iterator during collection load");
+            Error::Storage(e)
+        })?;
+
+        self.collection_cache.populate(collections);
+        Ok(())
+    }
+
+    /// Add a collection to the transaction-scoped cache.
+    ///
+    /// Called by create_collection to update the cache after writing to store.
+    pub fn cache_collection(&mut self, name: String, collection: Collection) {
+        self.collection_cache.add(name, collection);
+    }
+
+    /// Remove a collection from the transaction-scoped cache.
+    ///
+    /// Called by delete_collection to update the cache after writing to store.
+    pub fn uncache_collection(&mut self, name: &str) {
+        self.collection_cache.remove(name);
+    }
+
+    /// Get the collection cache.
+    ///
+    /// Use this for read-only access to iterate over cached collections.
+    pub fn collection_cache(&self) -> &CollectionCache {
+        &self.collection_cache
+    }
+
+    /// Get mutable access to the collection cache.
+    ///
+    /// Use this for advanced cache manipulation (e.g., populate from snapshot).
+    pub fn collection_cache_mut(&mut self) -> &mut CollectionCache {
+        &mut self.collection_cache
+    }
+
+    // =========================================================================
+    // Transaction Lifecycle Methods
+    // =========================================================================
 
     /// Commit the transaction.
     ///

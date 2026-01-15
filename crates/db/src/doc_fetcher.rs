@@ -1,20 +1,51 @@
 //! Document fetcher for transaction-scoped queries.
 
 use async_trait::async_trait;
+use datastore::NamespaceView;
 use document::Document;
 use query::runner::{DocFetcher, FetchByIdsResult};
+use schema::CollectionVersion;
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{Key, Store};
+use storage::keys::systemstore::CollectionNameKey;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
-use crate::collection_snapshot::CollectionSnapshot;
+use crate::collection::Collection;
 use crate::txn::DbTxn;
+
+/// Load a collection from the systemstore by name.
+///
+/// This is a standalone async function that doesn't hold any locks,
+/// allowing it to be called outside the mutex lock scope.
+async fn load_collection_from_systemstore(
+    systemstore: &NamespaceView,
+    name: &str,
+) -> query::error::Result<Option<Collection>> {
+    let key = CollectionNameKey::new(name);
+
+    match systemstore
+        .get(&key.bytes())
+        .await
+        .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
+    {
+        Some(data) => {
+            let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to deserialize schema for collection '{}': {}",
+                    name, e
+                ))
+            })?;
+            Ok(Some(Collection::new(schema)))
+        }
+        None => Ok(None),
+    }
+}
 
 /// Document fetcher that uses a database transaction.
 ///
-/// This fetcher holds a reference to an active transaction and a collection
-/// snapshot, allowing it to fetch documents within the transaction context.
+/// This fetcher holds a reference to an active transaction and uses the
+/// transaction's collection cache with lazy loading for snapshot isolation.
 ///
 /// # Ownership Model
 ///
@@ -26,17 +57,23 @@ use crate::txn::DbTxn;
 ///
 /// After `take_txn()` is called, all fetcher operations will return an error
 /// indicating the transaction was consumed. Use `is_consumed()` to check state.
+///
+/// # Collection Access
+///
+/// Collections are loaded lazily from the SystemStore on first access within
+/// the transaction. This provides snapshot isolation - the transaction sees
+/// collections as they existed when first accessed, not at transaction start.
 pub struct DbDocFetcher<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    collections: CollectionSnapshot,
 }
 
 impl<S: Store> DbDocFetcher<S> {
     /// Create a new transaction-scoped document fetcher.
-    pub(crate) fn new(txn: DbTxn<S>, collections: CollectionSnapshot) -> Self {
+    ///
+    /// Collections will be loaded lazily from the transaction's cache.
+    pub(crate) fn new(txn: DbTxn<S>) -> Self {
         Self {
             txn: Arc::new(TokioMutex::new(Some(txn))),
-            collections,
         }
     }
 
@@ -62,37 +99,53 @@ impl<S: Store> DbDocFetcher<S> {
     pub(crate) fn shared_txn(&self) -> Arc<TokioMutex<Option<DbTxn<S>>>> {
         self.txn.clone()
     }
-
-    /// Get a reference to the collection snapshot.
-    pub(crate) fn collections(&self) -> &CollectionSnapshot {
-        &self.collections
-    }
 }
 
 #[async_trait]
 impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?
-            .clone();
-
-        // Extract the datastore while holding the lock, then release the lock
-        // before awaiting. The datastore is Send + Sync so this is safe.
-        let datastore = {
+        // Step 1: Check if collection is in cache (sync, no await while holding lock)
+        let (collection_opt, systemstore, datastore) = {
             let txn_guard = self.txn.lock().await;
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction already consumed")
             })?;
-            db_txn.datastore().map_err(|e| {
+            let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
+            let systemstore = db_txn.systemstore().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to get systemstore for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
+            let datastore = db_txn.datastore().map_err(|e| {
                 query::error::QueryError::execution(format!(
                     "failed to get datastore for collection '{}': {}",
                     collection_name, e
                 ))
-            })?
+            })?;
+            (collection_opt, systemstore, datastore)
+        }; // Lock released here
+
+        // Step 2: If not in cache, load from store (no lock held during await)
+        let collection = if let Some(col) = collection_opt {
+            col
+        } else {
+            let loaded = load_collection_from_systemstore(&systemstore, collection_name).await?;
+            let collection = loaded
+                .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+            // Add to cache
+            {
+                let mut txn_guard = self.txn.lock().await;
+                if let Some(db_txn) = txn_guard.as_mut() {
+                    db_txn.cache_collection(collection_name.to_string(), collection.clone());
+                }
+            }
+
+            collection
         };
 
+        // Step 3: Fetch documents (no lock held)
         collection
             .get_all_with_datastore(&datastore)
             .await
@@ -104,27 +157,48 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         collection_name: &str,
         doc_ids: &[String],
     ) -> query::error::Result<FetchByIdsResult> {
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?
-            .clone();
-
-        // Extract the datastore while holding the lock, then release the lock
-        // before awaiting. The datastore is Send + Sync so this is safe.
-        let datastore = {
+        // Step 1: Check if collection is in cache (sync, no await while holding lock)
+        let (collection_opt, systemstore, datastore) = {
             let txn_guard = self.txn.lock().await;
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
                 query::error::QueryError::execution("transaction already consumed")
             })?;
-            db_txn.datastore().map_err(|e| {
+            let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
+            let systemstore = db_txn.systemstore().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to get systemstore for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
+            let datastore = db_txn.datastore().map_err(|e| {
                 query::error::QueryError::execution(format!(
                     "failed to get datastore for collection '{}': {}",
                     collection_name, e
                 ))
-            })?
+            })?;
+            (collection_opt, systemstore, datastore)
+        }; // Lock released here
+
+        // Step 2: If not in cache, load from store (no lock held during await)
+        let collection = if let Some(col) = collection_opt {
+            col
+        } else {
+            let loaded = load_collection_from_systemstore(&systemstore, collection_name).await?;
+            let collection = loaded
+                .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+            // Add to cache
+            {
+                let mut txn_guard = self.txn.lock().await;
+                if let Some(db_txn) = txn_guard.as_mut() {
+                    db_txn.cache_collection(collection_name.to_string(), collection.clone());
+                }
+            }
+
+            collection
         };
 
+        // Step 3: Fetch documents (no lock held)
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();
 

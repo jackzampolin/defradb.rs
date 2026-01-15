@@ -43,6 +43,7 @@
 /// txn.commit().await?;
 /// ```
 pub mod collection;
+pub mod collection_cache;
 pub mod collection_name;
 pub mod collection_snapshot;
 pub mod database;
@@ -55,6 +56,7 @@ pub mod txn_registry;
 
 // Re-export commonly used types
 pub use collection::Collection;
+pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;
 pub use collection_snapshot::CollectionSnapshot;
 pub use database::{DbOptions, DB};
