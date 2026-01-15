@@ -180,6 +180,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 ?cid,
                                 "Failed to send BlockAlreadyMerged event - receiver dropped"
                             );
+                            return Err(Error::ChannelSend);
                         }
                         Ok(())
                     }
@@ -202,6 +203,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 ?cid,
                                 "Failed to send SyncError event - receiver dropped"
                             );
+                            // Return channel error since we can't notify caller of the blockstore error
+                            return Err(Error::ChannelSend);
                         }
                         Err(Error::BlockstoreError(e.to_string()))
                     }
@@ -226,6 +229,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         ?cid,
                         "Failed to send BlockAlreadyMerged event - receiver dropped"
                     );
+                    return Err(Error::ChannelSend);
                 }
                 return Ok(());
             }
@@ -243,6 +247,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     .is_err()
                 {
                     tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                    return Err(Error::ChannelSend);
                 }
                 return Err(Error::BlockstoreError(e.to_string()));
             }
@@ -260,6 +265,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 .is_err()
             {
                 tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                return Err(Error::ChannelSend);
             }
             return Err(Error::BlockstoreError(e.to_string()));
         }
@@ -540,5 +546,58 @@ mod tests {
             received_count >= 1,
             "Should have at least one BlockReceived event"
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_pushlog_returns_error_when_receiver_dropped() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+
+        // Drop the event receiver immediately
+        drop(events);
+
+        let cid = test_cid();
+        let msg = create_test_broadcast(&cid);
+
+        // Processing should fail with ChannelSend error since receiver is dropped
+        let result = manager.process_pushlog(&msg).await;
+        assert!(result.is_err());
+        match result {
+            Err(Error::ChannelSend) => {
+                // Expected - channel send failed because receiver was dropped
+            }
+            other => panic!("Expected ChannelSend error, got {:?}", other),
+        }
+
+        // Block should still be stored (we store before sending event)
+        assert!(blockstore.has(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_already_merged_returns_error_when_receiver_dropped() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+
+        let cid = test_cid();
+        let msg = create_test_broadcast(&cid);
+
+        // Pre-store and merge the block
+        blockstore.put(&cid, &msg.block).await.unwrap();
+        blockstore.mark_as_merged(&cid).await.unwrap();
+
+        // Drop the event receiver
+        drop(events);
+
+        // Processing already-merged block should fail since we can't send event
+        let result = manager.process_pushlog(&msg).await;
+        assert!(result.is_err());
+        match result {
+            Err(Error::ChannelSend) => {
+                // Expected - can't send BlockAlreadyMerged event
+            }
+            other => panic!("Expected ChannelSend error, got {:?}", other),
+        }
     }
 }

@@ -2289,3 +2289,375 @@ async fn test_rebroadcast_on_merge_disabled_no_broadcast_attempt() {
 
     handle.shutdown().await.ok();
 }
+
+// ============================================================================
+// Recover Unmerged Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_recover_unmerged_with_no_blocks() {
+    use blockstore::DefraBlockstore;
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationLoop, SyncConfig,
+        SyncCoordinator,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    struct TestHandler {
+        call_count: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, TestError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(TestHandler {
+        call_count: AtomicUsize::new(0),
+    });
+
+    // No unmerged blocks - should succeed with empty results
+    let result = ReplicationLoop::recover_unmerged(coordinator, handler.clone()).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_empty());
+
+    // Handler should not have been called
+    assert_eq!(handler.call_count.load(Ordering::SeqCst), 0);
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_recover_unmerged_with_handler_failure() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationLoop, SyncConfig, SyncCoordinator,
+    };
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Store a block but don't mark as merged
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    blockstore.put(&cid, b"test block data").await.unwrap();
+
+    struct FailingHandler;
+
+    #[derive(Debug)]
+    struct FailError(String);
+    impl std::fmt::Display for FailError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FailError: {}", self.0)
+        }
+    }
+    impl std::error::Error for FailError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for FailingHandler {
+        type Error = FailError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, FailError> {
+            Err(FailError("intentional test failure".to_string()))
+        }
+    }
+
+    let handler = Arc::new(FailingHandler);
+
+    // Recover should return error because handler failed
+    let result = ReplicationLoop::recover_unmerged(coordinator, handler).await;
+    assert!(result.is_err());
+
+    // Verify it's a RecoveryFailed error
+    let err = result.unwrap_err();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("recovery completed with") && err_str.contains("failures"),
+        "Expected RecoveryFailed error, got: {}",
+        err_str
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_recover_unmerged_success_marks_as_merged() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationLoop, ReplicationResult, SyncConfig,
+        SyncCoordinator,
+    };
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Store a block but don't mark as merged
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    blockstore.put(&cid, b"test block data").await.unwrap();
+
+    // Verify it's unmerged
+    assert!(!blockstore.is_merged(&cid).await.unwrap());
+
+    struct SuccessHandler;
+
+    #[derive(Debug)]
+    struct NoError;
+    impl std::fmt::Display for NoError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "NoError")
+        }
+    }
+    impl std::error::Error for NoError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for SuccessHandler {
+        type Error = NoError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, NoError> {
+            // Verify we're in recovery mode
+            assert!(metadata.is_recovery);
+            assert!(metadata.is_incomplete());
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(SuccessHandler);
+
+    // Recover should succeed
+    let result = ReplicationLoop::recover_unmerged(coordinator.clone(), handler).await;
+    assert!(result.is_ok());
+
+    let results = result.unwrap();
+    assert_eq!(results.len(), 1);
+
+    // Should be Merged result
+    match &results[0] {
+        ReplicationResult::Merged { cid: result_cid, .. } => {
+            assert_eq!(*result_cid, cid);
+        }
+        other => panic!("Expected Merged result, got {:?}", other),
+    }
+
+    // Block should now be marked as merged
+    assert!(blockstore.is_merged(&cid).await.unwrap());
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// Missing Blocks Edge Case Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_dag_sync_missing_blocks_empty_store() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    // Use a different CID for the link - this simulates a DAG with a linked block
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // With empty store and a link that isn't local, should return NeedsFetch
+    // local_has returns false for all CIDs (nothing local)
+    let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
+    assert!(plan.needs_fetch(), "Should need to fetch missing link from empty store");
+}
+
+#[tokio::test]
+async fn test_dag_sync_concurrent_syncs_same_cid() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+
+    // Second call should return AlreadySyncing
+    let plan = dag_sync.prepare_sync(cid, &[], |_| false).await.unwrap();
+    assert!(
+        !plan.needs_fetch(),
+        "Should not need fetch when already syncing"
+    );
+
+    // Complete the sync
+    dag_sync
+        .handle_sync_complete(cid, true, None)
+        .await
+        .unwrap();
+
+    // Now it should return AlreadySynced
+    let plan = dag_sync.prepare_sync(cid, &[], |_| false).await.unwrap();
+    assert!(
+        !plan.needs_fetch(),
+        "Should not need fetch when already synced"
+    );
+}
+
+#[tokio::test]
+async fn test_dag_sync_multiple_missing_blocks() {
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Provide multiple missing CIDs
+    let missing1 =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+    let missing2 =
+        cid::Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
+
+    // local_has returns false for all CIDs (nothing local)
+    let plan = dag_sync.prepare_sync(cid, &[missing1, missing2], |_| false).await.unwrap();
+
+    match plan {
+        SyncPlan::NeedsFetch {
+            root,
+            missing,
+            providers,
+        } => {
+            assert_eq!(root, cid);
+            assert_eq!(missing.len(), 2);
+            assert!(missing.contains(&missing1));
+            assert!(missing.contains(&missing2));
+            // No providers since no peers have the CIDs
+            assert!(providers.is_empty());
+        }
+        _ => panic!("Expected NeedsFetch plan"),
+    }
+}
+
+#[tokio::test]
+async fn test_dag_sync_with_providers() {
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state.clone());
+
+    // Root and a different link CID
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // Add a peer that has our link CID
+    let peer = libp2p::PeerId::random();
+    peer_state.peer_connected(peer);
+    peer_state.peer_has_cid(&peer, link_cid);
+
+    // Prepare sync with missing blocks - local_has returns false
+    let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
+
+    match plan {
+        SyncPlan::NeedsFetch { providers, .. } => {
+            // The peer should be in providers since it has the link CID
+            assert!(providers.contains(&peer), "Peer should be a provider");
+        }
+        _ => panic!("Expected NeedsFetch plan"),
+    }
+}
+
+#[tokio::test]
+async fn test_dag_sync_failure_allows_retry() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(root_cid).await;
+    assert!(dag_sync.state().is_syncing(&root_cid).await);
+
+    // Complete with failure
+    let result = dag_sync
+        .handle_sync_complete(root_cid, false, Some("network timeout"))
+        .await;
+    assert!(result.is_err());
+
+    // Should NOT be syncing or synced (can retry)
+    assert!(!dag_sync.state().is_syncing(&root_cid).await);
+    assert!(!dag_sync.state().is_synced(&root_cid).await);
+
+    // Should be able to start sync again with a link that's missing
+    let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
+    assert!(plan.needs_fetch(), "Should be able to retry after failure");
+}
