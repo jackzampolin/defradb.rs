@@ -27,6 +27,7 @@ use storage::corekv::Store;
 use tracing::{error, warn};
 
 use crate::collection::Collection;
+use crate::collection_snapshot::CollectionSnapshot;
 use crate::database::DB;
 use crate::doc_fetcher::DbDocFetcher;
 use crate::error::{Error, Result};
@@ -98,7 +99,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 
     /// Get a snapshot of all collections from the DB.
-    pub fn collections(&self) -> Result<HashMap<String, Collection>> {
+    pub fn collections(&self) -> Result<CollectionSnapshot> {
         self.db.collections_snapshot()
     }
 
@@ -257,9 +258,9 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 
         // Snapshot collections at transaction start for snapshot isolation -
         // the transaction sees a consistent view of collections throughout its lifetime
-        let collections = Arc::new(self.db.collections_snapshot().map_err(|e| {
+        let collections = self.db.collections_snapshot().map_err(|e| {
             TransactionError::execution(format!("failed to snapshot collections: {}", e))
-        })?);
+        })?;
         let fetcher = Arc::new(DbDocFetcher::new(db_txn, collections));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
 
@@ -1162,5 +1163,141 @@ mod tests {
         );
 
         registry.rollback(&new_reader_txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_new_transaction_sees_recently_created_collection() {
+        // Test that a transaction started AFTER a collection is created can see that collection
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db.clone());
+
+        // Create collection after registry is created
+        db.create_collection(CollectionVersion::new(
+            "NewCollection",
+            "v1",
+            "col-new",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        ))
+        .await
+        .unwrap();
+
+        // New transaction should see the collection
+        let txn_id = registry.begin(true).await.unwrap();
+        let collections = registry.collections().unwrap();
+        assert!(
+            collections.contains("NewCollection"),
+            "New transaction should see recently created collection"
+        );
+
+        registry.rollback(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_collection_snapshot_isolation_during_deletion() {
+        // Test snapshot isolation: a transaction that started before a collection
+        // is deleted should still be able to query that collection
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db.clone());
+        let collection = db.get_collection("Users").unwrap().unwrap();
+
+        // Add some data to the collection first
+        {
+            let write_txn = db.new_txn(false).await.unwrap();
+            let mut doc = Document::new();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+            doc.set("age", NormalValue::Int(30));
+            doc.generate_and_set_doc_id().unwrap();
+            collection.create(&write_txn, &doc).await.unwrap();
+            write_txn.commit().await.unwrap();
+        }
+
+        // Start a transaction BEFORE deletion
+        let reader_txn_id = registry.begin(true).await.unwrap();
+        let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
+        let reader_fetcher = reader_ctx.doc_fetcher();
+
+        // Verify reader can see the collection with data
+        let docs_before = reader_fetcher.get_all("Users").await.unwrap();
+        assert_eq!(
+            docs_before.len(),
+            1,
+            "Should see 1 document before deletion"
+        );
+
+        // Now delete the collection from the DB
+        db.delete_collection("Users").await.unwrap();
+
+        // The reader transaction should STILL be able to query the collection
+        // because it has a snapshot from before the deletion
+        let docs_after = reader_fetcher.get_all("Users").await.unwrap();
+        assert_eq!(
+            docs_after.len(),
+            1,
+            "Reader should still see document after deletion due to snapshot isolation"
+        );
+        assert_eq!(
+            docs_after[0].get("name").unwrap().as_str(),
+            Some("Alice"),
+            "Should see the same document content"
+        );
+
+        // However, the DB should report the collection as gone
+        assert!(
+            !db.has_collection("Users").unwrap(),
+            "DB should report collection as deleted"
+        );
+
+        registry.rollback(&reader_txn_id).await.unwrap();
+
+        // A NEW transaction should NOT see the deleted collection
+        let new_txn_id = registry.begin(true).await.unwrap();
+        let new_ctx = registry.get(&new_txn_id).into_result().unwrap().unwrap();
+        let new_fetcher = new_ctx.doc_fetcher();
+
+        let result = new_fetcher.get_all("Users").await;
+        assert!(
+            result.is_err(),
+            "New transaction should not see deleted collection"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("Users"),
+            "Error should mention the collection name"
+        );
+
+        registry.rollback(&new_txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_collections_snapshot_is_isolated_from_modifications() {
+        // Test that modifying a snapshot does not affect the original cache
+        let db = test_db_with_collections().await;
+
+        let snapshot = db.collections_snapshot().unwrap();
+        assert!(snapshot.contains("Users"));
+
+        // The snapshot should be an independent copy
+        // (This is implicitly tested by the fact that CollectionSnapshot
+        // wraps an Arc and doesn't expose mutable methods)
+
+        // Adding a new collection should not affect existing snapshots
+        db.create_collection(CollectionVersion::new(
+            "Posts",
+            "v1",
+            "col-posts",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        ))
+        .await
+        .unwrap();
+
+        // Original snapshot should still only have Users
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.contains("Users"));
+        assert!(!snapshot.contains("Posts"));
+
+        // New snapshot should have both
+        let new_snapshot = db.collections_snapshot().unwrap();
+        assert_eq!(new_snapshot.len(), 2);
+        assert!(new_snapshot.contains("Users"));
+        assert!(new_snapshot.contains("Posts"));
     }
 }

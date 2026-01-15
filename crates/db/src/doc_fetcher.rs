@@ -3,19 +3,18 @@
 use async_trait::async_trait;
 use document::Document;
 use query::runner::{DocFetcher, FetchByIdsResult};
-use std::collections::HashMap;
 use std::sync::Arc;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
-use crate::collection::Collection;
+use crate::collection_snapshot::CollectionSnapshot;
 use crate::txn::DbTxn;
 
 /// Document fetcher that uses a database transaction.
 ///
-/// This fetcher holds a reference to an active transaction and collection
-/// definitions, allowing it to fetch documents within the transaction context.
+/// This fetcher holds a reference to an active transaction and a collection
+/// snapshot, allowing it to fetch documents within the transaction context.
 ///
 /// # Ownership Model
 ///
@@ -29,12 +28,12 @@ use crate::txn::DbTxn;
 /// indicating the transaction was consumed. Use `is_consumed()` to check state.
 pub struct DbDocFetcher<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    collections: Arc<HashMap<String, Collection>>,
+    collections: CollectionSnapshot,
 }
 
 impl<S: Store> DbDocFetcher<S> {
     /// Create a new transaction-scoped document fetcher.
-    pub(crate) fn new(txn: DbTxn<S>, collections: Arc<HashMap<String, Collection>>) -> Self {
+    pub(crate) fn new(txn: DbTxn<S>, collections: CollectionSnapshot) -> Self {
         Self {
             txn: Arc::new(TokioMutex::new(Some(txn))),
             collections,
@@ -64,7 +63,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let collection = self
             .collections
             .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?
+            .clone();
 
         // Extract the datastore while holding the lock, then release the lock
         // before awaiting. The datastore is Send + Sync so this is safe.
@@ -95,7 +95,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let collection = self
             .collections
             .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?
+            .clone();
 
         // Extract the datastore while holding the lock, then release the lock
         // before awaiting. The datastore is Send + Sync so this is safe.

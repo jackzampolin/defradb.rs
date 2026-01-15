@@ -483,10 +483,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 "Failed to parse block as IPLD - cannot extract links"
             );
             return Err(Error::BlockParseError {
-                reason: format!(
-                    "Failed to extract references: {}. Block may be corrupt.",
-                    e
-                ),
+                reason: format!("Failed to extract references: {}. Block may be corrupt.", e),
             });
         }
 
@@ -698,7 +695,8 @@ mod tests {
     async fn test_process_pushlog_stores_block() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -731,7 +729,8 @@ mod tests {
     async fn test_process_pushlog_already_merged() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -757,7 +756,8 @@ mod tests {
     async fn test_mark_as_merged() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, _events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -779,7 +779,8 @@ mod tests {
     async fn test_get_unmerged() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, _events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -808,7 +809,8 @@ mod tests {
     async fn test_process_pushlog_invalid_cid_returns_error() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+        let (manager, _events) =
+            SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
         // Create a broadcast with invalid CID bytes
         let msg = PushLogBroadcast::new(
@@ -837,7 +839,8 @@ mod tests {
 
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
         let manager = Arc::new(manager);
 
         let cid = test_cid();
@@ -892,7 +895,8 @@ mod tests {
     async fn test_process_pushlog_returns_error_when_receiver_dropped() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         // Drop the event receiver immediately
         drop(events);
@@ -918,7 +922,8 @@ mod tests {
     async fn test_already_merged_returns_error_when_receiver_dropped() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -945,7 +950,8 @@ mod tests {
     async fn test_pending_dag_count_initially_zero() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+        let (manager, _events) =
+            SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
         assert_eq!(manager.pending_dag_count(), 0);
     }
@@ -954,7 +960,8 @@ mod tests {
     async fn test_pending_dag_tracking() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         // Create a block that has links (simulated by creating IPLD-like data)
         // For simplicity, we'll use a block that fails to parse as IPLD,
@@ -983,7 +990,8 @@ mod tests {
     async fn test_blockstore_accessor() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+        let (manager, _events) =
+            SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         // Verify blockstore accessor returns the same blockstore
         let cid = test_cid();

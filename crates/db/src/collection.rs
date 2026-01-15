@@ -13,7 +13,7 @@ use storage::corekv::{IterOptions, Store};
 const DOC_KEY_PREFIX: &[u8] = b"/d/";
 
 /// A collection of documents with a shared schema.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Collection {
     /// The collection schema definition.
     def: CollectionVersion,

@@ -238,7 +238,11 @@ impl ReplicationLoop {
         );
 
         // Start Bitswap sync via host
-        match coordinator.host().bitswap_sync(root_cid, providers, missing).await {
+        match coordinator
+            .host()
+            .bitswap_sync(root_cid, providers, missing)
+            .await
+        {
             Ok(query_id) => {
                 // Register the query so we can track completion
                 coordinator.manager().register_query(query_id, root_cid);
@@ -516,7 +520,11 @@ impl ReplicationLoop {
                         "Block merged during recovery but marking failed - will be reprocessed next startup"
                     );
                 }
-                ReplicationResult::MergedButBroadcastFailed { cid, doc_id, broadcast_error } => {
+                ReplicationResult::MergedButBroadcastFailed {
+                    cid,
+                    doc_id,
+                    broadcast_error,
+                } => {
                     // Merge succeeded - count as success (broadcast not expected during recovery)
                     success_count += 1;
                     tracing::debug!(
@@ -666,7 +674,11 @@ mod tests {
         // We can't easily test the full loop without a coordinator
         // but we can verify the handler trait works
         let result = handler
-            .handle_block(&cid, b"test data", BlockMetadata::normal("doc1", "col1", "peer1"))
+            .handle_block(
+                &cid,
+                b"test data",
+                BlockMetadata::normal("doc1", "col1", "peer1"),
+            )
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_merged());

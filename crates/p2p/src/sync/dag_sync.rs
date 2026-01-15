@@ -667,7 +667,10 @@ mod tests {
         // All links exist locally
         let local_has = |_: &Cid| true;
 
-        let plan = dag_sync.prepare_sync(root, &links, local_has).await.unwrap();
+        let plan = dag_sync
+            .prepare_sync(root, &links, local_has)
+            .await
+            .unwrap();
 
         assert!(matches!(plan, SyncPlan::Complete));
         assert!(dag_sync.state.is_synced(&root).await);
@@ -688,7 +691,10 @@ mod tests {
         let cid2 = test_cid2();
         let local_has = move |cid: &Cid| *cid == cid2;
 
-        let plan = dag_sync.prepare_sync(root, &links, local_has).await.unwrap();
+        let plan = dag_sync
+            .prepare_sync(root, &links, local_has)
+            .await
+            .unwrap();
 
         match plan {
             SyncPlan::NeedsFetch(data) => {
@@ -773,12 +779,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_plan_accessors() {
-        let plan = SyncPlan::needs_fetch_new(
-            test_cid(),
-            vec![test_cid2()],
-            vec![PeerId::random()],
-        )
-        .expect("missing is non-empty");
+        let plan = SyncPlan::needs_fetch_new(test_cid(), vec![test_cid2()], vec![PeerId::random()])
+            .expect("missing is non-empty");
 
         assert!(plan.needs_fetch());
         assert_eq!(plan.missing().unwrap().len(), 1);
@@ -850,7 +852,9 @@ mod tests {
         let mut handles = Vec::new();
         for _ in 0..10 {
             let state_clone = Arc::clone(&state);
-            handles.push(tokio::spawn(async move { state_clone.start_sync(cid).await }));
+            handles.push(tokio::spawn(
+                async move { state_clone.start_sync(cid).await },
+            ));
         }
 
         // Collect results
@@ -909,11 +913,7 @@ mod tests {
     #[test]
     fn test_dag_sync_config_zero_timeout_returns_error() {
         // DagSyncConfig::new should return error if block_fetch_timeout is zero
-        let result = DagSyncConfig::new(
-            Duration::ZERO,
-            None,
-            NonZeroUsize::new(16).unwrap(),
-        );
+        let result = DagSyncConfig::new(Duration::ZERO, None, NonZeroUsize::new(16).unwrap());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("block_fetch_timeout"));

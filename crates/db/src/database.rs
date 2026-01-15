@@ -4,6 +4,8 @@
 /// It manages the root store, creates transactions, and provides
 /// access to collections.
 use crate::collection::Collection;
+use crate::collection_name::CollectionName;
+use crate::collection_snapshot::CollectionSnapshot;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
 use datastore::BasicTxn;
@@ -172,13 +174,31 @@ impl<S: Store> DB<S> {
             let systemstore = txn.systemstore()?;
             let opts = IterOptions::new().with_prefix(prefix.clone());
 
-            let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
+            let mut iter = systemstore.iterator(opts).await.map_err(|e| {
+                tracing::error!(error = ?e, "Failed to create iterator during collection load");
+                Error::Storage(e)
+            })?;
 
-            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                let key_str = String::from_utf8_lossy(&pair.key);
-                let prefix_str = String::from_utf8_lossy(&prefix);
+            while let Some(pair) = iter.next().await.map_err(|e| {
+                tracing::error!(error = ?e, "Failed to iterate collections during database load");
+                Error::Storage(e)
+            })? {
+                // Validate UTF-8 in key to catch data corruption early
+                let key_str = String::from_utf8(pair.key.to_vec()).map_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        key_bytes = ?&pair.key[..pair.key.len().min(50)],
+                        "Collection key contains invalid UTF-8"
+                    );
+                    Error::Serialization(format!("collection key contains invalid UTF-8: {}", e))
+                })?;
+
+                let prefix_str = String::from_utf8(prefix.clone()).map_err(|e| {
+                    Error::Other(format!("internal error: prefix is not valid UTF-8: {}", e))
+                })?;
+
                 let name = key_str
-                    .strip_prefix(&*prefix_str)
+                    .strip_prefix(&prefix_str)
                     .ok_or_else(|| {
                         Error::Other(format!(
                             "collection key '{}' does not match expected prefix '{}'",
@@ -189,13 +209,24 @@ impl<S: Store> DB<S> {
 
                 let schema: CollectionVersion =
                     serde_json::from_slice(&pair.value).map_err(|e| {
-                        Error::Serialization(format!("failed to deserialize schema: {}", e))
+                        tracing::error!(
+                            error = ?e,
+                            collection_name = %name,
+                            "Failed to deserialize schema for collection"
+                        );
+                        Error::Serialization(format!(
+                            "failed to deserialize schema for collection '{}': {}",
+                            name, e
+                        ))
                     })?;
 
                 collections.insert(name, Collection::new(schema));
             }
 
-            iter.close().await.map_err(Error::Storage)?;
+            iter.close().await.map_err(|e| {
+                tracing::error!(error = ?e, "Failed to close iterator during collection load");
+                Error::Storage(e)
+            })?;
         }
 
         txn.discard()
@@ -214,8 +245,16 @@ impl<S: Store> DB<S> {
     ///
     /// Uses store-level atomicity to prevent duplicates - checks existence within
     /// the transaction before writing.
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidCollectionName` if the collection name is invalid
+    /// - `CollectionAlreadyExists` if a collection with this name already exists
+    /// - `CacheUpdateFailedAfterCommit` if the schema was persisted but cache update failed
     pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
-        let name = schema.name.clone();
+        // Validate collection name
+        let collection_name = CollectionName::new(&schema.name)?;
+        let name = collection_name.as_str().to_string();
 
         let txn = self.new_txn(false).await?;
         let key = CollectionNameKey::new(&name);
@@ -239,8 +278,12 @@ impl<S: Store> DB<S> {
         // Write schema to store
         {
             let systemstore = txn.systemstore()?;
-            let data = serde_json::to_vec(&schema)
-                .map_err(|e| Error::Serialization(format!("failed to serialize schema: {}", e)))?;
+            let data = serde_json::to_vec(&schema).map_err(|e| {
+                Error::Serialization(format!(
+                    "failed to serialize schema for collection '{}': {}",
+                    name, e
+                ))
+            })?;
             systemstore
                 .set(&key.bytes(), &data)
                 .await
@@ -249,10 +292,16 @@ impl<S: Store> DB<S> {
 
         txn.commit().await?;
 
-        // Update cache after successful commit
+        // Update cache after successful commit.
+        // If this fails, the collection IS persisted but not in cache.
+        // A restart will recover by loading from store.
         let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(error = ?e, "Collection cache lock poisoned during create");
-            Error::LockPoisoned("collection cache lock poisoned during create".into())
+            tracing::error!(
+                error = ?e,
+                collection_name = %name,
+                "Collection cache lock poisoned during create - collection WAS persisted to store. Restart will recover."
+            );
+            Error::CacheUpdateFailedAfterCommit(name.clone())
         })?;
         cache.insert(name, Collection::new(schema));
 
@@ -262,6 +311,11 @@ impl<S: Store> DB<S> {
     /// Delete a collection and all its documents.
     ///
     /// Checks store for existence within transaction for atomic delete.
+    ///
+    /// # Errors
+    ///
+    /// - `CollectionNotFound` if the collection does not exist
+    /// - `CacheUpdateFailedAfterCommit` if the collection was deleted but cache update failed
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
         // Get collection_id from cache (read lock, released before async ops)
         let collection_id = {
@@ -314,17 +368,32 @@ impl<S: Store> DB<S> {
             }
             iter.close().await.map_err(Error::Storage)?;
 
-            for key in keys_to_delete {
-                datastore.delete(&key).await.map_err(Error::Storage)?;
+            for (i, key) in keys_to_delete.iter().enumerate() {
+                datastore.delete(key).await.map_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        collection_name = %name,
+                        documents_deleted = i,
+                        documents_total = keys_to_delete.len(),
+                        "Failed to delete document during collection deletion"
+                    );
+                    Error::Storage(e)
+                })?;
             }
         }
 
         txn.commit().await?;
 
-        // Update cache after successful commit
+        // Update cache after successful commit.
+        // If this fails, the collection IS deleted but still in cache.
+        // A restart will recover by loading from store.
         let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(error = ?e, "Collection cache lock poisoned during delete");
-            Error::LockPoisoned("collection cache lock poisoned during delete".into())
+            tracing::error!(
+                error = ?e,
+                collection_name = %name,
+                "Collection cache lock poisoned during delete - collection WAS deleted from store. Restart will recover."
+            );
+            Error::CacheUpdateFailedAfterCommit(name.to_string())
         })?;
         cache.remove(name);
 
@@ -365,12 +434,14 @@ impl<S: Store> DB<S> {
     }
 
     /// Get a snapshot of all collections (for use by DbTransactionRegistry).
-    pub fn collections_snapshot(&self) -> Result<HashMap<String, Collection>> {
+    ///
+    /// Returns an immutable snapshot that provides snapshot isolation for transactions.
+    pub fn collections_snapshot(&self) -> Result<CollectionSnapshot> {
         let cache = self.collections.read().map_err(|e| {
             tracing::error!(error = ?e, "Collection cache lock poisoned during snapshot");
             Error::LockPoisoned("collection cache lock poisoned during snapshot".into())
         })?;
-        Ok(cache.clone())
+        Ok(CollectionSnapshot::new(cache.clone()))
     }
 }
 
@@ -533,6 +604,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_collection_with_invalid_name_fails() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+
+        // Empty name should fail
+        let empty_schema = CollectionVersion::new(
+            "",
+            "v1",
+            "col-empty",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        );
+        let result = db.create_collection(empty_schema).await;
+        assert!(
+            matches!(result, Err(Error::InvalidCollectionName(_))),
+            "Expected InvalidCollectionName for empty name, got: {:?}",
+            result
+        );
+
+        // Name with slash should fail
+        let slash_schema = CollectionVersion::new(
+            "Users/Posts",
+            "v1",
+            "col-slash",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        );
+        let result = db.create_collection(slash_schema).await;
+        assert!(
+            matches!(result, Err(Error::InvalidCollectionName(_))),
+            "Expected InvalidCollectionName for name with slash, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
     async fn test_list_collections_empty() {
         let store = MemoryStore::new();
         let db = DB::new(store);
@@ -621,6 +726,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_open_with_options_loads_existing_collections() {
+        let store = MemoryStore::new();
+
+        {
+            let db = DB::new(store.clone());
+            db.create_collection(test_users_schema()).await.unwrap();
+        }
+
+        // Use open_with_options with custom options
+        let opts = DbOptions {
+            max_txn_retries: Some(10),
+            chunk_size: Some(1024),
+        };
+        let db = DB::open_with_options(store, opts).await.unwrap();
+
+        // Verify collections loaded correctly
+        assert!(db.has_collection("Users").unwrap());
+        let coll = db.get_collection("Users").unwrap().unwrap();
+        assert_eq!(coll.name(), "Users");
+
+        // Verify options were applied
+        assert_eq!(db.options().max_txn_retries, Some(10));
+        assert_eq!(db.options().chunk_size, Some(1024));
+    }
+
+    #[tokio::test]
+    async fn test_open_empty_store_returns_empty_collections() {
+        let store = MemoryStore::new();
+        let db = DB::open(store).await.unwrap();
+        assert!(db.list_collections().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_collections_snapshot() {
         let store = MemoryStore::new();
         let db = DB::new(store);
@@ -629,7 +767,7 @@ mod tests {
 
         let snapshot = db.collections_snapshot().unwrap();
         assert_eq!(snapshot.len(), 1);
-        assert!(snapshot.contains_key("Users"));
+        assert!(snapshot.contains("Users"));
     }
 
     #[tokio::test]
