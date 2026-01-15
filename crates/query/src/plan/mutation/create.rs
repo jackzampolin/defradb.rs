@@ -8,6 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use document::Document;
 use serde_json::Value as JsonValue;
+use tracing;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -73,40 +74,88 @@ pub fn json_to_normal_value(value: &JsonValue) -> Result<document::NormalValue> 
         }
         JsonValue::String(s) => Ok(NormalValue::String(s.clone())),
         JsonValue::Array(arr) => {
+            // Empty arrays default to empty string array
+            if arr.is_empty() {
+                return Ok(NormalValue::StringArray(Vec::new()));
+            }
+
             // Determine array type from first non-null element
             let first_non_null = arr.iter().find(|v| !v.is_null());
 
             match first_non_null {
                 Some(JsonValue::Bool(_)) => {
-                    let bools: Vec<bool> = arr
-                        .iter()
-                        .map(|v| v.as_bool().unwrap_or(false))
-                        .collect();
+                    let mut bools = Vec::with_capacity(arr.len());
+                    for (i, v) in arr.iter().enumerate() {
+                        match v {
+                            JsonValue::Bool(b) => bools.push(*b),
+                            JsonValue::Null => bools.push(false),
+                            _ => {
+                                return Err(QueryError::execution(format!(
+                                    "Array element at index {} is not a boolean (found {:?})",
+                                    i, v
+                                )))
+                            }
+                        }
+                    }
                     Ok(NormalValue::BoolArray(bools))
                 }
                 Some(JsonValue::Number(n)) if n.is_i64() => {
-                    let ints: Vec<i64> = arr.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+                    let mut ints = Vec::with_capacity(arr.len());
+                    for (i, v) in arr.iter().enumerate() {
+                        match v {
+                            JsonValue::Number(n) if n.as_i64().is_some() => {
+                                ints.push(n.as_i64().unwrap())
+                            }
+                            JsonValue::Null => ints.push(0),
+                            _ => {
+                                return Err(QueryError::execution(format!(
+                                    "Array element at index {} is not an integer (found {:?})",
+                                    i, v
+                                )))
+                            }
+                        }
+                    }
                     Ok(NormalValue::IntArray(ints))
                 }
                 Some(JsonValue::Number(_)) => {
-                    let floats: Vec<f64> = arr.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
+                    let mut floats = Vec::with_capacity(arr.len());
+                    for (i, v) in arr.iter().enumerate() {
+                        match v {
+                            JsonValue::Number(n) => floats.push(n.as_f64().unwrap_or(0.0)),
+                            JsonValue::Null => floats.push(0.0),
+                            _ => {
+                                return Err(QueryError::execution(format!(
+                                    "Array element at index {} is not a number (found {:?})",
+                                    i, v
+                                )))
+                            }
+                        }
+                    }
                     Ok(NormalValue::Float64Array(floats))
                 }
                 Some(JsonValue::String(_)) => {
-                    let strings: Vec<String> = arr
-                        .iter()
-                        .map(|v| v.as_str().unwrap_or("").to_string())
-                        .collect();
+                    let mut strings = Vec::with_capacity(arr.len());
+                    for (i, v) in arr.iter().enumerate() {
+                        match v {
+                            JsonValue::String(s) => strings.push(s.clone()),
+                            JsonValue::Null => strings.push(String::new()),
+                            _ => {
+                                return Err(QueryError::execution(format!(
+                                    "Array element at index {} is not a string (found {:?})",
+                                    i, v
+                                )))
+                            }
+                        }
+                    }
                     Ok(NormalValue::StringArray(strings))
                 }
-                _ => {
-                    // Empty array or mixed types - default to string array
-                    let strings: Vec<String> = arr
-                        .iter()
-                        .map(|v| v.as_str().unwrap_or("").to_string())
-                        .collect();
+                // Array contains only nulls - default to empty strings
+                None => {
+                    let strings: Vec<String> = arr.iter().map(|_| String::new()).collect();
                     Ok(NormalValue::StringArray(strings))
                 }
+                // Nested arrays or objects - store as JSON
+                Some(_) => Ok(NormalValue::Json(JsonValue::Array(arr.clone()))),
             }
         }
         JsonValue::Object(_) => {
@@ -234,14 +283,25 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
         NormalValue::Bool(b) => JsonValue::Bool(*b),
         NormalValue::Int(i) => JsonValue::Number((*i).into()),
         NormalValue::Float64(f) => {
-            serde_json::Number::from_f64(*f)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
+            if f.is_nan() || f.is_infinite() {
+                // NaN and Infinity cannot be represented in JSON - use null but log
+                tracing::warn!(value = %f, "Float64 value cannot be represented in JSON, using null");
+                JsonValue::Null
+            } else {
+                serde_json::Number::from_f64(*f)
+                    .map(JsonValue::Number)
+                    .unwrap_or(JsonValue::Null)
+            }
         }
         NormalValue::Float32(f) => {
-            serde_json::Number::from_f64(*f as f64)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
+            if f.is_nan() || f.is_infinite() {
+                tracing::warn!(value = %f, "Float32 value cannot be represented in JSON, using null");
+                JsonValue::Null
+            } else {
+                serde_json::Number::from_f64(*f as f64)
+                    .map(JsonValue::Number)
+                    .unwrap_or(JsonValue::Null)
+            }
         }
         NormalValue::String(s) => JsonValue::String(s.clone()),
         NormalValue::Bytes(b) => {
@@ -258,14 +318,48 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
         }
         NormalValue::Float64Array(arr) => JsonValue::Array(
             arr.iter()
-                .filter_map(|f| serde_json::Number::from_f64(*f).map(JsonValue::Number))
+                .map(|f| {
+                    if f.is_nan() || f.is_infinite() {
+                        tracing::warn!(value = %f, "Float64 array element cannot be represented in JSON, using null");
+                        JsonValue::Null
+                    } else {
+                        serde_json::Number::from_f64(*f)
+                            .map(JsonValue::Number)
+                            .unwrap_or(JsonValue::Null)
+                    }
+                })
                 .collect(),
         ),
         NormalValue::StringArray(arr) => {
             JsonValue::Array(arr.iter().map(|s| JsonValue::String(s.clone())).collect())
         }
-        // For other complex types, convert to JSON representation
-        _ => JsonValue::Null,
+        // Handle remaining array types
+        NormalValue::Float32Array(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|f| {
+                    if f.is_nan() || f.is_infinite() {
+                        tracing::warn!(value = %f, "Float32 array element cannot be represented in JSON, using null");
+                        JsonValue::Null
+                    } else {
+                        serde_json::Number::from_f64(*f as f64)
+                            .map(JsonValue::Number)
+                            .unwrap_or(JsonValue::Null)
+                    }
+                })
+                .collect(),
+        ),
+        NormalValue::BytesArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|bytes| {
+                    JsonValue::Array(bytes.iter().map(|b| JsonValue::Number((*b).into())).collect())
+                })
+                .collect(),
+        ),
+        // For unknown types, log a warning and return null
+        other => {
+            tracing::warn!("Unexpected NormalValue variant encountered, converting to null: {:?}", other);
+            JsonValue::Null
+        }
     }
 }
 
@@ -375,9 +469,10 @@ mod tests {
             doc.generate_and_set_doc_id()
                 .map_err(|e| QueryError::execution(format!("Failed to generate DocID: {}", e)))?;
 
-            let doc_id = doc.id().cloned().ok_or_else(|| {
-                QueryError::execution("Document should have ID after generation")
-            })?;
+            let doc_id = doc
+                .id()
+                .cloned()
+                .ok_or_else(|| QueryError::execution("Document should have ID after generation"))?;
 
             // Store for verification
             self.created
@@ -404,11 +499,7 @@ mod tests {
             unimplemented!("Not needed for CreateNode tests")
         }
 
-        async fn exists(
-            &self,
-            _collection_name: &str,
-            _doc_id: &document::DocID,
-        ) -> Result<bool> {
+        async fn exists(&self, _collection_name: &str, _doc_id: &document::DocID) -> Result<bool> {
             Ok(false)
         }
 
@@ -438,8 +529,7 @@ mod tests {
             .with_field("name", json!("Alice"))
             .with_field("age", json!(30));
 
-        let mut node =
-            CreateNode::new("Users", mutator.clone(), mapping).with_input(input);
+        let mut node = CreateNode::new("Users", mutator.clone(), mapping).with_input(input);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -473,8 +563,7 @@ mod tests {
                 .with_field("age", json!(25)),
         ];
 
-        let mut node =
-            CreateNode::new("Users", mutator.clone(), mapping).with_inputs(inputs);
+        let mut node = CreateNode::new("Users", mutator.clone(), mapping).with_inputs(inputs);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -559,5 +648,53 @@ mod tests {
         // Scores should be an int array
         let scores = doc.get("scores").unwrap();
         assert!(matches!(scores, document::NormalValue::IntArray(_)));
+    }
+
+    #[tokio::test]
+    async fn test_mixed_type_array_returns_error() {
+        // Boolean array with non-boolean element
+        let input = CreateInput::new().with_field("flags", json!([true, "not_a_bool", false]));
+        let result = input.to_document();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a boolean"));
+    }
+
+    #[tokio::test]
+    async fn test_mixed_type_int_array_returns_error() {
+        // Integer array with string element
+        let input = CreateInput::new().with_field("numbers", json!([1, "two", 3]));
+        let result = input.to_document();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not an integer"));
+    }
+
+    #[tokio::test]
+    async fn test_mixed_type_string_array_returns_error() {
+        // String array with number element
+        let input = CreateInput::new().with_field("names", json!(["alice", 123, "bob"]));
+        let result = input.to_document();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a string"));
+    }
+
+    #[tokio::test]
+    async fn test_null_in_array_is_handled() {
+        // Nulls in arrays should use default values, not error
+        let input = CreateInput::new().with_field("scores", json!([1, null, 3]));
+        let doc = input.to_document().unwrap();
+        let scores = doc.get("scores").unwrap();
+        if let document::NormalValue::IntArray(arr) = scores {
+            assert_eq!(arr, &vec![1, 0, 3]); // null becomes 0
+        } else {
+            panic!("Expected IntArray");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_array_defaults_to_string_array() {
+        let input = CreateInput::new().with_field("empty", json!([]));
+        let doc = input.to_document().unwrap();
+        let empty = doc.get("empty").unwrap();
+        assert!(matches!(empty, document::NormalValue::StringArray(arr) if arr.is_empty()));
     }
 }

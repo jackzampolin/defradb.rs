@@ -8,6 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use document::{DocID, Document};
 use serde_json::Value as JsonValue;
+use tracing;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -97,6 +98,8 @@ pub struct UpdateNode {
     input: UpdateInput,
     /// Updated documents (populated after first next())
     updated_docs: Vec<Doc>,
+    /// Document IDs that were requested but not found
+    not_found_ids: Vec<String>,
     /// Current position in updated_docs
     position: usize,
     /// Current document being yielded
@@ -128,6 +131,7 @@ impl UpdateNode {
             filter: None,
             input: UpdateInput::new(),
             updated_docs: Vec::new(),
+            not_found_ids: Vec::new(),
             position: 0,
             current_doc: Doc::default(),
             did_update: false,
@@ -158,6 +162,14 @@ impl UpdateNode {
         self.updated_docs.len()
     }
 
+    /// Get the document IDs that were requested but not found.
+    ///
+    /// This allows callers to detect when update operations silently
+    /// skipped documents due to them not existing in the collection.
+    pub fn not_found_ids(&self) -> &[String] {
+        &self.not_found_ids
+    }
+
     /// Convert an UpdateResult to a plan Doc using our document mapping.
     fn update_result_to_doc(&self, result: &UpdateResult) -> Result<Doc> {
         let num_fields = self.document_mapping.next_index();
@@ -185,6 +197,7 @@ impl PlanNode for UpdateNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
         self.updated_docs.clear();
+        self.not_found_ids.clear();
         self.did_update = false;
         self.initialized = true;
         Ok(())
@@ -240,8 +253,15 @@ impl PlanNode for UpdateNode {
                     // Convert to plan Doc
                     let plan_doc = self.update_result_to_doc(&result)?;
                     self.updated_docs.push(plan_doc);
+                } else {
+                    // Track and log missing documents instead of silently skipping
+                    tracing::warn!(
+                        collection = %self.collection_name,
+                        doc_id = %doc_id_str,
+                        "Document not found for update - skipping"
+                    );
+                    self.not_found_ids.push(doc_id_str.clone());
                 }
-                // Silently skip missing documents (Go behavior)
             }
 
             self.did_update = true;
@@ -263,6 +283,7 @@ impl PlanNode for UpdateNode {
 
     async fn close(&mut self) -> Result<()> {
         self.updated_docs.clear();
+        self.not_found_ids.clear();
         self.initialized = false;
         Ok(())
     }
@@ -301,10 +322,7 @@ mod tests {
 
         fn add_doc(&self, doc: Document) {
             if let Some(id) = doc.id() {
-                self.docs
-                    .lock()
-                    .unwrap()
-                    .insert(id.to_string(), doc);
+                self.docs.lock().unwrap().insert(id.to_string(), doc);
             }
         }
     }
@@ -315,9 +333,10 @@ mod tests {
             doc.generate_and_set_doc_id()
                 .map_err(|e| QueryError::execution(format!("Failed to generate DocID: {}", e)))?;
 
-            let doc_id = doc.id().cloned().ok_or_else(|| {
-                QueryError::execution("Document should have ID after generation")
-            })?;
+            let doc_id = doc
+                .id()
+                .cloned()
+                .ok_or_else(|| QueryError::execution("Document should have ID after generation"))?;
 
             self.docs
                 .lock()
@@ -328,9 +347,9 @@ mod tests {
         }
 
         async fn update(&self, _collection_name: &str, doc: Document) -> Result<UpdateResult> {
-            let doc_id = doc.id().ok_or_else(|| {
-                QueryError::execution("Document must have ID for update")
-            })?;
+            let doc_id = doc
+                .id()
+                .ok_or_else(|| QueryError::execution("Document must have ID for update"))?;
 
             let modified = doc.values().len();
 
@@ -343,7 +362,12 @@ mod tests {
         }
 
         async fn delete(&self, _collection_name: &str, doc_id: &DocID) -> Result<DeleteResult> {
-            let existed = self.docs.lock().unwrap().remove(&doc_id.to_string()).is_some();
+            let existed = self
+                .docs
+                .lock()
+                .unwrap()
+                .remove(&doc_id.to_string())
+                .is_some();
             Ok(DeleteResult::new(doc_id.clone(), existed))
         }
 
@@ -472,8 +496,7 @@ mod tests {
 
         let input = UpdateInput::new().with_field("email", json!("new@example.com"));
 
-        let mut node =
-            UpdateNode::new("Users", mutator, mapping).with_input(input);
+        let mut node = UpdateNode::new("Users", mutator, mapping).with_input(input);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -491,5 +514,47 @@ mod tests {
 
         let result = node.next().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_tracks_not_found_documents() {
+        let mutator = Arc::new(MockMutator::new());
+        let mapping = make_test_mapping();
+
+        // Create one document that exists
+        let doc = create_test_doc("Alice", "alice@test.com");
+        let existing_id = doc.id().unwrap().to_string();
+        mutator.add_doc(doc);
+
+        // Create another valid-looking DocID that doesn't exist in storage
+        let mut fake_doc = Document::new();
+        fake_doc.set("name", "Fake".to_string());
+        fake_doc.generate_and_set_doc_id().unwrap();
+        let nonexistent_id = fake_doc.id().unwrap().to_string();
+        // Don't add fake_doc to mutator - it won't exist
+
+        let input = UpdateInput::new().with_field("email", json!("updated@test.com"));
+
+        let mut node = UpdateNode::new("Users", mutator.clone(), mapping)
+            .with_doc_ids(vec![existing_id.clone(), nonexistent_id.clone()])
+            .with_input(input);
+
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+
+        // Exhaust the iterator
+        let mut count = 0;
+        while node.next().await.unwrap() {
+            count += 1;
+        }
+
+        // Only the existing document should have been updated
+        assert_eq!(count, 1, "Should only update one existing document");
+        assert_eq!(node.updated_count(), 1);
+
+        // The non-existent document should be tracked
+        let not_found = node.not_found_ids();
+        assert_eq!(not_found.len(), 1, "Should have one not-found ID");
+        assert_eq!(not_found[0], nonexistent_id);
     }
 }

@@ -22,7 +22,9 @@ use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseE
 use crate::json_convert::normal_value_to_json;
 use crate::mapper::{Mutation, MutationType, Requestable, Select};
 use crate::mutator::DocMutator;
-use crate::plan::{CreateInput, CreateNode, DeleteNode, LimitNode, ScanNode, SelectNode, UpdateInput, UpdateNode};
+use crate::plan::{
+    CreateInput, CreateNode, DeleteNode, LimitNode, ScanNode, SelectNode, UpdateInput, UpdateNode,
+};
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::{parse_mutations, parse_query};
 use crate::txn::{
@@ -202,7 +204,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let mut results = Map::new();
 
         for mutation in mutations {
-            let result = self.execute_single_mutation(&mutation, mutator.clone()).await?;
+            let result = self
+                .execute_single_mutation(&mutation, mutator.clone())
+                .await?;
             // Use collection name as key (Go behavior)
             results.insert(mutation.collection_name.clone(), result);
         }
@@ -236,9 +240,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             }
             MutationType::Update => {
                 let input = self.build_update_input(mutation)?;
-                let mut node =
-                    UpdateNode::new(&mutation.collection_name, mutator, mapping.clone())
-                        .with_input(input);
+                let mut node = UpdateNode::new(&mutation.collection_name, mutator, mapping.clone())
+                    .with_input(input);
 
                 if let Some(ref doc_ids) = mutation.doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
@@ -250,8 +253,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(node)
             }
             MutationType::Delete => {
-                let mut node =
-                    DeleteNode::new(&mutation.collection_name, mutator, mapping.clone());
+                let mut node = DeleteNode::new(&mutation.collection_name, mutator, mapping.clone());
 
                 if let Some(ref doc_ids) = mutation.doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
@@ -1260,9 +1262,10 @@ mod tests {
             doc.generate_and_set_doc_id()
                 .map_err(|e| QueryError::execution(format!("Failed to generate DocID: {}", e)))?;
 
-            let doc_id = doc.id().cloned().ok_or_else(|| {
-                QueryError::execution("Document should have ID after generation")
-            })?;
+            let doc_id = doc
+                .id()
+                .cloned()
+                .ok_or_else(|| QueryError::execution("Document should have ID after generation"))?;
 
             self.docs
                 .lock()
@@ -1296,11 +1299,7 @@ mod tests {
             Ok(crate::mutator::DeleteResult::new(doc_id.clone(), existed))
         }
 
-        async fn exists(
-            &self,
-            _collection_name: &str,
-            doc_id: &document::DocID,
-        ) -> Result<bool> {
+        async fn exists(&self, _collection_name: &str, doc_id: &document::DocID) -> Result<bool> {
             let docs = self.docs.lock().unwrap();
             Ok(docs
                 .iter()
@@ -1340,7 +1339,8 @@ mod tests {
     async fn test_execute_create_mutation() {
         let fetcher = MockFetcher::new();
         let mutator = Arc::new(MockMutator::new());
-        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
 
         let result = runner
             .execute_mutation(
@@ -1366,7 +1366,8 @@ mod tests {
     async fn test_execute_create_multiple_documents() {
         let fetcher = MockFetcher::new();
         let mutator = Arc::new(MockMutator::new());
-        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
 
         let result = runner
             .execute_mutation(
@@ -1427,7 +1428,8 @@ mod tests {
         let doc_id = doc.id().unwrap().to_string();
         mutator.add_doc("Users", doc);
 
-        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
 
         let mutation = format!(
             r#"mutation {{ delete_Users(docIDs: ["{}"]) {{ _docID }} }}"#,

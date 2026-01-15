@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use document::DocID;
+use tracing;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -47,6 +48,8 @@ pub struct DeleteNode {
     filter: Option<Filter>,
     /// Deleted document representations (populated after first next())
     deleted_docs: Vec<Doc>,
+    /// Document IDs that were requested but did not exist
+    not_found_ids: Vec<String>,
     /// Current position in deleted_docs
     position: usize,
     /// Current document being yielded
@@ -77,6 +80,7 @@ impl DeleteNode {
             doc_ids: None,
             filter: None,
             deleted_docs: Vec::new(),
+            not_found_ids: Vec::new(),
             position: 0,
             current_doc: Doc::default(),
             did_delete: false,
@@ -101,6 +105,14 @@ impl DeleteNode {
         self.deleted_docs.len()
     }
 
+    /// Get the document IDs that were requested but did not exist.
+    ///
+    /// This allows callers to detect when delete operations skipped
+    /// documents because they didn't exist in the collection.
+    pub fn not_found_ids(&self) -> &[String] {
+        &self.not_found_ids
+    }
+
     /// Create a minimal Doc representing a deleted document.
     fn create_deleted_doc(&self, doc_id: &str) -> Doc {
         let num_fields = self.document_mapping.next_index();
@@ -116,6 +128,7 @@ impl PlanNode for DeleteNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
         self.deleted_docs.clear();
+        self.not_found_ids.clear();
         self.did_delete = false;
         self.initialized = true;
         Ok(())
@@ -155,15 +168,20 @@ impl PlanNode for DeleteNode {
                 })?;
 
                 // Attempt to delete
-                let result = self
-                    .mutator
-                    .delete(&self.collection_name, &doc_id)
-                    .await?;
+                let result = self.mutator.delete(&self.collection_name, &doc_id).await?;
 
                 // Only yield if the document actually existed
                 if result.existed {
                     let plan_doc = self.create_deleted_doc(&doc_id_str);
                     self.deleted_docs.push(plan_doc);
+                } else {
+                    // Track and log non-existent documents
+                    tracing::warn!(
+                        collection = %self.collection_name,
+                        doc_id = %doc_id_str,
+                        "Attempted to delete non-existent document"
+                    );
+                    self.not_found_ids.push(doc_id_str);
                 }
             }
 
@@ -186,6 +204,7 @@ impl PlanNode for DeleteNode {
 
     async fn close(&mut self) -> Result<()> {
         self.deleted_docs.clear();
+        self.not_found_ids.clear();
         self.initialized = false;
         Ok(())
     }
@@ -224,10 +243,7 @@ mod tests {
 
         fn add_doc(&self, doc: Document) {
             if let Some(id) = doc.id() {
-                self.docs
-                    .lock()
-                    .unwrap()
-                    .insert(id.to_string(), doc);
+                self.docs.lock().unwrap().insert(id.to_string(), doc);
             }
         }
 
@@ -242,9 +258,10 @@ mod tests {
             doc.generate_and_set_doc_id()
                 .map_err(|e| QueryError::execution(format!("Failed to generate DocID: {}", e)))?;
 
-            let doc_id = doc.id().cloned().ok_or_else(|| {
-                QueryError::execution("Document should have ID after generation")
-            })?;
+            let doc_id = doc
+                .id()
+                .cloned()
+                .ok_or_else(|| QueryError::execution("Document should have ID after generation"))?;
 
             self.docs
                 .lock()
@@ -255,9 +272,9 @@ mod tests {
         }
 
         async fn update(&self, _collection_name: &str, doc: Document) -> Result<UpdateResult> {
-            let doc_id = doc.id().ok_or_else(|| {
-                QueryError::execution("Document must have ID for update")
-            })?;
+            let doc_id = doc
+                .id()
+                .ok_or_else(|| QueryError::execution("Document must have ID for update"))?;
 
             let modified = doc.values().len();
 
@@ -319,8 +336,8 @@ mod tests {
         assert_eq!(mutator.doc_count(), 1);
 
         // Delete it
-        let mut node = DeleteNode::new("Users", mutator.clone(), mapping)
-            .with_doc_ids(vec![doc_id.clone()]);
+        let mut node =
+            DeleteNode::new("Users", mutator.clone(), mapping).with_doc_ids(vec![doc_id.clone()]);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -354,8 +371,8 @@ mod tests {
         assert_eq!(mutator.doc_count(), 2);
 
         // Delete both
-        let mut node = DeleteNode::new("Users", mutator.clone(), mapping)
-            .with_doc_ids(vec![doc1_id, doc2_id]);
+        let mut node =
+            DeleteNode::new("Users", mutator.clone(), mapping).with_doc_ids(vec![doc1_id, doc2_id]);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -383,8 +400,8 @@ mod tests {
 
         // Try to delete with a mix of existing and non-existing IDs
         // Note: We need to use the same format as valid DocIDs
-        let mut node = DeleteNode::new("Users", mutator.clone(), mapping)
-            .with_doc_ids(vec![doc_id.clone()]);
+        let mut node =
+            DeleteNode::new("Users", mutator.clone(), mapping).with_doc_ids(vec![doc_id.clone()]);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -422,5 +439,45 @@ mod tests {
 
         let result = node.next().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_tracks_not_found_documents() {
+        let mutator = Arc::new(MockMutator::new());
+        let mapping = make_test_mapping();
+
+        // Create one document that exists
+        let doc = create_test_doc("Alice");
+        let existing_id = doc.id().unwrap().to_string();
+        mutator.add_doc(doc);
+
+        // Create another valid-looking DocID that doesn't exist in storage
+        let mut fake_doc = Document::new();
+        fake_doc.set("name", "Fake".to_string());
+        fake_doc.generate_and_set_doc_id().unwrap();
+        let nonexistent_id = fake_doc.id().unwrap().to_string();
+        // Don't add fake_doc to mutator - it won't exist
+
+        let mut node = DeleteNode::new("Users", mutator.clone(), mapping)
+            .with_doc_ids(vec![existing_id.clone(), nonexistent_id.clone()]);
+
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+
+        // Exhaust the iterator
+        let mut count = 0;
+        while node.next().await.unwrap() {
+            count += 1;
+        }
+
+        // Only the existing document should have been deleted
+        assert_eq!(count, 1, "Should only delete one existing document");
+        assert_eq!(node.deleted_count(), 1);
+        assert_eq!(mutator.doc_count(), 0, "Existing doc should be removed");
+
+        // The non-existent document should be tracked
+        let not_found = node.not_found_ids();
+        assert_eq!(not_found.len(), 1, "Should have one not-found ID");
+        assert_eq!(not_found[0], nonexistent_id);
     }
 }

@@ -31,9 +31,9 @@ pub enum ParsedOperation {
 pub fn parse_query(query: &str) -> Result<Vec<Select>> {
     match parse_request(query)? {
         ParsedOperation::Query(selects) => Ok(selects),
-        ParsedOperation::Mutation(_) => {
-            Err(QueryError::parse("Expected query but got mutation. Use parse_request() for mutations."))
-        }
+        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+            "Expected query but got mutation. Use parse_request() for mutations.",
+        )),
     }
 }
 
@@ -43,9 +43,7 @@ pub fn parse_query(query: &str) -> Result<Vec<Select>> {
 pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
     match parse_request(query)? {
         ParsedOperation::Mutation(mutations) => Ok(mutations),
-        ParsedOperation::Query(_) => {
-            Err(QueryError::parse("Expected mutation but got query"))
-        }
+        ParsedOperation::Query(_) => Err(QueryError::parse("Expected mutation but got query")),
     }
 }
 
@@ -106,7 +104,9 @@ pub fn parse_request(query: &str) -> Result<ParsedOperation> {
 
     // Cannot mix queries and mutations
     if has_query && has_mutation {
-        return Err(QueryError::parse("Cannot mix queries and mutations in same request"));
+        return Err(QueryError::parse(
+            "Cannot mix queries and mutations in same request",
+        ));
     }
 
     if has_mutation {
@@ -477,11 +477,7 @@ fn parse_create_input(value: &Value<'_, String>) -> Result<Vec<HashMap<String, J
                         let doc = parse_document_input(obj)?;
                         docs.push(doc);
                     }
-                    _ => {
-                        return Err(QueryError::parse(
-                            "CREATE input items must be objects",
-                        ))
-                    }
+                    _ => return Err(QueryError::parse("CREATE input items must be objects")),
                 }
             }
             Ok(docs)
@@ -717,7 +713,10 @@ mod mutation_tests {
 
         let result = parse_mutations(query);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid mutation name"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mutation name"));
     }
 
     #[test]

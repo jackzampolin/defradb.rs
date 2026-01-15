@@ -208,10 +208,22 @@ mod tests {
 
     #[test]
     fn test_mutation_type_from_prefix() {
-        assert_eq!(MutationType::from_prefix("create"), Some(MutationType::Create));
-        assert_eq!(MutationType::from_prefix("CREATE"), Some(MutationType::Create));
-        assert_eq!(MutationType::from_prefix("update"), Some(MutationType::Update));
-        assert_eq!(MutationType::from_prefix("delete"), Some(MutationType::Delete));
+        assert_eq!(
+            MutationType::from_prefix("create"),
+            Some(MutationType::Create)
+        );
+        assert_eq!(
+            MutationType::from_prefix("CREATE"),
+            Some(MutationType::Create)
+        );
+        assert_eq!(
+            MutationType::from_prefix("update"),
+            Some(MutationType::Update)
+        );
+        assert_eq!(
+            MutationType::from_prefix("delete"),
+            Some(MutationType::Delete)
+        );
         assert_eq!(MutationType::from_prefix("invalid"), None);
     }
 
@@ -239,12 +251,11 @@ mod tests {
 
     #[test]
     fn test_mutation_builders() {
-        let create = Mutation::create("Users")
-            .with_create_input(vec![{
-                let mut m = HashMap::new();
-                m.insert("name".to_string(), JsonValue::String("Alice".to_string()));
-                m
-            }]);
+        let create = Mutation::create("Users").with_create_input(vec![{
+            let mut m = HashMap::new();
+            m.insert("name".to_string(), JsonValue::String("Alice".to_string()));
+            m
+        }]);
 
         assert_eq!(create.mutation_type, MutationType::Create);
         assert_eq!(create.collection_name, "Users");
@@ -254,15 +265,17 @@ mod tests {
             .with_doc_ids(vec!["bae-123".to_string()])
             .with_update_input({
                 let mut m = HashMap::new();
-                m.insert("email".to_string(), JsonValue::String("new@example.com".to_string()));
+                m.insert(
+                    "email".to_string(),
+                    JsonValue::String("new@example.com".to_string()),
+                );
                 m
             });
 
         assert_eq!(update.mutation_type, MutationType::Update);
         assert!(update.doc_ids.is_some());
 
-        let delete = Mutation::delete("Users")
-            .with_doc_ids(vec!["bae-456".to_string()]);
+        let delete = Mutation::delete("Users").with_doc_ids(vec!["bae-456".to_string()]);
 
         assert_eq!(delete.mutation_type, MutationType::Delete);
     }
