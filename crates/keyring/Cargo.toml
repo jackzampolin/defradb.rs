@@ -10,12 +10,15 @@ description = "Keyring and key management for DefraDB"
 
 [dependencies]
 thiserror.workspace = true
-tokio.workspace = true
-serde_json.workspace = true
 base64 = "0.22"
 
-# JWE encryption (PBES2-HS512-A256KW)
+# JWE encryption (PBES2-HS512-A256KW) - Go compatible format
 josekit = "0.8"
+
+# OS keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager)
+# Renamed to avoid conflict with our crate name
+keyring_crate = { package = "keyring", version = "3" }
 
 [dev-dependencies]
 tempfile = "3"
+serde_json.workspace = true

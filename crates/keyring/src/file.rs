@@ -9,21 +9,29 @@
 // licenses/APL.txt.
 
 //! File-based keyring with JWE encryption
+//!
+//! Uses raw JWE compact serialization for Go DefraDB compatibility.
+//! The Go implementation uses github.com/lestrrat-go/jwx/v2/jwe with
+//! PBES2_HS512_A256KW algorithm.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use josekit::jwe::{JweHeader, PBES2_HS512_A256KW};
-use josekit::jwt::{self, JwtPayload};
+use josekit::jwe::{self, JweHeader, PBES2_HS512_A256KW};
 
 use crate::error::{Error, Result};
 use crate::keyring::Keyring;
+
+/// Content encryption algorithm - matches Go jwx default for PBES2_HS512_A256KW
+const CONTENT_ENCRYPTION: &str = "A128CBC-HS256";
 
 /// File-based keyring that stores keys in encrypted files using JWE.
 ///
 /// Each key is stored as a separate file in the directory, encrypted using
 /// PBES2-HS512-A256KW (Password-Based Encryption Scheme 2 with HMAC-SHA-512
-/// and AES-256-KW for key wrapping).
+/// and AES-256-KW for key wrapping) with A128CBC-HS256 content encryption.
+///
+/// The file format is compatible with Go DefraDB's file keyring.
 pub struct FileKeyring {
     dir: PathBuf,
     password: Vec<u8>,
@@ -48,18 +56,13 @@ impl FileKeyring {
 
     fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
         let mut header = JweHeader::new();
-        header.set_content_encryption("A256GCM");
+        header.set_content_encryption(CONTENT_ENCRYPTION);
 
         let encrypter = PBES2_HS512_A256KW
             .encrypter_from_bytes(&self.password)
             .map_err(|e| Error::Encryption(format!("failed to create encrypter: {}", e)))?;
 
-        let mut payload = JwtPayload::new();
-        payload
-            .set_claim("key", Some(serde_json::json!(base64_encode(data))))
-            .map_err(|e| Error::Encryption(format!("failed to set payload: {}", e)))?;
-
-        let token = jwt::encode_with_encrypter(&payload, &header, &encrypter)
+        let token = jwe::serialize_compact(data, &header, &encrypter)
             .map_err(|e| Error::Encryption(format!("failed to encrypt: {}", e)))?;
 
         Ok(token.into_bytes())
@@ -73,15 +76,10 @@ impl FileKeyring {
             .decrypter_from_bytes(&self.password)
             .map_err(|e| Error::Decryption(format!("failed to create decrypter: {}", e)))?;
 
-        let (payload, _header) = jwt::decode_with_decrypter(token, &decrypter)
+        let (data, _header) = jwe::deserialize_compact(token, &decrypter)
             .map_err(|e| Error::Decryption(format!("failed to decrypt: {}", e)))?;
 
-        let key_b64 = payload
-            .claim("key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Decryption("missing key claim".to_string()))?;
-
-        base64_decode(key_b64).map_err(|e| Error::Decryption(format!("invalid base64: {}", e)))
+        Ok(data)
     }
 }
 
@@ -128,22 +126,6 @@ impl Keyring for FileKeyring {
         }
         Ok(keys)
     }
-}
-
-fn base64_encode(data: &[u8]) -> String {
-    use std::io::Write;
-    let mut buf = Vec::new();
-    {
-        let mut encoder =
-            base64::write::EncoderWriter::new(&mut buf, &base64::engine::general_purpose::STANDARD);
-        encoder.write_all(data).unwrap();
-    }
-    String::from_utf8(buf).unwrap()
-}
-
-fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s)
 }
 
 #[cfg(test)]
@@ -237,5 +219,32 @@ mod tests {
         let keyring2 = FileKeyring::open(temp_dir.path(), b"password2").unwrap();
         let result = keyring2.get("key");
         assert!(matches!(result, Err(Error::Decryption(_))));
+    }
+
+    #[test]
+    fn test_jwe_format_go_compatible() {
+        // Verify JWE compact serialization format (5 base64url parts separated by dots)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let keyring = FileKeyring::open(temp_dir.path(), b"secret").unwrap();
+
+        keyring.set("peer_key", b"abc").unwrap();
+
+        // Read raw file content
+        let cipher = std::fs::read(temp_dir.path().join("peer_key")).unwrap();
+        let token = std::str::from_utf8(&cipher).unwrap();
+
+        // JWE compact serialization has 5 parts: header.encrypted_key.iv.ciphertext.tag
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 5, "JWE compact should have 5 parts");
+
+        // Verify header contains expected algorithm
+        use base64::Engine;
+        let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .unwrap();
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes).unwrap();
+
+        assert_eq!(header["alg"], "PBES2-HS512+A256KW");
+        assert_eq!(header["enc"], "A128CBC-HS256");
     }
 }

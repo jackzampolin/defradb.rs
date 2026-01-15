@@ -17,10 +17,12 @@
 mod error;
 mod file;
 mod keyring;
+mod system;
 
 pub use error::{Error, Result};
 pub use file::FileKeyring;
 pub use keyring::Keyring;
+pub use system::SystemKeyring;
 
 /// Environment variable name for the keyring secret
 pub const KEYRING_SECRET_ENV: &str = "DEFRA_KEYRING_SECRET";
