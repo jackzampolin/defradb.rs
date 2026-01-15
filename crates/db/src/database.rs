@@ -1592,7 +1592,11 @@ mod tests {
         // Step 4: Sign the proof with Ed25519
         let private_key = crypto::generate_ed25519().unwrap();
         let signed_proof = db
-            .extract_signed_proof(&leaf_cid, &root_cid, &private_key as &dyn crypto::PrivateKey)
+            .extract_signed_proof(
+                &leaf_cid,
+                &root_cid,
+                &private_key as &dyn crypto::PrivateKey,
+            )
             .await
             .expect("extract_signed_proof should not error")
             .expect("signed proof should exist");
