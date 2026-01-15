@@ -39,6 +39,15 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    #[error("query error: {0}")]
+    Query(#[from] query::error::QueryError),
+
+    #[error("transaction not found: {0}")]
+    TransactionNotFound(String),
+
+    #[error("transaction registry lock poisoned: {0}")]
+    LockPoisoned(String),
+
     #[error("{0}")]
     Other(String),
 }

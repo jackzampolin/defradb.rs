@@ -407,6 +407,17 @@ impl Select {
         self.show_deleted = true;
         self
     }
+
+    /// Get all requested simple fields (not nested selects or aggregates)
+    pub fn requested_fields(&self) -> Vec<&Field> {
+        self.fields
+            .iter()
+            .filter_map(|r| match r {
+                Requestable::Field(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -1,14 +1,40 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! HTTP server for DefraDB.
+//!
+//! Provides an Axum-based HTTP API compatible with Go DefraDB's API structure.
+//!
+//! # Endpoints
+//!
+//! - `GET /health-check` - Health check
+//! - `POST /api/v0/graphql` - Execute GraphQL queries
+//! - `GET /api/v0/graphql` - Execute GraphQL queries (via query params)
+//! - `GET /api/v0/schema` - Get GraphQL schema
+//! - `GET /api/v0/version` - Get version info
+//!
+//! # Example
+//!
+//! ```ignore
+//! use defra_http::Server;
+//! use query::executor::QueryExecutor;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let executor = MyQueryExecutor::new();
+//!     let server = Server::new(executor);
+//!     server.run().await.unwrap();
+//! }
+//! ```
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod error;
+pub mod handlers;
+pub mod router;
+pub mod server;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
+
+pub use error::{HttpError, Result};
+pub use router::{create_router, AppState};
+pub use server::{Server, ServerConfig};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use mock::MockQueryExecutor;
