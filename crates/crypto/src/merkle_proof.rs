@@ -51,6 +51,23 @@ impl ProofNode {
 
     /// Verify this node's CID matches its data
     pub fn verify_cid(&self) -> Result<bool> {
+        const SHA2_256_CODE: u64 = 0x12;
+        const DAG_CBOR_CODEC: u64 = 0x71;
+
+        // Explicitly check for supported hash algorithm and codec
+        if self.cid.hash().code() != SHA2_256_CODE {
+            return Err(Error::BlockError(format!(
+                "Unsupported hash algorithm: 0x{:x} (only SHA2-256 0x12 is supported)",
+                self.cid.hash().code()
+            )));
+        }
+        if self.cid.codec() != DAG_CBOR_CODEC {
+            return Err(Error::BlockError(format!(
+                "Unsupported codec: 0x{:x} (only DAG-CBOR 0x71 is supported)",
+                self.cid.codec()
+            )));
+        }
+
         let computed_cid = compute_cid(&self.data)?;
         Ok(computed_cid == self.cid)
     }
@@ -368,20 +385,25 @@ pub async fn extract_proof<B: ProofBlockstore>(
         if let Some(heads) = &block.heads {
             for parent_cid in heads {
                 if !visited.contains(parent_cid) {
-                    // Fetch parent block
-                    if let Some(parent_data) = blockstore.get_block(parent_cid).await? {
-                        block_cache.insert(*parent_cid, parent_data);
-                        visited.insert(*parent_cid);
-                        parent_map.insert(*parent_cid, current_cid);
-                        queue.push_back(*parent_cid);
+                    // Fetch parent block - this must exist if referenced
+                    let parent_data = blockstore.get_block(parent_cid).await?.ok_or_else(|| {
+                        Error::BlockError(format!(
+                            "Missing parent block {} referenced by {}",
+                            parent_cid, current_cid
+                        ))
+                    })?;
 
-                        // Check if we reached the root
-                        if *parent_cid == root_cid {
-                            // Reconstruct path from root back to leaf
-                            let path =
-                                reconstruct_path(&parent_map, &block_cache, leaf_cid, root_cid)?;
-                            return Ok(Some(MerkleProof::new(leaf_cid, root_cid, path)));
-                        }
+                    block_cache.insert(*parent_cid, parent_data);
+                    visited.insert(*parent_cid);
+                    parent_map.insert(*parent_cid, current_cid);
+                    queue.push_back(*parent_cid);
+
+                    // Check if we reached the root
+                    if *parent_cid == root_cid {
+                        // Reconstruct path from root back to leaf
+                        let path =
+                            reconstruct_path(&parent_map, &block_cache, leaf_cid, root_cid)?;
+                        return Ok(Some(MerkleProof::new(leaf_cid, root_cid, path)));
                     }
                 }
             }
@@ -901,6 +923,158 @@ mod tests {
         assert!(
             err_msg.contains("exceeds maximum length"),
             "Error should mention path length: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_proof_branching_dag() {
+        // Test branching DAG where a merge block points to multiple parents
+        //
+        //     root
+        //    /    \
+        //  b1      b2
+        //    \    /
+        //     merge (leaf)
+        //
+        // Both b1->root and b2->root are valid paths from merge to root
+        let blockstore = MemoryProofBlockstore::new();
+
+        // Create root block
+        let root = Block::new(create_test_delta("doc1", "v1"), vec![], vec![]);
+        let root_cid = root.generate_cid().unwrap();
+        blockstore.put(root_cid, root.to_dag_cbor().unwrap()).await;
+
+        // Create two branches from root
+        let b1 = Block::new(create_test_delta("doc1", "branch1"), vec![root_cid], vec![]);
+        let b1_cid = b1.generate_cid().unwrap();
+        blockstore.put(b1_cid, b1.to_dag_cbor().unwrap()).await;
+
+        let b2 = Block::new(create_test_delta("doc1", "branch2"), vec![root_cid], vec![]);
+        let b2_cid = b2.generate_cid().unwrap();
+        blockstore.put(b2_cid, b2.to_dag_cbor().unwrap()).await;
+
+        // Create merge block pointing to both branches
+        let merge = Block::new(create_test_delta("doc1", "merge"), vec![b1_cid, b2_cid], vec![]);
+        let merge_cid = merge.generate_cid().unwrap();
+        blockstore.put(merge_cid, merge.to_dag_cbor().unwrap()).await;
+
+        // Extract proof from merge to root - should find one of the paths
+        let proof = extract_proof(&blockstore, merge_cid, root_cid)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // BFS finds shortest path, so length should be 3 (merge -> b1 or b2 -> root)
+        assert_eq!(proof.len(), 3);
+        assert_eq!(proof.leaf_cid, merge_cid);
+        assert_eq!(proof.root_cid, root_cid);
+        assert!(proof.verify().unwrap());
+
+        // The middle block should be either b1 or b2
+        let middle_cid = proof.path[1].cid;
+        assert!(
+            middle_cid == b1_cid || middle_cid == b2_cid,
+            "Middle block should be one of the branches"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_proof_missing_parent_returns_error() {
+        // Test that referencing a non-existent parent block returns an error
+        let blockstore = MemoryProofBlockstore::new();
+
+        // Create a block that references a non-existent parent
+        let fake_parent_cid = {
+            let fake = Block::new(create_test_delta("doc1", "fake"), vec![], vec![]);
+            fake.generate_cid().unwrap()
+        };
+
+        let leaf = Block::new(
+            create_test_delta("doc1", "leaf"),
+            vec![fake_parent_cid],
+            vec![],
+        );
+        let leaf_cid = leaf.generate_cid().unwrap();
+        blockstore.put(leaf_cid, leaf.to_dag_cbor().unwrap()).await;
+
+        // Don't add the fake_parent_cid to blockstore - it's missing
+
+        // Create a root that exists but is unrelated
+        let root = Block::new(create_test_delta("doc1", "root"), vec![], vec![]);
+        let root_cid = root.generate_cid().unwrap();
+        blockstore.put(root_cid, root.to_dag_cbor().unwrap()).await;
+
+        // Attempting to extract proof should return error about missing parent
+        let result = extract_proof(&blockstore, leaf_cid, root_cid).await;
+        assert!(result.is_err(), "Should return error for missing parent");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Missing parent block"),
+            "Error should mention missing parent: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_verify_cid_unsupported_hash_algorithm() {
+        use multihash::MultihashGeneric;
+
+        // Create a valid block
+        let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+        let data = block.to_dag_cbor().unwrap();
+
+        // Create a CID with unsupported hash algorithm (Blake2b-256 = 0xb220)
+        const BLAKE2B_256_CODE: u64 = 0xb220;
+        const DAG_CBOR_CODEC: u64 = 0x71;
+
+        // Create a fake hash (all zeros) with Blake2b code
+        let fake_digest = [0u8; 32];
+        let mh = MultihashGeneric::<64>::wrap(BLAKE2B_256_CODE, &fake_digest).unwrap();
+        let unsupported_cid = Cid::new_v1(DAG_CBOR_CODEC, mh);
+
+        let node = ProofNode {
+            cid: unsupported_cid,
+            data,
+        };
+
+        let result = node.verify_cid();
+        assert!(result.is_err(), "Should return error for unsupported hash");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Unsupported hash algorithm"),
+            "Error should mention unsupported hash: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_verify_cid_unsupported_codec() {
+        use multihash::MultihashGeneric;
+
+        // Create a valid block
+        let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+        let data = block.to_dag_cbor().unwrap();
+
+        // Create a CID with unsupported codec (raw = 0x55)
+        const SHA2_256_CODE: u64 = 0x12;
+        const RAW_CODEC: u64 = 0x55;
+
+        let fake_digest = [0u8; 32];
+        let mh = MultihashGeneric::<64>::wrap(SHA2_256_CODE, &fake_digest).unwrap();
+        let unsupported_cid = Cid::new_v1(RAW_CODEC, mh);
+
+        let node = ProofNode {
+            cid: unsupported_cid,
+            data,
+        };
+
+        let result = node.verify_cid();
+        assert!(result.is_err(), "Should return error for unsupported codec");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Unsupported codec"),
+            "Error should mention unsupported codec: {}",
             err_msg
         );
     }

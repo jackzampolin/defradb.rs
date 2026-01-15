@@ -1298,7 +1298,6 @@ mod tests {
 
     #[test]
     fn test_decode_go_signature_block_ed25519() {
-        
         let sig_bytes = hex::decode(ED25519_SIG_BLOCK_CBOR).expect("Should decode hex");
         let signature: Signature =
             serde_ipld_dagcbor::from_slice(&sig_bytes).expect("Should decode DAG-CBOR signature");
@@ -1314,8 +1313,7 @@ mod tests {
         let identity_str =
             String::from_utf8(signature.header.identity.clone()).expect("Identity should be UTF-8");
         assert_eq!(
-            identity_str,
-            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            identity_str, "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
             "Ed25519 identity should be hex-encoded public key"
         );
 
@@ -1329,7 +1327,6 @@ mod tests {
 
     #[test]
     fn test_decode_go_signature_block_secp256k1() {
-        
         let sig_bytes = hex::decode(SECP256K1_SIG_BLOCK_CBOR).expect("Should decode hex");
         let signature: Signature =
             serde_ipld_dagcbor::from_slice(&sig_bytes).expect("Should decode DAG-CBOR signature");
@@ -1345,8 +1342,7 @@ mod tests {
         let identity_str =
             String::from_utf8(signature.header.identity.clone()).expect("Identity should be UTF-8");
         assert_eq!(
-            identity_str,
-            "0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0",
+            identity_str, "0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0",
             "secp256k1 identity should be hex-encoded compressed public key"
         );
 
@@ -1360,7 +1356,6 @@ mod tests {
 
     #[test]
     fn test_verify_go_ed25519_signature_on_block() {
-        
         // Decode the block bytes
         let block_bytes = hex::decode(MERKLE_TEST_BLOCK_CBOR).expect("Should decode block hex");
 
@@ -1383,7 +1378,6 @@ mod tests {
 
     #[test]
     fn test_verify_go_secp256k1_signature_on_block() {
-        
         // Decode the block bytes
         let block_bytes = hex::decode(MERKLE_TEST_BLOCK_CBOR).expect("Should decode block hex");
 
@@ -1406,7 +1400,6 @@ mod tests {
 
     #[test]
     fn test_rust_signature_format_matches_go_ed25519() {
-        
         // Sign the same block bytes with the same key
         let block_bytes = hex::decode(MERKLE_TEST_BLOCK_CBOR).expect("Should decode block hex");
         let private_key = Ed25519PrivateKey::from_bytes(&ED25519_PRIVATE_KEY).unwrap();
@@ -1441,7 +1434,6 @@ mod tests {
 
     #[test]
     fn test_rust_signature_format_matches_go_secp256k1() {
-        
         // Sign the same block bytes with the same key
         let block_bytes = hex::decode(MERKLE_TEST_BLOCK_CBOR).expect("Should decode block hex");
         let private_key = Secp256k1PrivateKey::from_bytes(&SECP256K1_PRIVATE_KEY).unwrap();
@@ -1479,7 +1471,8 @@ mod tests {
         // Verify that we can parse the identity from Go signature and reconstruct the public key
 
         // Ed25519
-        let ed25519_identity_hex = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        let ed25519_identity_hex =
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
         let ed25519_key_bytes = hex::decode(ed25519_identity_hex).expect("Should decode hex");
         let ed25519_pubkey =
             Ed25519PublicKey::from_bytes(&ed25519_key_bytes).expect("Should parse Ed25519 key");
