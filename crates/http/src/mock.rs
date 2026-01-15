@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use query::error::{QueryError, Result};
+use query::error::{QueryError, Result, TransactionError};
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
+use query::TransactionHandle;
 
 /// Mock executor for testing HTTP routes with pattern-matched query responses.
 #[derive(Debug, Clone)]
@@ -33,8 +34,39 @@ impl QueryExecutor for FailingMockExecutor {
         QueryResponse::error("execution failed")
     }
 
-    async fn execute_in_txn(&self, request: QueryRequest, _txn_id: &str) -> QueryResponse {
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        _handle: &TransactionHandle,
+    ) -> QueryResponse {
         self.execute(request).await
+    }
+
+    async fn begin_txn(
+        &self,
+        _readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        Err(TransactionError::not_supported(
+            "mock executor does not support transactions",
+        ))
+    }
+
+    async fn commit_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError::not_supported(
+            "mock executor does not support transactions",
+        ))
+    }
+
+    async fn rollback_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError::not_supported(
+            "mock executor does not support transactions",
+        ))
     }
 
     async fn schema(&self) -> Result<String> {
@@ -99,8 +131,33 @@ impl QueryExecutor for MockQueryExecutor {
         }
     }
 
-    async fn execute_in_txn(&self, request: QueryRequest, _txn_id: &str) -> QueryResponse {
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        _handle: &TransactionHandle,
+    ) -> QueryResponse {
         self.execute(request).await
+    }
+
+    async fn begin_txn(
+        &self,
+        _readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        Ok(TransactionHandle::new("mock-txn-001".to_string()))
+    }
+
+    async fn commit_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Ok(())
+    }
+
+    async fn rollback_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Ok(())
     }
 
     async fn schema(&self) -> Result<String> {

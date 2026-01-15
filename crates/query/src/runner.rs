@@ -2,6 +2,12 @@
 //!
 //! This module provides the QueryRunner which bridges the query planner
 //! with the storage layer, executing queries and returning JSON results.
+//!
+//! # Transaction Support
+//!
+//! The QueryRunner supports executing queries within transaction contexts via
+//! a `TransactionRegistry`. The registry manages transaction lifecycle and provides
+//! transaction-scoped document fetchers for query execution.
 
 use async_trait::async_trait;
 use document::Document;
@@ -11,53 +17,83 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::document::DocumentMapping;
-use crate::error::{QueryError, Result};
+use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::json_convert::normal_value_to_json;
 use crate::mapper::{Requestable, Select};
 use crate::plan::{LimitNode, ScanNode, SelectNode};
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::parse_query;
+use crate::txn::{
+    GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry,
+};
 
-/// Storage abstraction for fetching documents.
-#[async_trait]
-pub trait DocFetcher: Send + Sync {
-    /// Get all documents from a collection.
-    async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
-
-    /// Get documents by their IDs.
-    async fn get_by_ids(&self, collection_name: &str, doc_ids: &[String]) -> Result<Vec<Document>>;
-}
+// Re-export for backwards compatibility
+pub use crate::fetcher::{DocFetcher, FetchByIdsResult};
 
 /// Query runner that executes GraphQL queries against storage.
-pub struct QueryRunner<F: DocFetcher> {
-    /// Document fetcher for storage access
-    fetcher: F,
+pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRegistry> {
+    /// Document fetcher for storage access (used for non-transactional queries)
+    fetcher: Arc<F>,
     /// Collection schemas by name
     collections: HashMap<String, Arc<CollectionVersion>>,
+    /// Transaction registry for transaction lifecycle management
+    registry: Arc<R>,
 }
 
-impl<F: DocFetcher> QueryRunner<F> {
+impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
     /// Create a new query runner with the given fetcher and collections.
+    ///
+    /// This creates a runner without transaction support. Use `with_registry`
+    /// to enable transaction support.
     pub fn new(fetcher: F, collections: Vec<CollectionVersion>) -> Self {
         let collections_map = collections
             .iter()
             .map(|c| (c.name.clone(), Arc::new(c.clone())))
             .collect();
         Self {
-            fetcher,
+            fetcher: Arc::new(fetcher),
             collections: collections_map,
+            registry: Arc::new(NoOpTransactionRegistry),
+        }
+    }
+}
+
+impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
+    /// Create a new query runner with transaction support.
+    pub fn with_registry(fetcher: F, collections: Vec<CollectionVersion>, registry: R) -> Self {
+        let collections_map = collections
+            .iter()
+            .map(|c| (c.name.clone(), Arc::new(c.clone())))
+            .collect();
+        Self {
+            fetcher: Arc::new(fetcher),
+            collections: collections_map,
+            registry: Arc::new(registry),
         }
     }
 
     /// Execute a GraphQL query and return JSON results.
     pub async fn execute_query(&self, query: &str) -> Result<JsonValue> {
+        self.execute_query_with_fetcher(query, self.fetcher.as_ref())
+            .await
+    }
+
+    /// Execute a GraphQL query with a specific fetcher.
+    ///
+    /// This is used internally for both regular queries (using the default fetcher)
+    /// and transactional queries (using a transaction-scoped fetcher).
+    async fn execute_query_with_fetcher(
+        &self,
+        query: &str,
+        fetcher: &dyn DocFetcher,
+    ) -> Result<JsonValue> {
         let selects = parse_query(query)?;
 
         let mut results = Map::new();
 
         for select in selects {
-            let result = self.execute_select(&select).await?;
+            let result = self.execute_select_with_fetcher(&select, fetcher).await?;
             let key = select.field.output_name();
             results.insert(key.to_string(), result);
         }
@@ -65,8 +101,12 @@ impl<F: DocFetcher> QueryRunner<F> {
         Ok(JsonValue::Object(results))
     }
 
-    /// Execute a single Select operation.
-    async fn execute_select(&self, select: &Select) -> Result<JsonValue> {
+    /// Execute a single Select operation with a specific fetcher.
+    async fn execute_select_with_fetcher(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+    ) -> Result<JsonValue> {
         // Get collection schema
         let collection = self
             .collections
@@ -78,11 +118,10 @@ impl<F: DocFetcher> QueryRunner<F> {
 
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
-            self.fetcher
-                .get_by_ids(&select.collection_name, doc_ids)
-                .await?
+            let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            result.into_docs()
         } else {
-            self.fetcher.get_all(&select.collection_name).await?
+            fetcher.get_all(&select.collection_name).await?
         };
 
         // Build document mapping
@@ -258,29 +297,101 @@ impl<F: DocFetcher> QueryRunner<F> {
 }
 
 #[async_trait]
-impl<F: DocFetcher> QueryExecutor for QueryRunner<F> {
+impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> {
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         match self.execute_query(&request.query).await {
             Ok(data) => QueryResponse {
                 data: Some(data),
                 errors: vec![],
             },
-            Err(e) => QueryResponse {
-                data: None,
-                errors: vec![QueryResponseError {
-                    message: e.to_string(),
-                    path: None,
-                    locations: None,
-                }],
-            },
+            Err(e) => {
+                tracing::error!(
+                    query = %request.query,
+                    error = %e,
+                    "Query execution failed"
+                );
+                QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: e.to_string(),
+                        path: None,
+                        locations: None,
+                    }],
+                }
+            }
         }
     }
 
-    async fn execute_in_txn(&self, _request: QueryRequest, txn_id: &str) -> QueryResponse {
-        QueryResponse::error(format!(
-            "execute_in_txn is not yet implemented: transaction '{}' context cannot be used",
-            txn_id
-        ))
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        handle: &TransactionHandle,
+    ) -> QueryResponse {
+        // Look up the transaction in the registry
+        let txn_ctx = match self.registry.get(handle) {
+            GetTransactionResult::Found(ctx) => ctx,
+            GetTransactionResult::NotFound => {
+                return QueryResponse::error(format!(
+                    "transaction '{}' not found or has been committed/rolled back",
+                    handle
+                ));
+            }
+            GetTransactionResult::LockPoisoned => {
+                return QueryResponse::error(format!(
+                    "transaction registry lock poisoned - system may be in corrupted state (transaction '{}')",
+                    handle
+                ));
+            }
+        };
+
+        // Get the transaction-scoped fetcher and execute
+        let fetcher = txn_ctx.doc_fetcher();
+        match self
+            .execute_query_with_fetcher(&request.query, fetcher.as_ref())
+            .await
+        {
+            Ok(data) => QueryResponse {
+                data: Some(data),
+                errors: vec![],
+            },
+            Err(e) => {
+                tracing::error!(
+                    query = %request.query,
+                    txn_id = %handle,
+                    error = %e,
+                    "Query execution failed in transaction"
+                );
+                QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: e.to_string(),
+                        path: None,
+                        locations: None,
+                    }],
+                }
+            }
+        }
+    }
+
+    async fn begin_txn(
+        &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.registry.begin(readonly).await
+    }
+
+    async fn commit_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.commit(handle).await
+    }
+
+    async fn rollback_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.rollback(handle).await
     }
 
     async fn schema(&self) -> Result<String> {
@@ -300,52 +411,8 @@ impl<F: DocFetcher> QueryExecutor for QueryRunner<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{MockFetcher, MockTxnRegistry};
     use schema::{FieldDescription, FieldKind};
-    use std::sync::Mutex;
-
-    /// Mock fetcher for testing
-    struct MockFetcher {
-        docs: Mutex<HashMap<String, Vec<Document>>>,
-    }
-
-    impl MockFetcher {
-        fn new() -> Self {
-            Self {
-                docs: Mutex::new(HashMap::new()),
-            }
-        }
-
-        fn add_doc(&self, collection: &str, doc: Document) {
-            let mut docs = self.docs.lock().unwrap();
-            docs.entry(collection.to_string()).or_default().push(doc);
-        }
-    }
-
-    #[async_trait]
-    impl DocFetcher for MockFetcher {
-        async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
-            let docs = self.docs.lock().unwrap();
-            Ok(docs.get(collection_name).cloned().unwrap_or_default())
-        }
-
-        async fn get_by_ids(
-            &self,
-            collection_name: &str,
-            doc_ids: &[String],
-        ) -> Result<Vec<Document>> {
-            let docs = self.docs.lock().unwrap();
-            let all = docs.get(collection_name).cloned().unwrap_or_default();
-            let filtered: Vec<_> = all
-                .into_iter()
-                .filter(|d| {
-                    d.id()
-                        .map(|id| doc_ids.contains(&id.to_string()))
-                        .unwrap_or(false)
-                })
-                .collect();
-            Ok(filtered)
-        }
-    }
 
     fn make_test_collection() -> CollectionVersion {
         CollectionVersion::new(
@@ -487,7 +554,7 @@ mod tests {
             &self,
             _collection_name: &str,
             _doc_ids: &[String],
-        ) -> Result<Vec<Document>> {
+        ) -> Result<FetchByIdsResult> {
             Err(QueryError::execution("storage failure"))
         }
     }
@@ -658,18 +725,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_in_txn_returns_error() {
+    async fn test_execute_in_txn_without_registry_returns_error() {
         let fetcher = MockFetcher::new();
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
         let request = QueryRequest::new("{ Users { name } }");
-        let response = runner.execute_in_txn(request, "txn-123").await;
+        let handle: TransactionHandle = "txn-123".parse().unwrap();
+        let response = runner.execute_in_txn(request, &handle).await;
 
+        // Without a proper registry, transactions are not found
         assert!(response.has_errors());
-        assert!(response.errors[0]
-            .message
-            .contains("execute_in_txn is not yet implemented"));
         assert!(response.errors[0].message.contains("txn-123"));
+        assert!(response.errors[0].message.contains("not found"));
     }
 
     #[tokio::test]
@@ -769,5 +836,214 @@ mod tests {
         assert!(schema.contains("_docID: ID"));
         assert!(schema.contains("name: String"));
         assert!(schema.contains("age: Int"));
+    }
+
+    // Transaction support tests
+
+    #[tokio::test]
+    async fn test_begin_txn() {
+        let fetcher = MockFetcher::new();
+        let registry = MockTxnRegistry::new(MockFetcher::new());
+        let runner = QueryRunner::with_registry(fetcher, vec![make_test_collection()], registry);
+
+        let txn_id = runner.begin_txn(false).await.unwrap();
+        assert!(txn_id.starts_with("txn-"));
+    }
+
+    #[tokio::test]
+    async fn test_begin_and_commit_txn() {
+        let fetcher = MockFetcher::new();
+        let registry = MockTxnRegistry::new(MockFetcher::new());
+        let runner = QueryRunner::with_registry(fetcher, vec![make_test_collection()], registry);
+
+        let txn_id = runner.begin_txn(false).await.unwrap();
+        let result = runner.commit_txn(&txn_id).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_begin_and_rollback_txn() {
+        let fetcher = MockFetcher::new();
+        let registry = MockTxnRegistry::new(MockFetcher::new());
+        let runner = QueryRunner::with_registry(fetcher, vec![make_test_collection()], registry);
+
+        let txn_id = runner.begin_txn(false).await.unwrap();
+        let result = runner.rollback_txn(&txn_id).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_commit_nonexistent_txn_returns_error() {
+        let fetcher = MockFetcher::new();
+        let registry = MockTxnRegistry::new(MockFetcher::new());
+        let runner = QueryRunner::with_registry(fetcher, vec![make_test_collection()], registry);
+
+        let nonexistent_handle: TransactionHandle = "nonexistent-txn".parse().unwrap();
+        let result = runner.commit_txn(&nonexistent_handle).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_in_txn_success() {
+        let fetcher = MockFetcher::new();
+
+        // Set up data in the registry's fetcher
+        let registry_fetcher = MockFetcher::new();
+        let mut doc = Document::new();
+        doc.set("name", "TxnAlice");
+        doc.set("age", 40i64);
+        doc.generate_and_set_doc_id().unwrap();
+        registry_fetcher.add_doc("Users", doc);
+
+        let registry = MockTxnRegistry::new(registry_fetcher);
+        let runner = QueryRunner::with_registry(fetcher, vec![make_test_collection()], registry);
+
+        // Begin transaction
+        let txn_id = runner.begin_txn(false).await.unwrap();
+
+        // Execute query in transaction
+        let request = QueryRequest::new("{ Users { name age } }");
+        let response = runner.execute_in_txn(request, &txn_id).await;
+
+        assert!(!response.has_errors());
+        let data = response.data.unwrap();
+        let users = data.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("name").unwrap(), "TxnAlice");
+        assert_eq!(users[0].get("age").unwrap(), 40);
+
+        // Commit
+        runner.commit_txn(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execute_in_txn_after_commit_fails() {
+        let fetcher = MockFetcher::new();
+        let registry = MockTxnRegistry::new(MockFetcher::new());
+        let runner = QueryRunner::with_registry(fetcher, vec![make_test_collection()], registry);
+
+        let txn_id = runner.begin_txn(false).await.unwrap();
+        runner.commit_txn(&txn_id).await.unwrap();
+
+        // Try to execute after commit
+        let request = QueryRequest::new("{ Users { name } }");
+        let response = runner.execute_in_txn(request, &txn_id).await;
+
+        assert!(response.has_errors());
+        assert!(response.errors[0].message.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_queries_in_same_transaction() {
+        let registry_fetcher = MockFetcher::new();
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        registry_fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        registry_fetcher.add_doc("Users", doc2);
+
+        let registry = MockTxnRegistry::new(registry_fetcher);
+        let runner =
+            QueryRunner::with_registry(MockFetcher::new(), vec![make_test_collection()], registry);
+
+        let txn_id = runner.begin_txn(false).await.unwrap();
+
+        // First query
+        let request1 = QueryRequest::new("{ Users { name } }");
+        let response1 = runner.execute_in_txn(request1, &txn_id).await;
+        assert!(!response1.has_errors());
+
+        // Second query in same transaction
+        let request2 = QueryRequest::new("{ Users { age } }");
+        let response2 = runner.execute_in_txn(request2, &txn_id).await;
+        assert!(!response2.has_errors());
+
+        // Both should see the same data
+        let users1 = response1
+            .data
+            .unwrap()
+            .get("Users")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+        let users2 = response2
+            .data
+            .unwrap()
+            .get("Users")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(users1, users2);
+        assert_eq!(users1, 2);
+
+        runner.commit_txn(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_begin_txn_without_registry_returns_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner.begin_txn(false).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn test_query_error_does_not_invalidate_transaction() {
+        let registry_fetcher = MockFetcher::new();
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.set("age", 30i64);
+        doc.generate_and_set_doc_id().unwrap();
+        registry_fetcher.add_doc("Users", doc);
+
+        let registry = MockTxnRegistry::new(registry_fetcher);
+        let runner =
+            QueryRunner::with_registry(MockFetcher::new(), vec![make_test_collection()], registry);
+
+        // Begin transaction
+        let txn_id = runner.begin_txn(false).await.unwrap();
+
+        // Execute an invalid query (unknown collection) - should return error response
+        let bad_request = QueryRequest::new("{ NonExistentCollection { name } }");
+        let bad_response = runner.execute_in_txn(bad_request, &txn_id).await;
+        assert!(
+            bad_response.has_errors(),
+            "Query for unknown collection should fail"
+        );
+        assert!(
+            bad_response.errors[0]
+                .message
+                .contains("collection not found"),
+            "Error should mention collection not found"
+        );
+
+        // The transaction should still be valid - execute a good query
+        let good_request = QueryRequest::new("{ Users { name } }");
+        let good_response = runner.execute_in_txn(good_request, &txn_id).await;
+        assert!(
+            !good_response.has_errors(),
+            "Valid query should succeed after failed query"
+        );
+        let data = good_response.data.unwrap();
+        let users = data.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+
+        // Commit should succeed - transaction was not invalidated
+        let commit_result = runner.commit_txn(&txn_id).await;
+        assert!(
+            commit_result.is_ok(),
+            "Commit should succeed after query error"
+        );
     }
 }

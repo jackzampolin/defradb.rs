@@ -21,6 +21,7 @@
 pub mod document;
 pub mod error;
 pub mod executor;
+pub mod fetcher;
 mod json_convert;
 pub mod mapper;
 pub mod plan;
@@ -29,17 +30,23 @@ pub mod query_parse;
 pub mod runner;
 pub mod schema_gen;
 pub mod sdl_parse;
+pub mod test_utils;
+pub mod txn;
 
 // Re-exports for convenience
 pub use document::{DocumentMapping, RenderKey};
-pub use error::{QueryError, Result};
+pub use error::{QueryError, Result, TransactionError};
 pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 pub use mapper::{Filter, Select};
 pub use plan::{CreateInput, CreateNode, LimitNode, ScanNode, SelectNode};
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::parse_query;
-pub use runner::{DocFetcher, QueryRunner};
+pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::parse_sdl;
+pub use txn::{
+    GetTransactionResult, NoOpTransactionRegistry, TransactionContext, TransactionGuard,
+    TransactionHandle, TransactionRegistry,
+};
 
 #[cfg(test)]
 mod tests {

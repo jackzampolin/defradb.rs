@@ -4,6 +4,7 @@
 /// It provides CRUD operations for documents.
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
+use datastore::NamespaceView;
 use document::{DocID, Document, NormalValue};
 use schema::{CollectionVersion, FieldKind, ScalarArrayKind, ScalarKind};
 use storage::corekv::{IterOptions, Store};
@@ -215,6 +216,58 @@ impl Collection {
         })
         .await?;
 
+        Ok(docs)
+    }
+
+    // =========================================================================
+    // Methods that take NamespaceView directly (for Send-safe async contexts)
+    // =========================================================================
+
+    /// Get a document by ID using a NamespaceView directly.
+    ///
+    /// This method takes `NamespaceView` instead of `&DbTxn` to allow
+    /// use in async contexts where `Send` futures are required.
+    pub async fn get_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<Option<Document>> {
+        let key = self.doc_key(doc_id);
+        let data = datastore.get(&key).await.map_err(Error::Storage)?;
+
+        match data {
+            Some(bytes) => {
+                let doc =
+                    Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                Ok(Some(doc))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get all documents in the collection using a NamespaceView directly.
+    ///
+    /// This method takes `NamespaceView` instead of `&DbTxn` to allow
+    /// use in async contexts where `Send` futures are required.
+    pub async fn get_all_with_datastore(&self, datastore: &NamespaceView) -> Result<Vec<Document>> {
+        let prefix = self.collection_key_prefix();
+        let opts = IterOptions::new().with_prefix(prefix);
+
+        let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
+
+        let mut docs = Vec::new();
+        while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            let doc = Document::from_cbor(&pair.value).map_err(|e| {
+                Error::Serialization(format!(
+                    "failed to deserialize document at key {:?}: {}",
+                    String::from_utf8_lossy(&pair.key),
+                    e
+                ))
+            })?;
+            docs.push(doc);
+        }
+
+        iter.close().await.map_err(Error::Storage)?;
         Ok(docs)
     }
 
