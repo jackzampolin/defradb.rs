@@ -685,4 +685,158 @@ mod tests {
         // Cache should be empty
         assert!(db.list_collections().unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn test_load_collections_corrupted_json_returns_error() {
+        use storage::corekv::Key;
+        use storage::keys::systemstore::CollectionNameKey;
+
+        let store = MemoryStore::new();
+
+        // Write corrupted JSON directly to the store
+        {
+            let db = DB::new(store.clone());
+            let txn = db.new_txn(false).await.unwrap();
+
+            // Use block to ensure systemstore is dropped before commit
+            {
+                let systemstore = txn.systemstore().unwrap();
+                let key = CollectionNameKey::new("CorruptedCollection");
+                systemstore
+                    .set(&key.bytes(), b"not valid json {{{")
+                    .await
+                    .unwrap();
+            }
+
+            txn.commit().await.unwrap();
+        }
+
+        // Try to open the database - should fail on load_collections
+        let result = DB::open(store).await;
+        assert!(result.is_err(), "Expected error loading corrupted JSON");
+        match result {
+            Err(Error::Serialization(msg)) => {
+                assert!(
+                    msg.contains("deserialize"),
+                    "Error should mention deserialization: {}",
+                    msg
+                );
+            }
+            Err(e) => panic!("Expected Serialization error, got: {:?}", e),
+            Ok(_) => panic!("Expected error but got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_collection_removes_all_documents_from_store() {
+        use document::{Document, NormalValue};
+
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store.clone()));
+
+        // Create collection and add documents
+        db.create_collection(test_users_schema()).await.unwrap();
+        let collection = db.get_collection("Users").unwrap().unwrap();
+
+        {
+            let txn = db.new_txn(false).await.unwrap();
+            for i in 0..5 {
+                let mut doc = Document::new();
+                doc.set("name", NormalValue::String(format!("User{}", i)));
+                doc.set("age", NormalValue::Int(20 + i));
+                doc.generate_and_set_doc_id().unwrap();
+                collection.create(&txn, &doc).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+        }
+
+        // Verify documents exist
+        {
+            let txn = db.new_txn(true).await.unwrap();
+            let docs = collection.get_all(&txn).await.unwrap();
+            assert_eq!(docs.len(), 5, "Should have 5 documents before delete");
+            txn.discard().unwrap();
+        }
+
+        // Delete the collection
+        db.delete_collection("Users").await.unwrap();
+
+        // Verify documents are gone from the store by checking raw keys
+        let count = {
+            let txn = db.new_txn(true).await.unwrap();
+            let doc_prefix = "/d/col-users/";
+            let opts =
+                storage::corekv::IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
+
+            let count = {
+                let datastore = txn.datastore().unwrap();
+                let mut iter = datastore.iterator(opts).await.unwrap();
+
+                let mut c = 0;
+                while iter.next().await.unwrap().is_some() {
+                    c += 1;
+                }
+                iter.close().await.unwrap();
+                c
+            };
+
+            txn.discard().unwrap();
+            count
+        };
+
+        assert_eq!(count, 0, "All documents should be deleted from store");
+    }
+
+    #[tokio::test]
+    async fn test_schema_roundtrip_preserves_all_fields() {
+        let store = MemoryStore::new();
+
+        let original_schema = CollectionVersion::new(
+            "TestCollection",
+            "v1",
+            "col-test-123",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "age", FieldKind::int()),
+                FieldDescription::new("4", "active", FieldKind::bool()),
+            ],
+        );
+
+        // Create collection and persist
+        {
+            let db = DB::new(store.clone());
+            db.create_collection(original_schema.clone()).await.unwrap();
+        }
+
+        // Reopen and load from store
+        let db = DB::open(store).await.unwrap();
+        let loaded = db
+            .get_collection("TestCollection")
+            .unwrap()
+            .expect("Collection should exist");
+        let loaded_schema = loaded.schema();
+
+        // Verify all fields are preserved
+        assert_eq!(loaded_schema.name, original_schema.name);
+        assert_eq!(loaded_schema.version_id, original_schema.version_id);
+        assert_eq!(loaded_schema.collection_id, original_schema.collection_id);
+        assert_eq!(
+            loaded_schema.fields.len(),
+            original_schema.fields.len(),
+            "Field count should match"
+        );
+
+        for (loaded_field, original_field) in loaded_schema
+            .fields
+            .iter()
+            .zip(original_schema.fields.iter())
+        {
+            assert_eq!(loaded_field.id, original_field.id, "Field ID mismatch");
+            assert_eq!(
+                loaded_field.name, original_field.name,
+                "Field name mismatch"
+            );
+        }
+    }
 }
