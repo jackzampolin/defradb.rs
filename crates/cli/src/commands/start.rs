@@ -910,4 +910,132 @@ mod http_integration_tests {
         shutdown_tx.send(()).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
     }
+
+    /// End-to-end test: pre-seed database with documents, query via HTTP
+    #[tokio::test]
+    async fn test_http_graphql_returns_documents_from_database() {
+        use document::NormalValue;
+        use schema::{CollectionVersion, FieldDescription, FieldKind};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        // Use the same path that Node will use (rootdir when datastore.path is empty)
+        let data_path = temp_dir.path();
+
+        // Phase 1: Pre-seed database with collection and documents
+        {
+            let store = storage::RocksDBStore::open(data_path).unwrap();
+            let database = db::DB::new(store);
+
+            // Create Users collection
+            let schema = CollectionVersion::new(
+                "Users",
+                "v1",
+                "col-users",
+                vec![
+                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                    FieldDescription::new("2", "name", FieldKind::string()),
+                    FieldDescription::new("3", "age", FieldKind::int()),
+                ],
+            );
+            database.create_collection(schema).await.unwrap();
+
+            // Insert test documents
+            let collection = database.get_collection("Users").unwrap().unwrap();
+            let txn = database.new_txn(false).await.unwrap();
+
+            let mut doc1 = document::Document::new();
+            doc1.set("name", NormalValue::String("Alice".to_string()));
+            doc1.set("age", NormalValue::Int(30));
+            doc1.generate_and_set_doc_id().unwrap();
+            collection.create(&txn, &doc1).await.unwrap();
+
+            let mut doc2 = document::Document::new();
+            doc2.set("name", NormalValue::String("Bob".to_string()));
+            doc2.set("age", NormalValue::Int(25));
+            doc2.generate_and_set_doc_id().unwrap();
+            collection.create(&txn, &doc2).await.unwrap();
+
+            txn.commit().await.unwrap();
+            database.close().await.unwrap();
+        }
+
+        // Phase 2: Start server and query via HTTP
+        let config = Config {
+            rootdir: temp_dir.path().to_path_buf(),
+            log: crate::config::LogConfig::default(),
+            api: crate::config::ApiConfig {
+                address: format!("127.0.0.1:{}", port),
+                allowed_origins: vec![],
+                pubkey_path: String::new(),
+                privkey_path: String::new(),
+            },
+            datastore: crate::config::DatastoreConfig {
+                store: DatastoreType::Badger, // Uses RocksDB
+                path: String::new(),
+                max_txn_retries: 5,
+                valuelogfilesize: 1 << 30,
+                no_encryption: true,
+                no_signing: true,
+                no_searchable_encryption: true,
+                default_key_type: "ed25519".to_string(),
+            },
+            net: crate::config::NetConfig {
+                p2p_disabled: true,
+                p2p_addresses: vec![],
+                peers: vec![],
+                pubsub_enabled: false,
+                relay_enabled: false,
+            },
+            keyring: crate::config::KeyringConfig::default(),
+            development: false,
+            secret_file: String::new(),
+            telemetry_disabled: true,
+            replicator_retry_intervals: vec![],
+        };
+
+        let api_url = format!("http://127.0.0.1:{}", port);
+        let node = Node::new(config).await.unwrap();
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        wait_for_server(&api_url, 20).await;
+
+        // Query documents via GraphQL
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{}/api/v0/graphql", api_url))
+            .header("content-type", "application/json")
+            .body(r#"{"query": "{ Users { name age } }"}"#)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to query graphql endpoint");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let body: serde_json::Value = response.json().await.unwrap();
+
+        // Verify we got data back (not just errors)
+        let data = body.get("data").expect("Response should have data field");
+        let users = data.get("Users").expect("Data should have Users field");
+        let users_array = users.as_array().expect("Users should be an array");
+
+        assert_eq!(users_array.len(), 2, "Should have 2 users");
+
+        // Verify document contents
+        let names: Vec<&str> = users_array
+            .iter()
+            .filter_map(|u| u.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"Alice"), "Should contain Alice");
+        assert!(names.contains(&"Bob"), "Should contain Bob");
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
+    }
 }
