@@ -84,8 +84,10 @@ impl Collection {
 
         match data {
             Some(bytes) => {
-                let doc =
+                let mut doc =
                     Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                // Set the document ID (stored as part of the key, not in the serialized document)
+                doc.set_id(doc_id.clone());
                 Ok(Some(doc))
             }
             None => Ok(None),
@@ -189,13 +191,22 @@ impl Collection {
             .map_err(Error::Storage)?;
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-            let doc = Document::from_cbor(&pair.value).map_err(|e| {
+            let mut doc = Document::from_cbor(&pair.value).map_err(|e| {
                 Error::Serialization(format!(
                     "failed to deserialize document at key {:?}: {}",
                     String::from_utf8_lossy(&pair.key),
                     e
                 ))
             })?;
+
+            // Extract doc_id from key (format: /d/<collection_id>/<doc_id>)
+            // Find the last '/' and extract the doc_id string after it
+            if let Some(pos) = pair.key.iter().rposition(|&b| b == b'/') {
+                let doc_id_str = String::from_utf8_lossy(&pair.key[pos + 1..]);
+                if let Ok(doc_id) = doc_id_str.parse::<DocID>() {
+                    doc.set_id(doc_id);
+                }
+            }
 
             // Callback returns true to continue, false to stop
             if !callback(doc).await? {
@@ -238,8 +249,10 @@ impl Collection {
 
         match data {
             Some(bytes) => {
-                let doc =
+                let mut doc =
                     Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                // Set the document ID (stored as part of the key, not in the serialized document)
+                doc.set_id(doc_id.clone());
                 Ok(Some(doc))
             }
             None => Ok(None),
@@ -258,13 +271,23 @@ impl Collection {
 
         let mut docs = Vec::new();
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-            let doc = Document::from_cbor(&pair.value).map_err(|e| {
+            let mut doc = Document::from_cbor(&pair.value).map_err(|e| {
                 Error::Serialization(format!(
                     "failed to deserialize document at key {:?}: {}",
                     String::from_utf8_lossy(&pair.key),
                     e
                 ))
             })?;
+
+            // Extract doc_id from key (format: /d/<collection_id>/<doc_id>)
+            // Find the last '/' and extract the doc_id string after it
+            if let Some(pos) = pair.key.iter().rposition(|&b| b == b'/') {
+                let doc_id_str = String::from_utf8_lossy(&pair.key[pos + 1..]);
+                if let Ok(doc_id) = doc_id_str.parse::<DocID>() {
+                    doc.set_id(doc_id);
+                }
+            }
+
             docs.push(doc);
         }
 
