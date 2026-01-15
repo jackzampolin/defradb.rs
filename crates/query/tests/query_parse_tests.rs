@@ -154,14 +154,27 @@ fn test_filter_with_nested_and() {
 // Error path tests
 
 #[test]
-fn test_parse_mutation_returns_error() {
-    let query = r#"mutation { createUser(input: {name: "Alice"}) { _docID } }"#;
+fn test_parse_query_rejects_mutation() {
+    // parse_query should reject mutations (use parse_mutations instead)
+    let query = r#"mutation { create_Users(input: [{name: "Alice"}]) { _docID } }"#;
     let result = parse_query(query);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("mutations not yet supported"));
+        .contains("Expected query but got mutation"));
+}
+
+#[test]
+fn test_parse_mutations_works() {
+    use query::parse_mutations;
+
+    let query = r#"mutation { create_Users(input: [{name: "Alice"}]) { _docID } }"#;
+    let result = parse_mutations(query);
+    assert!(result.is_ok());
+    let mutations = result.unwrap();
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(mutations[0].collection_name, "Users");
 }
 
 #[test]

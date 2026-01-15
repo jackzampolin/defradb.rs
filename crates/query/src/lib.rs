@@ -38,12 +38,12 @@ pub mod txn;
 pub use document::{DocumentMapping, RenderKey};
 pub use error::{QueryError, Result, TransactionError};
 pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-pub use mapper::{Filter, Select};
+pub use mapper::{Filter, Mutation, MutationType, Select};
 pub use plan::{
     CreateInput, CreateNode, DeleteNode, LimitNode, ScanNode, SelectNode, UpdateInput, UpdateNode,
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
-pub use query_parse::parse_query;
+pub use query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
 pub use mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::parse_sdl;
