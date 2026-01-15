@@ -193,9 +193,8 @@ impl UpsertNode {
 
     /// Upsert a single document by ID with the given input.
     async fn upsert_by_id(&mut self, doc_id_str: &str, input: &UpsertInput) -> Result<()> {
-        let doc_id = DocID::from_string(doc_id_str).map_err(|e| {
-            QueryError::execution(format!("Invalid DocID '{}': {}", doc_id_str, e))
-        })?;
+        let doc_id = DocID::from_string(doc_id_str)
+            .map_err(|e| QueryError::execution(format!("Invalid DocID '{}': {}", doc_id_str, e)))?;
 
         // Check if document exists
         let existing = self
@@ -399,8 +398,9 @@ mod tests {
     impl DocMutator for MockMutator {
         async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
             if doc.id().is_none() {
-                doc.generate_and_set_doc_id()
-                    .map_err(|e| QueryError::execution(format!("Failed to generate DocID: {}", e)))?;
+                doc.generate_and_set_doc_id().map_err(|e| {
+                    QueryError::execution(format!("Failed to generate DocID: {}", e))
+                })?;
             }
 
             let doc_id = doc
@@ -511,8 +511,7 @@ mod tests {
         let doc_id = existing_doc.id().unwrap().to_string();
         mutator.add_doc(existing_doc);
 
-        let input = UpsertInput::new()
-            .with_field("email", json!("alice@new.com"));
+        let input = UpsertInput::new().with_field("email", json!("alice@new.com"));
 
         let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
             .with_doc_ids(vec![doc_id.clone()])
@@ -580,8 +579,7 @@ mod tests {
             .with_field("name", json!("NewUser"))
             .with_field("email", json!("new@example.com"));
 
-        let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
-            .with_input(input);
+        let mut node = UpsertNode::new("Users", mutator.clone(), mapping).with_input(input);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -609,8 +607,7 @@ mod tests {
         let mutator = Arc::new(MockMutator::new());
         let mapping = make_test_mapping();
 
-        let input = UpsertInput::new()
-            .with_field("name", json!("Alice"));
+        let input = UpsertInput::new().with_field("name", json!("Alice"));
 
         // Use an invalid DocID format
         let mut node = UpsertNode::new("Users", mutator, mapping)
@@ -643,8 +640,7 @@ mod tests {
                 .with_field("email", json!("user3@example.com")),
         ];
 
-        let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
-            .with_inputs(inputs);
+        let mut node = UpsertNode::new("Users", mutator.clone(), mapping).with_inputs(inputs);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -664,8 +660,7 @@ mod tests {
         let mutator = Arc::new(MockMutator::new());
         let mapping = make_test_mapping();
 
-        let input = UpsertInput::new()
-            .with_field("name", json!("Alice"));
+        let input = UpsertInput::new().with_field("name", json!("Alice"));
 
         // Empty doc_ids list
         let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
@@ -686,11 +681,9 @@ mod tests {
         let mutator = Arc::new(MockMutator::new());
         let mapping = make_test_mapping();
 
-        let input = UpsertInput::new()
-            .with_field("name", json!("Alice"));
+        let input = UpsertInput::new().with_field("name", json!("Alice"));
 
-        let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
-            .with_input(input);
+        let mut node = UpsertNode::new("Users", mutator.clone(), mapping).with_input(input);
 
         // First run
         node.init().await.unwrap();

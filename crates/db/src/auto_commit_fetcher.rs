@@ -41,11 +41,9 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
         // Create a read-only transaction
-        let txn = self
-            .db
-            .new_txn(true)
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("failed to create txn: {}", e)))?;
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
 
         // Get the datastore
         let datastore = txn.datastore().map_err(|e| {
@@ -86,11 +84,9 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
         // Create a read-only transaction
-        let txn = self
-            .db
-            .new_txn(true)
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("failed to create txn: {}", e)))?;
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
 
         // Get the datastore
         let datastore = txn.datastore().map_err(|e| {

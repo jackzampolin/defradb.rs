@@ -27,7 +27,7 @@ use crate::plan::{
     UpdateNode, UpsertInput, UpsertNode,
 };
 use crate::planner::{Doc, PlanNode};
-use crate::query_parse::{parse_mutations, parse_query};
+use crate::query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
 use crate::txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry,
 };
@@ -551,7 +551,28 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 #[async_trait]
 impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> {
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
-        match self.execute_query(&request.query).await {
+        // First, parse the request to determine if it's a query or mutation
+        let parsed = match parse_request(&request.query) {
+            Ok(p) => p,
+            Err(e) => {
+                return QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: format!("parse error: {}", e),
+                        path: None,
+                        locations: None,
+                    }],
+                };
+            }
+        };
+
+        // Route to appropriate handler based on operation type
+        let result = match parsed {
+            ParsedOperation::Query(_) => self.execute_query(&request.query).await,
+            ParsedOperation::Mutation(_) => self.execute_mutation(&request.query).await,
+        };
+
+        match result {
             Ok(data) => QueryResponse {
                 data: Some(data),
                 errors: vec![],
@@ -1727,11 +1748,7 @@ mod tests {
         let mut unique_ids = doc_ids.clone();
         unique_ids.sort();
         unique_ids.dedup();
-        assert_eq!(
-            unique_ids.len(),
-            3,
-            "Each document should have a unique ID"
-        );
+        assert_eq!(unique_ids.len(), 3, "Each document should have a unique ID");
     }
 
     #[tokio::test]
@@ -2176,9 +2193,7 @@ mod tests {
 
         // Delete only users with age > 30
         let result = runner
-            .execute_mutation(
-                r#"mutation { delete_Users(filter: {age: {_gt: 30}}) { _docID } }"#,
-            )
+            .execute_mutation(r#"mutation { delete_Users(filter: {age: {_gt: 30}}) { _docID } }"#)
             .await
             .unwrap();
 

@@ -43,8 +43,10 @@ pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<Collect
                 let collection_id = match String::from_utf8(kv.value) {
                     Ok(id) => id,
                     Err(e) => {
-                        load_error =
-                            Some(Error::Other(format!("Invalid collection ID encoding: {}", e)));
+                        load_error = Some(Error::Other(format!(
+                            "Invalid collection ID encoding: {}",
+                            e
+                        )));
                         break;
                     }
                 };
@@ -109,9 +111,9 @@ mod tests {
     use super::*;
     use crate::DB;
     use datastore::BasicTxn;
+    use std::sync::Arc;
     use storage::backends::MemoryStore;
     use storage::corekv::Key;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_load_empty_database() {
@@ -119,7 +121,10 @@ mod tests {
         let db = DB::new(store);
 
         let collections = load_active_collections(&db).await.unwrap();
-        assert!(collections.is_empty(), "New database should have no collections");
+        assert!(
+            collections.is_empty(),
+            "New database should have no collections"
+        );
     }
 
     #[tokio::test]
