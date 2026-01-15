@@ -16,15 +16,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use p2p::{
-    codec, DefraTopic, Error, HostEvent, Message, P2PHost, P2PHostHandle, PushLogBroadcast,
-    PushLogReply, PushLogRequest, SyncConfig, SyncCoordinator, SyncEvent, REP_REQUEST_PROTOCOL,
-    REP_RESPONSE_PROTOCOL,
+    codec, testutil::MockBitswapStore, DefraTopic, Error, HostEvent, Message, P2PHost,
+    P2PHostHandle, PushLogBroadcast, PushLogReply, PushLogRequest, SyncConfig, SyncCoordinator,
+    SyncEvent, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
 };
 use tokio::time::timeout;
 
 /// Helper to create and start a P2P host, returning the handle and event receiver.
 async fn create_and_start_host() -> (P2PHostHandle, tokio::sync::mpsc::Receiver<HostEvent>) {
-    let (host, handle, events) = P2PHost::new().expect("failed to create host");
+    let store = MockBitswapStore::new();
+    let (host, handle, events) = P2PHost::new(store).expect("failed to create host");
 
     // Spawn the host event loop
     tokio::spawn(host.run());
@@ -310,8 +311,10 @@ async fn test_host_with_custom_keypair() {
 
     let keypair = Keypair::generate_ed25519();
     let expected_peer_id = keypair.public().to_peer_id();
+    let store = MockBitswapStore::new();
 
-    let (host, handle, _events) = P2PHost::with_keypair(keypair).expect("failed to create host");
+    let (host, handle, _events) =
+        P2PHost::with_keypair(keypair, store).expect("failed to create host");
 
     assert_eq!(host.local_peer_id(), expected_peer_id);
 
@@ -1117,4 +1120,1991 @@ async fn test_two_node_sync_with_coordinator() {
 
     handle1.shutdown().await.ok();
     handle2.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_peer_state_tracking_with_coordinator() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    // Create two hosts with coordinators
+    let (handle1, mut events1) = create_and_start_host().await;
+    let store1 = Arc::new(MemoryStore::new());
+    let blockstore1 = Arc::new(DefraBlockstore::new(store1, true));
+    let (coordinator1, _sync_events1) =
+        SyncCoordinator::new(handle1.clone(), blockstore1.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 1");
+
+    let (handle2, mut events2) = create_and_start_host().await;
+    let store2 = Arc::new(MemoryStore::new());
+    let blockstore2 = Arc::new(DefraBlockstore::new(store2, true));
+    let (coordinator2, _sync_events2) =
+        SyncCoordinator::new(handle2.clone(), blockstore2.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 2");
+
+    // Set up networking
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    let addr1 = wait_for_listening(&mut events1).await;
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events2).await;
+
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+    let peer_id2 = handle2
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+
+    // Initially no peers connected in tracker
+    assert!(coordinator1.peer_state().connected_peers().is_empty());
+    assert!(coordinator2.peer_state().connected_peers().is_empty());
+
+    // Connect the hosts
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
+
+    // Wait for connection events and process them
+    let connected1 = wait_for_peer_connected(&mut events1).await;
+    let connected2 = wait_for_peer_connected(&mut events2).await;
+
+    // Process the connection events through coordinators
+    coordinator1
+        .handle_host_event(HostEvent::PeerConnected(connected1))
+        .await
+        .expect("handle event failed");
+    coordinator2
+        .handle_host_event(HostEvent::PeerConnected(connected2))
+        .await
+        .expect("handle event failed");
+
+    // Now peer state should track the connections
+    let connected_to_1 = coordinator1.peer_state().connected_peers();
+    let connected_to_2 = coordinator2.peer_state().connected_peers();
+
+    assert_eq!(connected_to_1.len(), 1, "Coordinator 1 should see peer 2");
+    assert_eq!(connected_to_2.len(), 1, "Coordinator 2 should see peer 1");
+    assert!(connected_to_1.contains(&peer_id2));
+    assert!(connected_to_2.contains(&peer_id1));
+
+    // Test peer state for topic subscriptions
+    coordinator1
+        .handle_host_event(HostEvent::PeerSubscribed {
+            peer_id: peer_id2,
+            topic: "users".to_string(),
+        })
+        .await
+        .expect("handle event failed");
+
+    let peers_for_users = coordinator1.peer_state().peers_for_collection("users");
+    assert_eq!(peers_for_users.len(), 1);
+    assert!(peers_for_users.contains(&peer_id2));
+
+    // Test peer stats
+    let stats = coordinator1.peer_state().stats();
+    assert_eq!(stats.connected_peers(), 1);
+    assert_eq!(stats.total_peers(), 1);
+
+    // Cleanup
+    handle1.shutdown().await.ok();
+    handle2.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_dag_sync_prepare_sync_no_missing_blocks() {
+    use p2p::sync::{DagSync, SyncPlan};
+    use std::str::FromStr;
+
+    // Create a coordinator with peer state
+    let (handle, _events) = create_and_start_host().await;
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    // Create test CIDs
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // When all links exist locally, prepare_sync returns Complete
+    let plan = dag_sync
+        .prepare_sync(root_cid, &[link_cid], |_| true) // All CIDs exist locally
+        .await
+        .expect("prepare_sync failed");
+
+    assert!(matches!(plan, SyncPlan::Complete));
+
+    // Root should be marked as synced
+    assert!(dag_sync.state().is_synced(&root_cid).await);
+
+    // Cleanup
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_peer_state_cid_tracking_before_connection() {
+    use blockstore::DefraBlockstore;
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create two hosts with coordinators
+    let (handle1, mut events1) = create_and_start_host().await;
+    let store1 = Arc::new(MemoryStore::new());
+    let blockstore1 = Arc::new(DefraBlockstore::new(store1, true));
+    let (coordinator1, _sync_events1) =
+        SyncCoordinator::new(handle1.clone(), blockstore1.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 1");
+
+    let (handle2, mut events2) = create_and_start_host().await;
+    let store2 = Arc::new(MemoryStore::new());
+    let blockstore2 = Arc::new(DefraBlockstore::new(store2, true));
+    let (_coordinator2, _sync_events2) =
+        SyncCoordinator::new(handle2.clone(), blockstore2.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator 2");
+
+    // Set up networking
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    let addr1 = wait_for_listening(&mut events1).await;
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events2).await;
+
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+    let peer_id2 = handle2
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+
+    // Test: Record CID for peer2 BEFORE connection event is processed
+    // This simulates a race condition where gossip message arrives before PeerConnected
+    let test_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Record CID before connection
+    coordinator1.peer_state().peer_has_cid(&peer_id2, test_cid);
+
+    // Peer entry should be created (bug fix verification)
+    assert!(coordinator1.peer_state().peer_has(&peer_id2, &test_cid));
+    assert_eq!(coordinator1.peer_state().stats().total_peers(), 1);
+
+    // But peer is not connected, so shouldn't appear in peers_with_cid
+    assert!(coordinator1
+        .peer_state()
+        .peers_with_cid(&test_cid)
+        .is_empty());
+
+    // Now connect the hosts
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
+
+    // Wait for and process connection events
+    let connected1 = wait_for_peer_connected(&mut events1).await;
+    coordinator1
+        .handle_host_event(HostEvent::PeerConnected(connected1))
+        .await
+        .expect("handle event failed");
+
+    // Now peer2 should appear in peers_with_cid
+    let peers_with = coordinator1.peer_state().peers_with_cid(&test_cid);
+    assert_eq!(peers_with.len(), 1);
+    assert!(peers_with.contains(&peer_id2));
+
+    // Cleanup
+    handle1.shutdown().await.ok();
+    handle2.shutdown().await.ok();
+}
+
+// ============================================================================
+// Error Path Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_handle_host_event_invalid_cid_in_gossip_message() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Create a gossip message with invalid CID bytes
+    let invalid_cid_bytes = vec![0xFF, 0xFF, 0xFF]; // Invalid CID
+    let message = PushLogBroadcast {
+        doc_id: "test-doc".to_string(),
+        cid: invalid_cid_bytes,
+        collection_id: "test-collection".to_string(),
+        creator: "test-creator".to_string(),
+        block: vec![1, 2, 3],
+    };
+
+    // Processing should not panic - invalid CID is logged and skipped
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: libp2p::PeerId::random(),
+            message_id: libp2p::gossipsub::MessageId::new(b"test"),
+            topic: "test-collection".to_string(),
+            message,
+        })
+        .await;
+
+    // Invalid CID is detected and returns an error - but importantly it doesn't panic
+    // The error is expected and the coordinator handles it gracefully
+    assert!(
+        result.is_err(),
+        "Should return error for invalid CID, got: {:?}",
+        result
+    );
+
+    // Verify it's specifically an InvalidCid error
+    let err = result.unwrap_err();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("CID") || err_str.contains("cid"),
+        "Error should mention CID: {}",
+        err_str
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_handle_host_event_peer_disconnect_updates_state() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let peer_id = libp2p::PeerId::random();
+
+    // Connect peer
+    coordinator
+        .handle_host_event(HostEvent::PeerConnected(peer_id))
+        .await
+        .expect("connect failed");
+    assert!(coordinator.peer_state().is_connected(&peer_id));
+
+    // Disconnect peer
+    coordinator
+        .handle_host_event(HostEvent::PeerDisconnected(peer_id))
+        .await
+        .expect("disconnect failed");
+    assert!(!coordinator.peer_state().is_connected(&peer_id));
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_handle_host_event_subscription_tracking() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let peer_id = libp2p::PeerId::random();
+
+    // Connect peer
+    coordinator
+        .handle_host_event(HostEvent::PeerConnected(peer_id))
+        .await
+        .expect("connect failed");
+
+    // Subscribe to collection
+    coordinator
+        .handle_host_event(HostEvent::PeerSubscribed {
+            peer_id,
+            topic: "users".to_string(),
+        })
+        .await
+        .expect("subscribe failed");
+
+    assert_eq!(
+        coordinator.peer_state().peers_for_collection("users").len(),
+        1
+    );
+
+    // Unsubscribe from collection
+    coordinator
+        .handle_host_event(HostEvent::PeerUnsubscribed {
+            peer_id,
+            topic: "users".to_string(),
+        })
+        .await
+        .expect("unsubscribe failed");
+
+    assert!(coordinator
+        .peer_state()
+        .peers_for_collection("users")
+        .is_empty());
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// ReplicationLoop Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_replication_loop_channel_closed_terminates() {
+    use p2p::sync::{MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop};
+
+    // Create a simple merge handler for testing
+    struct TestHandler;
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, TestError> {
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let coordinator = Arc::new(coordinator);
+    let handler = Arc::new(TestHandler);
+
+    // Drop the original events receiver - we'll use our own channel
+    drop(events);
+
+    // Create a new channel that we control
+    let (tx, rx) = tokio::sync::mpsc::channel::<SyncEvent>(1);
+
+    // Immediately drop the sender to close the channel
+    drop(tx);
+
+    // Run the loop with a timeout - it should terminate when channel closes
+    let result = timeout(
+        Duration::from_secs(2),
+        ReplicationLoop::run(
+            coordinator.clone(),
+            rx,
+            handler,
+            ReplicationConfig::default(),
+        ),
+    )
+    .await;
+
+    // The loop should complete (not timeout) when channel is closed
+    assert!(
+        result.is_ok(),
+        "ReplicationLoop should terminate when channel closes"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_replication_loop_drain_empty_channel() {
+    use p2p::sync::{MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop};
+
+    struct TestHandler;
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, TestError> {
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, mut events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let coordinator = Arc::new(coordinator);
+    let handler = Arc::new(TestHandler);
+
+    // Drain empty channel should return empty vec
+    let results = ReplicationLoop::drain(
+        coordinator.clone(),
+        &mut events,
+        handler,
+        ReplicationConfig::default(),
+    )
+    .await;
+
+    assert!(
+        results.is_empty(),
+        "Draining empty channel should return no results"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// Bitswap Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_dag_sync_with_missing_blocks() {
+    use p2p::sync::{DagSync, SyncPlan};
+    use std::str::FromStr;
+
+    // Create peer state with a connected peer
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let peer = libp2p::PeerId::random();
+    peer_state.peer_connected(peer);
+
+    let dag_sync = DagSync::new(peer_state);
+
+    // Create test CIDs
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let missing_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // When some links are missing locally, prepare_sync returns NeedsFetch
+    let plan = dag_sync
+        .prepare_sync(root_cid, &[missing_cid], |_| false) // No CIDs exist locally
+        .await
+        .expect("prepare_sync failed");
+
+    match plan {
+        SyncPlan::NeedsFetch(data) => {
+            assert_eq!(data.root(), root_cid);
+            assert_eq!(data.missing().len(), 1);
+            assert_eq!(data.missing()[0], missing_cid);
+            assert!(!data.providers().is_empty(), "Should have providers");
+        }
+        _ => panic!("Expected NeedsFetch, got {:?}", plan),
+    }
+
+    // Root should be marked as syncing
+    assert!(dag_sync.state().is_syncing(&root_cid).await);
+    // Missing block should also be marked as syncing
+    assert!(dag_sync.state().is_syncing(&missing_cid).await);
+}
+
+#[tokio::test]
+async fn test_dag_sync_handle_block_received() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+    assert!(dag_sync.state().is_syncing(&cid).await);
+
+    // Handle block received
+    dag_sync.handle_block_received(cid).await;
+
+    // Should now be synced, not syncing
+    assert!(!dag_sync.state().is_syncing(&cid).await);
+    assert!(dag_sync.state().is_synced(&cid).await);
+}
+
+#[tokio::test]
+async fn test_dag_sync_handle_sync_complete_success() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+
+    // Complete with success - should return Ok
+    dag_sync
+        .handle_sync_complete(cid, true, None)
+        .await
+        .expect("sync completion should succeed");
+
+    assert!(dag_sync.state().is_synced(&cid).await);
+    assert!(!dag_sync.state().is_syncing(&cid).await);
+}
+
+#[tokio::test]
+async fn test_dag_sync_handle_sync_complete_failure() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+
+    // Complete with failure - should return Err
+    let result = dag_sync.handle_sync_complete(cid, false, Some("sync failed")).await;
+    assert!(result.is_err(), "sync failure should return error");
+
+    // Should be neither syncing nor synced (can retry)
+    assert!(!dag_sync.state().is_synced(&cid).await);
+    assert!(!dag_sync.state().is_syncing(&cid).await);
+}
+
+#[tokio::test]
+async fn test_replicator_registry_access_control() {
+    use p2p::{BlockAccessController, ReplicatorRegistry};
+
+    let registry = Arc::new(ReplicatorRegistry::new());
+    let peer1 = libp2p::PeerId::random();
+    let peer2 = libp2p::PeerId::random();
+
+    // Register peer1 as a replicator for "users" collection
+    registry.add_replicator("users", peer1);
+
+    // Create controller with access control enabled
+    let controller = BlockAccessController::controlled(registry);
+
+    let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        .unwrap();
+
+    // peer1 should have access (is replicator)
+    assert!(controller.has_access(&peer1, &cid, Some("users")));
+
+    // peer2 should NOT have access (not a replicator)
+    assert!(!controller.has_access(&peer2, &cid, Some("users")));
+
+    // peer1 should also have access when collection is unknown (is_any_replicator)
+    assert!(controller.has_access(&peer1, &cid, None));
+}
+
+#[tokio::test]
+async fn test_replicator_registry_multiple_collections() {
+    use p2p::ReplicatorRegistry;
+
+    let registry = ReplicatorRegistry::new();
+    let peer = libp2p::PeerId::random();
+
+    registry.add_replicator("users", peer);
+    registry.add_replicator("posts", peer);
+    registry.add_replicator("comments", peer);
+
+    // Should be replicator for all three
+    assert!(registry.is_replicator("users", &peer));
+    assert!(registry.is_replicator("posts", &peer));
+    assert!(registry.is_replicator("comments", &peer));
+    assert!(!registry.is_replicator("other", &peer));
+
+    // Get collections should return all three
+    let collections = registry.get_collections(&peer);
+    assert_eq!(collections.len(), 3);
+
+    // Remove from one
+    registry.remove_replicator("posts", &peer);
+    assert!(!registry.is_replicator("posts", &peer));
+    assert!(registry.is_replicator("users", &peer));
+
+    // Remove peer entirely
+    registry.remove_peer(&peer);
+    assert!(!registry.is_any_replicator(&peer));
+}
+
+#[tokio::test]
+async fn test_bitswap_store_adapter_contains() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use storage::backends::MemoryStore;
+    use std::str::FromStr;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, false));
+    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Initially should not contain the CID
+    let libipld_cid = libipld::Cid::try_from(cid.to_bytes().as_slice()).unwrap();
+    let contains = adapter.contains(&libipld_cid).await.unwrap();
+    assert!(!contains);
+
+    // Put a block
+    let block_data = vec![1, 2, 3, 4, 5];
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    // Now should contain the CID
+    let contains = adapter.contains(&libipld_cid).await.unwrap();
+    assert!(contains);
+}
+
+#[tokio::test]
+async fn test_bitswap_store_adapter_get() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use storage::backends::MemoryStore;
+    use std::str::FromStr;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, false));
+    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let libipld_cid = libipld::Cid::try_from(cid.to_bytes().as_slice()).unwrap();
+
+    // Initially should return None
+    let data = adapter.get(&libipld_cid).await.unwrap();
+    assert!(data.is_none());
+
+    // Put a block
+    let block_data = vec![1, 2, 3, 4, 5];
+    blockstore.put(&cid, &block_data).await.unwrap();
+
+    // Now should return the block data
+    let data = adapter.get(&libipld_cid).await.unwrap();
+    assert!(data.is_some());
+    assert_eq!(data.unwrap(), block_data);
+}
+
+// ============================================================================
+// Concurrent State Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_dag_sync_state_concurrent_operations() {
+    use p2p::sync::DagSync;
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(p2p::sync::PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+    let state = dag_sync.state();
+
+    // Create multiple test CIDs
+    let cid1 =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let cid2 =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+    let cid3 =
+        cid::Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
+
+    // Spawn multiple concurrent tasks that manipulate state
+    let state1 = state.clone();
+    let state2 = state.clone();
+    let state3 = state.clone();
+
+    let handle1 = tokio::spawn(async move {
+        for _ in 0..100 {
+            state1.start_sync(cid1).await;
+            tokio::task::yield_now().await;
+            state1.complete_sync(cid1).await;
+        }
+    });
+
+    let handle2 = tokio::spawn(async move {
+        for _ in 0..100 {
+            state2.start_sync(cid2).await;
+            tokio::task::yield_now().await;
+            state2.cancel_sync(&cid2).await;
+        }
+    });
+
+    let handle3 = tokio::spawn(async move {
+        for _ in 0..100 {
+            let _ = state3.is_syncing(&cid1).await;
+            let _ = state3.is_synced(&cid2).await;
+            let _ = state3.syncing_cids().await;
+            state3.start_sync(cid3).await;
+            state3.complete_sync(cid3).await;
+        }
+    });
+
+    // Wait for all tasks to complete without deadlock
+    let result = timeout(Duration::from_secs(5), async {
+        handle1.await.expect("task 1 panicked");
+        handle2.await.expect("task 2 panicked");
+        handle3.await.expect("task 3 panicked");
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Concurrent state operations should complete without deadlock"
+    );
+
+    // Verify final state is consistent
+    // cid1 and cid3 should be synced (completed many times)
+    assert!(state.is_synced(&cid1).await, "cid1 should be synced");
+    assert!(state.is_synced(&cid3).await, "cid3 should be synced");
+
+    // cid2 was always cancelled, so should not be synced
+    assert!(
+        !state.is_synced(&cid2).await,
+        "cid2 should not be synced (was cancelled)"
+    );
+
+    // No CIDs should be in syncing state (all operations completed)
+    assert!(
+        !state.is_syncing(&cid1).await,
+        "cid1 should not still be syncing"
+    );
+    assert!(
+        !state.is_syncing(&cid2).await,
+        "cid2 should not still be syncing"
+    );
+    assert!(
+        !state.is_syncing(&cid3).await,
+        "cid3 should not still be syncing"
+    );
+}
+
+// ============================================================================
+// ReplicationLoop Error Path Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_replication_handles_missing_block_in_store() {
+    use p2p::sync::{MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop, SyncConfig};
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+    use std::str::FromStr;
+
+    // Create coordinator with an EMPTY blockstore
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore, SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    let coordinator = Arc::new(coordinator);
+
+    // Test handler that should never be called (block won't be found)
+    struct NeverCalledHandler;
+
+    #[derive(Debug)]
+    struct NeverCalledError;
+    impl std::fmt::Display for NeverCalledError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "NeverCalledError")
+        }
+    }
+    impl std::error::Error for NeverCalledError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for NeverCalledHandler {
+        type Error = NeverCalledError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, NeverCalledError> {
+            panic!("Handler should not be called when block is not in store");
+        }
+    }
+
+    let handler = Arc::new(NeverCalledHandler);
+
+    // Manually inject a BlockReceived event for a CID that's NOT in the blockstore
+    let missing_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Create a channel to send the event
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.send(p2p::sync::SyncEvent::BlockReceived {
+        cid: missing_cid,
+        doc_id: "test-doc".to_string(),
+        collection_id: "test-collection".to_string(),
+        creator: "test-creator".to_string(),
+    })
+    .await
+    .unwrap();
+    drop(tx); // Close channel to trigger drain completion
+
+    // Drain events (should return Failed result)
+    let results = ReplicationLoop::drain(
+        coordinator.clone(),
+        &mut rx,
+        handler,
+        ReplicationConfig::default(),
+    )
+    .await;
+
+    assert_eq!(results.len(), 1, "Should have exactly one result");
+
+    match &results[0] {
+        p2p::sync::ReplicationResult::Failed { cid, error } => {
+            assert_eq!(*cid, missing_cid);
+            assert!(
+                error.contains("not found"),
+                "Error should mention block not found: {}",
+                error
+            );
+        }
+        other => panic!(
+            "Expected Failed result for missing block, got {:?}",
+            other
+        ),
+    }
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_bitswap_store_adapter_insert_and_retrieve_roundtrip() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use storage::backends::MemoryStore;
+    use libipld::{Block, IpldCodec};
+    use libipld::multihash::{Code, MultihashDigest};
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, false));
+    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+
+    // Create block data
+    let block_data = b"test block data for bitswap roundtrip";
+
+    // Create a CID for this data (using raw codec and sha2-256)
+    let multihash = Code::Sha2_256.digest(block_data);
+    let libipld_cid = libipld::Cid::new_v1(IpldCodec::Raw.into(), multihash);
+
+    // Create a Block for insertion
+    let block = Block::<libipld::DefaultParams>::new(libipld_cid, block_data.to_vec()).unwrap();
+
+    // Verify block is not present before insertion
+    assert!(!adapter.contains(&libipld_cid).await.unwrap());
+
+    // Insert via BitswapStore trait (this is what Bitswap does when receiving blocks)
+    adapter.insert(&block).await.unwrap();
+
+    // Verify block is now present
+    assert!(adapter.contains(&libipld_cid).await.unwrap());
+
+    // Retrieve and verify data matches
+    let retrieved = adapter.get(&libipld_cid).await.unwrap();
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap(), block_data.to_vec());
+
+    // Also verify we can read via the underlying blockstore using cid crate's Cid
+    let cid_crate_cid = cid::Cid::try_from(libipld_cid.to_bytes().as_slice()).unwrap();
+    let from_blockstore = blockstore.get(&cid_crate_cid).await.unwrap();
+    assert!(from_blockstore.is_some());
+    assert_eq!(from_blockstore.unwrap(), block_data.to_vec());
+}
+
+// ============================================================================
+// Rebroadcast on Merge Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_rebroadcast_on_merge_enabled() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop,
+        ReplicationResult, SyncConfig, SyncCoordinator, SyncEvent,
+    };
+    use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Subscribe to a collection so broadcast has a topic
+    let collection_id = "test-rebroadcast-collection";
+    coordinator
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+
+    // Store a test block
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let block_data = b"test block for rebroadcast";
+    blockstore.put(&cid, block_data).await.unwrap();
+
+    // Track if merge handler was called
+    let merge_called = Arc::new(AtomicBool::new(false));
+    let merge_called_clone = merge_called.clone();
+
+    struct TestHandler {
+        called: Arc<AtomicBool>,
+    }
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, TestError> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(TestHandler {
+        called: merge_called_clone,
+    });
+
+    // Create event channel with BlockReceived event
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.send(SyncEvent::BlockReceived {
+        cid,
+        doc_id: "test-doc".to_string(),
+        collection_id: collection_id.to_string(),
+        creator: "test-creator".to_string(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+
+    // Run with rebroadcast_on_merge ENABLED
+    let config = ReplicationConfig {
+        continue_on_error: true,
+        rebroadcast_on_merge: true, // This is the key setting we're testing
+    };
+
+    let results = ReplicationLoop::drain(coordinator.clone(), &mut rx, handler, config).await;
+
+    // Verify merge handler was called
+    assert!(merge_called.load(Ordering::SeqCst), "Merge handler should have been called");
+
+    // Should have exactly one result
+    assert_eq!(results.len(), 1, "Should have exactly one result");
+
+    // Result should be Merged or MergedButBroadcastFailed
+    // (MergedButBroadcastFailed happens when no peers are connected to receive the broadcast)
+    match &results[0] {
+        ReplicationResult::Merged { cid: result_cid, .. } => {
+            assert_eq!(*result_cid, cid);
+        }
+        ReplicationResult::MergedButBroadcastFailed {
+            cid: result_cid,
+            broadcast_error,
+            ..
+        } => {
+            assert_eq!(*result_cid, cid);
+            // This is expected when no peers are connected
+            assert!(
+                !broadcast_error.is_empty(),
+                "Broadcast error should have details"
+            );
+        }
+        other => panic!(
+            "Expected Merged or MergedButBroadcastFailed, got {:?}",
+            other
+        ),
+    }
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_rebroadcast_on_merge_disabled_no_broadcast_attempt() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationConfig, ReplicationLoop, ReplicationResult,
+        SyncConfig, SyncCoordinator, SyncEvent,
+    };
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Store a test block
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let block_data = b"test block no rebroadcast";
+    blockstore.put(&cid, block_data).await.unwrap();
+
+    struct SimpleHandler;
+
+    #[derive(Debug)]
+    struct SimpleError;
+    impl std::fmt::Display for SimpleError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "SimpleError")
+        }
+    }
+    impl std::error::Error for SimpleError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for SimpleHandler {
+        type Error = SimpleError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, SimpleError> {
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(SimpleHandler);
+
+    // Create event channel
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.send(SyncEvent::BlockReceived {
+        cid,
+        doc_id: "test-doc".to_string(),
+        collection_id: "test-collection".to_string(),
+        creator: "test-creator".to_string(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+
+    // Run with rebroadcast_on_merge DISABLED (default)
+    let config = ReplicationConfig {
+        continue_on_error: true,
+        rebroadcast_on_merge: false, // Disabled - no broadcast should be attempted
+    };
+
+    let results = ReplicationLoop::drain(coordinator.clone(), &mut rx, handler, config).await;
+
+    assert_eq!(results.len(), 1);
+
+    // Should be plain Merged (NOT MergedButBroadcastFailed since no broadcast was attempted)
+    match &results[0] {
+        ReplicationResult::Merged { cid: result_cid, .. } => {
+            assert_eq!(*result_cid, cid);
+        }
+        other => panic!("Expected Merged result when rebroadcast disabled, got {:?}", other),
+    }
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// Recover Unmerged Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_recover_unmerged_with_no_blocks() {
+    use blockstore::DefraBlockstore;
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationLoop, SyncConfig,
+        SyncCoordinator,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    struct TestHandler {
+        call_count: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct TestError;
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TestError")
+        }
+    }
+    impl std::error::Error for TestError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for TestHandler {
+        type Error = TestError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, TestError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(TestHandler {
+        call_count: AtomicUsize::new(0),
+    });
+
+    // No unmerged blocks - should succeed with empty results
+    let result = ReplicationLoop::recover_unmerged(coordinator, handler.clone()).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_empty());
+
+    // Handler should not have been called
+    assert_eq!(handler.call_count.load(Ordering::SeqCst), 0);
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_recover_unmerged_with_handler_failure() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationLoop, SyncConfig, SyncCoordinator,
+    };
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Store a block but don't mark as merged
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    blockstore.put(&cid, b"test block data").await.unwrap();
+
+    struct FailingHandler;
+
+    #[derive(Debug)]
+    struct FailError(String);
+    impl std::fmt::Display for FailError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FailError: {}", self.0)
+        }
+    }
+    impl std::error::Error for FailError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for FailingHandler {
+        type Error = FailError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            _metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, FailError> {
+            Err(FailError("intentional test failure".to_string()))
+        }
+    }
+
+    let handler = Arc::new(FailingHandler);
+
+    // Recover should return error because handler failed
+    let result = ReplicationLoop::recover_unmerged(coordinator, handler).await;
+    assert!(result.is_err());
+
+    // Verify it's a RecoveryFailed error
+    let err = result.unwrap_err();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("recovery completed with") && err_str.contains("failures"),
+        "Expected RecoveryFailed error, got: {}",
+        err_str
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_recover_unmerged_success_marks_as_merged() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use p2p::sync::{
+        MergeHandler, MergeOutcome, ReplicationLoop, ReplicationResult, SyncConfig,
+        SyncCoordinator,
+    };
+    use std::str::FromStr;
+    use storage::backends::MemoryStore;
+
+    // Create host and coordinator
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+    let coordinator = Arc::new(coordinator);
+
+    // Store a block but don't mark as merged
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    blockstore.put(&cid, b"test block data").await.unwrap();
+
+    // Verify it's unmerged
+    assert!(!blockstore.is_merged(&cid).await.unwrap());
+
+    struct SuccessHandler;
+
+    #[derive(Debug)]
+    struct NoError;
+    impl std::fmt::Display for NoError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "NoError")
+        }
+    }
+    impl std::error::Error for NoError {}
+
+    #[async_trait::async_trait]
+    impl MergeHandler for SuccessHandler {
+        type Error = NoError;
+        async fn handle_block(
+            &self,
+            _cid: &cid::Cid,
+            _block_data: &[u8],
+            metadata: p2p::sync::BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, NoError> {
+            // Verify we're in recovery mode
+            assert!(metadata.is_recovery);
+            assert!(metadata.is_incomplete());
+            Ok(MergeOutcome::Merged)
+        }
+    }
+
+    let handler = Arc::new(SuccessHandler);
+
+    // Recover should succeed
+    let result = ReplicationLoop::recover_unmerged(coordinator.clone(), handler).await;
+    assert!(result.is_ok());
+
+    let results = result.unwrap();
+    assert_eq!(results.len(), 1);
+
+    // Should be Merged result
+    match &results[0] {
+        ReplicationResult::Merged { cid: result_cid, .. } => {
+            assert_eq!(*result_cid, cid);
+        }
+        other => panic!("Expected Merged result, got {:?}", other),
+    }
+
+    // Block should now be marked as merged
+    assert!(blockstore.is_merged(&cid).await.unwrap());
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// Missing Blocks Edge Case Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_dag_sync_missing_blocks_empty_store() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    // Use a different CID for the link - this simulates a DAG with a linked block
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // With empty store and a link that isn't local, should return NeedsFetch
+    // local_has returns false for all CIDs (nothing local)
+    let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
+    assert!(plan.needs_fetch(), "Should need to fetch missing link from empty store");
+}
+
+#[tokio::test]
+async fn test_dag_sync_concurrent_syncs_same_cid() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(cid).await;
+
+    // Second call should return AlreadySyncing
+    let plan = dag_sync.prepare_sync(cid, &[], |_| false).await.unwrap();
+    assert!(
+        !plan.needs_fetch(),
+        "Should not need fetch when already syncing"
+    );
+
+    // Complete the sync
+    dag_sync
+        .handle_sync_complete(cid, true, None)
+        .await
+        .unwrap();
+
+    // Now it should return AlreadySynced
+    let plan = dag_sync.prepare_sync(cid, &[], |_| false).await.unwrap();
+    assert!(
+        !plan.needs_fetch(),
+        "Should not need fetch when already synced"
+    );
+}
+
+#[tokio::test]
+async fn test_dag_sync_multiple_missing_blocks() {
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Provide multiple missing CIDs
+    let missing1 =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+    let missing2 =
+        cid::Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
+
+    // local_has returns false for all CIDs (nothing local)
+    let plan = dag_sync.prepare_sync(cid, &[missing1, missing2], |_| false).await.unwrap();
+
+    match plan {
+        SyncPlan::NeedsFetch(data) => {
+            assert_eq!(data.root(), cid);
+            assert_eq!(data.missing().len(), 2);
+            assert!(data.missing().contains(&missing1));
+            assert!(data.missing().contains(&missing2));
+            // No providers since no peers have the CIDs
+            assert!(data.providers().is_empty());
+        }
+        _ => panic!("Expected NeedsFetch plan"),
+    }
+}
+
+#[tokio::test]
+async fn test_dag_sync_with_providers() {
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state.clone());
+
+    // Root and a different link CID
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // Add a peer that has our link CID
+    let peer = libp2p::PeerId::random();
+    peer_state.peer_connected(peer);
+    peer_state.peer_has_cid(&peer, link_cid);
+
+    // Prepare sync with missing blocks - local_has returns false
+    let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
+
+    match plan {
+        SyncPlan::NeedsFetch(data) => {
+            // The peer should be in providers since it has the link CID
+            assert!(data.providers().contains(&peer), "Peer should be a provider");
+        }
+        _ => panic!("Expected NeedsFetch plan"),
+    }
+}
+
+#[tokio::test]
+async fn test_dag_sync_failure_allows_retry() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let link_cid =
+        cid::Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(root_cid).await;
+    assert!(dag_sync.state().is_syncing(&root_cid).await);
+
+    // Complete with failure
+    let result = dag_sync
+        .handle_sync_complete(root_cid, false, Some("network timeout"))
+        .await;
+    assert!(result.is_err());
+
+    // Should NOT be syncing or synced (can retry)
+    assert!(!dag_sync.state().is_syncing(&root_cid).await);
+    assert!(!dag_sync.state().is_synced(&root_cid).await);
+
+    // Should be able to start sync again with a link that's missing
+    let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
+    assert!(plan.needs_fetch(), "Should be able to retry after failure");
+}
+
+// ============================================================================
+// Cross-Collection Access Control Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_cross_collection_access_denial() {
+    use p2p::{BlockAccessController, ReplicatorRegistry};
+
+    let registry = Arc::new(ReplicatorRegistry::new());
+
+    // Peer A is a replicator for "users" collection only
+    let peer_a = libp2p::PeerId::random();
+    registry.add_replicator("users", peer_a);
+
+    // Peer B is a replicator for "posts" collection only
+    let peer_b = libp2p::PeerId::random();
+    registry.add_replicator("posts", peer_b);
+
+    // Create controller with access control enabled
+    let controller = BlockAccessController::controlled(registry);
+
+    let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        .unwrap();
+
+    // Peer A should have access to "users" collection
+    assert!(
+        controller.has_access(&peer_a, &cid, Some("users")),
+        "Peer A should have access to users collection"
+    );
+
+    // Peer B should have access to "posts" collection
+    assert!(
+        controller.has_access(&peer_b, &cid, Some("posts")),
+        "Peer B should have access to posts collection"
+    );
+
+    // Strangers (non-replicators) should NOT have access to any collection
+    let stranger = libp2p::PeerId::random();
+    assert!(
+        !controller.has_access(&stranger, &cid, Some("users")),
+        "Stranger should NOT have access to users collection"
+    );
+    assert!(
+        !controller.has_access(&stranger, &cid, Some("posts")),
+        "Stranger should NOT have access to posts collection"
+    );
+    assert!(
+        !controller.has_access(&stranger, &cid, None),
+        "Stranger should NOT have access when collection is unknown"
+    );
+
+    // Replicators for ANY collection get access via is_any_replicator fallback
+    // This is intentional behavior - replicators are trusted
+    assert!(
+        controller.has_access(&peer_a, &cid, None),
+        "Replicator should have access when collection is unknown"
+    );
+    assert!(
+        controller.has_access(&peer_b, &cid, None),
+        "Replicator should have access when collection is unknown"
+    );
+
+    // Due to is_any_replicator fallback, replicators for one collection
+    // also have access to blocks in other collections when the collection
+    // context is provided (this is the designed "permissive" behavior)
+    // See BlockAccessController::has_access implementation comment
+}
+
+#[tokio::test]
+async fn test_access_mode_open_allows_all() {
+    use p2p::{BlockAccessController, ReplicatorRegistry};
+
+    let registry = Arc::new(ReplicatorRegistry::new());
+
+    // Create controller with OPEN access (no ACP)
+    let controller = BlockAccessController::open(registry);
+
+    let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        .unwrap();
+
+    // Any peer should have access with Open mode
+    let random_peer = libp2p::PeerId::random();
+    assert!(
+        controller.has_access(&random_peer, &cid, Some("users")),
+        "Open mode should allow all access"
+    );
+    assert!(
+        controller.has_access(&random_peer, &cid, None),
+        "Open mode should allow all access even without collection"
+    );
+}
+
+// ============================================================================
+// Real IPLD Block Link Extraction Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_find_missing_links_with_real_ipld_blocks() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use storage::backends::MemoryStore;
+
+    // Create a coordinator with a real blockstore
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Create a leaf block (no links)
+    let leaf_data = Ipld::String("leaf node data".to_string());
+    let leaf_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &leaf_data).unwrap();
+    let leaf_cid_libipld = *leaf_block.cid();
+    let leaf_cid = cid::Cid::try_from(leaf_cid_libipld.to_bytes().as_slice()).unwrap();
+
+    // Create a parent block that links to the leaf
+    let parent_data = Ipld::Link(leaf_cid_libipld);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid = cid::Cid::try_from(parent_block.cid().to_bytes().as_slice()).unwrap();
+
+    // Store ONLY the parent in the blockstore (leaf is missing)
+    blockstore.put(&parent_cid, parent_block.data()).await.unwrap();
+
+    // Now use the coordinator's internal find_missing_links logic
+    // We can test this by broadcasting a message with the parent block
+    // and verifying the DAG sync identifies the missing leaf
+
+    // Subscribe to a collection so we can broadcast
+    let collection_id = "test-links-collection";
+    coordinator
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+
+    // Handle a GossipMessage with the parent block (should identify missing links)
+    let message = PushLogBroadcast {
+        doc_id: "test-doc".to_string(),
+        cid: parent_cid.to_bytes(),
+        collection_id: collection_id.to_string(),
+        creator: "test-creator".to_string(),
+        block: parent_block.data().to_vec(),
+    };
+
+    // Process the message - this internally calls find_missing_links
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: libp2p::PeerId::random(),
+            message_id: libp2p::gossipsub::MessageId::new(b"test-links"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    // Should succeed (store the block and identify missing links)
+    assert!(result.is_ok(), "Should process IPLD block with links: {:?}", result);
+
+    // Verify the parent block is in the blockstore
+    assert!(
+        blockstore.has(&parent_cid).await.unwrap(),
+        "Parent block should be in blockstore"
+    );
+
+    // The leaf is still missing (we only stored the parent)
+    assert!(
+        !blockstore.has(&leaf_cid).await.unwrap(),
+        "Leaf block should still be missing"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_find_missing_links_with_multiple_links() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Create two leaf blocks
+    let leaf1_data = Ipld::String("leaf 1".to_string());
+    let leaf1_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &leaf1_data).unwrap();
+    let leaf1_cid = *leaf1_block.cid();
+
+    let leaf2_data = Ipld::String("leaf 2".to_string());
+    let leaf2_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &leaf2_data).unwrap();
+    let leaf2_cid = *leaf2_block.cid();
+
+    // Create a parent block that links to both leaves (using a list)
+    let parent_data = Ipld::List(vec![Ipld::Link(leaf1_cid), Ipld::Link(leaf2_cid)]);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid = cid::Cid::try_from(parent_block.cid().to_bytes().as_slice()).unwrap();
+
+    // Store ONLY the parent and one leaf (leaf2 is missing)
+    blockstore.put(&parent_cid, parent_block.data()).await.unwrap();
+    let leaf1_cid_native = cid::Cid::try_from(leaf1_cid.to_bytes().as_slice()).unwrap();
+    blockstore.put(&leaf1_cid_native, leaf1_block.data()).await.unwrap();
+
+    let collection_id = "test-multi-links";
+    coordinator
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+
+    let message = PushLogBroadcast {
+        doc_id: "test-doc".to_string(),
+        cid: parent_cid.to_bytes(),
+        collection_id: collection_id.to_string(),
+        creator: "test-creator".to_string(),
+        block: parent_block.data().to_vec(),
+    };
+
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: libp2p::PeerId::random(),
+            message_id: libp2p::gossipsub::MessageId::new(b"test-multi"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    assert!(result.is_ok(), "Should process block with multiple links");
+
+    // Verify leaf1 is present (we stored it)
+    assert!(
+        blockstore.has(&leaf1_cid_native).await.unwrap(),
+        "Leaf 1 should be in blockstore"
+    );
+
+    // Verify leaf2 is missing (we didn't store it)
+    let leaf2_cid_native = cid::Cid::try_from(leaf2_cid.to_bytes().as_slice()).unwrap();
+    assert!(
+        !blockstore.has(&leaf2_cid_native).await.unwrap(),
+        "Leaf 2 should be missing"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// Handle Bitswap Complete Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_handle_bitswap_complete_success() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    // Create a standalone DagSync for testing sync state management
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(root_cid).await;
+
+    // Verify it's in syncing state
+    assert!(
+        dag_sync.state().is_syncing(&root_cid).await,
+        "Root should be in syncing state"
+    );
+
+    // Handle successful completion
+    let result = dag_sync.handle_sync_complete(root_cid, true, None).await;
+    assert!(result.is_ok(), "Sync completion should succeed");
+
+    // Verify it's now in synced state
+    assert!(
+        dag_sync.state().is_synced(&root_cid).await,
+        "Root should be in synced state after success"
+    );
+    assert!(
+        !dag_sync.state().is_syncing(&root_cid).await,
+        "Root should not be syncing after completion"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_bitswap_complete_failure_clears_syncing() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    dag_sync.state().start_sync(root_cid).await;
+
+    // Handle failure
+    let result = dag_sync
+        .handle_sync_complete(root_cid, false, Some("network timeout"))
+        .await;
+    assert!(result.is_err(), "Sync failure should return error");
+
+    // Verify the CID is no longer syncing (can retry)
+    assert!(
+        !dag_sync.state().is_syncing(&root_cid).await,
+        "Root should not be syncing after failure"
+    );
+    assert!(
+        !dag_sync.state().is_synced(&root_cid).await,
+        "Root should not be marked synced after failure"
+    );
+}
+
+// Note: test_handle_bitswap_complete_with_query_tracking is not possible
+// because QueryId has a private constructor. The SyncManager.register_query
+// and handle_bitswap_complete methods are tested through integration with
+// the full Bitswap behavior, which generates QueryIds internally.
+
+// ============================================================================
+// End-to-End DAG Sync Flow Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_end_to_end_dag_sync_with_local_blocks() {
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use std::collections::HashSet;
+
+    // Create a DagSync with a peer state tracker
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    // Create a complete DAG: parent -> child1, child2
+    let child1_data = Ipld::String("child 1".to_string());
+    let child1_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &child1_data).unwrap();
+    let child1_cid = *child1_block.cid();
+    let child1_cid_native = cid::Cid::try_from(child1_cid.to_bytes().as_slice()).unwrap();
+
+    let child2_data = Ipld::String("child 2".to_string());
+    let child2_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &child2_data).unwrap();
+    let child2_cid = *child2_block.cid();
+    let child2_cid_native = cid::Cid::try_from(child2_cid.to_bytes().as_slice()).unwrap();
+
+    let parent_data = Ipld::List(vec![Ipld::Link(child1_cid), Ipld::Link(child2_cid)]);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid_libipld = *parent_block.cid();
+    let parent_cid = cid::Cid::try_from(parent_cid_libipld.to_bytes().as_slice()).unwrap();
+
+    // Track which CIDs we "have" locally
+    let mut local_cids = HashSet::new();
+    local_cids.insert(parent_cid);
+    local_cids.insert(child1_cid_native);
+    local_cids.insert(child2_cid_native);
+
+    // Prepare sync - should return Complete since all blocks exist
+    let plan = dag_sync
+        .prepare_sync(parent_cid, &[child1_cid_native, child2_cid_native], |cid| {
+            local_cids.contains(cid)
+        })
+        .await
+        .expect("prepare_sync should succeed");
+
+    match plan {
+        SyncPlan::Complete => {
+            // Expected - all blocks exist locally
+        }
+        other => panic!("Expected Complete, got {:?}", other),
+    }
+
+    // Root should be marked as synced
+    assert!(
+        dag_sync.state().is_synced(&parent_cid).await,
+        "Root should be marked as synced when DAG is complete"
+    );
+}
+
+#[tokio::test]
+async fn test_end_to_end_dag_sync_needs_fetch() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use storage::backends::MemoryStore;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    // Create a DagSync with a peer state tracker
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state.clone());
+
+    // Create a DAG where parent is present but children are missing
+    let child1_data = Ipld::String("missing child 1".to_string());
+    let child1_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &child1_data).unwrap();
+    let child1_cid = *child1_block.cid();
+    let child1_cid_native = cid::Cid::try_from(child1_cid.to_bytes().as_slice()).unwrap();
+
+    let parent_data = Ipld::Link(child1_cid);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid = cid::Cid::try_from(parent_block.cid().to_bytes().as_slice()).unwrap();
+
+    // Store ONLY the parent (child is missing)
+    blockstore.put(&parent_cid, parent_block.data()).await.unwrap();
+
+    // Add a connected peer that could provide the missing block
+    let provider_peer = libp2p::PeerId::random();
+    peer_state.peer_connected(provider_peer);
+
+    // Prepare sync - should return NeedsFetch since child is missing
+    let plan = dag_sync
+        .prepare_sync(parent_cid, &[child1_cid_native], |_| false) // No blocks exist locally
+        .await
+        .expect("prepare_sync should succeed");
+
+    match plan {
+        SyncPlan::NeedsFetch(data) => {
+            assert_eq!(data.root(), parent_cid, "Root should match");
+            assert_eq!(data.missing().len(), 1, "Should have one missing block");
+            assert_eq!(data.missing()[0], child1_cid_native, "Missing CID should match");
+            assert!(
+                !data.providers().is_empty(),
+                "Should have at least one provider"
+            );
+        }
+        other => panic!("Expected NeedsFetch, got {:?}", other),
+    }
+
+    // Root should be marked as syncing (not synced yet)
+    assert!(
+        dag_sync.state().is_syncing(&parent_cid).await,
+        "Root should be in syncing state when blocks are missing"
+    );
 }

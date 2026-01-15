@@ -15,8 +15,9 @@
 //! conflicts during merge.
 
 use cid::Cid;
+use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 
 /// A queue that serializes processing of the same CID.
 ///
@@ -54,6 +55,74 @@ impl ProcessQueue {
         }
     }
 
+    /// Get the number of CIDs currently being processed.
+    ///
+    /// Useful for monitoring and debugging.
+    pub fn active_count(&self) -> usize {
+        self.inner.waiters.lock().len()
+    }
+
+    /// Get all CIDs currently being processed.
+    ///
+    /// Useful for debugging stuck operations.
+    pub fn active_cids(&self) -> Vec<Cid> {
+        self.inner.waiters.lock().keys().cloned().collect()
+    }
+
+    /// Force release a stuck CID.
+    ///
+    /// Use this to recover from situations where a ProcessGuard was dropped
+    /// outside a tokio runtime and the CID became permanently locked.
+    ///
+    /// # Safety
+    ///
+    /// Only call this for CIDs that you are certain are stuck. Calling this
+    /// while a legitimate processing operation is in progress may cause
+    /// duplicate processing.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the CID was released, `false` if it wasn't locked.
+    pub fn force_release(&self, cid: &Cid) -> bool {
+        let mut waiters = self.inner.waiters.lock();
+        if let Some(waiting) = waiters.remove(cid) {
+            tracing::warn!(
+                ?cid,
+                waiter_count = waiting.len(),
+                "Force-releasing stuck CID"
+            );
+            // Notify any waiters that processing is "complete"
+            for tx in waiting {
+                let _ = tx.send(());
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Force release all stuck CIDs.
+    ///
+    /// Use this during cleanup or recovery to release all locked CIDs.
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of CIDs that were released.
+    pub fn force_release_all(&self) -> usize {
+        let mut waiters = self.inner.waiters.lock();
+        let count = waiters.len();
+        if count > 0 {
+            tracing::warn!(count = count, "Force-releasing all stuck CIDs");
+            for (cid, waiting) in waiters.drain() {
+                tracing::debug!(?cid, "Force-releasing CID");
+                for tx in waiting {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        count
+    }
+
     /// Try to acquire exclusive processing rights for a CID.
     ///
     /// Returns:
@@ -79,7 +148,7 @@ impl ProcessQueue {
     /// }
     /// ```
     pub async fn try_acquire(&self, cid: &Cid) -> Result<ProcessGuard, oneshot::Receiver<()>> {
-        let mut waiters = self.inner.waiters.lock().await;
+        let mut waiters = self.inner.waiters.lock();
 
         if waiters.contains_key(cid) {
             // Someone else is processing - add ourselves as a waiter
@@ -96,9 +165,9 @@ impl ProcessQueue {
         }
     }
 
-    /// Release the CID and notify all waiters.
-    async fn release(&self, cid: &Cid) {
-        let mut waiters = self.inner.waiters.lock().await;
+    /// Release the CID and notify all waiters (synchronous version).
+    fn release_sync(&self, cid: &Cid) {
+        let mut waiters = self.inner.waiters.lock();
         if let Some(waiting) = waiters.remove(cid) {
             // Notify all waiters that processing is complete
             let waiter_count = waiting.len();
@@ -139,9 +208,12 @@ impl ProcessGuard {
         &self.cid
     }
 
-    /// Explicitly release the guard (same as drop, but async).
+    /// Explicitly release the guard.
+    ///
+    /// This is the preferred way to release as it provides explicit control.
+    /// The guard will also be released automatically on drop.
     pub async fn release(self) {
-        self.queue.release(&self.cid).await;
+        self.queue.release_sync(&self.cid);
         // Prevent Drop from running
         std::mem::forget(self);
     }
@@ -149,25 +221,9 @@ impl ProcessGuard {
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        // Clone data we need before spawning
-        let cid = self.cid;
-        let queue = self.queue.clone();
-
-        // Only spawn if we're in a tokio runtime context
-        // This prevents panics during shutdown or when used outside async code
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                queue.release(&cid).await;
-            });
-        } else {
-            // If no runtime is available, we can't release asynchronously.
-            // This is a degraded state - the CID will remain in the waiters map.
-            // Callers should prefer using the explicit `release().await` method.
-            tracing::warn!(
-                ?cid,
-                "ProcessGuard dropped outside tokio runtime - CID not released from queue"
-            );
-        }
+        // Release synchronously - this works both inside and outside tokio runtime
+        // because we use parking_lot::Mutex which supports synchronous locking.
+        self.queue.release_sync(&self.cid);
     }
 }
 
@@ -308,14 +364,96 @@ mod tests {
         // Acquire and drop (not explicit release)
         {
             let _guard = queue.try_acquire(&cid).await.unwrap();
-            // Guard dropped here
+            // Guard dropped here - release is now synchronous
         }
 
-        // Give time for async drop to complete
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Should be able to acquire again
+        // Should be able to acquire again immediately (drop is now synchronous)
         let result = queue.try_acquire(&cid).await;
         assert!(result.is_ok(), "Should be able to reacquire after drop");
+    }
+
+    #[test]
+    fn test_drop_releases_outside_tokio() {
+        // Test that dropping ProcessGuard outside tokio runtime works correctly
+        // (previously this would permanently lock the CID)
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+
+        // Use block_on to acquire in async context, then drop synchronously
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let guard = rt.block_on(async { queue.try_acquire(&cid).await.unwrap() });
+
+        // Drop the guard outside async context
+        drop(guard);
+
+        // Should be able to acquire again
+        let result = rt.block_on(async { queue.try_acquire(&cid).await });
+        assert!(
+            result.is_ok(),
+            "Should be able to reacquire after synchronous drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_waiters_handled_gracefully() {
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+
+        // First caller acquires
+        let guard = queue.try_acquire(&cid).await.unwrap();
+
+        // Create waiters then drop them (simulating cancelled tasks)
+        {
+            let rx1 = queue.try_acquire(&cid).await.unwrap_err();
+            let rx2 = queue.try_acquire(&cid).await.unwrap_err();
+            // Drop receivers without awaiting - simulates task cancellation
+            drop(rx1);
+            drop(rx2);
+        }
+
+        // Release should handle cancelled receivers gracefully (not panic)
+        guard.release().await;
+
+        // Queue should be in clean state
+        let result = queue.try_acquire(&cid).await;
+        assert!(
+            result.is_ok(),
+            "Queue should be clean after handling cancelled waiters"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mixed_cancelled_and_waiting() {
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+
+        // First caller acquires
+        let guard = queue.try_acquire(&cid).await.unwrap();
+
+        // Create a waiter that will be cancelled
+        let rx1 = queue.try_acquire(&cid).await.unwrap_err();
+        drop(rx1); // Cancel immediately
+
+        // Create a waiter that will actually wait
+        let queue_clone = queue.clone();
+        let waiter = tokio::spawn(async move {
+            let rx = queue_clone.try_acquire(&cid).await.unwrap_err();
+            rx.await.unwrap();
+            true
+        });
+
+        // Give waiter time to register
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Release - should notify the waiting task even though one was cancelled
+        guard.release().await;
+
+        // Active waiter should still be notified
+        let result = tokio::time::timeout(Duration::from_millis(100), waiter).await;
+        assert!(result.is_ok(), "Active waiter should be notified");
+        assert!(
+            result.unwrap().unwrap(),
+            "Active waiter should complete successfully"
+        );
     }
 }

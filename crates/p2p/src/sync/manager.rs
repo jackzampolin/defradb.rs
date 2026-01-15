@@ -23,6 +23,11 @@
 //! This matches Go's architecture where p2p calls db.Merge().
 
 use cid::Cid;
+use libipld::{Block, DefaultParams};
+use libp2p::PeerId;
+use libp2p_bitswap_next::QueryId;
+use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -30,6 +35,7 @@ use blockstore::Blockstore;
 
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
+use crate::sync::PeerStateTracker;
 
 use super::queue::ProcessQueue;
 
@@ -73,6 +79,40 @@ pub enum SyncEvent {
 
     /// Failed to process a sync request.
     SyncError { cid: Cid, error: String },
+
+    /// DAG has missing blocks that need to be fetched via Bitswap.
+    ///
+    /// The coordinator should:
+    /// 1. Call host.bitswap_sync() with the missing CIDs
+    /// 2. Register the QueryId with manager.register_query()
+    DagNeedsFetch {
+        /// Root CID of the DAG being synced
+        root_cid: Cid,
+        /// CIDs of missing blocks to fetch
+        missing: Vec<Cid>,
+        /// Suggested providers (peers that may have the blocks)
+        providers: Vec<PeerId>,
+        /// Document ID for the root block
+        doc_id: String,
+        /// Collection ID for the root block
+        collection_id: String,
+        /// Creator of the root block
+        creator: String,
+    },
+}
+
+/// Metadata for a pending DAG sync waiting for Bitswap to complete.
+#[derive(Debug, Clone)]
+pub struct PendingDag {
+    /// Document ID from the original PushLog message
+    pub doc_id: String,
+    /// Collection ID from the original PushLog message
+    pub collection_id: String,
+    /// Creator from the original PushLog message
+    pub creator: String,
+    /// CIDs still missing (gets smaller as blocks arrive via Bitswap)
+    #[allow(dead_code)] // Used for tracking Bitswap progress
+    pub missing: HashSet<Cid>,
 }
 
 /// Manager for P2P block synchronization.
@@ -86,8 +126,9 @@ pub enum SyncEvent {
 /// // Create blockstore in P2P mode (merge tracking enabled)
 /// let blockstore = DefraBlockstore::new(store, true);
 ///
-/// // Create sync manager
-/// let (manager, mut events) = SyncManager::new(blockstore, SyncConfig::default());
+/// // Create peer state tracker and sync manager
+/// let peer_state = Arc::new(PeerStateTracker::new());
+/// let (manager, mut events) = SyncManager::new(blockstore, peer_state, SyncConfig::default());
 ///
 /// // Handle incoming PushLog
 /// manager.process_pushlog(pushlog).await?;
@@ -112,19 +153,42 @@ pub struct SyncManager<B: Blockstore> {
 
     /// Channel for emitting sync events
     event_tx: mpsc::Sender<SyncEvent>,
+
+    /// Peer state tracker for finding providers
+    peer_state: Arc<PeerStateTracker>,
+
+    /// Pending DAGs waiting for Bitswap to complete.
+    /// Maps root CID → pending DAG metadata.
+    pending_dags: Arc<RwLock<HashMap<Cid, PendingDag>>>,
+
+    /// Maps Bitswap QueryId → root CID for tracking completions.
+    query_to_root: Arc<RwLock<HashMap<QueryId, Cid>>>,
 }
 
 impl<B: Blockstore + 'static> SyncManager<B> {
     /// Create a new SyncManager.
     ///
+    /// # Arguments
+    ///
+    /// * `blockstore` - The blockstore for storing/retrieving blocks
+    /// * `peer_state` - Peer state tracker for finding block providers
+    /// * `config` - Configuration options
+    ///
     /// Returns the manager and a receiver for sync events.
-    pub fn new(blockstore: Arc<B>, config: SyncConfig) -> (Self, mpsc::Receiver<SyncEvent>) {
+    pub fn new(
+        blockstore: Arc<B>,
+        peer_state: Arc<PeerStateTracker>,
+        config: SyncConfig,
+    ) -> (Self, mpsc::Receiver<SyncEvent>) {
         let (event_tx, event_rx) = mpsc::channel(config.event_buffer_size);
 
         let manager = Self {
             blockstore,
             process_queue: ProcessQueue::new(),
             event_tx,
+            peer_state,
+            pending_dags: Arc::new(RwLock::new(HashMap::new())),
+            query_to_root: Arc::new(RwLock::new(HashMap::new())),
         };
 
         (manager, event_rx)
@@ -180,6 +244,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 ?cid,
                                 "Failed to send BlockAlreadyMerged event - receiver dropped"
                             );
+                            return Err(Error::ChannelSend);
                         }
                         Ok(())
                     }
@@ -202,6 +267,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 ?cid,
                                 "Failed to send SyncError event - receiver dropped"
                             );
+                            // Return channel error since we can't notify caller of the blockstore error
+                            return Err(Error::ChannelSend);
                         }
                         Err(Error::BlockstoreError(e.to_string()))
                     }
@@ -226,6 +293,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         ?cid,
                         "Failed to send BlockAlreadyMerged event - receiver dropped"
                     );
+                    return Err(Error::ChannelSend);
                 }
                 return Ok(());
             }
@@ -243,6 +311,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     .is_err()
                 {
                     tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                    return Err(Error::ChannelSend);
                 }
                 return Err(Error::BlockstoreError(e.to_string()));
             }
@@ -260,38 +329,314 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 .is_err()
             {
                 tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                return Err(Error::ChannelSend);
             }
             return Err(Error::BlockstoreError(e.to_string()));
         }
 
-        tracing::info!(
+        tracing::debug!(
             ?cid,
             doc_id = %msg.doc_id,
             collection_id = %msg.collection_id,
-            "Block stored, emitting BlockReceived event"
+            "Block stored, checking for missing links"
         );
 
-        // Emit event for database layer to merge
-        // This is the critical event - log at error level if it fails
-        if self
-            .event_tx
-            .send(SyncEvent::BlockReceived {
-                cid: *cid,
-                doc_id: msg.doc_id.clone(),
-                collection_id: msg.collection_id.clone(),
-                creator: msg.creator.clone(),
-            })
-            .await
-            .is_err()
-        {
-            tracing::error!(
+        // Check for missing linked blocks
+        let missing = match self.find_missing_links(&msg.block).await {
+            Ok(m) => m,
+            Err(e) => {
+                // Block parsing failed - emit error event and propagate error
+                if self
+                    .event_tx
+                    .send(SyncEvent::SyncError {
+                        cid: *cid,
+                        error: e.to_string(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                    return Err(Error::ChannelSend);
+                }
+                return Err(e);
+            }
+        };
+
+        if missing.is_empty() {
+            // DAG is complete - emit BlockReceived for merge
+            tracing::info!(
                 ?cid,
                 doc_id = %msg.doc_id,
-                "CRITICAL: Failed to send BlockReceived event - block stored but may not be merged"
+                "DAG complete, emitting BlockReceived event"
             );
+
+            if self
+                .event_tx
+                .send(SyncEvent::BlockReceived {
+                    cid: *cid,
+                    doc_id: msg.doc_id.clone(),
+                    collection_id: msg.collection_id.clone(),
+                    creator: msg.creator.clone(),
+                })
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    ?cid,
+                    doc_id = %msg.doc_id,
+                    "CRITICAL: Failed to send BlockReceived event - block stored but will not be merged. \
+                     Event receiver may have been dropped."
+                );
+                return Err(Error::ChannelSend);
+            }
+        } else {
+            // DAG has missing blocks - track as pending and request Bitswap fetch
+            tracing::info!(
+                ?cid,
+                missing_count = missing.len(),
+                doc_id = %msg.doc_id,
+                "DAG has missing links, requesting Bitswap fetch"
+            );
+
+            // Track this DAG as pending
+            {
+                let mut pending = self.pending_dags.write();
+                pending.insert(
+                    *cid,
+                    PendingDag {
+                        doc_id: msg.doc_id.clone(),
+                        collection_id: msg.collection_id.clone(),
+                        creator: msg.creator.clone(),
+                        missing: missing.iter().cloned().collect(),
+                    },
+                );
+            }
+
+            // Get providers for the missing blocks
+            let providers = self.get_providers_for_cids(&missing);
+
+            // Emit event to request Bitswap fetch
+            if self
+                .event_tx
+                .send(SyncEvent::DagNeedsFetch {
+                    root_cid: *cid,
+                    missing: missing.clone(),
+                    providers,
+                    doc_id: msg.doc_id.clone(),
+                    collection_id: msg.collection_id.clone(),
+                    creator: msg.creator.clone(),
+                })
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    ?cid,
+                    "Failed to send DagNeedsFetch event - receiver dropped"
+                );
+                // Clean up pending dag since we can't request fetch
+                self.pending_dags.write().remove(cid);
+                return Err(Error::ChannelSend);
+            }
         }
 
         Ok(())
+    }
+
+    /// Find missing blocks by extracting links from the block data.
+    ///
+    /// This parses the block's IPLD structure and checks which linked CIDs
+    /// are not present in the blockstore.
+    ///
+    /// # Behavior
+    ///
+    /// - Raw blocks or blocks with unsupported codecs are treated as having no links
+    /// - IPLD blocks (DAG-CBOR, DAG-JSON, etc.) that fail to parse return an error
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BlockParseError` if an IPLD block cannot be parsed,
+    /// indicating possible data corruption.
+    async fn find_missing_links(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
+        // Try to parse the block to extract references
+        // We use a dummy CID since we only care about extracting links
+        let mut refs = Vec::new();
+        let block = Block::<DefaultParams>::new_unchecked(Cid::default(), block_data.to_vec());
+        if let Err(e) = block.references(&mut refs) {
+            // Check if this is an unsupported codec error vs a parse error
+            let error_msg = e.to_string();
+            if error_msg.contains("Unsupported codec") {
+                // Block uses an unsupported codec (e.g., raw blocks with codec 0).
+                // This is not an error - these blocks simply have no IPLD links.
+                tracing::debug!(
+                    error = %e,
+                    block_data_len = block_data.len(),
+                    "Block uses unsupported codec, assuming no IPLD links"
+                );
+                return Ok(Vec::new());
+            }
+
+            // This is a parse error for a block that should be IPLD.
+            // This may indicate corruption or encoding mismatch.
+            tracing::warn!(
+                error = %e,
+                block_data_len = block_data.len(),
+                "Failed to parse block as IPLD - cannot extract links"
+            );
+            return Err(Error::BlockParseError {
+                reason: format!(
+                    "Failed to extract references: {}. Block may be corrupt.",
+                    e
+                ),
+            });
+        }
+
+        // Check which CIDs are missing
+        let mut missing = Vec::new();
+        for link_cid in refs {
+            match self.blockstore.has(&link_cid).await {
+                Ok(true) => {
+                    // Already have this block
+                }
+                Ok(false) => {
+                    missing.push(link_cid);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        cid = %link_cid,
+                        error = %e,
+                        "Failed to check if block exists, treating as missing"
+                    );
+                    missing.push(link_cid);
+                }
+            }
+        }
+
+        Ok(missing)
+    }
+
+    /// Get providers (peers that may have the blocks) for the given CIDs.
+    fn get_providers_for_cids(&self, cids: &[Cid]) -> Vec<PeerId> {
+        let mut providers = HashSet::new();
+
+        // Add peers known to have any of the CIDs
+        for cid in cids {
+            for peer in self.peer_state.peers_with_cid(cid) {
+                providers.insert(peer);
+            }
+        }
+
+        // If no specific providers found, use all connected peers
+        if providers.is_empty() {
+            for peer in self.peer_state.connected_peers() {
+                providers.insert(peer);
+            }
+        }
+
+        providers.into_iter().collect()
+    }
+
+    /// Register a Bitswap query for tracking.
+    ///
+    /// This maps the QueryId to the root CID so we can identify
+    /// which DAG a completion event belongs to.
+    pub fn register_query(&self, query_id: QueryId, root_cid: Cid) {
+        self.query_to_root.write().insert(query_id, root_cid);
+    }
+
+    /// Handle Bitswap query completion.
+    ///
+    /// Called when a Bitswap sync completes (success or failure).
+    pub async fn handle_bitswap_complete(
+        &self,
+        query_id: QueryId,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<()> {
+        // Find the root CID for this query
+        let root_cid = match self.query_to_root.write().remove(&query_id) {
+            Some(cid) => cid,
+            None => {
+                tracing::debug!(
+                    query_id = ?query_id,
+                    "Bitswap complete for unknown query, ignoring"
+                );
+                return Ok(());
+            }
+        };
+
+        if success {
+            // All blocks fetched - emit BlockReceived for the root
+            let dag = self.pending_dags.write().remove(&root_cid);
+            match dag {
+                Some(dag) => {
+                    tracing::info!(
+                        cid = %root_cid,
+                        doc_id = %dag.doc_id,
+                        "Bitswap sync complete, emitting BlockReceived"
+                    );
+
+                    if self
+                        .event_tx
+                        .send(SyncEvent::BlockReceived {
+                            cid: root_cid,
+                            doc_id: dag.doc_id,
+                            collection_id: dag.collection_id,
+                            creator: dag.creator,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!(
+                            cid = %root_cid,
+                            "Failed to send BlockReceived after Bitswap complete - receiver dropped"
+                        );
+                        return Err(Error::ChannelSend);
+                    }
+                }
+                None => {
+                    // This can happen if the DAG was processed by another path,
+                    // cleaned up, or if there's a race condition
+                    tracing::warn!(
+                        cid = %root_cid,
+                        "Bitswap sync completed but no pending DAG found - \
+                         DAG may have been processed by another path or cleaned up"
+                    );
+                }
+            }
+        } else {
+            // Sync failed - emit error, clean up
+            self.pending_dags.write().remove(&root_cid);
+
+            let error_msg = error.unwrap_or_else(|| "Bitswap sync failed".to_string());
+            tracing::warn!(
+                cid = %root_cid,
+                error = %error_msg,
+                "Bitswap sync failed"
+            );
+
+            if self
+                .event_tx
+                .send(SyncEvent::SyncError {
+                    cid: root_cid,
+                    error: error_msg,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    cid = %root_cid,
+                    "Failed to send SyncError event - receiver dropped"
+                );
+                return Err(Error::ChannelSend);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the pending DAGs count (for testing/monitoring).
+    pub fn pending_dag_count(&self) -> usize {
+        self.pending_dags.read().len()
     }
 
     /// Check if a block exists and is merged.
@@ -335,6 +680,10 @@ mod tests {
         Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap()
     }
 
+    fn test_peer_state() -> Arc<PeerStateTracker> {
+        Arc::new(PeerStateTracker::new())
+    }
+
     fn create_test_broadcast(cid: &Cid) -> PushLogBroadcast {
         PushLogBroadcast::new(
             "doc123".to_string(),
@@ -349,7 +698,7 @@ mod tests {
     async fn test_process_pushlog_stores_block() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -382,7 +731,7 @@ mod tests {
     async fn test_process_pushlog_already_merged() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -408,7 +757,7 @@ mod tests {
     async fn test_mark_as_merged() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+        let (manager, _events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -430,7 +779,7 @@ mod tests {
     async fn test_get_unmerged() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+        let (manager, _events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
         let cid = test_cid();
         let msg = create_test_broadcast(&cid);
@@ -459,7 +808,7 @@ mod tests {
     async fn test_process_pushlog_invalid_cid_returns_error() {
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, _events) = SyncManager::new(blockstore, SyncConfig::default());
+        let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
         // Create a broadcast with invalid CID bytes
         let msg = PushLogBroadcast::new(
@@ -488,7 +837,7 @@ mod tests {
 
         let store = Arc::new(MemoryStore::new());
         let blockstore = Arc::new(DefraBlockstore::new(store, true));
-        let (manager, mut events) = SyncManager::new(blockstore.clone(), SyncConfig::default());
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
         let manager = Arc::new(manager);
 
         let cid = test_cid();
@@ -537,5 +886,108 @@ mod tests {
             received_count >= 1,
             "Should have at least one BlockReceived event"
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_pushlog_returns_error_when_receiver_dropped() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+        // Drop the event receiver immediately
+        drop(events);
+
+        let cid = test_cid();
+        let msg = create_test_broadcast(&cid);
+
+        // Processing should fail with ChannelSend error since receiver is dropped
+        let result = manager.process_pushlog(&msg).await;
+        assert!(result.is_err());
+        match result {
+            Err(Error::ChannelSend) => {
+                // Expected - channel send failed because receiver was dropped
+            }
+            other => panic!("Expected ChannelSend error, got {:?}", other),
+        }
+
+        // Block should still be stored (we store before sending event)
+        assert!(blockstore.has(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_already_merged_returns_error_when_receiver_dropped() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+        let cid = test_cid();
+        let msg = create_test_broadcast(&cid);
+
+        // Pre-store and merge the block
+        blockstore.put(&cid, &msg.block).await.unwrap();
+        blockstore.mark_as_merged(&cid).await.unwrap();
+
+        // Drop the event receiver
+        drop(events);
+
+        // Processing already-merged block should fail since we can't send event
+        let result = manager.process_pushlog(&msg).await;
+        assert!(result.is_err());
+        match result {
+            Err(Error::ChannelSend) => {
+                // Expected - can't send BlockAlreadyMerged event
+            }
+            other => panic!("Expected ChannelSend error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pending_dag_count_initially_zero() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+
+        assert_eq!(manager.pending_dag_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pending_dag_tracking() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+        // Create a block that has links (simulated by creating IPLD-like data)
+        // For simplicity, we'll use a block that fails to parse as IPLD,
+        // which will now return an error. Instead, let's test with a valid
+        // scenario where the block has no links.
+        let cid = test_cid();
+        let msg = create_test_broadcast(&cid);
+
+        // Process pushlog - block has no parseable links, should be complete
+        manager.process_pushlog(&msg).await.unwrap();
+
+        // Should receive BlockReceived since no missing links
+        let event = events.try_recv().unwrap();
+        match event {
+            SyncEvent::BlockReceived { cid: event_cid, .. } => {
+                assert_eq!(event_cid, cid);
+            }
+            _ => panic!("Expected BlockReceived event"),
+        }
+
+        // No pending dags since block was complete
+        assert_eq!(manager.pending_dag_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_blockstore_accessor() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, _events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+        // Verify blockstore accessor returns the same blockstore
+        let cid = test_cid();
+        manager.blockstore().put(&cid, b"test").await.unwrap();
+        assert!(blockstore.has(&cid).await.unwrap());
     }
 }

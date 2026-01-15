@@ -45,10 +45,18 @@
 
 mod broadcaster;
 mod coordinator;
+mod dag_sync;
 mod manager;
+mod merge;
+mod peer_state;
 mod queue;
+mod replication;
 
-pub use broadcaster::Broadcaster;
+pub use broadcaster::{BroadcastResult, Broadcaster};
 pub use coordinator::SyncCoordinator;
+pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, SyncPlan};
 pub use manager::{SyncConfig, SyncEvent, SyncManager};
+pub use merge::{BlockMetadata, MergeHandler, MergeOutcome};
+pub use peer_state::{PeerStateTracker, PeerStats};
 pub use queue::ProcessQueue;
+pub use replication::{ReplicationConfig, ReplicationLoop, ReplicationResult};

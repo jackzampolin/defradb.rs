@@ -150,6 +150,41 @@ pub enum Error {
     /// Blockstore error.
     #[error("blockstore error: {0}")]
     BlockstoreError(String),
+
+    /// Failed to send response.
+    #[error("failed to send response: {0}")]
+    ResponseSend(String),
+
+    /// DAG sync failed with reason.
+    #[error("DAG sync failed for CID {cid}: {reason}")]
+    DagSyncFailed {
+        /// The CID that failed to sync
+        cid: String,
+        /// Why the sync failed
+        reason: String,
+    },
+
+    /// Recovery completed with failures.
+    #[error("recovery completed with {failed} failures out of {total} blocks")]
+    RecoveryFailed {
+        /// Number of blocks successfully recovered
+        success: usize,
+        /// Number of blocks that failed to recover
+        failed: usize,
+        /// Total blocks attempted
+        total: usize,
+    },
+
+    /// Block could not be parsed as IPLD.
+    #[error("failed to parse block as IPLD: {reason}")]
+    BlockParseError {
+        /// Why the block couldn't be parsed
+        reason: String,
+    },
+
+    /// Invalid configuration value.
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl From<serde_cbor::Error> for Error {

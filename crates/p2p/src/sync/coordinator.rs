@@ -69,20 +69,27 @@ use cid::Cid;
 
 use crate::error::Result;
 use crate::host::{HostEvent, P2PHostHandle};
-use crate::message::PushLogBroadcast;
+use crate::message::{PushLogBroadcast, PushLogReply};
 
 use super::broadcaster::Broadcaster;
 use super::manager::{SyncConfig, SyncEvent, SyncManager};
+use super::peer_state::PeerStateTracker;
 
 /// Coordinator for P2P synchronization.
 ///
 /// This is the main integration point between the P2P layer and the database.
 pub struct SyncCoordinator<B: Blockstore> {
+    /// Host handle for sending responses
+    host: P2PHostHandle,
+
     /// Broadcaster for publishing updates
     broadcaster: Broadcaster,
 
     /// Sync manager for block storage
     manager: SyncManager<B>,
+
+    /// Peer state tracker
+    peer_state: Arc<PeerStateTracker>,
 
     /// Local peer ID (for creator field in broadcasts)
     local_peer_id: String,
@@ -98,13 +105,16 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         config: SyncConfig,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = host.local_peer_id().await?.to_string();
-        let broadcaster = Broadcaster::new(host);
-        let (manager, events) = SyncManager::new(blockstore, config);
+        let broadcaster = Broadcaster::new(host.clone());
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
 
         Ok((
             Self {
+                host,
                 broadcaster,
                 manager,
+                peer_state,
                 local_peer_id,
             },
             events,
@@ -116,13 +126,55 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// This should be called from the event loop that processes HostEvents.
     pub async fn handle_host_event(&self, event: HostEvent) -> Result<()> {
         match event {
-            HostEvent::GossipMessage { message, topic, .. } => {
+            HostEvent::PeerConnected(peer_id) => {
+                tracing::debug!(peer_id = %peer_id, "Peer connected");
+                self.peer_state.peer_connected(peer_id);
+            }
+            HostEvent::PeerDisconnected(peer_id) => {
+                tracing::debug!(peer_id = %peer_id, "Peer disconnected");
+                self.peer_state.peer_disconnected(&peer_id);
+            }
+            HostEvent::PeerSubscribed { peer_id, topic } => {
+                tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
+                self.peer_state.peer_subscribed(&peer_id, topic);
+            }
+            HostEvent::PeerUnsubscribed { peer_id, topic } => {
+                tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer unsubscribed from topic");
+                self.peer_state.peer_unsubscribed(&peer_id, &topic);
+            }
+            HostEvent::GossipMessage {
+                propagation_source,
+                message,
+                topic,
+                ..
+            } => {
                 tracing::debug!(
                     doc_id = %message.doc_id,
                     collection_id = %message.collection_id,
                     topic = %topic,
                     "Received GossipSub message"
                 );
+
+                // Parse CID - if invalid, return error early (don't call process_pushlog
+                // which will also fail with the same invalid CID)
+                match Cid::try_from(message.cid.as_slice()) {
+                    Ok(cid) => {
+                        self.peer_state.peer_has_cid(&propagation_source, cid);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            peer_id = %propagation_source,
+                            cid_bytes_len = message.cid.len(),
+                            error = %e,
+                            "Failed to parse CID from gossip message - skipping message"
+                        );
+                        return Err(crate::error::Error::InvalidCid(format!(
+                            "Failed to parse CID from gossip message: {}",
+                            e
+                        )));
+                    }
+                }
+
                 self.manager.process_pushlog(&message).await?;
             }
             HostEvent::PushLogRequest {
@@ -135,25 +187,67 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     doc_id = %request.doc_id,
                     "Received PushLog request"
                 );
+
+                // Parse CID - if invalid, send error response and return early
+                let cid = match Cid::try_from(request.cid.as_slice()) {
+                    Ok(cid) => {
+                        self.peer_state.peer_has_cid(&peer_id, cid);
+                        cid
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Failed to parse CID: {}", e);
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            cid_bytes_len = request.cid.len(),
+                            error = %e,
+                            "Failed to parse CID from PushLog request - sending error response"
+                        );
+                        let reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                        if let Err(send_err) = self.host.send_pushlog_response(channel, reply).await
+                        {
+                            tracing::warn!(
+                                peer_id = %peer_id,
+                                error = %send_err,
+                                "Failed to send error response for invalid CID"
+                            );
+                        }
+                        return Err(crate::error::Error::InvalidCid(error_msg));
+                    }
+                };
+
+                // Log that we have a valid CID
+                tracing::trace!(?cid, "Parsed valid CID from PushLog request");
+
                 // Convert request to broadcast format and process
                 let broadcast = PushLogBroadcast::from_request(&request);
-                self.manager.process_pushlog(&broadcast).await?;
+                let process_result = self.manager.process_pushlog(&broadcast).await;
 
-                // Response handling limitation:
-                // The ResponseChannel requires access to the swarm to send a response,
-                // but the coordinator only has access to P2PHostHandle. The response
-                // should be sent by having the host handle responses internally, or
-                // by adding a SendResponse command to P2PHostHandle.
-                // For now, we drop the channel which does NOT send a response.
-                tracing::trace!(
-                    peer_id = %peer_id,
-                    doc_id = %request.doc_id,
-                    "PushLog request processed - response channel dropped (no response sent)"
-                );
-                drop(channel);
+                // Send response based on processing result
+                let reply = match &process_result {
+                    Ok(()) => PushLogReply::success(&request.metadata.message_id),
+                    Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
+                };
+
+                if let Err(e) = self.host.send_pushlog_response(channel, reply).await {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        doc_id = %request.doc_id,
+                        error = %e,
+                        "Failed to send PushLog response"
+                    );
+                } else {
+                    tracing::trace!(
+                        peer_id = %peer_id,
+                        doc_id = %request.doc_id,
+                        "Sent PushLog response"
+                    );
+                }
+
+                // Propagate the processing error if there was one
+                process_result?;
             }
             other => {
-                // Other events (peer discovery, etc.) don't need sync handling
+                // Other events (peer discovery, listening, etc.) don't need sync handling
                 tracing::trace!(event = ?other, "Ignoring non-sync host event");
             }
         }
@@ -194,13 +288,18 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// * `block` - The raw block data
     /// * `doc_id` - The document ID
     /// * `collection_id` - The collection ID
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(BroadcastResult)` indicating success or partial success.
+    /// Partial success means one topic received the message but not both.
     pub async fn broadcast_local_update(
         &self,
         cid: &Cid,
         block: &[u8],
         doc_id: &str,
         collection_id: &str,
-    ) -> Result<()> {
+    ) -> Result<super::BroadcastResult> {
         let broadcast =
             Broadcaster::create_broadcast(cid, block, doc_id, collection_id, &self.local_peer_id);
         self.broadcaster.broadcast_update(&broadcast).await
@@ -240,6 +339,28 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     pub fn local_peer_id(&self) -> &str {
         &self.local_peer_id
     }
+
+    /// Get the peer state tracker reference.
+    pub fn peer_state(&self) -> &PeerStateTracker {
+        &self.peer_state
+    }
+
+    /// Get the host handle for direct peer communication.
+    pub fn host(&self) -> &P2PHostHandle {
+        &self.host
+    }
+
+    /// Get the sync manager reference.
+    pub fn manager(&self) -> &SyncManager<B> {
+        &self.manager
+    }
+
+    // Note: The request_block and request_block_from_any_peer methods were removed.
+    // They didn't interoperate with Go DefraDB (which uses Bitswap).
+    //
+    // For block fetching, use the DagSync module with Bitswap:
+    //   - DagSync::prepare_sync() to identify missing blocks
+    //   - behaviour.bitswap_sync() to fetch via Bitswap protocol
 }
 
 #[cfg(test)]

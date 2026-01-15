@@ -235,7 +235,7 @@ fn varint_size(x: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use multihash::Multihash;
+    use multihash::MultihashGeneric;
     use sha2::{Digest, Sha256};
 
     const SHA2_256_CODE: u64 = 0x12;
@@ -244,7 +244,7 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(b"test document content");
         let hash_bytes = hasher.finalize();
-        let mh: Multihash<64> = Multihash::wrap(SHA2_256_CODE, &hash_bytes).unwrap();
+        let mh: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash_bytes).unwrap();
         Cid::new_v1(0x55, mh) // 0x55 = raw codec
     }
 
@@ -282,12 +282,12 @@ mod tests {
         let mut hasher1 = Sha256::new();
         hasher1.update(b"document 1");
         let hash1 = hasher1.finalize();
-        let mh1: Multihash<64> = Multihash::wrap(SHA2_256_CODE, &hash1).unwrap();
+        let mh1: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash1).unwrap();
 
         let mut hasher2 = Sha256::new();
         hasher2.update(b"document 2");
         let hash2 = hasher2.finalize();
-        let mh2: Multihash<64> = Multihash::wrap(SHA2_256_CODE, &hash2).unwrap();
+        let mh2: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash2).unwrap();
 
         let cid1 = Cid::new_v1(0x55, mh1);
         let cid2 = Cid::new_v1(0x55, mh2);
