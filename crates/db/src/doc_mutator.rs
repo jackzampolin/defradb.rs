@@ -4,47 +4,19 @@ use async_trait::async_trait;
 use datastore::NamespaceView;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
-use schema::CollectionVersion;
 use std::sync::Arc;
-use storage::corekv::{Key, Store};
-use storage::keys::systemstore::CollectionNameKey;
+use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
+use tracing::warn;
 
 use crate::collection::Collection;
+use crate::collection_loader::load_collection_from_systemstore;
 use crate::txn::DbTxn;
-
-/// Load a collection from the systemstore by name.
-///
-/// This is a standalone async function that doesn't hold any locks,
-/// allowing it to be called outside the mutex lock scope.
-async fn load_collection_from_systemstore(
-    systemstore: &NamespaceView,
-    name: &str,
-) -> query::error::Result<Option<Collection>> {
-    let key = CollectionNameKey::new(name);
-
-    match systemstore
-        .get(&key.bytes())
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
-    {
-        Some(data) => {
-            let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to deserialize schema for collection '{}': {}",
-                    name, e
-                ))
-            })?;
-            Ok(Some(Collection::new(schema)))
-        }
-        None => Ok(None),
-    }
-}
 
 /// Document mutator that uses a database transaction.
 ///
 /// This mutator holds a reference to an active transaction and uses the
-/// transaction's collection cache with lazy loading for snapshot isolation.
+/// transaction's collection cache with lazy loading.
 ///
 /// # Ownership Model
 ///
@@ -64,8 +36,10 @@ async fn load_collection_from_systemstore(
 /// # Collection Access
 ///
 /// Collections are loaded lazily from the SystemStore on first access within
-/// the transaction. This provides snapshot isolation - the transaction sees
-/// collections as they existed when first accessed, not at transaction start.
+/// the transaction. Once loaded, the collection metadata is cached for the
+/// duration of the transaction. Note: This provides transaction-level caching,
+/// not true snapshot isolation - if collections are accessed at different times,
+/// they reflect the store state at the time of first access.
 pub struct DbDocMutator<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
 }
@@ -109,7 +83,6 @@ impl<S: Store> DbDocMutator<S> {
         &self,
         collection_name: &str,
     ) -> query::error::Result<(Collection, NamespaceView)> {
-        // Step 1: Check if collection is in cache
         let (collection_opt, systemstore, datastore) = {
             let txn_guard = self.txn.lock().await;
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
@@ -129,9 +102,8 @@ impl<S: Store> DbDocMutator<S> {
                 ))
             })?;
             (collection_opt, systemstore, datastore)
-        }; // Lock released here
+        };
 
-        // Step 2: If not in cache, load from store
         let collection = if let Some(col) = collection_opt {
             col
         } else {
@@ -139,11 +111,19 @@ impl<S: Store> DbDocMutator<S> {
             let collection = loaded
                 .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-            // Add to cache
+            // Add to cache - warn if transaction was consumed during load
             {
                 let mut txn_guard = self.txn.lock().await;
-                if let Some(db_txn) = txn_guard.as_mut() {
-                    db_txn.cache_collection(collection_name.to_string(), collection.clone());
+                match txn_guard.as_mut() {
+                    Some(db_txn) => {
+                        db_txn.cache_collection(collection.clone());
+                    }
+                    None => {
+                        warn!(
+                            collection_name = %collection_name,
+                            "Transaction was consumed during collection load - cache not updated"
+                        );
+                    }
                 }
             }
 

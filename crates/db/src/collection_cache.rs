@@ -11,7 +11,7 @@ use crate::collection::Collection;
 /// A transaction-scoped cache for collection metadata.
 ///
 /// This cache lives within a transaction and provides:
-/// - O(1) lookups by collection name
+/// - O(1) average-case lookups by collection name (HashMap-backed)
 /// - Lazy loading from SystemStore on cache miss
 /// - Isolation between transactions (each txn has its own cache)
 ///
@@ -46,20 +46,32 @@ impl CollectionCache {
     }
 
     /// Check if a collection exists in the cache.
+    ///
+    /// Note: `false` does not mean the collection doesn't exist - it may
+    /// not have been loaded yet.
     pub fn contains(&self, name: &str) -> bool {
         self.by_name.contains_key(name)
     }
 
-    /// Add a collection to the cache.
-    pub fn add(&mut self, name: String, collection: Collection) {
-        self.by_name.insert(name, collection);
+    /// Add a collection to the cache, keyed by its name.
+    ///
+    /// The key is derived from `collection.name()` to prevent key-name mismatches.
+    pub fn add(&mut self, collection: Collection) {
+        self.by_name
+            .insert(collection.name().to_string(), collection);
     }
 
     /// Remove a collection from the cache.
     ///
     /// Returns the removed collection if it existed.
+    /// Note: This resets the `is_fully_populated` flag since the cache
+    /// no longer contains all collections.
     pub fn remove(&mut self, name: &str) -> Option<Collection> {
-        self.by_name.remove(name)
+        let removed = self.by_name.remove(name);
+        if removed.is_some() {
+            self.is_fully_populated = false;
+        }
+        removed
     }
 
     /// Get all collection names in the cache.
@@ -82,30 +94,16 @@ impl CollectionCache {
         self.is_fully_populated
     }
 
-    /// Mark the cache as fully populated.
-    ///
-    /// Call this after loading all collections from the store.
-    pub fn mark_fully_populated(&mut self) {
-        self.is_fully_populated = true;
-    }
-
     /// Populate the cache with a full set of collections.
     ///
-    /// This replaces any existing cache contents and marks the cache
-    /// as fully populated.
-    pub fn populate(&mut self, collections: HashMap<String, Collection>) {
-        self.by_name = collections;
+    /// This replaces any existing cache contents, marks the cache as fully
+    /// populated, and derives keys from each collection's name.
+    pub fn populate(&mut self, collections: impl IntoIterator<Item = Collection>) {
+        self.by_name = collections
+            .into_iter()
+            .map(|c| (c.name().to_string(), c))
+            .collect();
         self.is_fully_populated = true;
-    }
-
-    /// Get an iterator over the collections.
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Collection)> {
-        self.by_name.iter()
-    }
-
-    /// Convert the cache into a HashMap.
-    pub fn into_inner(self) -> HashMap<String, Collection> {
-        self.by_name
     }
 }
 
@@ -142,7 +140,7 @@ mod tests {
         let mut cache = CollectionCache::new();
         let col = test_collection("Users");
 
-        cache.add("Users".to_string(), col);
+        cache.add(col);
 
         assert!(cache.contains("Users"));
         assert!(!cache.contains("Posts"));
@@ -156,8 +154,8 @@ mod tests {
     #[test]
     fn test_cache_remove() {
         let mut cache = CollectionCache::new();
-        cache.add("Users".to_string(), test_collection("Users"));
-        cache.add("Posts".to_string(), test_collection("Posts"));
+        cache.add(test_collection("Users"));
+        cache.add(test_collection("Posts"));
 
         assert_eq!(cache.len(), 2);
 
@@ -170,10 +168,26 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_remove_resets_fully_populated() {
+        let mut cache = CollectionCache::new();
+        cache.populate(vec![test_collection("Users"), test_collection("Posts")]);
+
+        assert!(cache.is_fully_populated());
+        assert_eq!(cache.len(), 2);
+
+        cache.remove("Users");
+
+        assert!(
+            !cache.is_fully_populated(),
+            "Cache should no longer be fully populated after remove"
+        );
+    }
+
+    #[test]
     fn test_cache_names() {
         let mut cache = CollectionCache::new();
-        cache.add("Users".to_string(), test_collection("Users"));
-        cache.add("Posts".to_string(), test_collection("Posts"));
+        cache.add(test_collection("Users"));
+        cache.add(test_collection("Posts"));
 
         let mut names = cache.names();
         names.sort();
@@ -185,25 +199,11 @@ mod tests {
         let mut cache = CollectionCache::new();
         assert!(!cache.is_fully_populated());
 
-        let mut collections = HashMap::new();
-        collections.insert("Users".to_string(), test_collection("Users"));
-        collections.insert("Posts".to_string(), test_collection("Posts"));
-
-        cache.populate(collections);
+        cache.populate(vec![test_collection("Users"), test_collection("Posts")]);
 
         assert!(cache.is_fully_populated());
         assert_eq!(cache.len(), 2);
         assert!(cache.contains("Users"));
         assert!(cache.contains("Posts"));
-    }
-
-    #[test]
-    fn test_cache_mark_fully_populated() {
-        let mut cache = CollectionCache::new();
-        cache.add("Users".to_string(), test_collection("Users"));
-
-        assert!(!cache.is_fully_populated());
-        cache.mark_fully_populated();
-        assert!(cache.is_fully_populated());
     }
 }

@@ -320,7 +320,7 @@ impl<S: Store> DB<S> {
             .map_err(Error::Storage)?;
 
         // Update txn-local cache
-        txn.cache_collection(name, Collection::new(schema));
+        txn.cache_collection(Collection::new(schema));
 
         Ok(())
     }
@@ -343,8 +343,7 @@ impl<S: Store> DB<S> {
             Ok(()) => {
                 txn.commit().await?;
 
-                // Update process-wide cache for backward compatibility
-                // This will be removed once all callers use transaction-scoped caching
+                // Update process-wide cache for callers not using transaction-scoped caching
                 let mut cache = self.collections.write().map_err(|e| {
                     tracing::error!(
                         error = ?e,
@@ -468,8 +467,7 @@ impl<S: Store> DB<S> {
             Ok(()) => {
                 txn.commit().await?;
 
-                // Update process-wide cache for backward compatibility
-                // This will be removed once all callers use transaction-scoped caching
+                // Update process-wide cache for callers not using transaction-scoped caching
                 let mut cache = self.collections.write().map_err(|e| {
                     tracing::error!(
                         error = ?e,

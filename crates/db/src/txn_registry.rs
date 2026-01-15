@@ -262,9 +262,8 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
 
         // Transaction-scoped collection caching: collections are loaded lazily
-        // from the SystemStore on first access within the transaction. This provides
-        // snapshot isolation - the transaction sees collections as they existed
-        // when first accessed, not at transaction start.
+        // from the SystemStore on first access within the transaction. Once loaded,
+        // the collection metadata is cached for the transaction's duration.
         let fetcher = Arc::new(DbDocFetcher::new(db_txn));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
 

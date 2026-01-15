@@ -9,7 +9,6 @@ use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
 use datastore::{BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
-use std::collections::HashMap;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::CollectionNameKey;
@@ -242,8 +241,7 @@ impl<S: Store> DbTxn<S> {
                     name, e
                 ))
             })?;
-            self.collection_cache
-                .add(name.to_string(), Collection::new(schema));
+            self.collection_cache.add(Collection::new(schema));
             return Ok(self.collection_cache.get(name));
         }
 
@@ -260,7 +258,7 @@ impl<S: Store> DbTxn<S> {
         }
 
         let prefix = CollectionNameKey::name_prefix();
-        let mut collections = HashMap::new();
+        let mut collections = Vec::new();
 
         let systemstore = self.systemstore()?;
         let opts = IterOptions::new().with_prefix(prefix.clone());
@@ -302,7 +300,9 @@ impl<S: Store> DbTxn<S> {
                 tracing::error!(
                     error = ?e,
                     collection_name = %name,
-                    "Failed to deserialize schema for collection"
+                    "Failed to deserialize schema for collection '{}': {}",
+                    name,
+                    e
                 );
                 Error::Serialization(format!(
                     "failed to deserialize schema for collection '{}': {}",
@@ -310,7 +310,7 @@ impl<S: Store> DbTxn<S> {
                 ))
             })?;
 
-            collections.insert(name, Collection::new(schema));
+            collections.push(Collection::new(schema));
         }
 
         iter.close().await.map_err(|e| {
@@ -324,9 +324,9 @@ impl<S: Store> DbTxn<S> {
 
     /// Add a collection to the transaction-scoped cache.
     ///
-    /// Called by create_collection to update the cache after writing to store.
-    pub fn cache_collection(&mut self, name: String, collection: Collection) {
-        self.collection_cache.add(name, collection);
+    /// The key is derived from the collection's name to prevent key-name mismatches.
+    pub fn cache_collection(&mut self, collection: Collection) {
+        self.collection_cache.add(collection);
     }
 
     /// Remove a collection from the transaction-scoped cache.
