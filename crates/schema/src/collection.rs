@@ -193,16 +193,173 @@ impl CollectionVersion {
         self.fields.iter().find(|f| f.id == id)
     }
 
-    /// Get a field by relation name (matches Go's GetFieldByRelation)
-    pub fn field_by_relation(&self, relation_name: &str) -> Option<&FieldDescription> {
+    /// Get a field by relation name (simple lookup)
+    pub fn field_by_relation_name(&self, relation_name: &str) -> Option<&FieldDescription> {
         self.fields
             .iter()
             .find(|f| f.relation_name.as_deref() == Some(relation_name))
     }
 
+    /// Get a field by relation (matches Go's GetFieldByRelation)
+    ///
+    /// Returns the field on this collection that is part of the given relation,
+    /// excluding the field that matches the "other" collection/field pair.
+    /// This is needed to find the "other side" of a relation when both sides
+    /// have the same relation_name.
+    ///
+    /// # Arguments
+    /// * `relation_name` - The name of the relation
+    /// * `other_collection_name` - The name of the other collection (to exclude self-matches)
+    /// * `other_field_name` - The name of the other field (to exclude self-matches)
+    pub fn field_by_relation(
+        &self,
+        relation_name: &str,
+        other_collection_name: &str,
+        other_field_name: &str,
+    ) -> Option<&FieldDescription> {
+        self.fields.iter().find(|f| {
+            f.relation_name.as_deref() == Some(relation_name)
+                && !(self.name == other_collection_name && f.name == other_field_name)
+                && !matches!(f.kind, FieldKind::Scalar(crate::ScalarKind::DocID))
+        })
+    }
+
     /// Get all relation fields
     pub fn relation_fields(&self) -> impl Iterator<Item = &FieldDescription> {
         self.fields.iter().filter(|f| f.kind.is_relation())
+    }
+
+    /// Generate the `_id` field name for a relation field
+    ///
+    /// Go uses `{fieldname}_id` as the convention for storing the foreign key
+    /// in relation fields. This constant is defined in client/request/consts.go
+    /// as `RelatedObjectID = "_id"` and used like `field.Name + request.RelatedObjectID`.
+    pub fn relation_id_field_name(field_name: &str) -> String {
+        format!("{}_id", field_name)
+    }
+
+    /// Check if an `_id` field exists for a given relation field name
+    pub fn has_relation_id_field(&self, relation_field_name: &str) -> bool {
+        let id_field_name = Self::relation_id_field_name(relation_field_name);
+        self.fields.iter().any(|f| f.name == id_field_name)
+    }
+
+    /// Add `_id` fields for all non-array relation fields that don't already have one
+    ///
+    /// This matches Go's behavior in `fieldsFromAST()` and `finalizeRelations()`.
+    /// For a relation field `author: User`, this generates an `author_id: ID` field
+    /// with the same relation_name and is_primary status.
+    ///
+    /// The `next_field_id` function is called to generate unique field IDs.
+    pub fn add_relation_id_fields(&mut self, mut next_field_id: impl FnMut() -> String) {
+        // Collect info about relation fields that need _id fields
+        let mut fields_to_add = Vec::new();
+
+        for field in &self.fields {
+            // Only process non-array relation fields
+            if !field.kind.is_relation() || field.kind.is_array() {
+                continue;
+            }
+
+            let id_field_name = Self::relation_id_field_name(&field.name);
+
+            // Skip if _id field already exists
+            if self.fields.iter().any(|f| f.name == id_field_name) {
+                continue;
+            }
+
+            // Create the _id field with same relation_name and is_primary
+            let id_field =
+                FieldDescription::new(next_field_id(), id_field_name, FieldKind::doc_id())
+                    .with_crdt_type(crate::CType::LwwRegister);
+
+            let id_field = if let Some(rel_name) = &field.relation_name {
+                id_field.with_relation_name(rel_name.clone())
+            } else {
+                id_field
+            };
+
+            let id_field = if field.is_primary {
+                id_field.as_primary()
+            } else {
+                id_field
+            };
+
+            fields_to_add.push((field.name.clone(), id_field));
+        }
+
+        // Insert each _id field immediately after its corresponding relation field
+        for (relation_field_name, id_field) in fields_to_add {
+            if let Some(pos) = self
+                .fields
+                .iter()
+                .position(|f| f.name == relation_field_name)
+            {
+                self.fields.insert(pos + 1, id_field);
+            }
+        }
+    }
+
+    /// Finalize relation fields for a set of collections
+    ///
+    /// This is called after all collections are parsed to:
+    /// 1. Auto-generate missing `_id` fields for non-array relations
+    /// 2. Auto-determine which side is primary for one-to-many relations
+    ///
+    /// Matches Go's `finalizeRelations()` function.
+    pub fn finalize_relations(
+        collections: &mut HashMap<String, CollectionVersion>,
+        mut next_field_id: impl FnMut() -> String,
+    ) {
+        // First pass: add missing _id fields and auto-set primary for one-to-many
+        let collection_names: Vec<String> = collections.keys().cloned().collect();
+
+        for name in collection_names {
+            let mut collection = collections.remove(&name).unwrap();
+
+            // Find fields that need _id and/or auto-primary
+            let mut updates = Vec::new();
+
+            for (idx, field) in collection.fields.iter().enumerate() {
+                if !field.kind.is_relation() {
+                    continue;
+                }
+
+                // Non-array relations are the "one" side (or one-to-one primary)
+                // Array relations are the "many" side
+                if !field.kind.is_array() {
+                    // Check if the other side exists and is an array
+                    if let Some(rel_name) = &field.relation_name {
+                        if let Some(other_col_id) = field.kind.relation_collection_id() {
+                            if let Some(other_col) = collections.get(other_col_id) {
+                                let other_field = other_col.field_by_relation(
+                                    rel_name,
+                                    &collection.name,
+                                    &field.name,
+                                );
+
+                                // If other side doesn't exist or is an array, this side is primary
+                                if other_field.is_none()
+                                    || other_field.map(|f| f.kind.is_array()).unwrap_or(false)
+                                {
+                                    updates.push((idx, true)); // Mark as primary
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Apply primary updates
+            for (idx, is_primary) in updates {
+                collection.fields[idx].is_primary = is_primary;
+            }
+
+            // Add missing _id fields
+            collection.add_relation_id_fields(&mut next_field_id);
+
+            collections.insert(name, collection);
+        }
     }
 
     /// Validate the collection schema
@@ -346,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_field_by_relation() {
+    fn test_field_by_relation_name() {
         let fields = vec![
             FieldDescription::new("1", "_docID", FieldKind::doc_id()),
             FieldDescription::new("2", "author", FieldKind::relation("users", false))
@@ -354,9 +511,47 @@ mod tests {
         ];
         let coll = CollectionVersion::new("posts", "v1", "coll-1", fields);
 
-        let field = coll.field_by_relation("post_author").unwrap();
+        let field = coll.field_by_relation_name("post_author").unwrap();
         assert_eq!(field.name, "author");
-        assert!(coll.field_by_relation("nonexistent").is_none());
+        assert!(coll.field_by_relation_name("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_field_by_relation() {
+        // Create posts collection with author field
+        let posts_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("author_posts"),
+        ];
+        let posts = CollectionVersion::new("posts", "v1", "coll-posts", posts_fields);
+
+        // Create users collection with posts field
+        let users_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+                .with_relation_name("author_posts"),
+        ];
+        let users = CollectionVersion::new("users", "v1", "coll-users", users_fields);
+
+        // From posts collection, find the field in users that is part of "author_posts"
+        // but not the "author" field from "posts"
+        let field = users
+            .field_by_relation("author_posts", "posts", "author")
+            .unwrap();
+        assert_eq!(field.name, "posts");
+
+        // From users collection, find the field in posts that is part of "author_posts"
+        // but not the "posts" field from "users"
+        let field = posts
+            .field_by_relation("author_posts", "users", "posts")
+            .unwrap();
+        assert_eq!(field.name, "author");
+
+        // Nonexistent relation should return None
+        assert!(posts
+            .field_by_relation("nonexistent", "users", "posts")
+            .is_none());
     }
 
     #[test]
@@ -452,5 +647,149 @@ mod tests {
         let json = serde_json::to_string(&coll).unwrap();
         let parsed: CollectionVersion = serde_json::from_str(&json).unwrap();
         assert_eq!(coll, parsed);
+    }
+
+    #[test]
+    fn test_relation_id_field_name() {
+        assert_eq!(
+            CollectionVersion::relation_id_field_name("author"),
+            "author_id"
+        );
+        assert_eq!(
+            CollectionVersion::relation_id_field_name("posts"),
+            "posts_id"
+        );
+    }
+
+    #[test]
+    fn test_add_relation_id_fields() {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts")
+                .as_primary(),
+        ];
+        let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
+
+        let mut counter = 100;
+        coll.add_relation_id_fields(|| {
+            counter += 1;
+            counter.to_string()
+        });
+
+        assert_eq!(coll.fields.len(), 3);
+
+        // Verify _id field was added
+        let id_field = coll.field_by_name("author_id").unwrap();
+        assert_eq!(id_field.id, "101");
+        assert_eq!(id_field.kind, FieldKind::doc_id());
+        assert_eq!(id_field.relation_name, Some("user_posts".to_string()));
+        assert!(id_field.is_primary);
+        assert_eq!(id_field.crdt_type, CType::LwwRegister);
+
+        // Verify _id field is after relation field
+        let author_idx = coll.fields.iter().position(|f| f.name == "author").unwrap();
+        let author_id_idx = coll
+            .fields
+            .iter()
+            .position(|f| f.name == "author_id")
+            .unwrap();
+        assert_eq!(author_id_idx, author_idx + 1);
+    }
+
+    #[test]
+    fn test_add_relation_id_fields_skips_arrays() {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            // Array relation (one-to-many from the "many" side) - no _id field needed
+            FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+                .with_relation_name("user_posts"),
+        ];
+        let mut coll = CollectionVersion::new("users", "v1", "coll-users", fields);
+
+        coll.add_relation_id_fields(|| "999".to_string());
+
+        // No _id field should be added for array relations
+        assert_eq!(coll.fields.len(), 2);
+        assert!(coll.field_by_name("posts_id").is_none());
+    }
+
+    #[test]
+    fn test_add_relation_id_fields_skips_existing() {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts"),
+            // _id field already exists
+            FieldDescription::new("3", "author_id", FieldKind::doc_id())
+                .with_relation_name("user_posts"),
+        ];
+        let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
+
+        coll.add_relation_id_fields(|| "999".to_string());
+
+        // No new _id field should be added
+        assert_eq!(coll.fields.len(), 3);
+        // Original _id field should remain
+        assert_eq!(coll.field_by_name("author_id").unwrap().id, "3");
+    }
+
+    #[test]
+    fn test_has_relation_id_field() {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false)),
+            FieldDescription::new("3", "author_id", FieldKind::doc_id()),
+        ];
+        let coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
+
+        assert!(coll.has_relation_id_field("author"));
+        assert!(!coll.has_relation_id_field("publisher"));
+    }
+
+    #[test]
+    fn test_finalize_relations_adds_id_fields() {
+        let users_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // One-to-many (array) - no _id field needed
+            FieldDescription::new("3", "posts", FieldKind::relation("posts", true))
+                .with_relation_name("user_posts"),
+        ];
+        let posts_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            // Many-to-one (non-array) - _id field needed
+            FieldDescription::new("3", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts"),
+        ];
+
+        let mut collections = HashMap::new();
+        collections.insert(
+            "users".to_string(),
+            CollectionVersion::new("users", "v1", "coll-users", users_fields),
+        );
+        collections.insert(
+            "posts".to_string(),
+            CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
+        );
+
+        let mut counter = 100;
+        CollectionVersion::finalize_relations(&mut collections, || {
+            counter += 1;
+            counter.to_string()
+        });
+
+        let users = collections.get("users").unwrap();
+        let posts = collections.get("posts").unwrap();
+
+        // Users should NOT get a posts_id field (array relation)
+        assert!(users.field_by_name("posts_id").is_none());
+        assert_eq!(users.fields.len(), 3);
+
+        // Posts SHOULD get an author_id field (non-array relation)
+        let author_id = posts.field_by_name("author_id").unwrap();
+        assert_eq!(author_id.kind, FieldKind::doc_id());
+        assert_eq!(posts.fields.len(), 4);
     }
 }
