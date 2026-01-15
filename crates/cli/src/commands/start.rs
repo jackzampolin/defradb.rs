@@ -776,4 +776,84 @@ mod http_integration_tests {
         shutdown_tx.send(()).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
     }
+
+    /// Create a test config with RocksDB backend
+    fn test_config_rocksdb(port: u16, temp_dir: &std::path::Path) -> Config {
+        Config {
+            rootdir: temp_dir.to_path_buf(),
+            log: crate::config::LogConfig::default(),
+            api: crate::config::ApiConfig {
+                address: format!("127.0.0.1:{}", port),
+                allowed_origins: vec![],
+                pubkey_path: String::new(),
+                privkey_path: String::new(),
+            },
+            datastore: crate::config::DatastoreConfig {
+                store: DatastoreType::Badger, // Use RocksDB backend
+                path: String::new(),
+                max_txn_retries: 5,
+                valuelogfilesize: 1 << 30,
+                no_encryption: true,
+                no_signing: true,
+                no_searchable_encryption: true,
+                default_key_type: "ed25519".to_string(),
+            },
+            net: crate::config::NetConfig {
+                p2p_disabled: true,
+                p2p_addresses: vec![],
+                peers: vec![],
+                pubsub_enabled: false,
+                relay_enabled: false,
+            },
+            keyring: crate::config::KeyringConfig::default(),
+            development: false,
+            secret_file: String::new(),
+            telemetry_disabled: true,
+            replicator_retry_intervals: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_server_with_rocksdb_backend() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        let config = test_config_rocksdb(port, temp_dir.path());
+        let api_url = format!("http://127.0.0.1:{}", port);
+
+        // Create node with RocksDB backend
+        let node = Node::new(config).await.unwrap();
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Test health check works with RocksDB
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}/health-check", api_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to health check");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "Healthy");
+
+        // Test schema endpoint - should be empty for fresh database
+        let response = client
+            .get(format!("{}/api/v0/schema", api_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to schema endpoint");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
+    }
 }
