@@ -619,4 +619,48 @@ mod tests {
         let result = handler.handle_block(&cid, b"test", metadata).await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_replication_result_merged_but_not_marked() {
+        // Test that MergedButNotMarked is a distinct result type
+        let cid = test_cid();
+        let result = ReplicationResult::MergedButNotMarked {
+            cid,
+            error: "mark_as_merged failed".to_string(),
+        };
+
+        // Verify the result contains the expected data
+        match result {
+            ReplicationResult::MergedButNotMarked { cid: c, error } => {
+                assert_eq!(c, cid);
+                assert!(error.contains("mark_as_merged"));
+            }
+            _ => panic!("Expected MergedButNotMarked"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_replication_result_merged_but_broadcast_failed() {
+        // Test that MergedButBroadcastFailed is a distinct result type
+        let cid = test_cid();
+        let result = ReplicationResult::MergedButBroadcastFailed {
+            cid,
+            doc_id: "doc123".to_string(),
+            broadcast_error: "no peers connected".to_string(),
+        };
+
+        // Verify the result contains the expected data
+        match result {
+            ReplicationResult::MergedButBroadcastFailed {
+                cid: c,
+                doc_id,
+                broadcast_error,
+            } => {
+                assert_eq!(c, cid);
+                assert_eq!(doc_id, "doc123");
+                assert!(broadcast_error.contains("no peers"));
+            }
+            _ => panic!("Expected MergedButBroadcastFailed"),
+        }
+    }
 }

@@ -909,52 +909,7 @@ impl P2PHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use libipld::{Block, Cid, Result as IpldResult};
-    use std::sync::{Arc, Mutex};
-
-    /// Mock BitswapStore for testing.
-    #[derive(Clone)]
-    struct MockBitswapStore {
-        blocks: Arc<Mutex<std::collections::HashMap<Cid, Vec<u8>>>>,
-    }
-
-    impl MockBitswapStore {
-        fn new() -> Self {
-            Self {
-                blocks: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl BitswapStore for MockBitswapStore {
-        type Params = DefaultParams;
-
-        async fn contains(&mut self, cid: &Cid) -> IpldResult<bool> {
-            Ok(self.blocks.lock().unwrap().contains_key(cid))
-        }
-
-        async fn get(&mut self, cid: &Cid) -> IpldResult<Option<Vec<u8>>> {
-            Ok(self.blocks.lock().unwrap().get(cid).cloned())
-        }
-
-        async fn insert(&mut self, block: &Block<Self::Params>) -> IpldResult<()> {
-            self.blocks
-                .lock()
-                .unwrap()
-                .insert(*block.cid(), block.data().to_vec());
-            Ok(())
-        }
-
-        async fn missing_blocks(&mut self, cid: &Cid) -> IpldResult<Vec<Cid>> {
-            if self.blocks.lock().unwrap().contains_key(cid) {
-                Ok(vec![])
-            } else {
-                Ok(vec![*cid])
-            }
-        }
-    }
+    use crate::testutil::MockBitswapStore;
 
     #[tokio::test]
     async fn test_host_creation() {

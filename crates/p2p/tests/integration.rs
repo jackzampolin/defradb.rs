@@ -12,62 +12,15 @@
 //!
 //! These tests verify end-to-end functionality with multiple hosts.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use libipld::{Block, Cid, DefaultParams, Result as IpldResult};
-use libp2p_bitswap_next::BitswapStore;
 use p2p::{
-    codec, DefraTopic, Error, HostEvent, Message, P2PHost, P2PHostHandle, PushLogBroadcast,
-    PushLogReply, PushLogRequest, SyncConfig, SyncCoordinator, SyncEvent, REP_REQUEST_PROTOCOL,
-    REP_RESPONSE_PROTOCOL,
+    codec, testutil::MockBitswapStore, DefraTopic, Error, HostEvent, Message, P2PHost,
+    P2PHostHandle, PushLogBroadcast, PushLogReply, PushLogRequest, SyncConfig, SyncCoordinator,
+    SyncEvent, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
 };
 use tokio::time::timeout;
-
-/// Mock BitswapStore for testing.
-#[derive(Clone)]
-struct MockBitswapStore {
-    blocks: Arc<Mutex<HashMap<Cid, Vec<u8>>>>,
-}
-
-impl MockBitswapStore {
-    fn new() -> Self {
-        Self {
-            blocks: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-}
-
-#[async_trait]
-impl BitswapStore for MockBitswapStore {
-    type Params = DefaultParams;
-
-    async fn contains(&mut self, cid: &Cid) -> IpldResult<bool> {
-        Ok(self.blocks.lock().unwrap().contains_key(cid))
-    }
-
-    async fn get(&mut self, cid: &Cid) -> IpldResult<Option<Vec<u8>>> {
-        Ok(self.blocks.lock().unwrap().get(cid).cloned())
-    }
-
-    async fn insert(&mut self, block: &Block<Self::Params>) -> IpldResult<()> {
-        self.blocks
-            .lock()
-            .unwrap()
-            .insert(*block.cid(), block.data().to_vec());
-        Ok(())
-    }
-
-    async fn missing_blocks(&mut self, cid: &Cid) -> IpldResult<Vec<Cid>> {
-        if self.blocks.lock().unwrap().contains_key(cid) {
-            Ok(vec![])
-        } else {
-            Ok(vec![*cid])
-        }
-    }
-}
 
 /// Helper to create and start a P2P host, returning the handle and event receiver.
 async fn create_and_start_host() -> (P2PHostHandle, tokio::sync::mpsc::Receiver<HostEvent>) {

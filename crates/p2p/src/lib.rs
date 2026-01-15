@@ -71,6 +71,8 @@ pub mod message;
 pub mod protocol;
 pub mod signing;
 pub mod sync;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testutil;
 pub mod topics;
 
 // Re-export main types for convenience

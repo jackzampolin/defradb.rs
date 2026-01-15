@@ -44,5 +44,10 @@ tracing = { workspace = true }
 # Synchronization (non-poisoning locks)
 parking_lot = { workspace = true }
 
+[features]
+default = []
+test-utils = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+p2p = { path = ".", features = ["test-utils"] }
