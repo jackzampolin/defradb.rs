@@ -61,11 +61,22 @@ impl TransactionError {
 
     /// Check if this is a retryable error.
     ///
-    /// Some errors (like lock poisoning) indicate unrecoverable state,
-    /// while others (like not found) may be due to timing issues.
+    /// Retryable errors are transient failures where the same operation might
+    /// succeed if retried with a new transaction. Non-retryable errors indicate
+    /// permanent failures or unrecoverable state.
+    ///
+    /// - `NotFound`: Not retryable - the transaction never existed or was already
+    ///   finalized. Retrying with the same handle will never succeed.
+    /// - `AlreadyFinalized`: Not retryable - the transaction was already committed
+    ///   or rolled back.
+    /// - `NotSupported`: Not retryable - transactions aren't available in this config.
+    /// - `Execution`: Retryable - transient storage errors that may succeed on retry
+    ///   with a new transaction.
+    /// - `LockPoisoned`: Not retryable - indicates a panic occurred and the system
+    ///   may be in a corrupted state.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::NotFound(_) => true,
+            Self::NotFound(_) => false,
             Self::AlreadyFinalized(_) => false,
             Self::NotSupported(_) => false,
             Self::Execution(_) => true,
@@ -191,5 +202,56 @@ mod tests {
         let _ = QueryError::collection_not_found("users");
         let _ = QueryError::execution("plan failed");
         let _ = QueryError::internal("unexpected state");
+    }
+
+    #[test]
+    fn test_transaction_error_is_retryable() {
+        // NotFound is NOT retryable - the transaction doesn't exist
+        assert!(
+            !TransactionError::not_found("test").is_retryable(),
+            "NotFound should not be retryable"
+        );
+
+        // AlreadyFinalized is NOT retryable - can't use a finalized transaction
+        assert!(
+            !TransactionError::already_finalized("test").is_retryable(),
+            "AlreadyFinalized should not be retryable"
+        );
+
+        // NotSupported is NOT retryable - transactions aren't available
+        assert!(
+            !TransactionError::not_supported("test").is_retryable(),
+            "NotSupported should not be retryable"
+        );
+
+        // Execution IS retryable - transient errors may succeed on retry
+        assert!(
+            TransactionError::execution("test").is_retryable(),
+            "Execution should be retryable"
+        );
+
+        // LockPoisoned is NOT retryable - system is in corrupted state
+        assert!(
+            !TransactionError::lock_poisoned("test").is_retryable(),
+            "LockPoisoned should not be retryable"
+        );
+    }
+
+    #[test]
+    fn test_transaction_error_display() {
+        let err = TransactionError::not_found("txn-123");
+        assert_eq!(err.to_string(), "transaction not found: txn-123");
+
+        let err = TransactionError::already_finalized("txn-456");
+        assert_eq!(err.to_string(), "transaction already finalized: txn-456");
+
+        let err = TransactionError::not_supported("no registry");
+        assert_eq!(err.to_string(), "transactions not supported: no registry");
+
+        let err = TransactionError::execution("commit failed");
+        assert_eq!(err.to_string(), "transaction error: commit failed");
+
+        let err = TransactionError::lock_poisoned("panic occurred");
+        assert_eq!(err.to_string(), "lock poisoned: panic occurred");
     }
 }

@@ -24,15 +24,13 @@ use crate::mapper::{Requestable, Select};
 use crate::plan::{LimitNode, ScanNode, SelectNode};
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::parse_query;
-use crate::txn::{NoOpTransactionRegistry, TransactionHandle, TransactionRegistry};
+use crate::txn::{GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry};
 
 /// Result of fetching documents by ID, including information about missing documents.
 #[derive(Debug, Clone)]
 pub struct FetchByIdsResult {
-    /// The documents that were found.
-    pub docs: Vec<Document>,
-    /// IDs that were requested but not found.
-    pub missing_ids: Vec<String>,
+    docs: Vec<Document>,
+    missing_ids: Vec<String>,
 }
 
 impl FetchByIdsResult {
@@ -62,6 +60,21 @@ impl FetchByIdsResult {
     /// Get the number of missing documents.
     pub fn missing_count(&self) -> usize {
         self.missing_ids.len()
+    }
+
+    /// Get the found documents.
+    pub fn docs(&self) -> &[Document] {
+        &self.docs
+    }
+
+    /// Take ownership of the found documents.
+    pub fn into_docs(self) -> Vec<Document> {
+        self.docs
+    }
+
+    /// Get the IDs that were not found.
+    pub fn missing_ids(&self) -> &[String] {
+        &self.missing_ids
     }
 }
 
@@ -170,9 +183,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
             let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
-            // Note: We currently return only found documents, but missing_ids is available
-            // for future use (e.g., partial error responses, logging, etc.)
-            result.docs
+            result.into_docs()
         } else {
             fetcher.get_all(&select.collection_name).await?
         };
@@ -375,10 +386,16 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
     ) -> QueryResponse {
         // Look up the transaction in the registry
         let txn_ctx = match self.registry.get(handle) {
-            Some(ctx) => ctx,
-            None => {
+            GetTransactionResult::Found(ctx) => ctx,
+            GetTransactionResult::NotFound => {
                 return QueryResponse::error(format!(
                     "transaction '{}' not found or has been committed/rolled back",
+                    handle
+                ));
+            }
+            GetTransactionResult::LockPoisoned => {
+                return QueryResponse::error(format!(
+                    "transaction registry lock poisoned - system may be in corrupted state (transaction '{}')",
                     handle
                 ));
             }
@@ -409,46 +426,21 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         &self,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.registry.begin(readonly).await.map_err(|e| {
-            // Convert QueryError to TransactionError
-            TransactionError::execution(e.to_string())
-        })
+        self.registry.begin(readonly).await
     }
 
     async fn commit_txn(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.commit(handle).await.map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                TransactionError::not_found(msg)
-            } else if msg.contains("already consumed") || msg.contains("double") {
-                TransactionError::already_finalized(msg)
-            } else if msg.contains("poisoned") {
-                TransactionError::lock_poisoned(msg)
-            } else {
-                TransactionError::execution(msg)
-            }
-        })
+        self.registry.commit(handle).await
     }
 
     async fn rollback_txn(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.rollback(handle).await.map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                TransactionError::not_found(msg)
-            } else if msg.contains("already consumed") || msg.contains("double") {
-                TransactionError::already_finalized(msg)
-            } else if msg.contains("poisoned") {
-                TransactionError::lock_poisoned(msg)
-            } else {
-                TransactionError::execution(msg)
-            }
-        })
+        self.registry.rollback(handle).await
     }
 
     async fn schema(&self) -> Result<String> {
@@ -949,7 +941,7 @@ mod tests {
 
     // Transaction support tests
 
-    use crate::txn::{TransactionContext, TransactionRegistry};
+    use crate::txn::{GetTransactionResult, TransactionContext, TransactionRegistry};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Mock transaction context for testing
@@ -993,7 +985,7 @@ mod tests {
 
     #[async_trait]
     impl TransactionRegistry for MockTxnRegistry {
-        async fn begin(&self, readonly: bool) -> Result<TransactionHandle> {
+        async fn begin(&self, readonly: bool) -> std::result::Result<TransactionHandle, TransactionError> {
             let id = self.counter.fetch_add(1, Ordering::SeqCst);
             let txn_id = format!("txn-{}", id);
 
@@ -1010,28 +1002,27 @@ mod tests {
             Ok(TransactionHandle::new(txn_id))
         }
 
-        fn get(&self, handle: &TransactionHandle) -> Option<Arc<dyn TransactionContext>> {
-            self.transactions
-                .lock()
-                .unwrap()
-                .get(handle.as_str())
-                .cloned()
+        fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
+            match self.transactions.lock().unwrap().get(handle.as_str()).cloned() {
+                Some(ctx) => GetTransactionResult::Found(ctx),
+                None => GetTransactionResult::NotFound,
+            }
         }
 
-        async fn commit(&self, handle: &TransactionHandle) -> Result<()> {
+        async fn commit(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
             match self.transactions.lock().unwrap().remove(handle.as_str()) {
                 Some(_) => Ok(()),
-                None => Err(QueryError::execution(format!(
+                None => Err(TransactionError::not_found(format!(
                     "transaction '{}' not found",
                     handle
                 ))),
             }
         }
 
-        async fn rollback(&self, handle: &TransactionHandle) -> Result<()> {
+        async fn rollback(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
             match self.transactions.lock().unwrap().remove(handle.as_str()) {
                 Some(_) => Ok(()),
-                None => Err(QueryError::execution(format!(
+                None => Err(TransactionError::not_found(format!(
                     "transaction '{}' not found",
                     handle
                 ))),

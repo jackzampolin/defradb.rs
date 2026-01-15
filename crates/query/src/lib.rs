@@ -42,8 +42,8 @@ pub use query_parse::parse_query;
 pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::parse_sdl;
 pub use txn::{
-    NoOpTransactionRegistry, TransactionContext, TransactionGuard, TransactionHandle,
-    TransactionRegistry,
+    GetTransactionResult, NoOpTransactionRegistry, TransactionContext, TransactionGuard,
+    TransactionHandle, TransactionRegistry,
 };
 
 #[cfg(test)]

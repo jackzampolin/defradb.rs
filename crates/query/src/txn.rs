@@ -8,7 +8,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::error::{Result, TransactionError};
+use crate::error::TransactionError;
 use crate::runner::DocFetcher;
 
 /// An opaque handle to an active transaction.
@@ -35,7 +35,13 @@ impl TransactionHandle {
     ///
     /// Handles created outside of a registry will fail when used with
     /// `get()`, `commit()`, or `rollback()` - the registry won't find them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is empty. Transaction IDs must be non-empty strings.
+    #[doc(hidden)]
     pub fn new(id: String) -> Self {
+        assert!(!id.is_empty(), "transaction ID cannot be empty");
         Self(id)
     }
 
@@ -96,6 +102,59 @@ pub trait TransactionContext: Send + Sync {
 
     /// Get a document fetcher scoped to this transaction.
     fn doc_fetcher(&self) -> Arc<dyn DocFetcher>;
+
+    /// Check if the transaction is still active (not yet committed or rolled back).
+    ///
+    /// Returns `true` if the transaction can still be used for queries.
+    /// Returns `false` if the transaction has been consumed via commit/rollback.
+    fn is_active(&self) -> bool {
+        // Default implementation returns true - concrete implementations
+        // should override if they track consumption state.
+        true
+    }
+}
+
+/// Result of looking up a transaction by handle.
+pub enum GetTransactionResult {
+    /// Transaction found.
+    Found(Arc<dyn TransactionContext>),
+    /// Transaction not found (never existed, or already committed/rolled back).
+    NotFound,
+    /// Lock is poisoned (a panic occurred elsewhere, system may be corrupted).
+    LockPoisoned,
+}
+
+impl std::fmt::Debug for GetTransactionResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Found(ctx) => f
+                .debug_tuple("Found")
+                .field(&format!("TransactionContext(id={})", ctx.id()))
+                .finish(),
+            Self::NotFound => f.write_str("NotFound"),
+            Self::LockPoisoned => f.write_str("LockPoisoned"),
+        }
+    }
+}
+
+impl GetTransactionResult {
+    /// Get the transaction context if found.
+    pub fn ok(self) -> Option<Arc<dyn TransactionContext>> {
+        match self {
+            Self::Found(ctx) => Some(ctx),
+            _ => None,
+        }
+    }
+
+    /// Check if the transaction was found.
+    pub fn is_found(&self) -> bool {
+        matches!(self, Self::Found(_))
+    }
+
+    /// Check if the lock is poisoned.
+    pub fn is_lock_poisoned(&self) -> bool {
+        matches!(self, Self::LockPoisoned)
+    }
 }
 
 /// Registry for managing active transactions.
@@ -107,22 +166,24 @@ pub trait TransactionRegistry: Send + Sync {
     /// Begin a new transaction.
     ///
     /// Returns a handle that can be used with `get()`, `commit()`, and `rollback()`.
-    async fn begin(&self, readonly: bool) -> Result<TransactionHandle>;
+    async fn begin(&self, readonly: bool) -> std::result::Result<TransactionHandle, TransactionError>;
 
     /// Get an existing transaction by handle.
     ///
-    /// Returns None if the transaction doesn't exist or has been committed/rolled back.
-    fn get(&self, handle: &TransactionHandle) -> Option<Arc<dyn TransactionContext>>;
+    /// Returns `Found(context)` if the transaction exists,
+    /// `NotFound` if it doesn't exist or has been committed/rolled back,
+    /// or `LockPoisoned` if the registry lock is poisoned.
+    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult;
 
     /// Commit a transaction.
     ///
     /// After commit, the handle is no longer valid for `get()`.
-    async fn commit(&self, handle: &TransactionHandle) -> Result<()>;
+    async fn commit(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError>;
 
     /// Rollback a transaction.
     ///
     /// After rollback, the handle is no longer valid for `get()`.
-    async fn rollback(&self, handle: &TransactionHandle) -> Result<()>;
+    async fn rollback(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError>;
 }
 
 /// A no-op transaction registry that doesn't support transactions.
@@ -133,24 +194,24 @@ pub struct NoOpTransactionRegistry;
 
 #[async_trait]
 impl TransactionRegistry for NoOpTransactionRegistry {
-    async fn begin(&self, _readonly: bool) -> Result<TransactionHandle> {
-        Err(crate::error::QueryError::execution(
+    async fn begin(&self, _readonly: bool) -> std::result::Result<TransactionHandle, TransactionError> {
+        Err(TransactionError::not_supported(
             "transactions are not supported in this configuration",
         ))
     }
 
-    fn get(&self, _handle: &TransactionHandle) -> Option<Arc<dyn TransactionContext>> {
-        None
+    fn get(&self, _handle: &TransactionHandle) -> GetTransactionResult {
+        GetTransactionResult::NotFound
     }
 
-    async fn commit(&self, _handle: &TransactionHandle) -> Result<()> {
-        Err(crate::error::QueryError::execution(
+    async fn commit(&self, _handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError::not_supported(
             "transactions are not supported in this configuration",
         ))
     }
 
-    async fn rollback(&self, _handle: &TransactionHandle) -> Result<()> {
-        Err(crate::error::QueryError::execution(
+    async fn rollback(&self, _handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError::not_supported(
             "transactions are not supported in this configuration",
         ))
     }
@@ -184,15 +245,13 @@ impl TransactionRegistry for NoOpTransactionRegistry {
 ///     for query in queries {
 ///         let resp = guard.execute(query).await;
 ///         if resp.has_errors() {
-///             // Guard is consumed, transaction rolled back
-///             guard.rollback().await?;
+///             guard.rollback().await?;  // Consumes guard, rolls back transaction
 ///             return Err(TransactionError::execution("query failed"));
 ///         }
 ///         responses.push(resp);
 ///     }
 ///
-///     // Guard is consumed, transaction committed
-///     guard.commit().await?;
+///     guard.commit().await?;  // Consumes guard, commits transaction
 ///     Ok(responses)
 /// }
 /// ```
@@ -203,6 +262,10 @@ pub struct TransactionGuard<'a, E: crate::QueryExecutor + ?Sized> {
 
 impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
     /// Begin a new transaction and return a guard for it.
+    ///
+    /// The returned guard must be explicitly finalized with `commit()` or `rollback()`.
+    /// Dropping the guard without finalization will leak the transaction in the registry.
+    #[must_use = "TransactionGuard must be explicitly committed or rolled back"]
     pub async fn begin(
         executor: &'a E,
         readonly: bool,
@@ -280,10 +343,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_noop_registry_get_returns_none() {
+    async fn test_noop_registry_get_returns_not_found() {
         let registry = NoOpTransactionRegistry;
         let handle: TransactionHandle = "any-id".parse().unwrap();
-        assert!(registry.get(&handle).is_none());
+        assert!(matches!(registry.get(&handle), GetTransactionResult::NotFound));
     }
 
     #[tokio::test]

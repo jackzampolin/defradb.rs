@@ -15,7 +15,8 @@
 
 use async_trait::async_trait;
 use document::Document;
-use query::txn::{TransactionContext, TransactionHandle, TransactionRegistry};
+use query::error::TransactionError;
+use query::txn::{GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry};
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,7 +137,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         ctx.doc_fetcher()
             .get_by_ids(collection_name, doc_ids)
             .await
-            .map(|result| result.docs)
+            .map(|result| result.into_docs())
             .map_err(Error::Query)
     }
 
@@ -216,96 +217,95 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
 #[async_trait]
 impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
-    async fn begin(&self, readonly: bool) -> query::error::Result<TransactionHandle> {
+    async fn begin(&self, readonly: bool) -> std::result::Result<TransactionHandle, TransactionError> {
         let txn_id = format!("txn-{}", self.id_counter.fetch_add(1, Ordering::SeqCst));
 
-        let db_txn =
-            self.db.new_txn(readonly).await.map_err(|e| {
-                query::error::QueryError::execution(format!("storage error: {}", e))
-            })?;
+        let db_txn = self.db.new_txn(readonly).await.map_err(|e| {
+            TransactionError::execution(format!("storage error: {}", e))
+        })?;
 
         let fetcher = Arc::new(DbDocFetcher::new(db_txn, self.collections.clone()));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
 
         self.transactions
             .write()
-            .map_err(|_| query::error::QueryError::execution("lock poisoned"))?
+            .map_err(|_| TransactionError::lock_poisoned("failed to acquire write lock for begin"))?
             .insert(txn_id.clone(), ctx);
 
         Ok(TransactionHandle::new(txn_id))
     }
 
-    fn get(&self, handle: &TransactionHandle) -> Option<Arc<dyn TransactionContext>> {
+    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
         match self.transactions.read() {
-            Ok(guard) => guard
-                .get(handle.as_str())
-                .cloned()
-                .map(|ctx| ctx as Arc<dyn TransactionContext>),
+            Ok(guard) => match guard.get(handle.as_str()).cloned() {
+                Some(ctx) => GetTransactionResult::Found(ctx as Arc<dyn TransactionContext>),
+                None => GetTransactionResult::NotFound,
+            },
             Err(poisoned) => {
                 error!(
                     txn_id = %handle,
                     error = ?poisoned,
-                    "Transaction registry lock poisoned - returning None for safety"
+                    "Transaction registry lock poisoned - system may be in corrupted state"
                 );
-                None
+                GetTransactionResult::LockPoisoned
             }
         }
     }
 
-    async fn commit(&self, handle: &TransactionHandle) -> query::error::Result<()> {
+    async fn commit(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
         let ctx = self
             .transactions
             .write()
             .map_err(|_| {
-                query::error::QueryError::execution(format!(
-                    "transaction registry lock poisoned during commit of '{}'",
+                TransactionError::lock_poisoned(format!(
+                    "failed to acquire write lock during commit of '{}'",
                     handle
                 ))
             })?
             .remove(handle.as_str())
             .ok_or_else(|| {
-                query::error::QueryError::execution(format!("transaction '{}' not found", handle))
+                TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
-            query::error::QueryError::execution(format!(
+            TransactionError::already_finalized(format!(
                 "transaction '{}' was already consumed (double commit/rollback?)",
                 handle
             ))
         })?;
 
         txn.force_commit().await.map_err(|e| {
-            query::error::QueryError::execution(format!(
+            TransactionError::execution(format!(
                 "commit error for transaction '{}': {}",
                 handle, e
             ))
         })
     }
 
-    async fn rollback(&self, handle: &TransactionHandle) -> query::error::Result<()> {
+    async fn rollback(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
         let ctx = self
             .transactions
             .write()
             .map_err(|_| {
-                query::error::QueryError::execution(format!(
-                    "transaction registry lock poisoned during rollback of '{}'",
+                TransactionError::lock_poisoned(format!(
+                    "failed to acquire write lock during rollback of '{}'",
                     handle
                 ))
             })?
             .remove(handle.as_str())
             .ok_or_else(|| {
-                query::error::QueryError::execution(format!("transaction '{}' not found", handle))
+                TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
-            query::error::QueryError::execution(format!(
+            TransactionError::already_finalized(format!(
                 "transaction '{}' was already consumed (double commit/rollback?)",
                 handle
             ))
         })?;
 
         txn.force_discard().map_err(|e| {
-            query::error::QueryError::execution(format!(
+            TransactionError::execution(format!(
                 "rollback error for transaction '{}': {}",
                 handle, e
             ))
@@ -348,7 +348,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         assert!(ctx.is_readonly());
     }
 
@@ -358,7 +358,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(false).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         assert!(!ctx.is_readonly());
     }
 
@@ -368,7 +368,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(false).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         assert_eq!(ctx.id(), txn_id.as_str());
     }
 
@@ -415,12 +415,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_nonexistent_returns_none() {
+    async fn test_get_nonexistent_returns_not_found() {
         let db = Arc::new(DB::new(MemoryStore::new()));
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
-        assert!(registry.get(&nonexistent).is_none());
+        assert!(matches!(registry.get(&nonexistent), GetTransactionResult::NotFound));
     }
 
     #[tokio::test]
@@ -473,27 +473,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_returns_none_after_commit() {
+    async fn test_get_returns_not_found_after_commit() {
         let db = Arc::new(DB::new(MemoryStore::new()));
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(false).await.unwrap();
-        assert!(registry.get(&txn_id).is_some());
+        assert!(registry.get(&txn_id).is_found());
 
         registry.commit(&txn_id).await.unwrap();
-        assert!(registry.get(&txn_id).is_none());
+        assert!(matches!(registry.get(&txn_id), GetTransactionResult::NotFound));
     }
 
     #[tokio::test]
-    async fn test_get_returns_none_after_rollback() {
+    async fn test_get_returns_not_found_after_rollback() {
         let db = Arc::new(DB::new(MemoryStore::new()));
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(false).await.unwrap();
-        assert!(registry.get(&txn_id).is_some());
+        assert!(registry.get(&txn_id).is_found());
 
         registry.rollback(&txn_id).await.unwrap();
-        assert!(registry.get(&txn_id).is_none());
+        assert!(matches!(registry.get(&txn_id), GetTransactionResult::NotFound));
     }
 
     #[tokio::test]
@@ -502,7 +502,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let docs = fetcher.get_all("Users").await.unwrap();
@@ -517,7 +517,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher.get_all("NonExistent").await;
@@ -533,12 +533,12 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
-        assert!(result.docs.is_empty());
-        assert!(result.missing_ids.is_empty());
+        assert!(result.docs().is_empty());
+        assert!(result.missing_ids().is_empty());
 
         registry.rollback(&txn_id).await.unwrap();
     }
@@ -549,7 +549,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher
@@ -632,7 +632,7 @@ mod tests {
 
         // Read via registry
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let docs = fetcher.get_all("Users").await.unwrap();
@@ -666,13 +666,13 @@ mod tests {
 
         // Query for just one document
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
-        assert_eq!(result.docs.len(), 1);
-        assert!(result.missing_ids.is_empty());
-        assert_eq!(result.docs[0].get("name").unwrap().as_str(), Some("Alice"));
+        assert_eq!(result.docs().len(), 1);
+        assert!(result.missing_ids().is_empty());
+        assert_eq!(result.docs()[0].get("name").unwrap().as_str(), Some("Alice"));
 
         registry.rollback(&txn_id).await.unwrap();
     }
@@ -686,9 +686,9 @@ mod tests {
         let txn2 = registry.begin(true).await.unwrap();
         let txn3 = registry.begin(false).await.unwrap();
 
-        assert!(registry.get(&txn1).is_some());
-        assert!(registry.get(&txn2).is_some());
-        assert!(registry.get(&txn3).is_some());
+        assert!(registry.get(&txn1).is_found());
+        assert!(registry.get(&txn2).is_found());
+        assert!(registry.get(&txn3).is_found());
 
         assert_ne!(txn1, txn2);
         assert_ne!(txn2, txn3);
@@ -749,7 +749,7 @@ mod tests {
 
         // Start a reader transaction FIRST
         let reader_txn_id = registry.begin(true).await.unwrap();
-        let reader_ctx = registry.get(&reader_txn_id).unwrap();
+        let reader_ctx = registry.get(&reader_txn_id).ok().unwrap();
         let reader_fetcher = reader_ctx.doc_fetcher();
 
         // Start a writer transaction and write WITHOUT committing
@@ -782,14 +782,13 @@ mod tests {
                     let txn_id = reg.begin(true).await.unwrap();
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-                    let ctx = reg.get(&txn_id);
-                    assert!(ctx.is_some(), "Task {} should find its transaction", i);
+                    assert!(reg.get(&txn_id).is_found(), "Task {} should find its transaction", i);
 
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     reg.rollback(&txn_id).await.unwrap();
 
                     assert!(
-                        reg.get(&txn_id).is_none(),
+                        !reg.get(&txn_id).is_found(),
                         "Task {} transaction should be gone after rollback",
                         i
                     );
@@ -808,7 +807,7 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher
@@ -843,7 +842,7 @@ mod tests {
 
         // Query for both
         let txn_id = registry.begin(true).await.unwrap();
-        let ctx = registry.get(&txn_id).unwrap();
+        let ctx = registry.get(&txn_id).ok().unwrap();
         let fetcher = ctx.doc_fetcher();
 
         let result = fetcher
@@ -851,12 +850,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.docs.len(), 1, "Should only return existing document");
-        assert_eq!(result.docs[0].get("name").unwrap().as_str(), Some("Exists"));
+        assert_eq!(result.docs().len(), 1, "Should only return existing document");
+        assert_eq!(result.docs()[0].get("name").unwrap().as_str(), Some("Exists"));
 
         // Verify missing IDs are reported
-        assert_eq!(result.missing_ids.len(), 1, "Should report one missing ID");
-        assert_eq!(result.missing_ids[0], nonexistent_id);
+        assert_eq!(result.missing_ids().len(), 1, "Should report one missing ID");
+        assert_eq!(result.missing_ids()[0], nonexistent_id);
         assert!(!result.is_complete(), "Result should not be complete");
 
         registry.rollback(&txn_id).await.unwrap();
@@ -998,7 +997,7 @@ mod tests {
         );
 
         // The new transaction should still be usable
-        assert!(registry.get(&new_txn).is_some());
+        assert!(registry.get(&new_txn).is_found());
         registry.rollback(&new_txn).await.unwrap();
     }
 
@@ -1020,5 +1019,64 @@ mod tests {
 
         registry.rollback(&txn2).await.unwrap();
         assert_eq!(registry.active_transaction_count().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_isolation_after_external_commit() {
+        // This test verifies snapshot isolation: a transaction started before
+        // another transaction commits should NOT see the committed data.
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+        let collection = Collection::new(test_schema().pop().unwrap());
+
+        // Step 1: Start reader transaction A FIRST (gets snapshot at this point)
+        let reader_txn_id = registry.begin(true).await.unwrap();
+        let reader_ctx = registry.get(&reader_txn_id).ok().unwrap();
+        let reader_fetcher = reader_ctx.doc_fetcher();
+
+        // Verify initially empty
+        let initial_docs = reader_fetcher.get_all("Users").await.unwrap();
+        assert!(
+            initial_docs.is_empty(),
+            "Reader should see empty collection initially"
+        );
+
+        // Step 2: In a separate transaction, write and COMMIT data
+        let write_txn = db.new_txn(false).await.unwrap();
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("CommittedData".to_string()));
+        doc.set("age", NormalValue::Int(42));
+        doc.generate_and_set_doc_id().unwrap();
+        collection.create(&write_txn, &doc).await.unwrap();
+        write_txn.commit().await.unwrap();
+
+        // Step 3: Reader transaction A should STILL see empty (snapshot isolation)
+        // because its snapshot was taken before the write committed
+        let after_commit_docs = reader_fetcher.get_all("Users").await.unwrap();
+        assert!(
+            after_commit_docs.is_empty(),
+            "Reader should NOT see committed data due to snapshot isolation (found {} docs)",
+            after_commit_docs.len()
+        );
+
+        registry.rollback(&reader_txn_id).await.unwrap();
+
+        // Step 4: A NEW transaction started after commit SHOULD see the data
+        let new_reader_txn_id = registry.begin(true).await.unwrap();
+        let new_reader_ctx = registry.get(&new_reader_txn_id).ok().unwrap();
+        let new_reader_fetcher = new_reader_ctx.doc_fetcher();
+
+        let new_docs = new_reader_fetcher.get_all("Users").await.unwrap();
+        assert_eq!(
+            new_docs.len(),
+            1,
+            "New reader should see the committed data"
+        );
+        assert_eq!(
+            new_docs[0].get("name").unwrap().as_str(),
+            Some("CommittedData")
+        );
+
+        registry.rollback(&new_reader_txn_id).await.unwrap();
     }
 }

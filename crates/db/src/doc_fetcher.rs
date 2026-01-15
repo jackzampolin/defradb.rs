@@ -20,8 +20,9 @@ use crate::txn::DbTxn;
 /// # Ownership Model
 ///
 /// The transaction is wrapped in `Arc<TokioMutex<Option<...>>>` because:
-/// - `Arc`: Shared ownership between `DbDocFetcher` and `DbTransactionContext`
-/// - `TokioMutex`: Async-safe interior mutability for concurrent queries
+/// - `Arc`: Enables the fetcher to be cloned and shared across multiple query
+///   executions within the same transaction (e.g., for parallel reads)
+/// - `TokioMutex`: Async-safe interior mutability for concurrent access
 /// - `Option`: Enables `take_txn()` to extract the transaction for commit/rollback
 ///
 /// After `take_txn()` is called, all fetcher operations will return an error
