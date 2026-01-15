@@ -22,23 +22,32 @@ use tracing::{error, info, warn};
 use crate::config::{Config, DatastoreType};
 use crate::error::{Error, Result};
 
-/// Document fetcher for empty database state.
+/// Stub document fetcher that returns empty results.
 ///
-/// Returns empty results for all queries. Used when no schemas are loaded.
+/// This is a temporary implementation until full database integration is complete.
+/// All queries will return empty results - this is NOT production-ready.
 struct EmptyFetcher;
 
 #[async_trait]
 impl query::DocFetcher for EmptyFetcher {
-    async fn get_all(&self, _collection_name: &str) -> query::Result<Vec<document::Document>> {
+    async fn get_all(&self, collection_name: &str) -> query::Result<Vec<document::Document>> {
+        warn!(
+            collection = %collection_name,
+            "EmptyFetcher: returning empty results (DB integration not yet complete)"
+        );
         Ok(vec![])
     }
 
     async fn get_by_ids(
         &self,
-        _collection_name: &str,
+        collection_name: &str,
         doc_ids: &[String],
     ) -> query::Result<query::FetchByIdsResult> {
-        // All requested IDs are missing since DB is empty
+        warn!(
+            collection = %collection_name,
+            requested_ids = ?doc_ids,
+            "EmptyFetcher: marking all IDs as missing (DB integration not yet complete)"
+        );
         Ok(query::FetchByIdsResult::partial(vec![], doc_ids.to_vec()))
     }
 }
@@ -402,8 +411,6 @@ impl Node {
                 allowed_origins: config.api.allowed_origins.clone(),
             };
 
-            // Create QueryRunner with loaded collections
-            // EmptyFetcher is still used since we don't have full DB integration yet
             let executor = query::QueryRunner::new(EmptyFetcher, collections);
             let server = defra_http::Server::with_config(executor, server_config);
 

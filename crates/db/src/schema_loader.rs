@@ -16,52 +16,85 @@ use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 /// then looks up each collection's full definition from `/collection/id/<id>`.
 ///
 /// Returns an empty Vec if no collections are stored (new database).
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - A collection name exists but its definition is missing (inconsistent state)
+/// - A collection definition cannot be deserialized (corrupt data)
+/// - Storage operations fail
 pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<CollectionVersion>> {
     let txn = db.new_txn(true).await?;
     let systemstore = txn.systemstore()?;
 
     let mut collections = Vec::new();
+    let mut load_error: Option<Error> = None;
 
     // Iterate over all collection name mappings
     let prefix = CollectionNameKey::name_prefix();
     let opts = IterOptions::new().with_prefix(prefix);
     let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
 
-    while let Some(kv) = iter.next().await.map_err(Error::Storage)? {
-        // The value at /collection/name/<name> is the collection ID
-        let collection_id = String::from_utf8(kv.value)
-            .map_err(|e| Error::Other(format!("Invalid collection ID encoding: {}", e)))?;
+    // Process iterator, capturing any error for later
+    loop {
+        match iter.next().await {
+            Ok(Some(kv)) => {
+                // The value at /collection/name/<name> is the collection ID
+                let collection_id = match String::from_utf8(kv.value) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        load_error =
+                            Some(Error::Other(format!("Invalid collection ID encoding: {}", e)));
+                        break;
+                    }
+                };
 
-        // Look up the full collection definition
-        let collection_key = CollectionKey::new(&collection_id);
-        let collection_json = systemstore
-            .get(&collection_key.bytes())
-            .await
-            .map_err(Error::Storage)?
-            .ok_or_else(|| {
-                Error::Other(format!(
-                    "Collection definition not found for ID: {}",
-                    collection_id
-                ))
-            })?;
+                // Look up the full collection definition
+                let collection_key = CollectionKey::new(&collection_id);
+                let collection_json = match systemstore.get(&collection_key.bytes()).await {
+                    Ok(Some(json)) => json,
+                    Ok(None) => {
+                        load_error = Some(Error::Other(format!(
+                            "Collection definition not found for ID: {}",
+                            collection_id
+                        )));
+                        break;
+                    }
+                    Err(e) => {
+                        load_error = Some(Error::Storage(e));
+                        break;
+                    }
+                };
 
-        // Deserialize the collection
-        let collection: CollectionVersion =
-            serde_json::from_slice(&collection_json).map_err(|e| {
-                Error::Other(format!(
-                    "Failed to deserialize collection {}: {}",
-                    collection_id, e
-                ))
-            })?;
-
-        collections.push(collection);
+                // Deserialize the collection
+                match serde_json::from_slice::<CollectionVersion>(&collection_json) {
+                    Ok(collection) => collections.push(collection),
+                    Err(e) => {
+                        load_error = Some(Error::Other(format!(
+                            "Failed to deserialize collection {}: {}",
+                            collection_id, e
+                        )));
+                        break;
+                    }
+                }
+            }
+            Ok(None) => break, // End of iteration
+            Err(e) => {
+                load_error = Some(Error::Storage(e));
+                break;
+            }
+        }
     }
 
-    iter.close().await.map_err(Error::Storage)?;
+    // Always close the iterator, log if cleanup fails
+    if let Err(e) = iter.close().await {
+        tracing::warn!(error = %e, "Failed to close iterator during schema loading");
+    }
 
-    // Read-only transaction - no need to commit or discard explicitly
-    // The transaction will be cleaned up when it's dropped
-    drop(txn);
+    // Return error if any occurred during loading
+    if let Some(err) = load_error {
+        return Err(err);
+    }
 
     tracing::info!(
         "Loaded {} collection(s) from systemstore",
@@ -175,5 +208,75 @@ mod tests {
         assert!(names.contains(&"users"));
         assert!(names.contains(&"posts"));
         assert!(names.contains(&"comments"));
+    }
+
+    #[tokio::test]
+    async fn test_load_missing_collection_definition_returns_error() {
+        let store = Arc::new(MemoryStore::new());
+        let db = DB::new((*store).clone());
+
+        // Store only the name mapping, NOT the collection definition
+        {
+            let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+            let txn = crate::txn::DbTxn::new(basic_txn, store.clone());
+
+            let name_key = CollectionNameKey::new("orphan_collection");
+            txn.systemstore()
+                .unwrap()
+                .set(&name_key.bytes(), b"missing_id_123")
+                .await
+                .unwrap();
+
+            txn.commit().await.unwrap();
+        }
+
+        let result = load_active_collections(&db).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not found"),
+            "Error should mention 'not found', got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_invalid_json_collection_returns_error() {
+        let store = Arc::new(MemoryStore::new());
+        let db = DB::new((*store).clone());
+
+        // Store name mapping pointing to invalid JSON
+        {
+            let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+            let txn = crate::txn::DbTxn::new(basic_txn, store.clone());
+
+            let name_key = CollectionNameKey::new("bad_collection");
+            let collection_key = CollectionKey::new("bad_id_456");
+
+            // Store name -> id mapping
+            txn.systemstore()
+                .unwrap()
+                .set(&name_key.bytes(), b"bad_id_456")
+                .await
+                .unwrap();
+
+            // Store invalid JSON as collection definition
+            txn.systemstore()
+                .unwrap()
+                .set(&collection_key.bytes(), b"{ invalid json }")
+                .await
+                .unwrap();
+
+            txn.commit().await.unwrap();
+        }
+
+        let result = load_active_collections(&db).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("deserialize"),
+            "Error should mention 'deserialize', got: {}",
+            err_msg
+        );
     }
 }
