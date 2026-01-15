@@ -1,0 +1,39 @@
+// Copyright 2025 Democratized Data Foundation
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
+//! Core Keyring trait
+
+use crate::error::Result;
+
+/// Keyring provides a simple set/get interface for a keyring service.
+///
+/// Keys are stored as raw bytes and can be used for cryptographic operations.
+/// Different backends (file-based, OS keyring) implement this trait.
+pub trait Keyring: Send + Sync {
+    /// Stores the given key in the keystore under the given name.
+    ///
+    /// If a key with the given name already exists it will be overridden.
+    fn set(&self, name: &str, key: &[u8]) -> Result<()>;
+
+    /// Returns the key with the given name from the keystore.
+    ///
+    /// Returns `Error::NotFound` if no key with that name exists.
+    fn get(&self, name: &str) -> Result<Vec<u8>>;
+
+    /// Removes the key with the given name from the keystore.
+    ///
+    /// Returns `Error::NotFound` if no key with that name exists.
+    fn delete(&self, name: &str) -> Result<()>;
+
+    /// Returns a list of all key names in the keyring.
+    ///
+    /// Note: Some backends (like OS keyring) may not support listing keys.
+    fn list(&self) -> Result<Vec<String>>;
+}
