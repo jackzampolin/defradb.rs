@@ -204,6 +204,8 @@ pub struct Aggregate {
     pub targets: Vec<AggregateTarget>,
     /// Optional filter for the aggregate
     pub filter: Option<Filter>,
+    /// Optional alias for output
+    pub alias: Option<String>,
 }
 
 impl Aggregate {
@@ -212,6 +214,7 @@ impl Aggregate {
             aggregate_type: AggregateType::Count,
             targets: Vec::new(),
             filter: None,
+            alias: None,
         }
     }
 
@@ -220,6 +223,7 @@ impl Aggregate {
             aggregate_type: AggregateType::Sum,
             targets: vec![target],
             filter: None,
+            alias: None,
         }
     }
 
@@ -228,6 +232,7 @@ impl Aggregate {
             aggregate_type: AggregateType::Average,
             targets: vec![target],
             filter: None,
+            alias: None,
         }
     }
 
@@ -236,6 +241,7 @@ impl Aggregate {
             aggregate_type: AggregateType::Min,
             targets: vec![target],
             filter: None,
+            alias: None,
         }
     }
 
@@ -244,12 +250,30 @@ impl Aggregate {
             aggregate_type: AggregateType::Max,
             targets: vec![target],
             filter: None,
+            alias: None,
         }
     }
 
     pub fn with_filter(mut self, filter: Filter) -> Self {
         self.filter = Some(filter);
         self
+    }
+
+    pub fn with_target(mut self, target: AggregateTarget) -> Self {
+        self.targets.push(target);
+        self
+    }
+
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    /// Get the output name (alias if set, otherwise the aggregate type name)
+    pub fn output_name(&self) -> &str {
+        self.alias
+            .as_deref()
+            .unwrap_or_else(|| self.aggregate_type.as_str())
     }
 }
 

@@ -75,7 +75,8 @@ impl<S: Store> DbDocFetcher<S> {
 #[async_trait]
 impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .get_all_with_datastore(&datastore)
@@ -88,7 +89,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         collection_name: &str,
         doc_ids: &[String],
     ) -> query::error::Result<FetchByIdsResult> {
-        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();

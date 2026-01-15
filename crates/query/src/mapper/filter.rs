@@ -124,6 +124,43 @@ impl Filter {
         self.conditions.is_empty()
     }
 
+    /// Get all field names referenced by this filter
+    pub fn referenced_fields(&self) -> Vec<String> {
+        let mut fields = Vec::new();
+        Self::collect_fields(&self.conditions, &mut fields);
+        fields
+    }
+
+    fn collect_fields(conditions: &HashMap<String, JsonValue>, fields: &mut Vec<String>) {
+        for (key, value) in conditions {
+            // Skip logical operators
+            if FilterOp::parse(key).is_some() {
+                match value {
+                    JsonValue::Array(arr) => {
+                        for item in arr {
+                            if let JsonValue::Object(obj) = item {
+                                let nested: HashMap<String, JsonValue> =
+                                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                Self::collect_fields(&nested, fields);
+                            }
+                        }
+                    }
+                    JsonValue::Object(obj) => {
+                        let nested: HashMap<String, JsonValue> =
+                            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        Self::collect_fields(&nested, fields);
+                    }
+                    _ => {}
+                }
+            } else {
+                // This is a field name
+                if !fields.contains(key) {
+                    fields.push(key.clone());
+                }
+            }
+        }
+    }
+
     /// Evaluate the filter against document fields
     pub fn matches(&self, fields: &[Option<JsonValue>], mapping: &DocumentMapping) -> Result<bool> {
         if self.conditions.is_empty() {

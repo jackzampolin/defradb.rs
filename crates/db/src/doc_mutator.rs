@@ -83,7 +83,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
-        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Generate document ID if not present
         if doc.id().is_none() {
@@ -109,7 +110,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<UpdateResult> {
-        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .update_with_datastore(&datastore, &doc)
@@ -127,7 +129,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let existed = collection
             .delete_with_datastore(&datastore, doc_id)
@@ -138,7 +141,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
-        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .exists_with_datastore(&datastore, doc_id)
@@ -151,7 +155,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
-        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .get_with_datastore(&datastore, doc_id)

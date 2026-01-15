@@ -1,11 +1,15 @@
 //! Query plan nodes implementing the Volcano Iterator Model
 
+mod count;
+mod groupby;
 mod limit;
 pub mod mutation;
 mod orderby;
 mod scan;
 mod select;
 
+pub use count::CountNode;
+pub use groupby::{DocumentGroup, GroupByNode};
 pub use limit::LimitNode;
 pub use mutation::{
     CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertAction, UpsertInput,

@@ -122,7 +122,6 @@ impl OrderByNode {
         }
     }
 
-
     /// Static version of compare_docs that doesn't require &self
     fn compare_docs_static(
         a: &Doc,
@@ -186,7 +185,11 @@ impl PlanNode for OrderByNode {
         for condition in &self.order_by.conditions {
             if !condition.fields.is_empty() {
                 let field_name = &condition.fields[0];
-                if self.document_mapping.first_index_of_name(field_name).is_none() {
+                if self
+                    .document_mapping
+                    .first_index_of_name(field_name)
+                    .is_none()
+                {
                     return Err(QueryError::execution(format!(
                         "ORDER BY field '{}' does not exist in the document schema",
                         field_name
@@ -207,9 +210,8 @@ impl PlanNode for OrderByNode {
         let mapping = &self.document_mapping;
 
         // Sort the buffer using stable sort (preserves order of equal elements)
-        self.buffer.sort_by(|a, b| {
-            Self::compare_docs_static(a, b, order_by, mapping)
-        });
+        self.buffer
+            .sort_by(|a, b| Self::compare_docs_static(a, b, order_by, mapping));
 
         Ok(())
     }
@@ -301,8 +303,8 @@ mod tests {
             make_doc("doc3", "Bob", 35),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("name", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("name", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -332,8 +334,8 @@ mod tests {
             make_doc("doc3", "Bob", 35),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("name", OrderDirection::Desc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("name", OrderDirection::Desc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -363,8 +365,8 @@ mod tests {
             make_doc("doc3", "Charlie", 35),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("age", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -435,8 +437,8 @@ mod tests {
             make_doc("doc3", "Charlie", 25),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("age", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -470,8 +472,8 @@ mod tests {
             make_doc("doc3", "Charlie", 25),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("age", OrderDirection::Desc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Desc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -499,8 +501,8 @@ mod tests {
         let collection = make_test_collection();
         let mapping = make_test_mapping();
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("name", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("name", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(vec![]);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -518,8 +520,8 @@ mod tests {
 
         let docs = vec![make_doc("doc1", "Alice", 30)];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("name", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("name", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -544,8 +546,8 @@ mod tests {
             make_doc("doc3", "Charlie", 35),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("name", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("name", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -576,8 +578,8 @@ mod tests {
             make_doc("doc3", "Alice", 30),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("name", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("name", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -675,14 +677,13 @@ mod tests {
         let collection = make_test_collection();
         let mapping = make_test_mapping();
 
-        let docs = vec![
-            make_doc("doc1", "Alice", 30),
-            make_doc("doc2", "Bob", 25),
-        ];
+        let docs = vec![make_doc("doc1", "Alice", 30), make_doc("doc2", "Bob", 25)];
 
         // Order by a field that doesn't exist in the mapping
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("nonexistent_field", OrderDirection::Asc));
+        let order_by = OrderBy::new().with_condition(OrderCondition::new(
+            "nonexistent_field",
+            OrderDirection::Asc,
+        ));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -693,7 +694,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("ORDER BY field 'nonexistent_field' does not exist"),
+            err.to_string()
+                .contains("ORDER BY field 'nonexistent_field' does not exist"),
             "Expected error about nonexistent field, got: {}",
             err
         );
@@ -714,8 +716,8 @@ mod tests {
         ];
 
         // Order by age - all ages are equal, so stable sort should preserve order
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("age", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
@@ -749,8 +751,8 @@ mod tests {
             make_doc("doc4", "Diana", 25),
         ];
 
-        let order_by = OrderBy::new()
-            .with_condition(OrderCondition::new("age", OrderDirection::Asc));
+        let order_by =
+            OrderBy::new().with_condition(OrderCondition::new("age", OrderDirection::Asc));
 
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
         let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);

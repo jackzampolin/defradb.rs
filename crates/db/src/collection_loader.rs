@@ -67,9 +67,9 @@ pub(crate) async fn get_collection_with_lazy_load<S: Store + 'static>(
     // Extract what we need from the transaction while holding the lock briefly
     let (collection_opt, systemstore, datastore) = {
         let txn_guard = txn.lock().await;
-        let db_txn = txn_guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("transaction already consumed")
-        })?;
+        let db_txn = txn_guard
+            .as_ref()
+            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
         let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
         let systemstore = db_txn.systemstore().map_err(|e| {
             query::error::QueryError::execution(format!(

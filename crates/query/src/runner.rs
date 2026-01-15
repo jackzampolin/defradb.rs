@@ -20,11 +20,11 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::json_convert::normal_value_to_json;
-use crate::mapper::{Mutation, MutationType, Requestable, Select};
+use crate::mapper::{AggregateType, Mutation, MutationType, Requestable, Select};
 use crate::mutator::DocMutator;
 use crate::plan::{
-    CreateInput, CreateNode, DeleteNode, LimitNode, OrderByNode, ScanNode, SelectNode, UpdateInput,
-    UpdateNode, UpsertInput, UpsertNode,
+    CountNode, CreateInput, CreateNode, DeleteNode, GroupByNode, LimitNode, OrderByNode, ScanNode,
+    SelectNode, UpdateInput, UpdateNode, UpsertInput, UpsertNode,
 };
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::{parse_mutations, parse_query};
@@ -404,25 +404,32 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Validate that the select doesn't use unsupported features.
     fn validate_select(&self, select: &Select) -> Result<()> {
-        if select.group_by.is_some() {
-            return Err(QueryError::execution(
-                "grouping is not yet implemented; remove the 'groupBy' argument",
-            ));
-        }
         if select.cid.is_some() {
             return Err(QueryError::execution(
                 "CID-based queries are not yet implemented; remove the 'cid' argument",
             ));
         }
 
-        // Check for nested selections (relations)
+        // Check for nested selections and unsupported aggregates
         for field in &select.fields {
-            if let Requestable::Select(nested) = field {
-                return Err(QueryError::execution(format!(
-                    "nested selections (relations) are not yet implemented; \
-                     remove the nested '{}' selection",
-                    nested.collection_name
-                )));
+            match field {
+                Requestable::Select(nested) => {
+                    return Err(QueryError::execution(format!(
+                        "nested selections (relations) are not yet implemented; \
+                         remove the nested '{}' selection",
+                        nested.collection_name
+                    )));
+                }
+                Requestable::Aggregate(agg) => {
+                    // Only _count is supported for now
+                    if agg.aggregate_type != AggregateType::Count {
+                        return Err(QueryError::execution(format!(
+                            "'{}' aggregate is not yet implemented; only _count is supported",
+                            agg.aggregate_type.as_str()
+                        )));
+                    }
+                }
+                Requestable::Field(_) => {}
             }
         }
 
@@ -437,11 +444,48 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<DocumentMapping> {
         let mut mapping = DocumentMapping::new();
 
-        // Add requested fields
-        for field in select.requested_fields() {
-            let index = mapping.next_index();
-            mapping.add(index, &field.name);
-            mapping.add_render_key(index, field.output_name());
+        // Add requested fields and aggregates
+        for requestable in &select.fields {
+            match requestable {
+                Requestable::Field(field) => {
+                    let index = mapping.next_index();
+                    mapping.add(index, &field.name);
+                    mapping.add_render_key(index, field.output_name());
+                }
+                Requestable::Aggregate(agg) => {
+                    let index = mapping.next_index();
+                    let name = agg.aggregate_type.as_str();
+                    mapping.add(index, name);
+                    // Use alias if provided, otherwise use the aggregate name
+                    mapping.add_render_key(index, agg.output_name());
+                }
+                Requestable::Select(_) => {
+                    // Nested selections will be handled when relations are implemented
+                }
+            }
+        }
+
+        // Add fields referenced by the filter (but not selected)
+        // These are needed for filter evaluation but won't be rendered
+        if let Some(ref filter) = select.filter {
+            for field_name in filter.referenced_fields() {
+                if mapping.first_index_of_name(&field_name).is_none() {
+                    let index = mapping.next_index();
+                    mapping.add(index, &field_name);
+                    // Don't add render_key - we don't want to output these fields
+                }
+            }
+        }
+
+        // Add GROUP BY fields (they need to be in mapping for grouping)
+        if let Some(ref group_by) = select.group_by {
+            for field_name in &group_by.fields {
+                if mapping.first_index_of_name(field_name).is_none() {
+                    let index = mapping.next_index();
+                    mapping.add(index, field_name);
+                    // Don't add render_key - they may or may not be selected
+                }
+            }
         }
 
         // If no fields specified, add all from collection
@@ -517,14 +561,63 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             plan = Box::new(select_node);
         }
 
-        // Add OrderByNode for sorting (after filtering, before limit)
-        if let Some(ref order_by) = select.order_by {
-            plan = Box::new(OrderByNode::new(plan, order_by.clone(), mapping.clone()));
-        }
+        // Check if we have GROUP BY
+        let has_group_by = select.group_by.is_some();
 
-        // Add LimitNode if needed
-        if let Some(ref limit) = select.limit {
-            plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
+        if has_group_by {
+            // WITH GROUP BY: GroupByNode → Aggregates → OrderBy → Limit
+
+            // Add GroupByNode
+            if let Some(ref group_by) = select.group_by {
+                plan = Box::new(GroupByNode::new(plan, group_by.clone(), mapping.clone()));
+            }
+
+            // Add aggregate nodes
+            for field in &select.fields {
+                if let Requestable::Aggregate(agg) = field {
+                    if agg.aggregate_type == AggregateType::Count {
+                        let agg_index = mapping
+                            .first_index_of_name("_count")
+                            .unwrap_or_else(|| mapping.next_index());
+                        plan = Box::new(CountNode::new(plan, mapping.clone(), agg_index));
+                    }
+                }
+            }
+
+            // Add OrderByNode for sorting (after grouping/aggregation)
+            if let Some(ref order_by) = select.order_by {
+                plan = Box::new(OrderByNode::new(plan, order_by.clone(), mapping.clone()));
+            }
+
+            // Add LimitNode
+            if let Some(ref limit) = select.limit {
+                plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
+            }
+        } else {
+            // WITHOUT GROUP BY: OrderBy → Limit → Aggregates
+
+            // Add OrderByNode for sorting (after filtering, before limit)
+            if let Some(ref order_by) = select.order_by {
+                plan = Box::new(OrderByNode::new(plan, order_by.clone(), mapping.clone()));
+            }
+
+            // Add LimitNode
+            if let Some(ref limit) = select.limit {
+                plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
+            }
+
+            // Add aggregate nodes
+            // Without GROUP BY, aggregates return a single row for the entire result
+            for field in &select.fields {
+                if let Requestable::Aggregate(agg) = field {
+                    if agg.aggregate_type == AggregateType::Count {
+                        let agg_index = mapping
+                            .first_index_of_name("_count")
+                            .unwrap_or_else(|| mapping.next_index());
+                        plan = Box::new(CountNode::new(plan, mapping.clone(), agg_index));
+                    }
+                }
+            }
         }
 
         Ok(plan)
@@ -1103,19 +1196,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_group_by_returns_error() {
+    async fn test_group_by_single_field() {
         let fetcher = MockFetcher::new();
+
+        // Add test documents with same names (will group together)
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Alice");
+        doc3.set("age", 35i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
         let result = runner
             .execute_query("{ Users(groupBy: [name]) { name } }")
-            .await;
+            .await
+            .unwrap();
 
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("grouping is not yet implemented"));
+        let users = result["Users"].as_array().unwrap();
+        // Should get 2 groups: Alice and Bob
+        assert_eq!(users.len(), 2);
+
+        let names: Vec<&str> = users.iter().map(|u| u["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"Alice"));
+        assert!(names.contains(&"Bob"));
+    }
+
+    #[tokio::test]
+    async fn test_group_by_with_count() {
+        let fetcher = MockFetcher::new();
+
+        // Add test documents: 2 in Engineering, 2 in Sales
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Alice");
+        doc3.set("age", 35i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users(groupBy: [name]) { name _count } }")
+            .await
+            .unwrap();
+
+        let users = result["Users"].as_array().unwrap();
+        // Should get 2 groups: Alice (count 2) and Bob (count 1)
+        assert_eq!(users.len(), 2);
+
+        // Find Alice group and verify count
+        let alice = users
+            .iter()
+            .find(|u| u["name"].as_str() == Some("Alice"))
+            .unwrap();
+        assert_eq!(alice["_count"].as_i64(), Some(2));
+
+        // Find Bob group and verify count
+        let bob = users
+            .iter()
+            .find(|u| u["name"].as_str() == Some("Bob"))
+            .unwrap();
+        assert_eq!(bob["_count"].as_i64(), Some(1));
     }
 
     #[tokio::test]
@@ -1727,11 +1892,7 @@ mod tests {
         let mut unique_ids = doc_ids.clone();
         unique_ids.sort();
         unique_ids.dedup();
-        assert_eq!(
-            unique_ids.len(),
-            3,
-            "Each document should have a unique ID"
-        );
+        assert_eq!(unique_ids.len(), 3, "Each document should have a unique ID");
     }
 
     #[tokio::test]
@@ -2176,9 +2337,7 @@ mod tests {
 
         // Delete only users with age > 30
         let result = runner
-            .execute_mutation(
-                r#"mutation { delete_Users(filter: {age: {_gt: 30}}) { _docID } }"#,
-            )
+            .execute_mutation(r#"mutation { delete_Users(filter: {age: {_gt: 30}}) { _docID } }"#)
             .await
             .unwrap();
 
@@ -2322,5 +2481,130 @@ mod tests {
         // Only doc1 should be updated (docIDs takes priority)
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].get("_docID").unwrap().as_str().unwrap(), doc1_id);
+    }
+
+    // =============================================================================
+    // Aggregation Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_count_all_documents() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Charlie");
+        doc3.set("age", 35i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner.execute_query("{ Users { _count } }").await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("_count").unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_count_with_alias() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query("{ Users { total: _count } }")
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("total").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_with_filter() {
+        let fetcher = MockFetcher::new();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Charlie");
+        doc3.set("age", 35i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc3);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_query(r#"{ Users(filter: {age: {_gte: 30}}) { _count } }"#)
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        // Should count only Alice and Charlie (age >= 30)
+        assert_eq!(users[0].get("_count").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_empty_collection() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner.execute_query("{ Users { _count } }").await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("_count").unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_aggregate_returns_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        // _sum is not yet implemented
+        let result = runner
+            .execute_query(r#"{ Users { _sum(field: "age") } }"#)
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("'_sum' aggregate is not yet implemented"));
     }
 }
