@@ -13,7 +13,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use clap::Args;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -22,35 +21,6 @@ use tracing::{error, info, warn};
 use crate::config::{Config, DatastoreType};
 use crate::error::{Error, Result};
 
-/// Stub document fetcher that returns empty results.
-///
-/// This is a temporary implementation until full database integration is complete.
-/// All queries will return empty results - this is NOT production-ready.
-struct EmptyFetcher;
-
-#[async_trait]
-impl query::DocFetcher for EmptyFetcher {
-    async fn get_all(&self, collection_name: &str) -> query::Result<Vec<document::Document>> {
-        warn!(
-            collection = %collection_name,
-            "EmptyFetcher: returning empty results (DB integration not yet complete)"
-        );
-        Ok(vec![])
-    }
-
-    async fn get_by_ids(
-        &self,
-        collection_name: &str,
-        doc_ids: &[String],
-    ) -> query::Result<query::FetchByIdsResult> {
-        warn!(
-            collection = %collection_name,
-            requested_ids = ?doc_ids,
-            "EmptyFetcher: marking all IDs as missing (DB integration not yet complete)"
-        );
-        Ok(query::FetchByIdsResult::partial(vec![], doc_ids.to_vec()))
-    }
-}
 
 const DEV_MODE_BANNER: &str = r#"
 ******************************************
@@ -342,12 +312,12 @@ impl Node {
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
 
-        // Initialize storage, load schemas, and set up P2P
-        let (p2p_handle, collections) = match config.datastore.store {
+        // Initialize storage, database, and set up P2P and HTTP server
+        let (p2p_handle, http_server) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
-                Self::init_store_and_p2p(store, &config).await?
+                Self::init_store_and_server(store, &config).await?
             }
             DatastoreType::Badger => {
                 info!(
@@ -355,15 +325,56 @@ impl Node {
                     config.data_path().display()
                 );
                 let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
-                Self::init_store_and_p2p(store, &config).await?
+                Self::init_store_and_server(store, &config).await?
             }
         };
 
-        info!("Loaded {} collection schema(s)", collections.len());
-
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        // Create HTTP server with loaded schemas
+        Ok(Self {
+            config,
+            p2p_handle,
+            http_server: Some(http_server),
+            shutdown_tx,
+            shutdown_rx,
+        })
+    }
+
+    /// Initialize store, database, P2P, and HTTP server.
+    ///
+    /// This function creates the database, loads collections, sets up the query
+    /// runner with proper transaction support, and returns the HTTP server.
+    async fn init_store_and_server<S>(
+        store: Arc<S>,
+        config: &Config,
+    ) -> Result<(Option<p2p::P2PHostHandle>, defra_http::Server)>
+    where
+        S: storage::corekv::Store + 'static,
+    {
+        // Open database and load collections from storage
+        let database = Arc::new(
+            db::DB::open_from_arc(store.clone())
+                .await
+                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?,
+        );
+
+        let collection_count = database
+            .list_collections()
+            .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?
+            .len();
+        info!("Loaded {} collection schema(s)", collection_count);
+
+        // Set up P2P if enabled
+        let p2p = if config.net.p2p_disabled {
+            None
+        } else {
+            info!("Initializing P2P network");
+            let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
+            let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
+            Some(Self::start_p2p(config, bitswap_store).await?)
+        };
+
+        // Create HTTP server with database-backed query runner
         let http_server = {
             let api_address: SocketAddr = config
                 .api
@@ -378,46 +389,35 @@ impl Node {
                 allowed_origins: config.api.allowed_origins.clone(),
             };
 
-            let executor = query::QueryRunner::new(EmptyFetcher, collections);
+            // Create auto-committing fetcher for non-transactional queries
+            let fetcher = db::AutoCommitFetcher::new(database.clone());
+
+            // Create transaction registry for explicit transaction support
+            let registry = db::DbTransactionRegistry::new(database.clone());
+
+            // Get collection schemas for the query runner
+            let collections: Vec<schema::CollectionVersion> = database
+                .list_collections()
+                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?
+                .iter()
+                .filter_map(|name| {
+                    database
+                        .get_collection(name)
+                        .ok()
+                        .flatten()
+                        .map(|c| c.schema().clone())
+                })
+                .collect();
+
+            // Create query runner with transaction support
+            let executor = query::QueryRunner::with_registry(fetcher, collections, registry);
             let server = defra_http::Server::with_config(executor, server_config);
 
             info!("HTTP server configured on {}", api_address);
-            Some(server)
+            server
         };
 
-        Ok(Self {
-            config,
-            p2p_handle,
-            http_server,
-            shutdown_tx,
-            shutdown_rx,
-        })
-    }
-
-    /// Initialize store, load schemas, and optionally start P2P.
-    async fn init_store_and_p2p<S>(
-        store: Arc<S>,
-        config: &Config,
-    ) -> Result<(Option<p2p::P2PHostHandle>, Vec<schema::CollectionVersion>)>
-    where
-        S: storage::corekv::Store + 'static,
-    {
-        // Load schemas from storage
-        let database = db::DB::from_arc(store.clone());
-        let collections = db::load_active_collections(&database)
-            .await
-            .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
-
-        let p2p = if config.net.p2p_disabled {
-            None
-        } else {
-            info!("Initializing P2P network");
-            let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
-            let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            Some(Self::start_p2p(config, bitswap_store).await?)
-        };
-
-        Ok((p2p, collections))
+        Ok((p2p, http_server))
     }
 
     /// Start P2P networking with the given bitswap store

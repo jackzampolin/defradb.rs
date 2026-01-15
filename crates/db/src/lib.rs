@@ -42,6 +42,7 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
+pub mod auto_commit_fetcher;
 pub mod collection;
 pub mod collection_name;
 pub mod collection_snapshot;
@@ -55,6 +56,7 @@ pub mod txn_context;
 pub mod txn_registry;
 
 // Re-export commonly used types
+pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use collection::Collection;
 pub use collection_name::CollectionName;
 pub use collection_snapshot::CollectionSnapshot;

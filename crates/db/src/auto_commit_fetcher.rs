@@ -1,0 +1,263 @@
+//! Auto-committing document fetcher for non-transactional queries.
+//!
+//! This fetcher wraps a database and automatically creates and commits
+//! a read-only transaction for each query operation. This enables queries
+//! without explicit transaction management while still providing proper
+//! transactional semantics.
+
+use async_trait::async_trait;
+use document::Document;
+use query::runner::{DocFetcher, FetchByIdsResult};
+use std::sync::Arc;
+use storage::corekv::Store;
+use tracing::warn;
+
+use crate::database::DB;
+
+/// Document fetcher that auto-commits transactions for each operation.
+///
+/// This is useful for queries that don't need explicit transaction control.
+/// Each operation creates a new read-only transaction, performs the query,
+/// and commits (or discards on error).
+pub struct AutoCommitFetcher<S: Store> {
+    db: Arc<DB<S>>,
+}
+
+impl<S: Store> AutoCommitFetcher<S> {
+    /// Create a new auto-committing fetcher wrapping the given database.
+    pub fn new(db: Arc<DB<S>>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
+    async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
+        // Get collection from DB cache
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Create a read-only transaction
+        let txn = self
+            .db
+            .new_txn(true)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("failed to create txn: {}", e)))?;
+
+        // Get the datastore
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+
+        // Execute the query
+        let result = collection
+            .get_all_with_datastore(&datastore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
+
+        // Discard the read-only transaction (no changes to commit)
+        if let Err(e) = txn.discard() {
+            warn!(
+                collection = %collection_name,
+                error = %e,
+                "Failed to discard read-only transaction after get_all"
+            );
+        }
+
+        result
+    }
+
+    async fn get_by_ids(
+        &self,
+        collection_name: &str,
+        doc_ids: &[String],
+    ) -> query::error::Result<FetchByIdsResult> {
+        // Get collection from DB cache
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Create a read-only transaction
+        let txn = self
+            .db
+            .new_txn(true)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("failed to create txn: {}", e)))?;
+
+        // Get the datastore
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+
+        // Fetch documents
+        let mut docs = Vec::new();
+        let mut missing_ids = Vec::new();
+
+        for id_str in doc_ids {
+            let doc_id = document::DocID::from_string(id_str).map_err(|e| {
+                query::error::QueryError::execution(format!("invalid doc ID '{}': {}", id_str, e))
+            })?;
+
+            match collection
+                .get_with_datastore(&datastore, &doc_id)
+                .await
+                .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
+            {
+                Some(doc) => docs.push(doc),
+                None => missing_ids.push(id_str.clone()),
+            }
+        }
+
+        // Discard the read-only transaction
+        if let Err(e) = txn.discard() {
+            warn!(
+                collection = %collection_name,
+                error = %e,
+                "Failed to discard read-only transaction after get_by_ids"
+            );
+        }
+
+        if !missing_ids.is_empty() {
+            warn!(
+                collection = %collection_name,
+                requested_count = doc_ids.len(),
+                found_count = docs.len(),
+                missing_count = missing_ids.len(),
+                missing_ids = ?missing_ids,
+                "Some explicitly requested documents were not found"
+            );
+        }
+
+        Ok(FetchByIdsResult::partial(docs, missing_ids))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use document::NormalValue;
+    use query::runner::DocFetcher;
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use storage::backends::MemoryStore;
+
+    fn test_schema() -> CollectionVersion {
+        CollectionVersion::new(
+            "Users",
+            "v1",
+            "col-users",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "age", FieldKind::int()),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn test_get_all_empty_collection() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+        db.create_collection(test_schema()).await.unwrap();
+
+        let fetcher = AutoCommitFetcher::new(db);
+        let docs = fetcher.get_all("Users").await.unwrap();
+        assert!(docs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_with_documents() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+        db.create_collection(test_schema()).await.unwrap();
+
+        // Insert some documents
+        let collection = db.get_collection("Users").unwrap().unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+
+        let mut doc1 = Document::new();
+        doc1.set("name", NormalValue::String("Alice".to_string()));
+        doc1.set("age", NormalValue::Int(30));
+        doc1.generate_and_set_doc_id().unwrap();
+        collection.create(&txn, &doc1).await.unwrap();
+
+        let mut doc2 = Document::new();
+        doc2.set("name", NormalValue::String("Bob".to_string()));
+        doc2.set("age", NormalValue::Int(25));
+        doc2.generate_and_set_doc_id().unwrap();
+        collection.create(&txn, &doc2).await.unwrap();
+
+        txn.commit().await.unwrap();
+
+        // Now fetch all
+        let fetcher = AutoCommitFetcher::new(db);
+        let docs = fetcher.get_all("Users").await.unwrap();
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_ids_found() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+        db.create_collection(test_schema()).await.unwrap();
+
+        // Insert a document
+        let collection = db.get_collection("Users").unwrap().unwrap();
+        let txn = db.new_txn(false).await.unwrap();
+
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String("Alice".to_string()));
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().to_string();
+        collection.create(&txn, &doc).await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Fetch by ID
+        let fetcher = AutoCommitFetcher::new(db);
+        let result = fetcher.get_by_ids("Users", &[doc_id]).await.unwrap();
+        assert_eq!(result.docs().len(), 1);
+        assert!(result.missing_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_by_ids_not_found() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+        db.create_collection(test_schema()).await.unwrap();
+
+        let fetcher = AutoCommitFetcher::new(db);
+        // Use a valid DocID format (bae-<uuid>) that doesn't exist
+        let nonexistent_id = "bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc".to_string();
+        let result = fetcher
+            .get_by_ids("Users", &[nonexistent_id.clone()])
+            .await
+            .unwrap();
+        assert!(result.docs().is_empty());
+        assert_eq!(result.missing_ids().len(), 1);
+        assert_eq!(result.missing_ids()[0], nonexistent_id);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_collection_returns_error() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        let fetcher = AutoCommitFetcher::new(db);
+        let result = fetcher.get_all("NonExistent").await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("collection not found"));
+    }
+}

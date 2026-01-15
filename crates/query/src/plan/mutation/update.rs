@@ -177,7 +177,7 @@ impl UpdateNode {
 
         // Set document ID at index 0
         if let Some(doc_id) = result.document.id() {
-            doc.set_doc_id(&doc_id.to_string());
+            doc.set_doc_id(doc_id.to_string());
         }
 
         // Map each field from the updated document
