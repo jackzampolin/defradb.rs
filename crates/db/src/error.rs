@@ -52,7 +52,7 @@ pub enum Error {
     LockPoisoned(String),
 
     #[error(
-        "cache update failed after successful commit for collection '{0}' - restart recommended"
+        "cache update failed after successful commit for collection '{0}' - call reload_cache() or restart to recover"
     )]
     CacheUpdateFailedAfterCommit(String),
 

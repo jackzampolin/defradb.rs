@@ -259,6 +259,30 @@ impl<S: Store> DB<S> {
         Ok(())
     }
 
+    /// Reload the collection cache from persistent storage.
+    ///
+    /// This method is useful for recovering from cache-store inconsistency
+    /// without restarting the application. Call this after receiving a
+    /// `CacheUpdateFailedAfterCommit` error.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// match db.create_collection(schema).await {
+    ///     Ok(_) => println!("Collection created"),
+    ///     Err(Error::CacheUpdateFailedAfterCommit(_)) => {
+    ///         // Collection was persisted but cache update failed
+    ///         db.reload_cache().await?;
+    ///         println!("Cache recovered");
+    ///     }
+    ///     Err(e) => return Err(e),
+    /// }
+    /// ```
+    pub async fn reload_cache(&self) -> Result<()> {
+        tracing::info!("Reloading collection cache from persistent storage");
+        self.load_collections().await
+    }
+
     /// Create a new collection with schema persistence.
     ///
     /// Uses store-level atomicity to prevent duplicates - checks existence within
@@ -317,12 +341,12 @@ impl<S: Store> DB<S> {
 
         // Update cache after successful commit.
         // If this fails, the collection IS persisted but not in cache.
-        // A restart will recover by loading from store.
+        // Call reload_cache() or restart to recover.
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(
                 error = ?e,
                 collection_name = %name,
-                "Collection cache lock poisoned during create - collection WAS persisted to store. Restart will recover."
+                "Collection cache lock poisoned during create - collection WAS persisted to store. Call reload_cache() or restart to recover."
             );
             Error::CacheUpdateFailedAfterCommit(name.clone())
         })?;
@@ -442,12 +466,12 @@ impl<S: Store> DB<S> {
 
         // Update cache after successful commit.
         // If this fails, the collection IS deleted but still in cache.
-        // A restart will recover by loading from store.
+        // Call reload_cache() or restart to recover.
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(
                 error = ?e,
                 collection_name = %name,
-                "Collection cache lock poisoned during delete - collection WAS deleted from store. Restart will recover."
+                "Collection cache lock poisoned during delete - collection WAS deleted from store. Call reload_cache() or restart to recover."
             );
             Error::CacheUpdateFailedAfterCommit(name.to_string())
         })?;
@@ -1123,5 +1147,49 @@ mod tests {
             r2.is_ok(),
             exists
         );
+    }
+
+    #[tokio::test]
+    async fn test_reload_cache_recovers_from_inconsistency() {
+        // Test that reload_cache() can recover from cache-store inconsistency
+        use storage::corekv::Key;
+        use storage::keys::systemstore::CollectionNameKey;
+
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store.clone()));
+
+        // Create a collection normally
+        db.create_collection(test_users_schema()).await.unwrap();
+        assert!(db.has_collection("Users").unwrap());
+
+        // Simulate cache-store divergence by directly adding to store
+        {
+            let txn = db.new_txn(false).await.unwrap();
+            let schema = CollectionVersion::new(
+                "HiddenCollection",
+                "v1",
+                "col-hidden",
+                vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+            );
+            let key = CollectionNameKey::new("HiddenCollection");
+            {
+                let systemstore = txn.systemstore().unwrap();
+                let data = serde_json::to_vec(&schema).unwrap();
+                systemstore.set(&key.bytes(), &data).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+        }
+
+        // Cache doesn't know about HiddenCollection
+        assert!(!db.has_collection("HiddenCollection").unwrap());
+        assert_eq!(db.list_collections().unwrap().len(), 1);
+
+        // Reload cache from store
+        db.reload_cache().await.unwrap();
+
+        // Now cache should reflect store state
+        assert!(db.has_collection("Users").unwrap());
+        assert!(db.has_collection("HiddenCollection").unwrap());
+        assert_eq!(db.list_collections().unwrap().len(), 2);
     }
 }
