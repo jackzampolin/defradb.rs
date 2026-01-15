@@ -615,6 +615,88 @@ impl<S: Store> DB<S> {
         })?;
         Ok(CollectionSnapshot::new(cache.clone()))
     }
+
+    /// Extract a Merkle proof from the blockstore.
+    ///
+    /// This generates a proof demonstrating that the block at `leaf_cid` is part
+    /// of the Merkle chain leading to `root_cid`. The proof can be used to verify
+    /// data integrity without access to the full database.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf_cid` - The CID of the leaf block (e.g., a document update)
+    /// * `root_cid` - The CID of the root block (e.g., the collection head)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(proof))` - A valid proof path exists from leaf to root
+    /// * `Ok(None)` - No path exists (blocks are unrelated or one doesn't exist)
+    /// * `Err(Error)` - An error occurred during proof extraction
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let proof = db.extract_proof(&leaf_cid, &root_cid).await?;
+    /// if let Some(proof) = proof {
+    ///     // Verify the proof
+    ///     assert!(crypto::verify_proof(&proof)?);
+    ///
+    ///     // Optionally sign the proof
+    ///     let signed = crypto::SignedMerkleProof::sign(proof, &private_key)?;
+    /// }
+    /// ```
+    pub async fn extract_proof(
+        &self,
+        leaf_cid: &cid::Cid,
+        root_cid: &cid::Cid,
+    ) -> Result<Option<crypto::MerkleProof>>
+    where
+        S: 'static,
+    {
+        // Create a blockstore wrapper for proof extraction
+        let blockstore = blockstore::DefraBlockstore::new(self.store.clone(), false);
+
+        // Use the crypto crate's extract_proof function
+        crypto::extract_proof(&blockstore, *leaf_cid, *root_cid)
+            .await
+            .map_err(|e| Error::Other(format!("failed to extract proof: {}", e)))
+    }
+
+    /// Extract and sign a Merkle proof.
+    ///
+    /// This is a convenience method that extracts a proof and signs it in one step.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf_cid` - The CID of the leaf block
+    /// * `root_cid` - The CID of the root block
+    /// * `private_key` - The private key to sign with (Ed25519 or secp256k1)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(signed_proof))` - A signed proof
+    /// * `Ok(None)` - No proof path exists
+    /// * `Err(Error)` - An error occurred
+    pub async fn extract_signed_proof(
+        &self,
+        leaf_cid: &cid::Cid,
+        root_cid: &cid::Cid,
+        private_key: &dyn crypto::PrivateKey,
+    ) -> Result<Option<crypto::SignedMerkleProof>>
+    where
+        S: 'static,
+    {
+        let proof = self.extract_proof(leaf_cid, root_cid).await?;
+
+        match proof {
+            Some(p) => {
+                let signed = crypto::SignedMerkleProof::sign(p, private_key)
+                    .map_err(|e| Error::Other(format!("failed to sign proof: {}", e)))?;
+                Ok(Some(signed))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1446,5 +1528,140 @@ mod tests {
         let txn2 = db.new_txn(true).await.unwrap();
         let value = txn2.datastore().unwrap().get(b"key").await.unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
+    }
+
+    /// Integration test demonstrating the complete Merkle proof workflow:
+    /// 1. Create a database with a chain of blocks
+    /// 2. Extract a proof from leaf to root
+    /// 3. Verify the proof
+    /// 4. Sign the proof
+    /// 5. Verify the signed proof
+    #[tokio::test]
+    async fn test_merkle_proof_full_workflow() {
+        use blockstore::{Blockstore, DefraBlockstore};
+        use crypto::PrivateKey;
+        use defra_core::block::{Block, CrdtDelta, LwwDeltaPayload};
+
+        // Create database and blockstore
+        let store = MemoryStore::new();
+        let db = DB::new(store.clone());
+        let blockstore = DefraBlockstore::new(Arc::new(store), false);
+
+        // Helper to create a test delta
+        fn create_delta(doc_id: &str, field: &str) -> CrdtDelta {
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                field_name: field.to_string(),
+                priority: 1,
+                schema_version_id: "v1".to_string(),
+                data: b"test".to_vec(),
+            })
+        }
+
+        // Create a chain of blocks: root <- block1 <- leaf
+        let root = Block::new(create_delta("doc1", "v1"), vec![], vec![]);
+        let root_cid = root.generate_cid().unwrap();
+        let root_data = root.to_dag_cbor().unwrap();
+        blockstore.put(&root_cid, &root_data).await.unwrap();
+
+        let block1 = Block::new(create_delta("doc1", "v2"), vec![root_cid], vec![]);
+        let block1_cid = block1.generate_cid().unwrap();
+        let block1_data = block1.to_dag_cbor().unwrap();
+        blockstore.put(&block1_cid, &block1_data).await.unwrap();
+
+        let leaf = Block::new(create_delta("doc1", "v3"), vec![block1_cid], vec![]);
+        let leaf_cid = leaf.generate_cid().unwrap();
+        let leaf_data = leaf.to_dag_cbor().unwrap();
+        blockstore.put(&leaf_cid, &leaf_data).await.unwrap();
+
+        // Step 2: Extract proof from leaf to root
+        let proof = db
+            .extract_proof(&leaf_cid, &root_cid)
+            .await
+            .expect("extract_proof should not error")
+            .expect("proof should exist");
+
+        // Verify proof structure
+        assert_eq!(proof.leaf_cid, leaf_cid);
+        assert_eq!(proof.root_cid, root_cid);
+        assert_eq!(proof.len(), 3, "Chain has 3 blocks: leaf -> block1 -> root");
+
+        // Step 3: Verify the proof
+        assert!(proof.verify().unwrap(), "Extracted proof should be valid");
+
+        // Step 4: Sign the proof with Ed25519
+        let private_key = crypto::generate_ed25519().unwrap();
+        let signed_proof = db
+            .extract_signed_proof(&leaf_cid, &root_cid, &private_key as &dyn crypto::PrivateKey)
+            .await
+            .expect("extract_signed_proof should not error")
+            .expect("signed proof should exist");
+
+        // Step 5: Verify the signed proof
+        assert!(
+            signed_proof.verify_with_embedded_key().unwrap(),
+            "Signed proof should verify with embedded key"
+        );
+
+        // Also verify with explicit public key
+        let public_key = private_key.public_key();
+        assert!(
+            signed_proof.verify(public_key.as_ref()).unwrap(),
+            "Signed proof should verify with explicit public key"
+        );
+
+        // Verify the underlying proof is still valid
+        assert!(
+            signed_proof.proof.verify().unwrap(),
+            "Underlying proof should be valid"
+        );
+
+        // Test DAG-CBOR serialization roundtrip
+        let proof_bytes = proof.to_dag_cbor().unwrap();
+        let restored_proof = crypto::MerkleProof::from_dag_cbor(&proof_bytes).unwrap();
+        assert_eq!(
+            proof, restored_proof,
+            "Proof should roundtrip through DAG-CBOR"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merkle_proof_no_path_returns_none() {
+        use blockstore::{Blockstore, DefraBlockstore};
+        use defra_core::block::{Block, CrdtDelta, LwwDeltaPayload};
+
+        // Create database and blockstore
+        let store = MemoryStore::new();
+        let db = DB::new(store.clone());
+        let blockstore = DefraBlockstore::new(Arc::new(store), false);
+
+        fn create_delta(doc_id: &str, field: &str) -> CrdtDelta {
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                field_name: field.to_string(),
+                priority: 1,
+                schema_version_id: "v1".to_string(),
+                data: b"test".to_vec(),
+            })
+        }
+
+        // Create two unrelated blocks (not connected)
+        let block1 = Block::new(create_delta("doc1", "v1"), vec![], vec![]);
+        let cid1 = block1.generate_cid().unwrap();
+        blockstore
+            .put(&cid1, &block1.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+
+        let block2 = Block::new(create_delta("doc2", "v1"), vec![], vec![]);
+        let cid2 = block2.generate_cid().unwrap();
+        blockstore
+            .put(&cid2, &block2.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+
+        // Try to extract proof between unrelated blocks
+        let result = db.extract_proof(&cid1, &cid2).await.unwrap();
+        assert!(result.is_none(), "Should return None for unrelated blocks");
     }
 }

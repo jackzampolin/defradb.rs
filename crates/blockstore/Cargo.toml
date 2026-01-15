@@ -11,6 +11,8 @@ description = "IPFS-compatible blockstore with merge tracking for DefraDB"
 [dependencies]
 # Internal dependencies
 storage = { path = "../storage" }
+crypto = { path = "../crypto" }
+defra-core = { path = "../defra-core" }
 
 # IPLD
 cid = { workspace = true }

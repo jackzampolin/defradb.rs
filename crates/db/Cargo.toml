@@ -34,6 +34,9 @@ datastore = { path = "../datastore" }
 schema = { path = "../schema" }
 document = { path = "../document" }
 query = { path = "../query" }
+blockstore = { path = "../blockstore" }
+crypto = { path = "../crypto" }
+defra-core = { path = "../defra-core" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

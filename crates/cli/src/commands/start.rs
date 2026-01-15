@@ -1106,7 +1106,10 @@ mod http_integration_tests {
             .expect("Data should have Users array");
         assert_eq!(created_array.len(), 1, "Should have created 1 document");
         let created = &created_array[0];
-        assert_eq!(created.get("name").and_then(|n| n.as_str()), Some("Charlie"));
+        assert_eq!(
+            created.get("name").and_then(|n| n.as_str()),
+            Some("Charlie")
+        );
         assert_eq!(created.get("age").and_then(|n| n.as_i64()), Some(35));
         let doc_id = created
             .get("_docID")
@@ -1207,7 +1210,10 @@ mod http_integration_tests {
         let body: serde_json::Value = response.json().await.unwrap();
 
         // Debug: print full response
-        println!("Update mutation response: {}", serde_json::to_string_pretty(&body).unwrap());
+        println!(
+            "Update mutation response: {}",
+            serde_json::to_string_pretty(&body).unwrap()
+        );
 
         // Verify mutation succeeded
         // Note: Response uses collection name "Users" as key, not "update_Users"
@@ -1404,7 +1410,10 @@ mod http_integration_tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body: serde_json::Value = response.json().await.unwrap();
         let readonly_txn_id = body.get("txn_id").and_then(|t| t.as_str()).unwrap();
-        assert_ne!(txn_id, readonly_txn_id, "Should get different transaction IDs");
+        assert_ne!(
+            txn_id, readonly_txn_id,
+            "Should get different transaction IDs"
+        );
 
         shutdown_tx.send(()).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
