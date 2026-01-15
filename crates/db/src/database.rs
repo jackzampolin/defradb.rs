@@ -194,12 +194,22 @@ impl<S: Store> DB<S> {
                 })?;
 
                 let prefix_str = String::from_utf8(prefix.clone()).map_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        prefix_bytes = ?&prefix[..prefix.len().min(50)],
+                        "Internal error: collection key prefix contains invalid UTF-8"
+                    );
                     Error::Other(format!("internal error: prefix is not valid UTF-8: {}", e))
                 })?;
 
                 let name = key_str
                     .strip_prefix(&prefix_str)
                     .ok_or_else(|| {
+                        tracing::error!(
+                            key = %key_str,
+                            expected_prefix = %prefix_str,
+                            "Collection key does not match expected prefix - possible data corruption"
+                        );
                         Error::Other(format!(
                             "collection key '{}' does not match expected prefix '{}'",
                             key_str, prefix_str
@@ -229,8 +239,16 @@ impl<S: Store> DB<S> {
             })?;
         }
 
-        txn.discard()
-            .map_err(|e| Error::Other(format!("failed to discard transaction: {}", e)))?;
+        if let Err(discard_err) = txn.discard() {
+            tracing::error!(
+                error = %discard_err,
+                "Transaction discard failed after loading collections"
+            );
+            return Err(Error::Other(format!(
+                "failed to discard transaction: {}",
+                discard_err
+            )));
+        }
 
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(error = ?e, "Collection cache lock poisoned during load");
@@ -270,8 +288,13 @@ impl<S: Store> DB<S> {
         };
 
         if exists {
-            txn.discard()
-                .map_err(|e| Error::Other(format!("failed to discard: {}", e)))?;
+            if let Err(discard_err) = txn.discard() {
+                tracing::error!(
+                    error = %discard_err,
+                    collection_name = %name,
+                    "Transaction discard failed while handling CollectionAlreadyExists"
+                );
+            }
             return Err(Error::CollectionAlreadyExists(name));
         }
 
@@ -343,8 +366,13 @@ impl<S: Store> DB<S> {
         };
 
         if !exists {
-            txn.discard()
-                .map_err(|e| Error::Other(format!("failed to discard: {}", e)))?;
+            if let Err(discard_err) = txn.discard() {
+                tracing::error!(
+                    error = %discard_err,
+                    collection_name = %name,
+                    "Transaction discard failed while handling CollectionNotFound"
+                );
+            }
             return Err(Error::CollectionNotFound(name.to_string()));
         }
 
@@ -360,13 +388,41 @@ impl<S: Store> DB<S> {
             let doc_prefix = format!("/d/{}/", collection_id);
             let opts = IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
 
-            let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
+            let mut iter = datastore.iterator(opts).await.map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %name,
+                    "Failed to create iterator for document deletion"
+                );
+                Error::Storage(e)
+            })?;
             let mut keys_to_delete = Vec::new();
 
-            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            while let Some(pair) = iter.next().await.map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %name,
+                    documents_found = keys_to_delete.len(),
+                    "Failed to iterate documents during collection deletion"
+                );
+                Error::Storage(e)
+            })? {
                 keys_to_delete.push(pair.key.clone());
             }
-            iter.close().await.map_err(Error::Storage)?;
+            iter.close().await.map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %name,
+                    "Failed to close iterator during collection deletion"
+                );
+                Error::Storage(e)
+            })?;
+
+            tracing::debug!(
+                collection_name = %name,
+                documents_to_delete = keys_to_delete.len(),
+                "Deleting documents for collection"
+            );
 
             for (i, key) in keys_to_delete.iter().enumerate() {
                 datastore.delete(key).await.map_err(|e| {
@@ -489,8 +545,7 @@ mod tests {
 
         // Execute with_txn that commits
         db.with_txn(false, |_txn| {
-            // We need async operations inside, but this closure is sync
-            // This is a limitation - we'll address in with_txn_async
+            // Sync closure - use with_txn_async for async operations
             Ok(())
         })
         .await
@@ -976,5 +1031,97 @@ mod tests {
                 "Field name mismatch"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_delete_collection_cache_store_inconsistency() {
+        // Test behavior when cache and store diverge (collection in cache but not store)
+        // This tests the safety check in delete_collection that verifies store existence
+        use storage::corekv::Key;
+        use storage::keys::systemstore::CollectionNameKey;
+
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store.clone()));
+
+        // Create a collection normally
+        db.create_collection(test_users_schema()).await.unwrap();
+        assert!(db.has_collection("Users").unwrap());
+
+        // Manually delete from store, bypassing cache (simulating inconsistency)
+        {
+            let txn = db.new_txn(false).await.unwrap();
+            let key = CollectionNameKey::new("Users");
+            {
+                let systemstore = txn.systemstore().unwrap();
+                systemstore.delete(&key.bytes()).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+        }
+
+        // Cache still has it
+        assert!(db.has_collection("Users").unwrap());
+
+        // Now try to delete - should fail gracefully with CollectionNotFound
+        // because the store check catches the inconsistency
+        let result = db.delete_collection("Users").await;
+        assert!(result.is_err());
+        match result {
+            Err(Error::CollectionNotFound(name)) => {
+                assert_eq!(name, "Users");
+            }
+            Err(e) => panic!("Expected CollectionNotFound, got: {:?}", e),
+            Ok(_) => panic!("Expected error but got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_create_and_delete_same_collection() {
+        // Test concurrent create + delete of the same collection
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        // Create collection first
+        db.create_collection(test_users_schema()).await.unwrap();
+
+        // Now race create and delete
+        let db1 = db.clone();
+        let schema = test_users_schema();
+        let handle1 = tokio::spawn(async move {
+            // Delete then create
+            db1.delete_collection("Users").await?;
+            db1.create_collection(schema).await
+        });
+
+        let db2 = db.clone();
+        let handle2 = tokio::spawn(async move {
+            // Just delete
+            db2.delete_collection("Users").await
+        });
+
+        let (r1, r2) = tokio::join!(handle1, handle2);
+
+        // At least one should fail (either both tried to delete, or create raced with delete)
+        let r1 = r1.unwrap();
+        let r2 = r2.unwrap();
+
+        // The important thing is no panics and the database is in a consistent state
+        // Either collection exists or it doesn't
+        let exists = db.has_collection("Users").unwrap();
+        let list = db.list_collections().unwrap();
+
+        // If collection exists, it should be in the list
+        if exists {
+            assert!(list.contains(&"Users".to_string()));
+        } else {
+            assert!(!list.contains(&"Users".to_string()));
+        }
+
+        // Log outcomes for debugging
+        println!(
+            "Concurrent create+delete results: r1={:?}, r2={:?}, exists={}",
+            r1.is_ok(),
+            r2.is_ok(),
+            exists
+        );
     }
 }
