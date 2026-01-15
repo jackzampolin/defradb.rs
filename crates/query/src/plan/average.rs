@@ -13,7 +13,7 @@ use crate::planner::{Doc, PlanNode};
 /// - Without GROUP BY: Computes average of all documents and yields a single result
 /// - With GROUP BY: For each group, adds the average to the document
 ///
-/// Null values are skipped. Returns 0.0 if no values to average.
+/// Null values are skipped. Returns null if no values to average (SQL semantics).
 /// Always returns f64 for precision.
 pub struct AverageNode {
     source: Box<dyn PlanNode>,
@@ -25,7 +25,7 @@ pub struct AverageNode {
     /// The running sum (for non-grouped mode)
     sum: f64,
     /// The running count (for non-grouped mode)
-    count: i64,
+    count: usize,
     /// Current document with average result
     current_doc: Doc,
     /// Whether we've already yielded the result (for non-grouped mode)
@@ -67,9 +67,10 @@ impl AverageNode {
     }
 
     /// Compute average of a slice of documents
-    fn compute_average(&self, docs: &[Doc]) -> f64 {
+    /// Returns None if no values (SQL semantics: AVG of empty set is NULL)
+    fn compute_average(&self, docs: &[Doc]) -> Option<f64> {
         let mut sum = 0.0;
-        let mut count = 0i64;
+        let mut count = 0usize;
 
         for doc in docs {
             if doc.hidden {
@@ -82,15 +83,25 @@ impl AverageNode {
         }
 
         if count == 0 {
-            0.0
+            None
         } else {
-            sum / count as f64
+            Some(sum / count as f64)
         }
     }
 
-    /// Convert average to JSON value (always f64)
-    fn avg_to_json(avg: f64) -> JsonValue {
-        JsonValue::Number(serde_json::Number::from_f64(avg).unwrap_or_else(|| 0.into()))
+    /// Convert average to JSON value (null for empty, f64 otherwise)
+    /// Returns Null for NaN/Infinity to prevent silent data corruption
+    fn avg_to_json(avg: Option<f64>) -> JsonValue {
+        match avg {
+            None => JsonValue::Null,
+            Some(val) => {
+                // NaN and Infinity cannot be represented in JSON - return null
+                // This is safer than silently returning 0
+                serde_json::Number::from_f64(val)
+                    .map(JsonValue::Number)
+                    .unwrap_or(JsonValue::Null)
+            }
+        }
     }
 }
 
@@ -116,56 +127,57 @@ impl PlanNode for AverageNode {
             self.start().await?;
         }
 
-        // Try to get next from source
-        if !self.source.next().await? {
-            // No more source documents
-            if !self.grouped_mode && !self.done {
-                // Non-grouped mode: Return the single result
-                self.done = true;
-                let avg = if self.count == 0 {
-                    0.0
-                } else {
-                    self.sum / self.count as f64
-                };
-                let num_fields = self
-                    .document_mapping
-                    .next_index()
-                    .max(self.aggregate_index + 1);
-                let mut doc = Doc::new(num_fields);
-                doc.set(self.aggregate_index, Self::avg_to_json(avg));
+        loop {
+            // Try to get next from source
+            if !self.source.next().await? {
+                // No more source documents
+                if !self.grouped_mode && !self.done {
+                    // Non-grouped mode: Return the single result
+                    self.done = true;
+                    let avg = if self.count == 0 {
+                        None
+                    } else {
+                        Some(self.sum / self.count as f64)
+                    };
+                    let num_fields = self
+                        .document_mapping
+                        .next_index()
+                        .max(self.aggregate_index + 1);
+                    let mut doc = Doc::new(num_fields);
+                    doc.set(self.aggregate_index, Self::avg_to_json(avg));
+                    self.current_doc = doc;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+
+            // Check if source provides group docs
+            if let Some(group_docs) = self.source.current_group_docs() {
+                // Grouped mode: compute average for this group
+                self.grouped_mode = true;
+                let group_avg = self.compute_average(group_docs);
+
+                // Clone the current doc from source and add the average
+                let mut doc = self.source.value().deep_clone();
+                if doc.num_fields() <= self.aggregate_index {
+                    doc.set(self.aggregate_index, JsonValue::Null);
+                }
+                doc.set(self.aggregate_index, Self::avg_to_json(group_avg));
                 self.current_doc = doc;
                 return Ok(true);
             }
-            return Ok(false);
-        }
 
-        // Check if source provides group docs
-        if let Some(group_docs) = self.source.current_group_docs() {
-            // Grouped mode: compute average for this group
-            self.grouped_mode = true;
-            let group_avg = self.compute_average(group_docs);
-
-            // Clone the current doc from source and add the average
-            let mut doc = self.source.value().deep_clone();
-            if doc.num_fields() <= self.aggregate_index {
-                doc.set(self.aggregate_index, JsonValue::Null);
+            // Non-grouped mode: accumulate sum and count
+            let doc = self.source.value();
+            if !doc.hidden {
+                if let Some(val) = Self::extract_numeric(doc.get(self.field_index)) {
+                    self.sum += val;
+                    self.count += 1;
+                }
             }
-            doc.set(self.aggregate_index, Self::avg_to_json(group_avg));
-            self.current_doc = doc;
-            return Ok(true);
-        }
 
-        // Non-grouped mode: accumulate sum and count
-        let doc = self.source.value();
-        if !doc.hidden {
-            if let Some(val) = Self::extract_numeric(doc.get(self.field_index)) {
-                self.sum += val;
-                self.count += 1;
-            }
+            // Continue iterating (loop continues)
         }
-
-        // Continue iterating
-        Box::pin(self.next()).await
     }
 
     fn value(&self) -> &Doc {
@@ -277,9 +289,8 @@ mod tests {
 
         assert!(avg_node.next().await.unwrap());
         let result = avg_node.value();
-        // Should return 0.0 for empty
-        let avg_val = result.get(3).unwrap().as_f64().unwrap();
-        assert!((avg_val - 0.0).abs() < 0.001);
+        // Should return null for empty set (SQL semantics)
+        assert_eq!(result.get(3), Some(&JsonValue::Null));
 
         avg_node.close().await.unwrap();
     }

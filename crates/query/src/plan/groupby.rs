@@ -5,7 +5,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
 use crate::document::DocumentMapping;
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 use crate::mapper::GroupBy;
 use crate::planner::{Doc, PlanNode};
 
@@ -80,16 +80,24 @@ impl GroupByNode {
 
     /// Generate a group key from document field values
     /// Format: `{field_index}_{field_value}_` for each GROUP BY field
-    fn generate_key(&self, doc: &Doc) -> String {
+    /// Returns an error if any GROUP BY field is not found in the document mapping
+    fn generate_key(&self, doc: &Doc) -> Result<String> {
         let mut key = String::new();
         for field_name in &self.group_by.fields {
-            if let Some(index) = self.document_mapping.first_index_of_name(field_name) {
-                key.push_str(&format!("{}_", index));
-                let value = doc.get(index);
-                key.push_str(&format!("{}_", Self::value_to_key(value)));
-            }
+            let index = self
+                .document_mapping
+                .first_index_of_name(field_name)
+                .ok_or_else(|| {
+                    QueryError::unknown_field(format!(
+                        "GROUP BY field '{}' not found in document mapping",
+                        field_name
+                    ))
+                })?;
+            key.push_str(&format!("{}_", index));
+            let value = doc.get(index);
+            key.push_str(&format!("{}_", Self::value_to_key(value)));
         }
-        key
+        Ok(key)
     }
 
     /// Convert a JSON value to a string key component
@@ -139,7 +147,7 @@ impl PlanNode for GroupByNode {
 
         while self.source.next().await? {
             let doc = self.source.value().deep_clone();
-            let key = self.generate_key(&doc);
+            let key = self.generate_key(&doc)?;
 
             if let Some(&idx) = group_map.get(&key) {
                 self.groups[idx].1.add(doc);

@@ -88,9 +88,13 @@ impl SumNode {
     }
 
     /// Convert sum to JSON value (int if no floats, float otherwise)
+    /// Returns Null for NaN/Infinity to prevent silent data corruption
     fn sum_to_json(sum: f64, has_float: bool) -> JsonValue {
         if has_float {
-            JsonValue::Number(serde_json::Number::from_f64(sum).unwrap_or_else(|| 0.into()))
+            // NaN and Infinity cannot be represented in JSON - return null
+            serde_json::Number::from_f64(sum)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null)
         } else {
             JsonValue::Number((sum as i64).into())
         }
@@ -119,57 +123,58 @@ impl PlanNode for SumNode {
             self.start().await?;
         }
 
-        // Try to get next from source
-        if !self.source.next().await? {
-            // No more source documents
-            if !self.grouped_mode && !self.done {
-                // Non-grouped mode: Return the single result
-                self.done = true;
-                let num_fields = self
-                    .document_mapping
-                    .next_index()
-                    .max(self.aggregate_index + 1);
-                let mut doc = Doc::new(num_fields);
+        loop {
+            // Try to get next from source
+            if !self.source.next().await? {
+                // No more source documents
+                if !self.grouped_mode && !self.done {
+                    // Non-grouped mode: Return the single result
+                    self.done = true;
+                    let num_fields = self
+                        .document_mapping
+                        .next_index()
+                        .max(self.aggregate_index + 1);
+                    let mut doc = Doc::new(num_fields);
+                    doc.set(
+                        self.aggregate_index,
+                        Self::sum_to_json(self.sum, self.has_float),
+                    );
+                    self.current_doc = doc;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+
+            // Check if source provides group docs
+            if let Some(group_docs) = self.source.current_group_docs() {
+                // Grouped mode: sum field values in this group
+                self.grouped_mode = true;
+                let (group_sum, group_has_float) = self.compute_sum(group_docs);
+
+                // Clone the current doc from source and add the sum
+                let mut doc = self.source.value().deep_clone();
+                if doc.num_fields() <= self.aggregate_index {
+                    doc.set(self.aggregate_index, JsonValue::Null);
+                }
                 doc.set(
                     self.aggregate_index,
-                    Self::sum_to_json(self.sum, self.has_float),
+                    Self::sum_to_json(group_sum, group_has_float),
                 );
                 self.current_doc = doc;
                 return Ok(true);
             }
-            return Ok(false);
-        }
 
-        // Check if source provides group docs
-        if let Some(group_docs) = self.source.current_group_docs() {
-            // Grouped mode: sum field values in this group
-            self.grouped_mode = true;
-            let (group_sum, group_has_float) = self.compute_sum(group_docs);
-
-            // Clone the current doc from source and add the sum
-            let mut doc = self.source.value().deep_clone();
-            if doc.num_fields() <= self.aggregate_index {
-                doc.set(self.aggregate_index, JsonValue::Null);
+            // Non-grouped mode: accumulate sum
+            let doc = self.source.value();
+            if !doc.hidden {
+                if let Some((val, is_float)) = Self::extract_numeric(doc.get(self.field_index)) {
+                    self.sum += val;
+                    self.has_float = self.has_float || is_float;
+                }
             }
-            doc.set(
-                self.aggregate_index,
-                Self::sum_to_json(group_sum, group_has_float),
-            );
-            self.current_doc = doc;
-            return Ok(true);
-        }
 
-        // Non-grouped mode: accumulate sum
-        let doc = self.source.value();
-        if !doc.hidden {
-            if let Some((val, is_float)) = Self::extract_numeric(doc.get(self.field_index)) {
-                self.sum += val;
-                self.has_float = self.has_float || is_float;
-            }
+            // Continue iterating to sum all docs (loop continues)
         }
-
-        // Continue iterating to sum all docs
-        Box::pin(self.next()).await
     }
 
     fn value(&self) -> &Doc {

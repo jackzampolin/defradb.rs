@@ -90,11 +90,15 @@ impl MinNode {
     }
 
     /// Convert min to JSON value
+    /// Returns Null for NaN/Infinity to prevent silent data corruption
     fn min_to_json(min: Option<f64>, has_float: bool) -> JsonValue {
         match min {
             None => JsonValue::Null,
             Some(val) if has_float => {
-                JsonValue::Number(serde_json::Number::from_f64(val).unwrap_or_else(|| 0.into()))
+                // NaN and Infinity cannot be represented in JSON - return null
+                serde_json::Number::from_f64(val)
+                    .map(JsonValue::Number)
+                    .unwrap_or(JsonValue::Null)
             }
             Some(val) => JsonValue::Number((val as i64).into()),
         }
@@ -123,60 +127,61 @@ impl PlanNode for MinNode {
             self.start().await?;
         }
 
-        // Try to get next from source
-        if !self.source.next().await? {
-            // No more source documents
-            if !self.grouped_mode && !self.done {
-                // Non-grouped mode: Return the single result
-                self.done = true;
-                let num_fields = self
-                    .document_mapping
-                    .next_index()
-                    .max(self.aggregate_index + 1);
-                let mut doc = Doc::new(num_fields);
+        loop {
+            // Try to get next from source
+            if !self.source.next().await? {
+                // No more source documents
+                if !self.grouped_mode && !self.done {
+                    // Non-grouped mode: Return the single result
+                    self.done = true;
+                    let num_fields = self
+                        .document_mapping
+                        .next_index()
+                        .max(self.aggregate_index + 1);
+                    let mut doc = Doc::new(num_fields);
+                    doc.set(
+                        self.aggregate_index,
+                        Self::min_to_json(self.min, self.has_float),
+                    );
+                    self.current_doc = doc;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+
+            // Check if source provides group docs
+            if let Some(group_docs) = self.source.current_group_docs() {
+                // Grouped mode: find min in this group
+                self.grouped_mode = true;
+                let (group_min, group_has_float) = self.compute_min(group_docs);
+
+                // Clone the current doc from source and add the min
+                let mut doc = self.source.value().deep_clone();
+                if doc.num_fields() <= self.aggregate_index {
+                    doc.set(self.aggregate_index, JsonValue::Null);
+                }
                 doc.set(
                     self.aggregate_index,
-                    Self::min_to_json(self.min, self.has_float),
+                    Self::min_to_json(group_min, group_has_float),
                 );
                 self.current_doc = doc;
                 return Ok(true);
             }
-            return Ok(false);
-        }
 
-        // Check if source provides group docs
-        if let Some(group_docs) = self.source.current_group_docs() {
-            // Grouped mode: find min in this group
-            self.grouped_mode = true;
-            let (group_min, group_has_float) = self.compute_min(group_docs);
-
-            // Clone the current doc from source and add the min
-            let mut doc = self.source.value().deep_clone();
-            if doc.num_fields() <= self.aggregate_index {
-                doc.set(self.aggregate_index, JsonValue::Null);
+            // Non-grouped mode: track minimum
+            let doc = self.source.value();
+            if !doc.hidden {
+                if let Some((val, is_float)) = Self::extract_numeric(doc.get(self.field_index)) {
+                    self.min = Some(match self.min {
+                        None => val,
+                        Some(current) => current.min(val),
+                    });
+                    self.has_float = self.has_float || is_float;
+                }
             }
-            doc.set(
-                self.aggregate_index,
-                Self::min_to_json(group_min, group_has_float),
-            );
-            self.current_doc = doc;
-            return Ok(true);
-        }
 
-        // Non-grouped mode: track minimum
-        let doc = self.source.value();
-        if !doc.hidden {
-            if let Some((val, is_float)) = Self::extract_numeric(doc.get(self.field_index)) {
-                self.min = Some(match self.min {
-                    None => val,
-                    Some(current) => current.min(val),
-                });
-                self.has_float = self.has_float || is_float;
-            }
+            // Continue iterating (loop continues)
         }
-
-        // Continue iterating
-        Box::pin(self.next()).await
     }
 
     fn value(&self) -> &Doc {

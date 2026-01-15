@@ -1,5 +1,6 @@
 //! Query plan nodes implementing the Volcano Iterator Model
 
+mod alldocs;
 mod average;
 mod count;
 mod groupby;
@@ -12,6 +13,7 @@ mod scan;
 mod select;
 mod sum;
 
+pub use alldocs::AllDocsNode;
 pub use average::AverageNode;
 pub use count::CountNode;
 pub use groupby::{DocumentGroup, GroupByNode};

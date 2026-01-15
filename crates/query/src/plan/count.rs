@@ -76,50 +76,50 @@ impl PlanNode for CountNode {
             self.start().await?;
         }
 
-        // Try to get next from source
-        if !self.source.next().await? {
-            // No more source documents
-            if !self.grouped_mode && !self.done {
-                // Non-grouped mode: We counted during iteration, return the single result
-                self.done = true;
-                let num_fields = self
-                    .document_mapping
-                    .next_index()
-                    .max(self.aggregate_index + 1);
-                let mut doc = Doc::new(num_fields);
-                doc.set(self.aggregate_index, JsonValue::Number(self.count.into()));
+        loop {
+            // Try to get next from source
+            if !self.source.next().await? {
+                // No more source documents
+                if !self.grouped_mode && !self.done {
+                    // Non-grouped mode: We counted during iteration, return the single result
+                    self.done = true;
+                    let num_fields = self
+                        .document_mapping
+                        .next_index()
+                        .max(self.aggregate_index + 1);
+                    let mut doc = Doc::new(num_fields);
+                    doc.set(self.aggregate_index, JsonValue::Number(self.count.into()));
+                    self.current_doc = doc;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+
+            // Check if source provides group docs
+            if let Some(group_docs) = self.source.current_group_docs() {
+                // Grouped mode: count docs in this group
+                self.grouped_mode = true;
+                let group_count = group_docs.iter().filter(|d| !d.hidden).count() as i64;
+
+                // Clone the current doc from source and add the count
+                let mut doc = self.source.value().deep_clone();
+                // Ensure doc has enough fields
+                if doc.num_fields() <= self.aggregate_index {
+                    doc.set(self.aggregate_index, JsonValue::Null);
+                }
+                doc.set(self.aggregate_index, JsonValue::Number(group_count.into()));
                 self.current_doc = doc;
                 return Ok(true);
             }
-            return Ok(false);
-        }
 
-        // Check if source provides group docs
-        if let Some(group_docs) = self.source.current_group_docs() {
-            // Grouped mode: count docs in this group
-            self.grouped_mode = true;
-            let group_count = group_docs.iter().filter(|d| !d.hidden).count() as i64;
-
-            // Clone the current doc from source and add the count
-            let mut doc = self.source.value().deep_clone();
-            // Ensure doc has enough fields
-            if doc.num_fields() <= self.aggregate_index {
-                doc.set(self.aggregate_index, JsonValue::Null);
+            // Non-grouped mode: count this doc
+            let doc = self.source.value();
+            if !doc.hidden {
+                self.count += 1;
             }
-            doc.set(self.aggregate_index, JsonValue::Number(group_count.into()));
-            self.current_doc = doc;
-            return Ok(true);
-        }
 
-        // Non-grouped mode: count this doc
-        let doc = self.source.value();
-        if !doc.hidden {
-            self.count += 1;
+            // Continue iterating to count all docs (loop continues)
         }
-
-        // Continue iterating to count all docs
-        // We'll return the result after all docs are counted (when source returns false)
-        Box::pin(self.next()).await
     }
 
     fn value(&self) -> &Doc {
