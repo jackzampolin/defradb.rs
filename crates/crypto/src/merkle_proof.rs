@@ -25,6 +25,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::keys::{PrivateKey, PublicKey};
 use crate::types::KeyType;
 
+/// Maximum allowed proof path length to prevent DoS via large proofs
+const MAX_PROOF_PATH_LENGTH: usize = 1000;
+
 /// A node in the Merkle proof path
 ///
 /// Contains the block data and its computed CID for verification.
@@ -90,15 +93,25 @@ impl MerkleProof {
     /// Verify this proof is valid
     ///
     /// Checks:
-    /// 1. Path is non-empty
-    /// 2. First node CID matches leaf_cid
-    /// 3. Last node CID matches root_cid
-    /// 4. Each node's CID matches its content hash
-    /// 5. Each node's heads contains the next node's CID (child -> parent chain)
+    /// 1. Path length is within limits
+    /// 2. Path is non-empty
+    /// 3. First node CID matches leaf_cid
+    /// 4. Last node CID matches root_cid
+    /// 5. Each node's CID matches its content hash
+    /// 6. Each node's heads contains the next node's CID (child -> parent chain)
     ///
     /// The chain structure is: leaf (newest) -> ... -> root (oldest)
     /// Each node points to its parent(s) via the `heads` field.
     pub fn verify(&self) -> Result<bool> {
+        // Check path length to prevent DoS
+        if self.path.len() > MAX_PROOF_PATH_LENGTH {
+            return Err(Error::BlockError(format!(
+                "Proof path exceeds maximum length: {} > {}",
+                self.path.len(),
+                MAX_PROOF_PATH_LENGTH
+            )));
+        }
+
         if self.path.is_empty() {
             return Ok(false);
         }
@@ -175,6 +188,9 @@ pub struct SignedMerkleProof {
 
 impl SignedMerkleProof {
     /// Create a signed proof from a proof and private key
+    ///
+    /// The identity field is stored as hex-encoded public key bytes for
+    /// wire compatibility with Go DefraDB.
     pub fn sign(proof: MerkleProof, private_key: &dyn PrivateKey) -> Result<Self> {
         let proof_bytes = proof.to_dag_cbor()?;
         let sig_value = private_key.sign(&proof_bytes)?;
@@ -190,7 +206,9 @@ impl SignedMerkleProof {
         };
 
         let public_key = private_key.public_key();
-        let header = SignatureHeader::new(sig_type, public_key.raw());
+        // Go stores identity as hex-encoded public key string bytes
+        let identity = public_key.to_hex_string().into_bytes();
+        let header = SignatureHeader::new(sig_type, identity);
 
         Ok(Self {
             proof,
@@ -201,9 +219,25 @@ impl SignedMerkleProof {
     /// Verify the signature and proof validity
     ///
     /// Returns true only if both the signature is valid AND the proof is valid.
+    /// The public key type must match the signature algorithm.
     pub fn verify(&self, public_key: &dyn PublicKey) -> Result<bool> {
+        // Validate key type matches signature algorithm
+        let expected_key_type = match self.signature.header.sig_type {
+            SignatureType::EdDSA => KeyType::Ed25519,
+            SignatureType::ES256K => KeyType::Secp256k1,
+        };
+        if public_key.key_type() != expected_key_type {
+            return Err(Error::Crypto(format!(
+                "Key type mismatch: signature requires {:?}, got {:?}",
+                expected_key_type,
+                public_key.key_type()
+            )));
+        }
+
         // Verify the identity in the signature matches the provided key
-        if self.signature.header.identity != public_key.raw() {
+        // Identity is stored as hex-encoded public key string bytes
+        let expected_identity = public_key.to_hex_string().into_bytes();
+        if self.signature.header.identity != expected_identity {
             return Ok(false);
         }
 
@@ -419,13 +453,24 @@ fn compute_cid(bytes: &[u8]) -> Result<Cid> {
 }
 
 /// Extract public key from a signature header
+///
+/// The identity field is stored as hex-encoded public key string bytes
+/// for wire compatibility with Go DefraDB.
 fn extract_public_key_from_signature(sig: &Signature) -> Result<Box<dyn PublicKey>> {
     let key_type = match sig.header.sig_type {
         SignatureType::EdDSA => KeyType::Ed25519,
         SignatureType::ES256K => KeyType::Secp256k1,
     };
 
-    crate::keys::generation::public_key_from_bytes(key_type, &sig.header.identity)
+    // Identity is stored as hex-encoded string bytes
+    let hex_string = String::from_utf8(sig.header.identity.clone()).map_err(|e| {
+        Error::Crypto(format!(
+            "Invalid identity encoding in signature header: {}",
+            e
+        ))
+    })?;
+
+    crate::keys::generation::public_key_from_string(key_type, &hex_string)
 }
 
 /// Verify a standalone proof without blockstore access
@@ -808,5 +853,55 @@ mod tests {
 
         // Test standalone verify_signed_proof
         assert!(verify_signed_proof(&signed).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_key_type_mismatch_returns_error() {
+        use crate::keys::generation::{generate_ed25519, generate_secp256k1};
+        use crate::keys::PrivateKey;
+
+        // Sign with Ed25519
+        let ed25519_key = generate_ed25519().unwrap();
+        let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+        let cid = block.generate_cid().unwrap();
+        let node = ProofNode::from_block(&block).unwrap();
+        let proof = MerkleProof::new(cid, cid, vec![node]);
+        let signed = SignedMerkleProof::sign(proof, &ed25519_key as &dyn PrivateKey).unwrap();
+
+        // Try to verify with secp256k1 key - should return error, not false
+        let secp_key = generate_secp256k1().unwrap();
+        let secp_public = secp_key.public_key();
+        let result = signed.verify(secp_public.as_ref());
+
+        assert!(result.is_err(), "Key type mismatch should return error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Key type mismatch"),
+            "Error should mention key type mismatch: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_max_path_length_exceeded() {
+        // Create a proof with too many nodes (simulated)
+        let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+        let cid = block.generate_cid().unwrap();
+        let node = ProofNode::from_block(&block).unwrap();
+
+        // Create a vector with MAX_PROOF_PATH_LENGTH + 1 nodes
+        let large_path: Vec<ProofNode> =
+            (0..=MAX_PROOF_PATH_LENGTH).map(|_| node.clone()).collect();
+
+        let proof = MerkleProof::new(cid, cid, large_path);
+        let result = proof.verify();
+
+        assert!(result.is_err(), "Should reject oversized proof");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeds maximum length"),
+            "Error should mention path length: {}",
+            err_msg
+        );
     }
 }
