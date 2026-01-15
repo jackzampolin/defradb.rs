@@ -23,6 +23,7 @@ query = { path = "../query" }
 db = { path = "../db" }
 schema = { path = "../schema" }
 document = { path = "../document" }
+keyring = { path = "../keyring" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -47,6 +48,9 @@ anyhow = { workspace = true }
 
 # File system
 dirs = "5.0"
+
+# Random number generation
+getrandom = "0.2"
 
 # IPLD (for Bitswap type parameters)
 libipld = { workspace = true }

@@ -17,11 +17,13 @@
 mod error;
 mod file;
 mod keyring;
+mod signer;
 mod system;
 
 pub use error::{Error, Result};
 pub use file::FileKeyring;
 pub use keyring::Keyring;
+pub use signer::{KeyType, KeyringSigner};
 pub use system::SystemKeyring;
 
 /// Environment variable name for the keyring secret
