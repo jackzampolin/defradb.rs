@@ -97,6 +97,9 @@
 /// - Architecture guides
 pub mod backends;
 pub mod corekv;
+pub mod encoding;
+pub mod field_value;
+pub mod index;
 pub mod keys;
 pub mod namespace;
 pub mod stores;

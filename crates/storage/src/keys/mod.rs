@@ -48,7 +48,7 @@ pub mod utils;
 // Re-export commonly used types
 pub use blockstore::{BlockstoreKey, ToMergeIndexKey, MERGE_PREFIX};
 pub use datastore::{
-    DataStoreKey, DatastoreSE, IndexDataStoreKey, PrimaryDataStoreKey, ViewCacheKey,
+    DataStoreKey, DatastoreSE, IndexDataStoreKey, IndexedField, PrimaryDataStoreKey, ViewCacheKey,
 };
 pub use encstore::EncstoreKey;
 pub use headstore::{

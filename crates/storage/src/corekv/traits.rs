@@ -313,6 +313,42 @@ pub trait TxnStore: Store {}
 /// Blanket implementation: any Store automatically implements TxnStore.
 impl<T> TxnStore for T where T: Store {}
 
+/// Blanket implementation of Reader for Box<dyn Txn>.
+///
+/// This allows boxed transactions to be used where Reader is required.
+#[async_trait]
+impl Reader for Box<dyn Txn> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        (**self).get(key).await
+    }
+
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        (**self).has(key).await
+    }
+
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        (**self).get_size(key).await
+    }
+
+    async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
+        (**self).iterator(opts).await
+    }
+}
+
+/// Blanket implementation of Writer for Box<dyn Txn>.
+///
+/// This allows boxed transactions to be used where Writer is required.
+#[async_trait]
+impl Writer for Box<dyn Txn> {
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        (**self).set(key, value).await
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        (**self).delete(key).await
+    }
+}
+
 /// Helper function to create a simple sync callback from a closure.
 ///
 /// # Example
