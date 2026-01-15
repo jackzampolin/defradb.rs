@@ -383,6 +383,7 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
         MutationType::Create => Mutation::create(&collection_name),
         MutationType::Update => Mutation::update(&collection_name),
         MutationType::Delete => Mutation::delete(&collection_name),
+        MutationType::Upsert => Mutation::upsert(&collection_name),
     };
 
     // Parse arguments based on mutation type
@@ -394,20 +395,20 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
                 mutation.create_input = input;
             }
 
-            // UPDATE: input is patch object
-            (MutationType::Update, "input") => {
+            // UPDATE/UPSERT: input is patch object
+            (MutationType::Update | MutationType::Upsert, "input") => {
                 let input = parse_update_input(arg_value)?;
                 mutation.update_input = input;
             }
 
-            // UPDATE/DELETE: docIDs to target
-            (MutationType::Update | MutationType::Delete, "docIDs" | "_docIDs") => {
+            // UPDATE/DELETE/UPSERT: docIDs to target
+            (MutationType::Update | MutationType::Delete | MutationType::Upsert, "docIDs" | "_docIDs") => {
                 let doc_ids = parse_doc_ids_value(arg_value)?;
                 mutation.doc_ids = Some(doc_ids);
             }
 
-            // UPDATE/DELETE: filter to find documents
-            (MutationType::Update | MutationType::Delete, "filter") => {
+            // UPDATE/DELETE/UPSERT: filter to find documents
+            (MutationType::Update | MutationType::Delete | MutationType::Upsert, "filter") => {
                 let filter = parse_filter_value(arg_value)?;
                 mutation.filter = Some(filter);
             }
@@ -455,6 +456,15 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
                     collection_name
                 )));
             }
+        }
+        MutationType::Upsert => {
+            if mutation.update_input.is_empty() {
+                return Err(QueryError::parse(format!(
+                    "upsert_{} mutation requires 'input' argument with fields to set",
+                    collection_name
+                )));
+            }
+            // Note: docIDs/filter are optional for upsert - if not provided, creates a new document
         }
     }
 
@@ -752,5 +762,84 @@ mod mutation_tests {
         // parse_query should fail on mutation
         let result = parse_query(query);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_upsert_mutation_with_doc_ids() {
+        let query = r#"
+            mutation {
+                upsert_Users(docIDs: ["bae-123"], input: {name: "Alice", age: 30}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        assert_eq!(mutations.len(), 1);
+
+        let m = &mutations[0];
+        assert_eq!(m.mutation_type, MutationType::Upsert);
+        assert_eq!(m.collection_name, "Users");
+        assert_eq!(m.doc_ids, Some(vec!["bae-123".to_string()]));
+        assert_eq!(
+            m.update_input.get("name"),
+            Some(&JsonValue::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_upsert_mutation_with_filter() {
+        let query = r#"
+            mutation {
+                upsert_Users(filter: {name: {_eq: "Alice"}}, input: {age: 31}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        let m = &mutations[0];
+        assert_eq!(m.mutation_type, MutationType::Upsert);
+        assert!(m.filter.is_some());
+        assert!(m.doc_ids.is_none());
+    }
+
+    #[test]
+    fn test_parse_upsert_mutation_create_new() {
+        // Upsert without docIDs/filter creates a new document
+        let query = r#"
+            mutation {
+                upsert_Users(input: {name: "NewUser", email: "new@example.com"}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        let m = &mutations[0];
+        assert_eq!(m.mutation_type, MutationType::Upsert);
+        assert!(m.doc_ids.is_none());
+        assert!(m.filter.is_none());
+        assert_eq!(
+            m.update_input.get("name"),
+            Some(&JsonValue::String("NewUser".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_upsert_missing_input_error() {
+        let query = r#"
+            mutation {
+                upsert_Users(docIDs: ["bae-123"]) {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_mutations(query);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires 'input'"));
     }
 }

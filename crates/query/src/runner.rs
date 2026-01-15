@@ -24,6 +24,7 @@ use crate::mapper::{Mutation, MutationType, Requestable, Select};
 use crate::mutator::DocMutator;
 use crate::plan::{
     CreateInput, CreateNode, DeleteNode, LimitNode, ScanNode, SelectNode, UpdateInput, UpdateNode,
+    UpsertInput, UpsertNode,
 };
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::{parse_mutations, parse_query};
@@ -229,6 +230,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         // Build document mapping from requested fields
         let mapping = self.build_mutation_mapping(mutation)?;
 
+        // Resolve filter to doc_ids if filter is provided without doc_ids
+        let resolved_doc_ids = self.resolve_filter_to_doc_ids(mutation).await?;
+
         // Build and execute the appropriate mutation plan
         let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {
             MutationType::Create => {
@@ -243,11 +247,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut node = UpdateNode::new(&mutation.collection_name, mutator, mapping.clone())
                     .with_input(input);
 
-                if let Some(ref doc_ids) = mutation.doc_ids {
+                // Use resolved doc_ids (from filter) or original doc_ids
+                if let Some(ref doc_ids) = resolved_doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
-                }
-                if let Some(ref filter) = mutation.filter {
-                    node = node.with_filter(filter.clone());
+                } else if let Some(ref doc_ids) = mutation.doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
                 }
 
                 Box::new(node)
@@ -255,11 +259,25 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             MutationType::Delete => {
                 let mut node = DeleteNode::new(&mutation.collection_name, mutator, mapping.clone());
 
-                if let Some(ref doc_ids) = mutation.doc_ids {
+                // Use resolved doc_ids (from filter) or original doc_ids
+                if let Some(ref doc_ids) = resolved_doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
+                } else if let Some(ref doc_ids) = mutation.doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
                 }
-                if let Some(ref filter) = mutation.filter {
-                    node = node.with_filter(filter.clone());
+
+                Box::new(node)
+            }
+            MutationType::Upsert => {
+                let input = self.build_upsert_input(mutation)?;
+                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone())
+                    .with_input(input);
+
+                // Use resolved doc_ids (from filter) or original doc_ids
+                if let Some(ref doc_ids) = resolved_doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
+                } else if let Some(ref doc_ids) = mutation.doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
                 }
 
                 Box::new(node)
@@ -281,6 +299,49 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         plan.close().await?;
 
         Ok(JsonValue::Array(results))
+    }
+
+    /// Resolve a filter to document IDs by querying the collection.
+    ///
+    /// This is used for filter-based mutations where we need to first
+    /// find matching documents, then perform the mutation on them.
+    async fn resolve_filter_to_doc_ids(&self, mutation: &Mutation) -> Result<Option<Vec<String>>> {
+        // Only resolve if there's a filter but no explicit doc_ids
+        let filter = match (&mutation.filter, &mutation.doc_ids) {
+            (Some(filter), None) => filter,
+            _ => return Ok(None),
+        };
+
+        // Get the collection schema to build a mapping
+        let collection = self
+            .collections
+            .get(&mutation.collection_name)
+            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+
+        // Build mapping from collection schema
+        let mut mapping = DocumentMapping::new();
+        for (i, field) in collection.fields.iter().enumerate() {
+            mapping.add(i, &field.name);
+        }
+
+        // Get all documents from the collection
+        let all_docs = self.fetcher.get_all(&mutation.collection_name).await?;
+
+        // Apply filter to find matching documents
+        let mut matching_ids = Vec::new();
+        for doc in &all_docs {
+            // Convert Document to fields array for filter matching
+            let plan_doc = self.document_to_plan_doc(doc, &mapping)?;
+            let fields = plan_doc.fields();
+
+            if filter.matches(fields, &mapping)? {
+                if let Some(id) = doc.id() {
+                    matching_ids.push(id.to_string());
+                }
+            }
+        }
+
+        Ok(Some(matching_ids))
     }
 
     /// Build document mapping for mutation result fields.
@@ -327,6 +388,18 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(update_input)
+    }
+
+    /// Build UpsertInput from mutation input.
+    fn build_upsert_input(&self, mutation: &Mutation) -> Result<UpsertInput> {
+        let mut upsert_input = UpsertInput::new();
+
+        // Upsert uses update_input for the field values
+        for (field_name, value) in &mutation.update_input {
+            upsert_input = upsert_input.with_field(field_name.clone(), value.clone());
+        }
+
+        Ok(upsert_input)
     }
 
     /// Validate that the select doesn't use unsupported features.

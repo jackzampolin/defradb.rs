@@ -18,6 +18,8 @@ pub enum MutationType {
     Update,
     /// Delete existing documents
     Delete,
+    /// Create or update documents (insert if not exists, update if exists)
+    Upsert,
 }
 
 impl MutationType {
@@ -35,6 +37,7 @@ impl MutationType {
             "create" => Some(Self::Create),
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
+            "upsert" => Some(Self::Upsert),
             _ => None,
         }
     }
@@ -45,6 +48,7 @@ impl MutationType {
             Self::Create => "create",
             Self::Update => "update",
             Self::Delete => "delete",
+            Self::Upsert => "upsert",
         }
     }
 }
@@ -105,6 +109,20 @@ impl Mutation {
     pub fn delete(collection_name: impl Into<String>) -> Self {
         Self {
             mutation_type: MutationType::Delete,
+            collection_name: collection_name.into(),
+            create_input: Vec::new(),
+            update_input: HashMap::new(),
+            doc_ids: None,
+            filter: None,
+            fields: Vec::new(),
+            document_mapping: DocumentMapping::new(),
+        }
+    }
+
+    /// Create a new UPSERT mutation.
+    pub fn upsert(collection_name: impl Into<String>) -> Self {
+        Self {
+            mutation_type: MutationType::Upsert,
             collection_name: collection_name.into(),
             create_input: Vec::new(),
             update_input: HashMap::new(),
@@ -194,7 +212,7 @@ pub fn parse_mutation_name(name: &str) -> Result<(MutationType, String), String>
 
     let mutation_type = MutationType::from_prefix(prefix).ok_or_else(|| {
         format!(
-            "Invalid mutation prefix '{}': expected 'create', 'update', or 'delete'",
+            "Invalid mutation prefix '{}': expected 'create', 'update', 'delete', or 'upsert'",
             prefix
         )
     })?;
@@ -223,6 +241,14 @@ mod tests {
         assert_eq!(
             MutationType::from_prefix("delete"),
             Some(MutationType::Delete)
+        );
+        assert_eq!(
+            MutationType::from_prefix("upsert"),
+            Some(MutationType::Upsert)
+        );
+        assert_eq!(
+            MutationType::from_prefix("UPSERT"),
+            Some(MutationType::Upsert)
         );
         assert_eq!(MutationType::from_prefix("invalid"), None);
     }
