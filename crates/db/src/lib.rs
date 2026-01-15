@@ -49,6 +49,7 @@ pub mod database;
 pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
+pub mod schema_loader;
 pub mod txn;
 pub mod txn_context;
 pub mod txn_registry;
@@ -64,6 +65,7 @@ pub use error::{Error, Result};
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};
+pub use schema_loader::load_active_collections;
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};

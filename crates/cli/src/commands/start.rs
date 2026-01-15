@@ -333,21 +333,29 @@ impl Node {
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
 
-        // Initialize storage and P2P together (P2P needs concrete blockstore type)
-        // We use a helper function to avoid code duplication
-        let p2p_handle = match config.datastore.store {
+        // Initialize storage, load schemas, and set up P2P
+        // We need to handle both store types with their concrete types
+        let (p2p_handle, collections) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
 
-                if config.net.p2p_disabled {
+                // Load schemas from storage
+                let database = db::DB::from_arc(store.clone());
+                let collections = db::load_active_collections(&database)
+                    .await
+                    .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
+
+                let p2p = if config.net.p2p_disabled {
                     None
                 } else {
                     info!("Initializing P2P network");
                     let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
                     let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
                     Some(Self::start_p2p(&config, bitswap_store).await?)
-                }
+                };
+
+                (p2p, collections)
             }
             DatastoreType::Badger => {
                 info!(
@@ -356,21 +364,30 @@ impl Node {
                 );
                 let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
 
-                if config.net.p2p_disabled {
+                // Load schemas from storage
+                let database = db::DB::from_arc(store.clone());
+                let collections = db::load_active_collections(&database)
+                    .await
+                    .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
+
+                let p2p = if config.net.p2p_disabled {
                     None
                 } else {
                     info!("Initializing P2P network");
                     let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
                     let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
                     Some(Self::start_p2p(&config, bitswap_store).await?)
-                }
+                };
+
+                (p2p, collections)
             }
         };
 
+        info!("Loaded {} collection schema(s)", collections.len());
+
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        // Create HTTP server with empty schema (Phase 1)
-        // Phase 2 will load schemas from storage
+        // Create HTTP server with loaded schemas
         let http_server = {
             let api_address: SocketAddr = config
                 .api
@@ -385,8 +402,8 @@ impl Node {
                 allowed_origins: config.api.allowed_origins.clone(),
             };
 
-            // Empty schema - queries will return "collection not found"
-            let collections: Vec<schema::CollectionVersion> = vec![];
+            // Create QueryRunner with loaded collections
+            // EmptyFetcher is still used since we don't have full DB integration yet
             let executor = query::QueryRunner::new(EmptyFetcher, collections);
             let server = defra_http::Server::with_config(executor, server_config);
 

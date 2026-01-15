@@ -73,6 +73,51 @@ impl<S: Store> DB<S> {
         Ok(db)
     }
 
+    /// Create a new database from an Arc-wrapped store.
+    ///
+    /// Use this when you already have an `Arc<S>` and want to share
+    /// the store between the database and other components (e.g., blockstore).
+    ///
+    /// Note: This creates a DB with an empty collection cache. Use `open_from_arc()`
+    /// to load existing collections from the store.
+    ///
+    /// **Warning:** When multiple DB instances share a store via `from_arc()`,
+    /// transaction IDs may collide if both instances create transactions concurrently.
+    /// This is acceptable for read-heavy workloads but may cause issues with
+    /// concurrent writes from multiple DB instances.
+    pub fn from_arc(store: Arc<S>) -> Self {
+        Self::from_arc_with_options(store, DbOptions::default())
+    }
+
+    /// Create a new database from an Arc-wrapped store with options.
+    ///
+    /// **Warning:** When multiple DB instances share a store via `from_arc()`,
+    /// transaction IDs may collide if both instances create transactions concurrently.
+    pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Self {
+        Self {
+            store,
+            options,
+            txn_id_counter: AtomicU64::new(0),
+            collections: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Open a database from an Arc-wrapped store and load existing collections.
+    ///
+    /// Use this when you already have an `Arc<S>` and want to share
+    /// the store between the database and other components (e.g., blockstore),
+    /// while also loading existing collections from the store.
+    pub async fn open_from_arc(store: Arc<S>) -> Result<Self> {
+        Self::open_from_arc_with_options(store, DbOptions::default()).await
+    }
+
+    /// Open a database from an Arc-wrapped store with options and load existing collections.
+    pub async fn open_from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
+        let db = Self::from_arc_with_options(store, options);
+        db.load_collections().await?;
+        Ok(db)
+    }
+
     /// Get the next transaction ID.
     fn next_txn_id(&self) -> u64 {
         self.txn_id_counter.fetch_add(1, Ordering::SeqCst) + 1
