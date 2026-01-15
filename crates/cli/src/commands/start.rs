@@ -73,7 +73,7 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_txn_retries: Option<u32>,
 
-    /// Specify the datastore to use (supported: badger, memory)
+    /// Specify the datastore to use (supported: badger, rocksdb, memory)
     #[arg(long)]
     pub store: Option<String>,
 
@@ -343,28 +343,11 @@ impl Node {
         info!("Data directory: {}", config.data_path().display());
 
         // Initialize storage, load schemas, and set up P2P
-        // We need to handle both store types with their concrete types
         let (p2p_handle, collections) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
-
-                // Load schemas from storage
-                let database = db::DB::from_arc(store.clone());
-                let collections = db::load_active_collections(&database)
-                    .await
-                    .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
-
-                let p2p = if config.net.p2p_disabled {
-                    None
-                } else {
-                    info!("Initializing P2P network");
-                    let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
-                    let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-                    Some(Self::start_p2p(&config, bitswap_store).await?)
-                };
-
-                (p2p, collections)
+                Self::init_store_and_p2p(store, &config).await?
             }
             DatastoreType::Badger => {
                 info!(
@@ -372,23 +355,7 @@ impl Node {
                     config.data_path().display()
                 );
                 let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
-
-                // Load schemas from storage
-                let database = db::DB::from_arc(store.clone());
-                let collections = db::load_active_collections(&database)
-                    .await
-                    .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
-
-                let p2p = if config.net.p2p_disabled {
-                    None
-                } else {
-                    info!("Initializing P2P network");
-                    let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
-                    let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-                    Some(Self::start_p2p(&config, bitswap_store).await?)
-                };
-
-                (p2p, collections)
+                Self::init_store_and_p2p(store, &config).await?
             }
         };
 
@@ -425,6 +392,32 @@ impl Node {
             shutdown_tx,
             shutdown_rx,
         })
+    }
+
+    /// Initialize store, load schemas, and optionally start P2P.
+    async fn init_store_and_p2p<S>(
+        store: Arc<S>,
+        config: &Config,
+    ) -> Result<(Option<p2p::P2PHostHandle>, Vec<schema::CollectionVersion>)>
+    where
+        S: storage::corekv::Store + 'static,
+    {
+        // Load schemas from storage
+        let database = db::DB::from_arc(store.clone());
+        let collections = db::load_active_collections(&database)
+            .await
+            .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
+
+        let p2p = if config.net.p2p_disabled {
+            None
+        } else {
+            info!("Initializing P2P network");
+            let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
+            let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
+            Some(Self::start_p2p(config, bitswap_store).await?)
+        };
+
+        Ok((p2p, collections))
     }
 
     /// Start P2P networking with the given bitswap store
@@ -559,20 +552,50 @@ impl Node {
             });
         }
 
-        // Wait for shutdown signal
-        self.shutdown_rx.recv().await;
+        // Wait for shutdown signal OR HTTP server crash
+        let mut http_task = http_task;
+        let http_crashed = match &mut http_task {
+            Some(task) => {
+                tokio::select! {
+                    _ = self.shutdown_rx.recv() => false,
+                    result = task => {
+                        match result {
+                            Ok(()) => {
+                                error!("HTTP server exited unexpectedly");
+                            }
+                            Err(e) if e.is_panic() => {
+                                error!("HTTP server panicked: {}", e);
+                            }
+                            Err(e) => {
+                                error!("HTTP server task failed: {}", e);
+                            }
+                        }
+                        true
+                    }
+                }
+            }
+            None => {
+                self.shutdown_rx.recv().await;
+                false
+            }
+        };
 
-        info!("Shutting down DefraDB node...");
-
-        // Shutdown HTTP server
-        // Note: We abort the task since the server doesn't have graceful shutdown yet
-        if let Some(task) = http_task {
-            info!("Stopping HTTP server...");
-            task.abort();
-            // Wait briefly for cleanup
-            match tokio::time::timeout(std::time::Duration::from_secs(1), task).await {
-                Ok(_) => info!("HTTP server stopped"),
-                Err(_) => warn!("HTTP server shutdown timed out"),
+        if http_crashed {
+            info!("Initiating shutdown due to HTTP server failure...");
+        } else {
+            info!("Shutting down DefraDB node...");
+            // Only abort if we're shutting down normally (not due to crash)
+            if let Some(task) = http_task {
+                info!("Stopping HTTP server...");
+                task.abort();
+                match tokio::time::timeout(std::time::Duration::from_secs(1), task).await {
+                    Ok(_) => info!("HTTP server stopped"),
+                    Err(_) => warn!(
+                        timeout_secs = 1,
+                        "HTTP server shutdown timed out - server was forcefully terminated. \
+                         This may occur if requests were still in flight."
+                    ),
+                }
             }
         }
 
@@ -596,6 +619,30 @@ impl Node {
 mod http_integration_tests {
     use super::*;
     use std::time::Duration;
+
+    /// Wait for server to be ready by polling health endpoint with retries.
+    async fn wait_for_server(api_url: &str, max_attempts: u32) {
+        let client = reqwest::Client::new();
+        for attempt in 1..=max_attempts {
+            match client
+                .get(format!("{}/health-check", api_url))
+                .timeout(Duration::from_millis(100))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => return,
+                _ => {
+                    if attempt < max_attempts {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        }
+        panic!(
+            "Server at {} failed to become ready after {} attempts",
+            api_url, max_attempts
+        );
+    }
 
     /// Create a test config with random port and P2P disabled
     fn test_config(port: u16, temp_dir: &std::path::Path) -> Config {
@@ -651,8 +698,8 @@ mod http_integration_tests {
             node.run().await
         });
 
-        // Give server time to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait for server to be ready
+        wait_for_server(&api_url, 20).await;
 
         // Test health check endpoint
         let client = reqwest::Client::new();
@@ -690,7 +737,7 @@ mod http_integration_tests {
             node.run().await
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_server(&api_url, 20).await;
 
         // Test version endpoint
         let client = reqwest::Client::new();
@@ -725,7 +772,7 @@ mod http_integration_tests {
             node.run().await
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_server(&api_url, 20).await;
 
         // Test GraphQL endpoint - expect error since no schema is loaded
         let client = reqwest::Client::new();
@@ -766,7 +813,7 @@ mod http_integration_tests {
             node.run().await
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_server(&api_url, 20).await;
 
         // Test schema endpoint - should return empty or minimal schema
         let client = reqwest::Client::new();
@@ -835,7 +882,7 @@ mod http_integration_tests {
             node.run().await
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_server(&api_url, 20).await;
 
         // Test health check works with RocksDB
         let client = reqwest::Client::new();
