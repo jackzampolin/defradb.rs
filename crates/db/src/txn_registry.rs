@@ -16,7 +16,9 @@
 use async_trait::async_trait;
 use document::Document;
 use query::error::TransactionError;
-use query::txn::{GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry};
+use query::txn::{
+    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
+};
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -193,9 +195,14 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                             error = %e,
                             "Failed to discard stale transaction during cleanup"
                         );
+                        // Don't count as cleaned - storage may still hold resources
+                    } else {
+                        cleaned += 1;
                     }
+                } else {
+                    // Transaction was already consumed (committed/rolled back)
+                    cleaned += 1;
                 }
-                cleaned += 1;
             }
         }
 
@@ -217,12 +224,17 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
 #[async_trait]
 impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
-    async fn begin(&self, readonly: bool) -> std::result::Result<TransactionHandle, TransactionError> {
+    async fn begin(
+        &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
         let txn_id = format!("txn-{}", self.id_counter.fetch_add(1, Ordering::SeqCst));
 
-        let db_txn = self.db.new_txn(readonly).await.map_err(|e| {
-            TransactionError::execution(format!("storage error: {}", e))
-        })?;
+        let db_txn = self
+            .db
+            .new_txn(readonly)
+            .await
+            .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
 
         let fetcher = Arc::new(DbDocFetcher::new(db_txn, self.collections.clone()));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
@@ -252,7 +264,10 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         }
     }
 
-    async fn commit(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+    async fn commit(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         let ctx = self
             .transactions
             .write()
@@ -275,14 +290,14 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         })?;
 
         txn.force_commit().await.map_err(|e| {
-            TransactionError::execution(format!(
-                "commit error for transaction '{}': {}",
-                handle, e
-            ))
+            TransactionError::execution(format!("commit error for transaction '{}': {}", handle, e))
         })
     }
 
-    async fn rollback(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+    async fn rollback(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         let ctx = self
             .transactions
             .write()
@@ -420,7 +435,10 @@ mod tests {
         let registry = DbTransactionRegistry::new(db, test_schema());
 
         let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
-        assert!(matches!(registry.get(&nonexistent), GetTransactionResult::NotFound));
+        assert!(matches!(
+            registry.get(&nonexistent),
+            GetTransactionResult::NotFound
+        ));
     }
 
     #[tokio::test]
@@ -481,7 +499,10 @@ mod tests {
         assert!(registry.get(&txn_id).is_found());
 
         registry.commit(&txn_id).await.unwrap();
-        assert!(matches!(registry.get(&txn_id), GetTransactionResult::NotFound));
+        assert!(matches!(
+            registry.get(&txn_id),
+            GetTransactionResult::NotFound
+        ));
     }
 
     #[tokio::test]
@@ -493,7 +514,10 @@ mod tests {
         assert!(registry.get(&txn_id).is_found());
 
         registry.rollback(&txn_id).await.unwrap();
-        assert!(matches!(registry.get(&txn_id), GetTransactionResult::NotFound));
+        assert!(matches!(
+            registry.get(&txn_id),
+            GetTransactionResult::NotFound
+        ));
     }
 
     #[tokio::test]
@@ -672,7 +696,10 @@ mod tests {
         let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
         assert_eq!(result.docs().len(), 1);
         assert!(result.missing_ids().is_empty());
-        assert_eq!(result.docs()[0].get("name").unwrap().as_str(), Some("Alice"));
+        assert_eq!(
+            result.docs()[0].get("name").unwrap().as_str(),
+            Some("Alice")
+        );
 
         registry.rollback(&txn_id).await.unwrap();
     }
@@ -782,7 +809,11 @@ mod tests {
                     let txn_id = reg.begin(true).await.unwrap();
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-                    assert!(reg.get(&txn_id).is_found(), "Task {} should find its transaction", i);
+                    assert!(
+                        reg.get(&txn_id).is_found(),
+                        "Task {} should find its transaction",
+                        i
+                    );
 
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     reg.rollback(&txn_id).await.unwrap();
@@ -850,11 +881,22 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.docs().len(), 1, "Should only return existing document");
-        assert_eq!(result.docs()[0].get("name").unwrap().as_str(), Some("Exists"));
+        assert_eq!(
+            result.docs().len(),
+            1,
+            "Should only return existing document"
+        );
+        assert_eq!(
+            result.docs()[0].get("name").unwrap().as_str(),
+            Some("Exists")
+        );
 
         // Verify missing IDs are reported
-        assert_eq!(result.missing_ids().len(), 1, "Should report one missing ID");
+        assert_eq!(
+            result.missing_ids().len(),
+            1,
+            "Should report one missing ID"
+        );
         assert_eq!(result.missing_ids()[0], nonexistent_id);
         assert!(!result.is_complete(), "Result should not be complete");
 

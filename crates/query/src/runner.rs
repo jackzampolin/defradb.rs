@@ -24,7 +24,9 @@ use crate::mapper::{Requestable, Select};
 use crate::plan::{LimitNode, ScanNode, SelectNode};
 use crate::planner::{Doc, PlanNode};
 use crate::query_parse::parse_query;
-use crate::txn::{GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry};
+use crate::txn::{
+    GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry,
+};
 
 /// Result of fetching documents by ID, including information about missing documents.
 #[derive(Debug, Clone)]
@@ -1000,7 +1002,10 @@ mod tests {
 
     #[async_trait]
     impl TransactionRegistry for MockTxnRegistry {
-        async fn begin(&self, readonly: bool) -> std::result::Result<TransactionHandle, TransactionError> {
+        async fn begin(
+            &self,
+            readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
             let id = self.counter.fetch_add(1, Ordering::SeqCst);
             let txn_id = format!("txn-{}", id);
 
@@ -1018,13 +1023,22 @@ mod tests {
         }
 
         fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
-            match self.transactions.lock().unwrap().get(handle.as_str()).cloned() {
+            match self
+                .transactions
+                .lock()
+                .unwrap()
+                .get(handle.as_str())
+                .cloned()
+            {
                 Some(ctx) => GetTransactionResult::Found(ctx),
                 None => GetTransactionResult::NotFound,
             }
         }
 
-        async fn commit(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+        async fn commit(
+            &self,
+            handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
             match self.transactions.lock().unwrap().remove(handle.as_str()) {
                 Some(_) => Ok(()),
                 None => Err(TransactionError::not_found(format!(
@@ -1034,7 +1048,10 @@ mod tests {
             }
         }
 
-        async fn rollback(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+        async fn rollback(
+            &self,
+            handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
             match self.transactions.lock().unwrap().remove(handle.as_str()) {
                 Some(_) => Ok(()),
                 None => Err(TransactionError::not_found(format!(

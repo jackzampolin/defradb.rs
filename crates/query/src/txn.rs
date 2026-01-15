@@ -88,7 +88,9 @@ impl std::str::FromStr for TransactionHandle {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         if s.is_empty() {
-            return Err(TransactionError::execution("transaction ID cannot be empty"));
+            return Err(TransactionError::execution(
+                "transaction ID cannot be empty",
+            ));
         }
         Ok(Self(s.to_string()))
     }
@@ -158,7 +160,9 @@ impl GetTransactionResult {
             Self::Found(ctx) => Some(ctx),
             Self::NotFound => None,
             Self::LockPoisoned => {
-                tracing::error!("Transaction registry lock poisoned during lookup - system may be corrupted");
+                tracing::error!(
+                    "Transaction registry lock poisoned during lookup - system may be corrupted"
+                );
                 None
             }
         }
@@ -168,12 +172,14 @@ impl GetTransactionResult {
     ///
     /// Use this when you need to distinguish between "not found" and "lock poisoned"
     /// for proper error handling.
-    pub fn into_result(self) -> std::result::Result<Option<Arc<dyn TransactionContext>>, TransactionError> {
+    pub fn into_result(
+        self,
+    ) -> std::result::Result<Option<Arc<dyn TransactionContext>>, TransactionError> {
         match self {
             Self::Found(ctx) => Ok(Some(ctx)),
             Self::NotFound => Ok(None),
             Self::LockPoisoned => Err(TransactionError::lock_poisoned(
-                "transaction registry lock poisoned"
+                "transaction registry lock poisoned",
             )),
         }
     }
@@ -198,7 +204,10 @@ pub trait TransactionRegistry: Send + Sync {
     /// Begin a new transaction.
     ///
     /// Returns a handle that can be used with `get()`, `commit()`, and `rollback()`.
-    async fn begin(&self, readonly: bool) -> std::result::Result<TransactionHandle, TransactionError>;
+    async fn begin(
+        &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError>;
 
     /// Get an existing transaction by handle.
     ///
@@ -210,12 +219,16 @@ pub trait TransactionRegistry: Send + Sync {
     /// Commit a transaction.
     ///
     /// After commit, the handle is no longer valid for `get()`.
-    async fn commit(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError>;
+    async fn commit(&self, handle: &TransactionHandle)
+        -> std::result::Result<(), TransactionError>;
 
     /// Rollback a transaction.
     ///
     /// After rollback, the handle is no longer valid for `get()`.
-    async fn rollback(&self, handle: &TransactionHandle) -> std::result::Result<(), TransactionError>;
+    async fn rollback(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError>;
 }
 
 /// A no-op transaction registry that doesn't support transactions.
@@ -226,7 +239,10 @@ pub struct NoOpTransactionRegistry;
 
 #[async_trait]
 impl TransactionRegistry for NoOpTransactionRegistry {
-    async fn begin(&self, _readonly: bool) -> std::result::Result<TransactionHandle, TransactionError> {
+    async fn begin(
+        &self,
+        _readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
         Err(TransactionError::not_supported(
             "transactions are not supported in this configuration",
         ))
@@ -236,13 +252,19 @@ impl TransactionRegistry for NoOpTransactionRegistry {
         GetTransactionResult::NotFound
     }
 
-    async fn commit(&self, _handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+    async fn commit(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         Err(TransactionError::not_supported(
             "transactions are not supported in this configuration",
         ))
     }
 
-    async fn rollback(&self, _handle: &TransactionHandle) -> std::result::Result<(), TransactionError> {
+    async fn rollback(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         Err(TransactionError::not_supported(
             "transactions are not supported in this configuration",
         ))
@@ -378,7 +400,10 @@ mod tests {
     async fn test_noop_registry_get_returns_not_found() {
         let registry = NoOpTransactionRegistry;
         let handle: TransactionHandle = "any-id".parse().unwrap();
-        assert!(matches!(registry.get(&handle), GetTransactionResult::NotFound));
+        assert!(matches!(
+            registry.get(&handle),
+            GetTransactionResult::NotFound
+        ));
     }
 
     #[tokio::test]
@@ -431,8 +456,12 @@ mod tests {
         // Test Found case
         struct MockCtx;
         impl TransactionContext for MockCtx {
-            fn id(&self) -> &str { "test" }
-            fn is_readonly(&self) -> bool { false }
+            fn id(&self) -> &str {
+                "test"
+            }
+            fn is_readonly(&self) -> bool {
+                false
+            }
             fn doc_fetcher(&self) -> Arc<dyn crate::runner::DocFetcher> {
                 unimplemented!()
             }
