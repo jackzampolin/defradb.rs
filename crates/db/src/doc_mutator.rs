@@ -7,13 +7,13 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::collection_snapshot::CollectionSnapshot;
+use crate::collection_loader::get_collection_with_lazy_load;
 use crate::txn::DbTxn;
 
 /// Document mutator that uses a database transaction.
 ///
-/// This mutator holds a reference to an active transaction and collection
-/// snapshot, allowing it to perform mutations within the transaction context.
+/// This mutator holds a reference to an active transaction and uses the
+/// transaction's collection cache with lazy loading.
 ///
 /// # Ownership Model
 ///
@@ -29,17 +29,25 @@ use crate::txn::DbTxn;
 ///
 /// After `take_txn()` is called, all mutator operations will return an error
 /// indicating the transaction was consumed. Use `is_consumed()` to check state.
+///
+/// # Collection Access
+///
+/// Collections are loaded lazily from the SystemStore on first access within
+/// the transaction. Once loaded, the collection metadata is cached for the
+/// duration of the transaction. Note: This provides transaction-level caching,
+/// not true snapshot isolation - if collections are accessed at different times,
+/// they reflect the store state at the time of first access.
 pub struct DbDocMutator<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    collections: CollectionSnapshot,
 }
 
 impl<S: Store> DbDocMutator<S> {
     /// Create a new transaction-scoped document mutator.
-    pub fn new(txn: DbTxn<S>, collections: CollectionSnapshot) -> Self {
+    ///
+    /// Collections will be loaded lazily from the transaction's cache.
+    pub fn new(txn: DbTxn<S>) -> Self {
         Self {
             txn: Arc::new(TokioMutex::new(Some(txn))),
-            collections,
         }
     }
 
@@ -47,11 +55,8 @@ impl<S: Store> DbDocMutator<S> {
     ///
     /// This is used by `DbTransactionContext` to create a mutator that shares
     /// the same transaction as the `DbDocFetcher`.
-    pub(crate) fn from_shared_txn(
-        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-        collections: CollectionSnapshot,
-    ) -> Self {
-        Self { txn, collections }
+    pub(crate) fn from_shared_txn(txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
+        Self { txn }
     }
 
     /// Take the transaction out of the mutator (for commit/rollback).
@@ -78,10 +83,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Generate document ID if not present
         if doc.id().is_none() {
@@ -93,21 +95,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         let doc_id = doc.id().cloned().ok_or_else(|| {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
-
-        // Extract the datastore while holding the lock, then release the lock
-        // before awaiting. The datastore is Send + Sync so this is safe.
-        let datastore = {
-            let txn_guard = self.txn.lock().await;
-            let db_txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction already consumed")
-            })?;
-            db_txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?
-        };
 
         collection
             .create_with_datastore(&datastore, &doc)
@@ -122,24 +109,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<UpdateResult> {
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-        // Extract the datastore while holding the lock
-        let datastore = {
-            let txn_guard = self.txn.lock().await;
-            let db_txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction already consumed")
-            })?;
-            db_txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?
-        };
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .update_with_datastore(&datastore, &doc)
@@ -157,24 +127,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-        // Extract the datastore while holding the lock
-        let datastore = {
-            let txn_guard = self.txn.lock().await;
-            let db_txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction already consumed")
-            })?;
-            db_txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?
-        };
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let existed = collection
             .delete_with_datastore(&datastore, doc_id)
@@ -185,24 +138,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-        // Extract the datastore while holding the lock
-        let datastore = {
-            let txn_guard = self.txn.lock().await;
-            let db_txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction already consumed")
-            })?;
-            db_txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?
-        };
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .exists_with_datastore(&datastore, doc_id)
@@ -215,24 +151,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-        // Extract the datastore while holding the lock
-        let datastore = {
-            let txn_guard = self.txn.lock().await;
-            let db_txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction already consumed")
-            })?;
-            db_txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?
-        };
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .get_with_datastore(&datastore, doc_id)
@@ -246,34 +165,33 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collection::Collection;
     use crate::database::DB;
     use document::NormalValue;
     use schema::{CollectionVersion, FieldDescription, FieldKind};
-    use std::collections::HashMap;
     use storage::backends::MemoryStore;
 
-    fn test_collections() -> CollectionSnapshot {
+    fn test_schema() -> CollectionVersion {
         let fields = vec![
             FieldDescription::new("1", "_docID", FieldKind::doc_id()),
             FieldDescription::new("2", "name", FieldKind::string()),
             FieldDescription::new("3", "age", FieldKind::int()),
         ];
-        let col = Collection::new(CollectionVersion::new("Users", "v1", "col-users", fields));
+        CollectionVersion::new("Users", "v1", "col-users", fields)
+    }
 
-        let mut map = HashMap::new();
-        map.insert("Users".to_string(), col);
-        CollectionSnapshot::new(map)
+    async fn setup_db_with_collection() -> DB<MemoryStore> {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        db.create_collection(test_schema()).await.unwrap();
+        db
     }
 
     #[tokio::test]
     async fn test_create_document() {
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         // Create a document
         let mut doc = Document::new();
@@ -293,20 +211,18 @@ mod tests {
 
         // Verify the document was persisted
         let txn = db.new_txn(true).await.unwrap();
-        let read_mutator = DbDocMutator::new(txn, collections);
+        let read_mutator = DbDocMutator::new(txn);
         let exists = read_mutator.exists("Users", &result.doc_id).await.unwrap();
         assert!(exists);
     }
 
     #[tokio::test]
     async fn test_delete_document() {
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         // First create a document
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Bob".to_string()));
@@ -318,7 +234,7 @@ mod tests {
 
         // Now delete it
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let delete_result = mutator.delete("Users", &doc_id).await.unwrap();
         assert!(delete_result.existed);
@@ -328,20 +244,18 @@ mod tests {
 
         // Verify it's gone
         let txn = db.new_txn(true).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections);
+        let mutator = DbDocMutator::new(txn);
         let exists = mutator.exists("Users", &doc_id).await.unwrap();
         assert!(!exists);
     }
 
     #[tokio::test]
     async fn test_update_document() {
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         // First create a document
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Charlie".to_string()));
@@ -354,7 +268,7 @@ mod tests {
 
         // Now update it
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let mut updated_doc = Document::with_id(doc_id.clone());
         updated_doc.set("name", NormalValue::String("Charles".to_string()));
@@ -368,7 +282,7 @@ mod tests {
 
         // Verify the update
         let txn = db.new_txn(true).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections);
+        let mutator = DbDocMutator::new(txn);
         let fetched = mutator.get_for_update("Users", &doc_id).await.unwrap();
         assert!(fetched.is_some());
         assert_eq!(
@@ -379,13 +293,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_for_update() {
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         // First create a document
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("Diana".to_string()));
@@ -397,7 +309,7 @@ mod tests {
 
         // Get for update
         let txn = db.new_txn(true).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections);
+        let mutator = DbDocMutator::new(txn);
 
         let fetched = mutator.get_for_update("Users", &doc_id).await.unwrap();
         assert!(fetched.is_some());
@@ -411,10 +323,10 @@ mod tests {
     async fn test_unknown_collection_returns_error() {
         let store = MemoryStore::new();
         let db = DB::new(store);
-        let collections = test_collections();
+        // Don't create any collections
 
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections);
+        let mutator = DbDocMutator::new(txn);
 
         let doc = Document::new();
         let result = mutator.create("NonExistent", doc).await;
@@ -427,12 +339,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_consumed_transaction_returns_error() {
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections);
+        let mutator = DbDocMutator::new(txn);
 
         // Consume the transaction
         let txn = mutator.take_txn().await.unwrap();
@@ -450,13 +360,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_reverts_mutations() {
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         // Create a document in a transaction
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("RollbackTest".to_string()));
@@ -473,7 +381,7 @@ mod tests {
 
         // Verify document does NOT exist after rollback
         let txn = db.new_txn(true).await.unwrap();
-        let read_mutator = DbDocMutator::new(txn, collections);
+        let read_mutator = DbDocMutator::new(txn);
         let exists_after_rollback = read_mutator.exists("Users", &doc_id).await.unwrap();
         assert!(
             !exists_after_rollback,
@@ -483,13 +391,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_partial_mutation_rollback() {
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         // Create first document successfully
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let mut doc1 = Document::new();
         doc1.set("name", NormalValue::String("Doc1".to_string()));
@@ -510,7 +416,7 @@ mod tests {
 
         // Verify NEITHER document exists after rollback
         let txn = db.new_txn(true).await.unwrap();
-        let read_mutator = DbDocMutator::new(txn, collections);
+        let read_mutator = DbDocMutator::new(txn);
         assert!(
             !read_mutator.exists("Users", &doc1_id).await.unwrap(),
             "Doc1 should not exist after rollback"
@@ -525,12 +431,10 @@ mod tests {
     async fn test_concurrent_mutations_are_serialized() {
         use std::sync::Arc;
 
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = Arc::new(DbDocMutator::new(txn, collections.clone()));
+        let mutator = Arc::new(DbDocMutator::new(txn));
 
         // Spawn multiple concurrent create operations
         let m1 = mutator.clone();
@@ -574,7 +478,7 @@ mod tests {
         txn.commit().await.unwrap();
 
         let txn = db.new_txn(true).await.unwrap();
-        let read_mutator = DbDocMutator::new(txn, collections);
+        let read_mutator = DbDocMutator::new(txn);
         assert!(read_mutator.exists("Users", &doc1_id).await.unwrap());
         assert!(read_mutator.exists("Users", &doc2_id).await.unwrap());
         assert!(read_mutator.exists("Users", &doc3_id).await.unwrap());
@@ -584,13 +488,11 @@ mod tests {
     async fn test_concurrent_read_write_operations() {
         use std::sync::Arc;
 
-        let store = MemoryStore::new();
-        let db = DB::new(store);
-        let collections = test_collections();
+        let db = setup_db_with_collection().await;
 
         // First create a document
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = DbDocMutator::new(txn, collections.clone());
+        let mutator = DbDocMutator::new(txn);
 
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("ReadWriteTest".to_string()));
@@ -602,7 +504,7 @@ mod tests {
 
         // Now test concurrent read and write operations
         let txn = db.new_txn(false).await.unwrap();
-        let mutator = Arc::new(DbDocMutator::new(txn, collections.clone()));
+        let mutator = Arc::new(DbDocMutator::new(txn));
 
         let m1 = mutator.clone();
         let m2 = mutator.clone();

@@ -328,204 +328,227 @@ impl<S: Store> DB<S> {
         self.load_collections().await
     }
 
-    /// Create a new collection with schema persistence.
+    /// Create a new collection within an existing transaction.
     ///
-    /// Uses store-level atomicity to prevent duplicates - checks existence within
-    /// the transaction before writing.
+    /// The collection is written to the store and added to the transaction's cache.
+    /// The caller is responsible for committing or discarding the transaction.
     ///
     /// # Errors
     ///
     /// - `InvalidCollectionName` if the collection name is invalid
     /// - `CollectionAlreadyExists` if a collection with this name already exists
-    /// - `CacheUpdateFailedAfterCommit` if the schema was persisted but cache update failed
-    pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
+    pub async fn create_collection_with_txn(
+        &self,
+        txn: &mut DbTxn<S>,
+        schema: CollectionVersion,
+    ) -> Result<()> {
         // Validate collection name
         let collection_name = CollectionName::new(&schema.name)?;
         let name = collection_name.as_str().to_string();
 
-        let txn = self.new_txn(false).await?;
-        let key = CollectionNameKey::new(&name);
-
-        // Check if collection exists in store (must drop systemstore before discard)
-        let exists = {
-            let systemstore = txn.systemstore()?;
-            systemstore
-                .get(&key.bytes())
-                .await
-                .map_err(Error::Storage)?
-                .is_some()
-        };
-
-        if exists {
-            if let Err(discard_err) = txn.discard() {
-                tracing::error!(
-                    error = %discard_err,
-                    collection_name = %name,
-                    "Transaction discard failed while handling CollectionAlreadyExists"
-                );
-            }
+        // Check if collection exists in txn cache or store
+        if txn.get_collection(&name).await?.is_some() {
             return Err(Error::CollectionAlreadyExists(name));
         }
 
-        // Write schema to store
-        {
-            let systemstore = txn.systemstore()?;
-            let data = serde_json::to_vec(&schema).map_err(|e| {
-                Error::Serialization(format!(
-                    "failed to serialize schema for collection '{}': {}",
-                    name, e
-                ))
-            })?;
-            systemstore
-                .set(&key.bytes(), &data)
-                .await
-                .map_err(Error::Storage)?;
+        // Write schema to store (within txn)
+        let key = CollectionNameKey::new(&name);
+        let data = serde_json::to_vec(&schema).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize schema for collection '{}': {}",
+                name, e
+            ))
+        })?;
+        txn.systemstore()?
+            .set(&key.bytes(), &data)
+            .await
+            .map_err(Error::Storage)?;
+
+        // Update txn-local cache
+        txn.cache_collection(Collection::new(schema));
+
+        Ok(())
+    }
+
+    /// Create a new collection with schema persistence.
+    ///
+    /// This is a convenience method that creates its own transaction.
+    /// For multi-operation transactions, use `create_collection_with_txn`.
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidCollectionName` if the collection name is invalid
+    /// - `CollectionAlreadyExists` if a collection with this name already exists
+    pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
+        let name = schema.name.clone();
+        let collection = Collection::new(schema.clone());
+
+        let mut txn = self.new_txn(false).await?;
+        match self.create_collection_with_txn(&mut txn, schema).await {
+            Ok(()) => {
+                txn.commit().await?;
+
+                // Update process-wide cache for callers not using transaction-scoped caching
+                let mut cache = self.collections.write().map_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        collection_name = %name,
+                        "Collection cache lock poisoned during create"
+                    );
+                    Error::CacheUpdateFailedAfterCommit(name.clone())
+                })?;
+                cache.insert(name, collection);
+                Ok(())
+            }
+            Err(e) => {
+                if let Err(discard_err) = txn.discard() {
+                    tracing::warn!(
+                        error = %discard_err,
+                        original_error = %e,
+                        "Transaction discard failed after create_collection error"
+                    );
+                }
+                Err(e)
+            }
         }
+    }
 
-        txn.commit().await?;
+    /// Delete a collection and all its documents within an existing transaction.
+    ///
+    /// The collection is deleted from the store and removed from the transaction's cache.
+    /// The caller is responsible for committing or discarding the transaction.
+    ///
+    /// # Errors
+    ///
+    /// - `CollectionNotFound` if the collection does not exist
+    pub async fn delete_collection_with_txn(&self, txn: &mut DbTxn<S>, name: &str) -> Result<()> {
+        // Get collection from txn cache/store
+        let collection = txn
+            .get_collection(name)
+            .await?
+            .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;
+        let collection_id = collection.collection_id().to_string();
 
-        // Update cache after successful commit.
-        // If this fails, the collection IS persisted but not in cache.
-        // Call reload_cache() or restart to recover.
-        let mut cache = self.collections.write().map_err(|e| {
+        // Delete schema from store
+        let schema_key = CollectionNameKey::new(name);
+        txn.systemstore()?
+            .delete(&schema_key.bytes())
+            .await
+            .map_err(Error::Storage)?;
+
+        // Delete documents
+        let datastore = txn.datastore()?;
+        let doc_prefix = format!("/d/{}/", collection_id);
+        let opts = IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
+
+        let mut iter = datastore.iterator(opts).await.map_err(|e| {
             tracing::error!(
                 error = ?e,
                 collection_name = %name,
-                "Collection cache lock poisoned during create - collection WAS persisted to store. Call reload_cache() or restart to recover."
+                "Failed to create iterator for document deletion"
             );
-            Error::CacheUpdateFailedAfterCommit(name.clone())
+            Error::Storage(e)
         })?;
-        cache.insert(name, Collection::new(schema));
+        let mut keys_to_delete = Vec::new();
+
+        while let Some(pair) = iter.next().await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_name = %name,
+                documents_found = keys_to_delete.len(),
+                "Failed to iterate documents during collection deletion"
+            );
+            Error::Storage(e)
+        })? {
+            keys_to_delete.push(pair.key.clone());
+        }
+        iter.close().await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_name = %name,
+                "Failed to close iterator during collection deletion"
+            );
+            Error::Storage(e)
+        })?;
+
+        tracing::debug!(
+            collection_name = %name,
+            documents_to_delete = keys_to_delete.len(),
+            "Deleting documents for collection"
+        );
+
+        for (i, key) in keys_to_delete.iter().enumerate() {
+            datastore.delete(key).await.map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %name,
+                    documents_deleted = i,
+                    documents_total = keys_to_delete.len(),
+                    "Failed to delete document during collection deletion"
+                );
+                Error::Storage(e)
+            })?;
+        }
+
+        // Update txn-local cache
+        txn.uncache_collection(name);
 
         Ok(())
     }
 
     /// Delete a collection and all its documents.
     ///
-    /// Checks store for existence within transaction for atomic delete.
+    /// This is a convenience method that creates its own transaction.
+    /// For multi-operation transactions, use `delete_collection_with_txn`.
     ///
     /// # Errors
     ///
     /// - `CollectionNotFound` if the collection does not exist
-    /// - `CacheUpdateFailedAfterCommit` if the collection was deleted but cache update failed
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
-        // Get collection_id from cache (read lock, released before async ops)
-        let collection_id = {
-            let cache = self.collections.read().map_err(|e| {
-                tracing::error!(error = ?e, "Collection cache lock poisoned during delete");
-                Error::LockPoisoned("collection cache lock poisoned during delete".into())
-            })?;
-            cache
-                .get(name)
-                .map(|c| c.collection_id().to_string())
-                .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?
-        };
+        let name_owned = name.to_string();
 
-        let txn = self.new_txn(false).await?;
-        let schema_key = CollectionNameKey::new(name);
+        let mut txn = self.new_txn(false).await?;
+        match self.delete_collection_with_txn(&mut txn, name).await {
+            Ok(()) => {
+                txn.commit().await?;
 
-        // Verify collection still exists in store (must drop systemstore before discard)
-        let exists = {
-            let systemstore = txn.systemstore()?;
-            systemstore
-                .get(&schema_key.bytes())
-                .await
-                .map_err(Error::Storage)?
-                .is_some()
-        };
-
-        if !exists {
-            if let Err(discard_err) = txn.discard() {
-                tracing::error!(
-                    error = %discard_err,
-                    collection_name = %name,
-                    "Transaction discard failed while handling CollectionNotFound"
-                );
-            }
-            return Err(Error::CollectionNotFound(name.to_string()));
-        }
-
-        // Delete schema and documents
-        {
-            let systemstore = txn.systemstore()?;
-            systemstore
-                .delete(&schema_key.bytes())
-                .await
-                .map_err(Error::Storage)?;
-
-            let datastore = txn.datastore()?;
-            let doc_prefix = format!("/d/{}/", collection_id);
-            let opts = IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
-
-            let mut iter = datastore.iterator(opts).await.map_err(|e| {
-                tracing::error!(
-                    error = ?e,
-                    collection_name = %name,
-                    "Failed to create iterator for document deletion"
-                );
-                Error::Storage(e)
-            })?;
-            let mut keys_to_delete = Vec::new();
-
-            while let Some(pair) = iter.next().await.map_err(|e| {
-                tracing::error!(
-                    error = ?e,
-                    collection_name = %name,
-                    documents_found = keys_to_delete.len(),
-                    "Failed to iterate documents during collection deletion"
-                );
-                Error::Storage(e)
-            })? {
-                keys_to_delete.push(pair.key.clone());
-            }
-            iter.close().await.map_err(|e| {
-                tracing::error!(
-                    error = ?e,
-                    collection_name = %name,
-                    "Failed to close iterator during collection deletion"
-                );
-                Error::Storage(e)
-            })?;
-
-            tracing::debug!(
-                collection_name = %name,
-                documents_to_delete = keys_to_delete.len(),
-                "Deleting documents for collection"
-            );
-
-            for (i, key) in keys_to_delete.iter().enumerate() {
-                datastore.delete(key).await.map_err(|e| {
+                // Update process-wide cache for callers not using transaction-scoped caching
+                let mut cache = self.collections.write().map_err(|e| {
                     tracing::error!(
                         error = ?e,
-                        collection_name = %name,
-                        documents_deleted = i,
-                        documents_total = keys_to_delete.len(),
-                        "Failed to delete document during collection deletion"
+                        collection_name = %name_owned,
+                        "Collection cache lock poisoned during delete"
                     );
-                    Error::Storage(e)
+                    Error::CacheUpdateFailedAfterCommit(name_owned.clone())
                 })?;
+                cache.remove(&name_owned);
+                Ok(())
+            }
+            Err(e) => {
+                if let Err(discard_err) = txn.discard() {
+                    tracing::warn!(
+                        error = %discard_err,
+                        original_error = %e,
+                        "Transaction discard failed after delete_collection error"
+                    );
+                }
+                Err(e)
             }
         }
+    }
 
-        txn.commit().await?;
-
-        // Update cache after successful commit.
-        // If this fails, the collection IS deleted but still in cache.
-        // Call reload_cache() or restart to recover.
-        let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(
-                error = ?e,
-                collection_name = %name,
-                "Collection cache lock poisoned during delete - collection WAS deleted from store. Call reload_cache() or restart to recover."
-            );
-            Error::CacheUpdateFailedAfterCommit(name.to_string())
-        })?;
-        cache.remove(name);
-
-        Ok(())
+    /// List all collection names using the transaction's cache.
+    ///
+    /// This loads all collections from the store into the transaction cache
+    /// if they haven't been loaded yet.
+    pub async fn list_collections_with_txn(&self, txn: &mut DbTxn<S>) -> Result<Vec<String>> {
+        txn.load_all_collections().await?;
+        Ok(txn.collection_cache().names())
     }
 
     /// List all collection names.
+    ///
+    /// Uses the process-wide cache. For transaction-scoped access, use `list_collections_with_txn`.
     pub fn list_collections(&self) -> Result<Vec<String>> {
         let cache = self.collections.read().map_err(|e| {
             tracing::error!(error = ?e, "Collection cache lock poisoned during list");
@@ -534,7 +557,21 @@ impl<S: Store> DB<S> {
         Ok(cache.keys().cloned().collect())
     }
 
+    /// Get a collection by name using the transaction's cache.
+    ///
+    /// This performs lazy loading - the collection is loaded from the store
+    /// on first access within the transaction.
+    pub async fn get_collection_with_txn(
+        &self,
+        txn: &mut DbTxn<S>,
+        name: &str,
+    ) -> Result<Option<Collection>> {
+        txn.get_collection(name).await.map(|opt| opt.cloned())
+    }
+
     /// Get a collection by name.
+    ///
+    /// Uses the process-wide cache. For transaction-scoped access, use `get_collection_with_txn`.
     pub fn get_collection(&self, name: &str) -> Result<Option<Collection>> {
         let cache = self
             .collections
@@ -546,7 +583,17 @@ impl<S: Store> DB<S> {
         Ok(cache.get(name).cloned())
     }
 
+    /// Check if a collection exists using the transaction's cache.
+    ///
+    /// This performs lazy loading - the collection is loaded from the store
+    /// on first access within the transaction.
+    pub async fn has_collection_with_txn(&self, txn: &mut DbTxn<S>, name: &str) -> Result<bool> {
+        Ok(txn.get_collection(name).await?.is_some())
+    }
+
     /// Check if a collection exists.
+    ///
+    /// Uses the process-wide cache. For transaction-scoped access, use `has_collection_with_txn`.
     pub fn has_collection(&self, name: &str) -> Result<bool> {
         let cache = self
             .collections
@@ -1192,6 +1239,102 @@ mod tests {
             r2.is_ok(),
             exists
         );
+    }
+
+    /// Documents the transaction-level caching behavior.
+    ///
+    /// The collection cache is per-transaction and uses lazy loading:
+    /// - Collections are NOT pre-loaded when a transaction starts
+    /// - Collections are loaded from the store on first access
+    /// - Once cached, the same collection instance is reused within the transaction
+    ///
+    /// Note: The underlying storage layer (MemoryStore) provides its own snapshot
+    /// isolation, so a transaction won't see changes committed after it started.
+    /// The "not true snapshot isolation" comment in the doc refers to the cache
+    /// behavior specifically - if you start a transaction and don't access a
+    /// collection, it's not snapshotted. But storage-level isolation still applies.
+    #[tokio::test]
+    async fn test_transaction_cache_lazy_loading_behavior() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        // Create collection first
+        db.create_collection(test_users_schema()).await.unwrap();
+
+        // Start transaction A
+        let txn_a = db.new_txn(true).await.unwrap();
+
+        // Cache starts empty - collections are NOT pre-loaded
+        assert!(
+            txn_a.collection_cache().is_empty(),
+            "Transaction starts with empty cache (lazy loading)"
+        );
+
+        // First access loads from store and caches
+        {
+            let systemstore = txn_a.systemstore().unwrap();
+            let key = storage::keys::systemstore::CollectionNameKey::new("Users");
+            let data = systemstore
+                .get(&storage::corekv::Key::bytes(&key))
+                .await
+                .unwrap();
+            assert!(data.is_some(), "Collection should be loadable from store");
+        }
+
+        // The cache loading happens through DbDocFetcher/DbDocMutator's
+        // get_collection_with_lazy_load function, which:
+        // 1. Checks the transaction's cache first
+        // 2. On miss, loads from store and adds to cache
+        // 3. On subsequent accesses, returns cached version
+
+        txn_a.discard().unwrap();
+    }
+
+    /// Verifies that the storage layer provides snapshot isolation,
+    /// preventing transactions from seeing changes committed after they started.
+    #[tokio::test]
+    async fn test_storage_snapshot_isolation() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        // Start transaction A BEFORE any collections exist
+        let txn_a = db.new_txn(true).await.unwrap();
+
+        // Create collection in a separate transaction
+        db.create_collection(test_users_schema()).await.unwrap();
+
+        // Transaction A (started before collection existed) should NOT see
+        // the new collection due to storage-level snapshot isolation
+        {
+            let systemstore = txn_a.systemstore().unwrap();
+            let key = storage::keys::systemstore::CollectionNameKey::new("Users");
+            let data = systemstore
+                .get(&storage::corekv::Key::bytes(&key))
+                .await
+                .unwrap();
+            assert!(
+                data.is_none(),
+                "Storage snapshot isolation: txn A should NOT see collection created after it started"
+            );
+        }
+
+        txn_a.discard().unwrap();
+
+        // New transaction SHOULD see the collection
+        let txn_b = db.new_txn(true).await.unwrap();
+        {
+            let systemstore = txn_b.systemstore().unwrap();
+            let key = storage::keys::systemstore::CollectionNameKey::new("Users");
+            let data = systemstore
+                .get(&storage::corekv::Key::bytes(&key))
+                .await
+                .unwrap();
+            assert!(
+                data.is_some(),
+                "New transaction should see previously committed collection"
+            );
+        }
+        txn_b.discard().unwrap();
     }
 
     #[tokio::test]

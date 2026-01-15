@@ -27,7 +27,6 @@ use storage::corekv::Store;
 use tracing::{error, warn};
 
 use crate::collection::Collection;
-use crate::collection_snapshot::CollectionSnapshot;
 use crate::database::DB;
 use crate::doc_fetcher::DbDocFetcher;
 use crate::error::{Error, Result};
@@ -98,12 +97,18 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         &self.db
     }
 
-    /// Get a snapshot of all collections from the DB.
-    pub fn collections(&self) -> Result<CollectionSnapshot> {
-        self.db.collections_snapshot()
+    /// Get all collection names from the DB.
+    ///
+    /// Uses the process-wide cache. For transaction-scoped access,
+    /// use the transaction's collection cache directly.
+    pub fn collection_names(&self) -> Result<Vec<String>> {
+        self.db.list_collections()
     }
 
     /// Get a collection by name from the DB.
+    ///
+    /// Uses the process-wide cache. For transaction-scoped access,
+    /// use the transaction's collection cache directly.
     pub fn collection(&self, name: &str) -> Result<Option<Collection>> {
         self.db.get_collection(name)
     }
@@ -256,12 +261,10 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .await
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
 
-        // Snapshot collections at transaction start for snapshot isolation -
-        // the transaction sees a consistent view of collections throughout its lifetime
-        let collections = self.db.collections_snapshot().map_err(|e| {
-            TransactionError::execution(format!("failed to snapshot collections: {}", e))
-        })?;
-        let fetcher = Arc::new(DbDocFetcher::new(db_txn, collections));
+        // Transaction-scoped collection caching: collections are loaded lazily
+        // from the SystemStore on first access within the transaction. Once loaded,
+        // the collection metadata is cached for the transaction's duration.
+        let fetcher = Arc::new(DbDocFetcher::new(db_txn));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
 
         self.transactions
@@ -1183,9 +1186,9 @@ mod tests {
 
         // New transaction should see the collection
         let txn_id = registry.begin(true).await.unwrap();
-        let collections = registry.collections().unwrap();
+        let collection_names = registry.collection_names().unwrap();
         assert!(
-            collections.contains("NewCollection"),
+            collection_names.contains(&"NewCollection".to_string()),
             "New transaction should see recently created collection"
         );
 
