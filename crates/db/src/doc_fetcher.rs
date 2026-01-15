@@ -66,8 +66,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .get(collection_name)
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        // Extract the NamespaceView (owned) while holding the lock, then release
-        // the lock before awaiting. NamespaceView is Send + Sync so this is safe.
+        // Extract the datastore while holding the lock, then release the lock
+        // before awaiting. The datastore is Send + Sync so this is safe.
         let datastore = {
             let txn_guard = self.txn.lock().await;
             let db_txn = txn_guard.as_ref().ok_or_else(|| {
@@ -97,8 +97,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .get(collection_name)
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        // Extract the NamespaceView (owned) while holding the lock, then release
-        // the lock before awaiting. NamespaceView is Send + Sync so this is safe.
+        // Extract the datastore while holding the lock, then release the lock
+        // before awaiting. The datastore is Send + Sync so this is safe.
         let datastore = {
             let txn_guard = self.txn.lock().await;
             let db_txn = txn_guard.as_ref().ok_or_else(|| {

@@ -21,6 +21,7 @@
 pub mod document;
 pub mod error;
 pub mod executor;
+pub mod fetcher;
 mod json_convert;
 pub mod mapper;
 pub mod plan;

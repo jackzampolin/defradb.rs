@@ -28,74 +28,8 @@ use crate::txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry,
 };
 
-/// Result of fetching documents by ID, including information about missing documents.
-#[derive(Debug, Clone)]
-pub struct FetchByIdsResult {
-    docs: Vec<Document>,
-    missing_ids: Vec<String>,
-}
-
-impl FetchByIdsResult {
-    /// Create a new result with no missing IDs.
-    pub fn all_found(docs: Vec<Document>) -> Self {
-        Self {
-            docs,
-            missing_ids: Vec::new(),
-        }
-    }
-
-    /// Create a new result with some missing IDs.
-    pub fn partial(docs: Vec<Document>, missing_ids: Vec<String>) -> Self {
-        Self { docs, missing_ids }
-    }
-
-    /// Check if all requested documents were found.
-    pub fn is_complete(&self) -> bool {
-        self.missing_ids.is_empty()
-    }
-
-    /// Get the number of documents found.
-    pub fn found_count(&self) -> usize {
-        self.docs.len()
-    }
-
-    /// Get the number of missing documents.
-    pub fn missing_count(&self) -> usize {
-        self.missing_ids.len()
-    }
-
-    /// Get the found documents.
-    pub fn docs(&self) -> &[Document] {
-        &self.docs
-    }
-
-    /// Take ownership of the found documents.
-    pub fn into_docs(self) -> Vec<Document> {
-        self.docs
-    }
-
-    /// Get the IDs that were not found.
-    pub fn missing_ids(&self) -> &[String] {
-        &self.missing_ids
-    }
-}
-
-/// Storage abstraction for fetching documents.
-#[async_trait]
-pub trait DocFetcher: Send + Sync {
-    /// Get all documents from a collection.
-    async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
-
-    /// Get documents by their IDs.
-    ///
-    /// Returns both the found documents and the IDs that were not found.
-    /// This allows callers to handle missing documents appropriately.
-    async fn get_by_ids(
-        &self,
-        collection_name: &str,
-        doc_ids: &[String],
-    ) -> Result<FetchByIdsResult>;
-}
+// Re-export for backwards compatibility
+pub use crate::fetcher::{DocFetcher, FetchByIdsResult};
 
 /// Query runner that executes GraphQL queries against storage.
 pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRegistry> {
@@ -1217,5 +1151,55 @@ mod tests {
         let result = runner.begin_txn(false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn test_query_error_does_not_invalidate_transaction() {
+        let registry_fetcher = MockFetcher::new();
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.set("age", 30i64);
+        doc.generate_and_set_doc_id().unwrap();
+        registry_fetcher.add_doc("Users", doc);
+
+        let registry = MockTxnRegistry::new(registry_fetcher);
+        let runner =
+            QueryRunner::with_registry(MockFetcher::new(), vec![make_test_collection()], registry);
+
+        // Begin transaction
+        let txn_id = runner.begin_txn(false).await.unwrap();
+
+        // Execute an invalid query (unknown collection) - should return error response
+        let bad_request = QueryRequest::new("{ NonExistentCollection { name } }");
+        let bad_response = runner.execute_in_txn(bad_request, &txn_id).await;
+        assert!(
+            bad_response.has_errors(),
+            "Query for unknown collection should fail"
+        );
+        assert!(
+            bad_response.errors[0]
+                .message
+                .contains("collection not found"),
+            "Error should mention collection not found"
+        );
+
+        // The transaction should still be valid - execute a good query
+        let good_request = QueryRequest::new("{ Users { name } }");
+        let good_response = runner.execute_in_txn(good_request, &txn_id).await;
+        assert!(
+            !good_response.has_errors(),
+            "Valid query should succeed after failed query"
+        );
+        let data = good_response.data.unwrap();
+        let users = data.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+
+        // Commit should succeed - transaction was not invalidated
+        let commit_result = runner.commit_txn(&txn_id).await;
+        assert!(
+            commit_result.is_ok(),
+            "Commit should succeed after query error"
+        );
     }
 }
