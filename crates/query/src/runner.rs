@@ -1470,6 +1470,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_create_with_partial_fields() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Create with only 'name' field, no 'age'
+        let result = runner
+            .execute_mutation(
+                r#"mutation { create_Users(input: [{name: "Alice"}]) { _docID name } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+        // _docID should be generated
+        assert!(users[0].get("_docID").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_returns_generated_doc_id() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        let result = runner
+            .execute_mutation(
+                r#"mutation { create_Users(input: [{name: "Alice", age: 30}]) { _docID } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+
+        let doc_id = users[0].get("_docID").unwrap().as_str().unwrap();
+        // DocID should be a valid bae- prefixed string
+        assert!(doc_id.starts_with("bae-"), "DocID should start with 'bae-'");
+        assert!(doc_id.len() > 10, "DocID should be reasonably long");
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_with_all_field_types() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Create with string and integer fields
+        let result = runner
+            .execute_mutation(
+                r#"mutation { create_Users(input: [{name: "Alice", age: 30}]) { _docID name age } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+        assert_eq!(users[0].get("age").unwrap(), 30);
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_each_doc_gets_unique_id() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Create multiple documents with different content
+        let result = runner
+            .execute_mutation(
+                r#"mutation {
+                    create_Users(input: [
+                        {name: "Alice", age: 30},
+                        {name: "Bob", age: 25},
+                        {name: "Charlie", age: 35}
+                    ]) { _docID name }
+                }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 3);
+
+        // Collect all doc IDs
+        let doc_ids: Vec<&str> = users
+            .iter()
+            .map(|u| u.get("_docID").unwrap().as_str().unwrap())
+            .collect();
+
+        // All IDs should be unique
+        let mut unique_ids = doc_ids.clone();
+        unique_ids.sort();
+        unique_ids.dedup();
+        assert_eq!(
+            unique_ids.len(),
+            3,
+            "Each document should have a unique ID"
+        );
+    }
+
+    #[tokio::test]
     async fn test_execute_mutation_unknown_collection_returns_error() {
         let fetcher = MockFetcher::new();
         let mutator = Arc::new(MockMutator::new());
