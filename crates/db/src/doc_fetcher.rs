@@ -1,7 +1,6 @@
 //! Document fetcher for transaction-scoped queries.
 
 use async_trait::async_trait;
-use datastore::NamespaceView;
 use document::Document;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
@@ -9,8 +8,7 @@ use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
-use crate::collection::Collection;
-use crate::collection_loader::load_collection_from_systemstore;
+use crate::collection_loader::get_collection_with_lazy_load;
 use crate::txn::DbTxn;
 
 /// Document fetcher that uses a database transaction.
@@ -74,69 +72,10 @@ impl<S: Store> DbDocFetcher<S> {
     }
 }
 
-impl<S: Store + 'static> DbDocFetcher<S> {
-    /// Get a collection by name with lazy loading from the SystemStore.
-    ///
-    /// Returns the collection and datastore for document operations.
-    async fn get_collection(
-        &self,
-        collection_name: &str,
-    ) -> query::error::Result<(Collection, NamespaceView)> {
-        let (collection_opt, systemstore, datastore) = {
-            let txn_guard = self.txn.lock().await;
-            let db_txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction already consumed")
-            })?;
-            let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
-            let systemstore = db_txn.systemstore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get systemstore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
-            let datastore = db_txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
-            (collection_opt, systemstore, datastore)
-        };
-
-        let collection = if let Some(col) = collection_opt {
-            col
-        } else {
-            let loaded = load_collection_from_systemstore(&systemstore, collection_name).await?;
-            let collection = loaded
-                .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-            // Add to cache - warn if transaction was consumed during load
-            {
-                let mut txn_guard = self.txn.lock().await;
-                match txn_guard.as_mut() {
-                    Some(db_txn) => {
-                        db_txn.cache_collection(collection.clone());
-                    }
-                    None => {
-                        warn!(
-                            collection_name = %collection_name,
-                            "Transaction was consumed during collection load - cache not updated"
-                        );
-                    }
-                }
-            }
-
-            collection
-        };
-
-        Ok((collection, datastore))
-    }
-}
-
 #[async_trait]
 impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) = self.get_collection(collection_name).await?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .get_all_with_datastore(&datastore)
@@ -149,7 +88,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         collection_name: &str,
         doc_ids: &[String],
     ) -> query::error::Result<FetchByIdsResult> {
-        let (collection, datastore) = self.get_collection(collection_name).await?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();

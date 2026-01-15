@@ -1196,6 +1196,102 @@ mod tests {
         );
     }
 
+    /// Documents the transaction-level caching behavior.
+    ///
+    /// The collection cache is per-transaction and uses lazy loading:
+    /// - Collections are NOT pre-loaded when a transaction starts
+    /// - Collections are loaded from the store on first access
+    /// - Once cached, the same collection instance is reused within the transaction
+    ///
+    /// Note: The underlying storage layer (MemoryStore) provides its own snapshot
+    /// isolation, so a transaction won't see changes committed after it started.
+    /// The "not true snapshot isolation" comment in the doc refers to the cache
+    /// behavior specifically - if you start a transaction and don't access a
+    /// collection, it's not snapshotted. But storage-level isolation still applies.
+    #[tokio::test]
+    async fn test_transaction_cache_lazy_loading_behavior() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        // Create collection first
+        db.create_collection(test_users_schema()).await.unwrap();
+
+        // Start transaction A
+        let txn_a = db.new_txn(true).await.unwrap();
+
+        // Cache starts empty - collections are NOT pre-loaded
+        assert!(
+            txn_a.collection_cache().is_empty(),
+            "Transaction starts with empty cache (lazy loading)"
+        );
+
+        // First access loads from store and caches
+        {
+            let systemstore = txn_a.systemstore().unwrap();
+            let key = storage::keys::systemstore::CollectionNameKey::new("Users");
+            let data = systemstore
+                .get(&storage::corekv::Key::bytes(&key))
+                .await
+                .unwrap();
+            assert!(data.is_some(), "Collection should be loadable from store");
+        }
+
+        // The cache loading happens through DbDocFetcher/DbDocMutator's
+        // get_collection_with_lazy_load function, which:
+        // 1. Checks the transaction's cache first
+        // 2. On miss, loads from store and adds to cache
+        // 3. On subsequent accesses, returns cached version
+
+        txn_a.discard().unwrap();
+    }
+
+    /// Verifies that the storage layer provides snapshot isolation,
+    /// preventing transactions from seeing changes committed after they started.
+    #[tokio::test]
+    async fn test_storage_snapshot_isolation() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        // Start transaction A BEFORE any collections exist
+        let txn_a = db.new_txn(true).await.unwrap();
+
+        // Create collection in a separate transaction
+        db.create_collection(test_users_schema()).await.unwrap();
+
+        // Transaction A (started before collection existed) should NOT see
+        // the new collection due to storage-level snapshot isolation
+        {
+            let systemstore = txn_a.systemstore().unwrap();
+            let key = storage::keys::systemstore::CollectionNameKey::new("Users");
+            let data = systemstore
+                .get(&storage::corekv::Key::bytes(&key))
+                .await
+                .unwrap();
+            assert!(
+                data.is_none(),
+                "Storage snapshot isolation: txn A should NOT see collection created after it started"
+            );
+        }
+
+        txn_a.discard().unwrap();
+
+        // New transaction SHOULD see the collection
+        let txn_b = db.new_txn(true).await.unwrap();
+        {
+            let systemstore = txn_b.systemstore().unwrap();
+            let key = storage::keys::systemstore::CollectionNameKey::new("Users");
+            let data = systemstore
+                .get(&storage::corekv::Key::bytes(&key))
+                .await
+                .unwrap();
+            assert!(
+                data.is_some(),
+                "New transaction should see previously committed collection"
+            );
+        }
+        txn_b.discard().unwrap();
+    }
+
     #[tokio::test]
     async fn test_reload_cache_recovers_from_inconsistency() {
         // Test that reload_cache() can recover from cache-store inconsistency

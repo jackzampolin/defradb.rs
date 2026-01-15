@@ -1,16 +1,13 @@
 //! Document mutator for transaction-scoped mutations.
 
 use async_trait::async_trait;
-use datastore::NamespaceView;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::warn;
 
-use crate::collection::Collection;
-use crate::collection_loader::load_collection_from_systemstore;
+use crate::collection_loader::get_collection_with_lazy_load;
 use crate::txn::DbTxn;
 
 /// Document mutator that uses a database transaction.
@@ -77,61 +74,6 @@ impl<S: Store> DbDocMutator<S> {
     pub async fn is_consumed(&self) -> bool {
         self.txn.lock().await.is_none()
     }
-
-    /// Get a collection by name, loading from the transaction's cache with lazy loading.
-    async fn get_collection(
-        &self,
-        collection_name: &str,
-    ) -> query::error::Result<(Collection, NamespaceView)> {
-        let (collection_opt, systemstore, datastore) = {
-            let txn_guard = self.txn.lock().await;
-            let db_txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction already consumed")
-            })?;
-            let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
-            let systemstore = db_txn.systemstore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get systemstore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
-            let datastore = db_txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
-            (collection_opt, systemstore, datastore)
-        };
-
-        let collection = if let Some(col) = collection_opt {
-            col
-        } else {
-            let loaded = load_collection_from_systemstore(&systemstore, collection_name).await?;
-            let collection = loaded
-                .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-            // Add to cache - warn if transaction was consumed during load
-            {
-                let mut txn_guard = self.txn.lock().await;
-                match txn_guard.as_mut() {
-                    Some(db_txn) => {
-                        db_txn.cache_collection(collection.clone());
-                    }
-                    None => {
-                        warn!(
-                            collection_name = %collection_name,
-                            "Transaction was consumed during collection load - cache not updated"
-                        );
-                    }
-                }
-            }
-
-            collection
-        };
-
-        Ok((collection, datastore))
-    }
 }
 
 #[async_trait]
@@ -141,7 +83,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
-        let (collection, datastore) = self.get_collection(collection_name).await?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         // Generate document ID if not present
         if doc.id().is_none() {
@@ -167,7 +109,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<UpdateResult> {
-        let (collection, datastore) = self.get_collection(collection_name).await?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .update_with_datastore(&datastore, &doc)
@@ -185,7 +127,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        let (collection, datastore) = self.get_collection(collection_name).await?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let existed = collection
             .delete_with_datastore(&datastore, doc_id)
@@ -196,7 +138,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
-        let (collection, datastore) = self.get_collection(collection_name).await?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .exists_with_datastore(&datastore, doc_id)
@@ -209,7 +151,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
-        let (collection, datastore) = self.get_collection(collection_name).await?;
+        let (collection, datastore) = get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         collection
             .get_with_datastore(&datastore, doc_id)
