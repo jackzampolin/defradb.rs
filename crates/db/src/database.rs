@@ -615,6 +615,88 @@ impl<S: Store> DB<S> {
         })?;
         Ok(CollectionSnapshot::new(cache.clone()))
     }
+
+    /// Extract a Merkle proof from the blockstore.
+    ///
+    /// This generates a proof demonstrating that the block at `leaf_cid` is part
+    /// of the Merkle chain leading to `root_cid`. The proof can be used to verify
+    /// data integrity without access to the full database.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf_cid` - The CID of the leaf block (e.g., a document update)
+    /// * `root_cid` - The CID of the root block (e.g., the collection head)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(proof))` - A valid proof path exists from leaf to root
+    /// * `Ok(None)` - No path exists (blocks are unrelated or one doesn't exist)
+    /// * `Err(Error)` - An error occurred during proof extraction
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let proof = db.extract_proof(&leaf_cid, &root_cid).await?;
+    /// if let Some(proof) = proof {
+    ///     // Verify the proof
+    ///     assert!(crypto::verify_proof(&proof)?);
+    ///
+    ///     // Optionally sign the proof
+    ///     let signed = crypto::SignedMerkleProof::sign(proof, &private_key)?;
+    /// }
+    /// ```
+    pub async fn extract_proof(
+        &self,
+        leaf_cid: &cid::Cid,
+        root_cid: &cid::Cid,
+    ) -> Result<Option<crypto::MerkleProof>>
+    where
+        S: 'static,
+    {
+        // Create a blockstore wrapper for proof extraction
+        let blockstore = blockstore::DefraBlockstore::new(self.store.clone(), false);
+
+        // Use the crypto crate's extract_proof function
+        crypto::extract_proof(&blockstore, *leaf_cid, *root_cid)
+            .await
+            .map_err(|e| Error::Other(format!("failed to extract proof: {}", e)))
+    }
+
+    /// Extract and sign a Merkle proof.
+    ///
+    /// This is a convenience method that extracts a proof and signs it in one step.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf_cid` - The CID of the leaf block
+    /// * `root_cid` - The CID of the root block
+    /// * `private_key` - The private key to sign with (Ed25519 or secp256k1)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(signed_proof))` - A signed proof
+    /// * `Ok(None)` - No proof path exists
+    /// * `Err(Error)` - An error occurred
+    pub async fn extract_signed_proof(
+        &self,
+        leaf_cid: &cid::Cid,
+        root_cid: &cid::Cid,
+        private_key: &dyn crypto::PrivateKey,
+    ) -> Result<Option<crypto::SignedMerkleProof>>
+    where
+        S: 'static,
+    {
+        let proof = self.extract_proof(leaf_cid, root_cid).await?;
+
+        match proof {
+            Some(p) => {
+                let signed = crypto::SignedMerkleProof::sign(p, private_key)
+                    .map_err(|e| Error::Other(format!("failed to sign proof: {}", e)))?;
+                Ok(Some(signed))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
