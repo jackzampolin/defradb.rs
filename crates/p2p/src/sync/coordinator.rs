@@ -89,7 +89,7 @@ pub struct SyncCoordinator<B: Blockstore> {
     manager: SyncManager<B>,
 
     /// Peer state tracker
-    peer_state: PeerStateTracker,
+    peer_state: Arc<PeerStateTracker>,
 
     /// Local peer ID (for creator field in broadcasts)
     local_peer_id: String,
@@ -106,8 +106,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = host.local_peer_id().await?.to_string();
         let broadcaster = Broadcaster::new(host.clone());
-        let (manager, events) = SyncManager::new(blockstore, config);
-        let peer_state = PeerStateTracker::new();
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
 
         Ok((
             Self {
@@ -348,6 +348,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Get the host handle for direct peer communication.
     pub fn host(&self) -> &P2PHostHandle {
         &self.host
+    }
+
+    /// Get the sync manager reference.
+    pub fn manager(&self) -> &SyncManager<B> {
+        &self.manager
     }
 
     // Note: The request_block and request_block_from_any_peer methods were removed.

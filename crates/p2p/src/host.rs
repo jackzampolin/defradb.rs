@@ -16,13 +16,14 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use cid::Cid;
 use futures::StreamExt;
 use libipld::DefaultParams;
 use libp2p::{
     gossipsub, identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use libp2p_bitswap_next::BitswapStore;
+use libp2p_bitswap_next::{BitswapEvent, BitswapStore, QueryId};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -103,6 +104,20 @@ pub enum HostCommand {
 
     /// Shutdown the host.
     Shutdown,
+
+    /// Start a Bitswap sync operation to fetch missing blocks.
+    BitswapSync {
+        cid: Cid,
+        providers: Vec<PeerId>,
+        missing: Vec<Cid>,
+        response: oneshot::Sender<Result<QueryId>>,
+    },
+
+    /// Cancel a Bitswap query.
+    BitswapCancel {
+        query_id: QueryId,
+        response: oneshot::Sender<bool>,
+    },
 }
 
 /// Events emitted by the P2P host.
@@ -144,6 +159,19 @@ pub enum HostEvent {
 
     /// A peer unsubscribed from a topic.
     PeerUnsubscribed { peer_id: PeerId, topic: String },
+
+    /// Bitswap sync progress update.
+    BitswapProgress {
+        query_id: QueryId,
+        missing_count: usize,
+    },
+
+    /// Bitswap sync completed (success or failure).
+    BitswapComplete {
+        query_id: QueryId,
+        success: bool,
+        error: Option<String>,
+    },
 }
 
 /// Opaque response channel for sending PushLog responses.
@@ -322,6 +350,56 @@ impl P2PHostHandle {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::SubscribedTopics {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
+    }
+
+    /// Start a Bitswap sync operation to fetch missing blocks.
+    ///
+    /// This initiates a DAG sync that will fetch the specified block and all
+    /// its linked blocks from the given providers.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The root CID to sync
+    /// * `providers` - Peer IDs that may have the blocks
+    /// * `missing` - Known missing CIDs to fetch
+    ///
+    /// # Returns
+    ///
+    /// A `QueryId` that can be used to track progress and cancel the query.
+    pub async fn bitswap_sync(
+        &self,
+        cid: Cid,
+        providers: Vec<PeerId>,
+        missing: Vec<Cid>,
+    ) -> Result<QueryId> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::BitswapSync {
+                cid,
+                providers,
+                missing,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Cancel an in-progress Bitswap query.
+    ///
+    /// # Returns
+    ///
+    /// `true` if a query was cancelled, `false` if no query was found.
+    pub async fn bitswap_cancel(&self, query_id: QueryId) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::BitswapCancel {
+                query_id,
                 response: response_tx,
             })
             .await
@@ -579,6 +657,35 @@ impl P2PHost {
                 info!("Shutdown requested");
                 return false;
             }
+
+            HostCommand::BitswapSync {
+                cid,
+                providers,
+                missing,
+                response,
+            } => {
+                debug!(
+                    cid = %cid,
+                    providers = ?providers,
+                    missing_count = missing.len(),
+                    "Starting Bitswap sync"
+                );
+                let query_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .bitswap_sync(cid, providers, missing.into_iter());
+                if response.send(Ok(query_id)).is_err() {
+                    debug!(cid = %cid, "BitswapSync command response dropped - caller cancelled");
+                }
+            }
+
+            HostCommand::BitswapCancel { query_id, response } => {
+                debug!(query_id = ?query_id, "Cancelling Bitswap query");
+                let cancelled = self.swarm.behaviour_mut().bitswap_cancel(query_id);
+                if response.send(cancelled).is_err() {
+                    debug!(query_id = ?query_id, "BitswapCancel command response dropped - caller cancelled");
+                }
+            }
         }
         true
     }
@@ -651,6 +758,14 @@ impl P2PHost {
 
             SwarmEvent::Behaviour(DefraEvent::GossipSub(gossipsub_event)) => {
                 self.handle_gossipsub_event(gossipsub_event).await;
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::Bitswap(bitswap_event)) => {
+                self.handle_bitswap_event(bitswap_event).await;
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::Kademlia(kad_event)) => {
+                self.handle_kademlia_event(kad_event).await;
             }
 
             SwarmEvent::OutgoingConnectionError {
@@ -890,6 +1005,107 @@ impl P2PHost {
 
             gossipsub::Event::GossipsubNotSupported { peer_id } => {
                 debug!("Peer {} does not support gossipsub", peer_id);
+            }
+        }
+    }
+
+    /// Handle Bitswap events.
+    async fn handle_bitswap_event(&mut self, event: BitswapEvent) {
+        match event {
+            BitswapEvent::Progress(query_id, missing_count) => {
+                debug!(
+                    query_id = ?query_id,
+                    missing_count = missing_count,
+                    "Bitswap sync progress"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::BitswapProgress {
+                        query_id,
+                        missing_count,
+                    })
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        query_id = ?query_id,
+                        "Failed to send BitswapProgress event - receiver dropped"
+                    );
+                }
+            }
+
+            BitswapEvent::Complete(query_id, result) => {
+                let (success, error) = match result {
+                    Ok(()) => {
+                        debug!(query_id = ?query_id, "Bitswap sync completed successfully");
+                        (true, None)
+                    }
+                    Err(e) => {
+                        warn!(query_id = ?query_id, error = %e, "Bitswap sync failed");
+                        (false, Some(e.to_string()))
+                    }
+                };
+
+                if self
+                    .event_tx
+                    .send(HostEvent::BitswapComplete {
+                        query_id,
+                        success,
+                        error,
+                    })
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        query_id = ?query_id,
+                        "Failed to send BitswapComplete event - receiver dropped"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Handle Kademlia DHT events.
+    async fn handle_kademlia_event(&mut self, event: libp2p::kad::Event) {
+        use libp2p::kad;
+
+        match event {
+            kad::Event::RoutingUpdated {
+                peer, addresses, ..
+            } => {
+                debug!(
+                    peer_id = %peer,
+                    addresses = ?addresses,
+                    "Kademlia routing table updated"
+                );
+            }
+
+            kad::Event::OutboundQueryProgressed { id, result, .. } => {
+                debug!(query_id = ?id, "Kademlia query progressed: {:?}", result);
+            }
+
+            kad::Event::InboundRequest { request } => {
+                debug!("Kademlia inbound request: {:?}", request);
+            }
+
+            kad::Event::RoutablePeer { peer, address } => {
+                debug!(peer_id = %peer, address = %address, "Found routable peer via Kademlia");
+            }
+
+            kad::Event::PendingRoutablePeer { peer, address } => {
+                debug!(
+                    peer_id = %peer,
+                    address = %address,
+                    "Found pending routable peer via Kademlia"
+                );
+            }
+
+            kad::Event::UnroutablePeer { peer } => {
+                debug!(peer_id = %peer, "Peer is unroutable via Kademlia");
+            }
+
+            kad::Event::ModeChanged { new_mode } => {
+                debug!(mode = ?new_mode, "Kademlia mode changed");
             }
         }
     }

@@ -32,6 +32,8 @@ use std::sync::Arc;
 
 use blockstore::Blockstore;
 use cid::Cid;
+use libp2p::PeerId;
+use libp2p_bitswap_next::QueryId;
 use tokio::sync::mpsc;
 
 use super::coordinator::SyncCoordinator;
@@ -57,6 +59,8 @@ pub enum ReplicationResult {
     MergedButNotMarked { cid: Cid, error: String },
     /// Event channel closed
     ChannelClosed,
+    /// Bitswap fetch started for missing blocks
+    BitswapFetchStarted { root_cid: Cid, query_id: QueryId },
 }
 
 /// Configuration for the replication loop.
@@ -154,6 +158,13 @@ impl ReplicationLoop {
                     tracing::info!("Event channel closed, stopping replication loop");
                     break;
                 }
+                ReplicationResult::BitswapFetchStarted { root_cid, query_id } => {
+                    tracing::debug!(
+                        cid = %root_cid,
+                        query_id = ?query_id,
+                        "Bitswap fetch started for missing blocks"
+                    );
+                }
             }
         }
 
@@ -197,6 +208,53 @@ impl ReplicationLoop {
                 reason: "already merged".to_string(),
             },
             SyncEvent::SyncError { cid, error } => ReplicationResult::Failed { cid, error },
+            SyncEvent::DagNeedsFetch {
+                root_cid,
+                missing,
+                providers,
+                ..
+            } => {
+                // Initiate Bitswap fetch for missing blocks
+                Self::handle_dag_needs_fetch(coordinator, root_cid, missing, providers).await
+            }
+        }
+    }
+
+    /// Handle a DagNeedsFetch event by initiating a Bitswap sync.
+    async fn handle_dag_needs_fetch<B>(
+        coordinator: &SyncCoordinator<B>,
+        root_cid: Cid,
+        missing: Vec<Cid>,
+        providers: Vec<PeerId>,
+    ) -> ReplicationResult
+    where
+        B: Blockstore + 'static,
+    {
+        tracing::debug!(
+            cid = %root_cid,
+            missing_count = missing.len(),
+            provider_count = providers.len(),
+            "Initiating Bitswap fetch for missing blocks"
+        );
+
+        // Start Bitswap sync via host
+        match coordinator.host().bitswap_sync(root_cid, providers, missing).await {
+            Ok(query_id) => {
+                // Register the query so we can track completion
+                coordinator.manager().register_query(query_id, root_cid);
+                ReplicationResult::BitswapFetchStarted { root_cid, query_id }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    cid = %root_cid,
+                    error = %e,
+                    "Failed to start Bitswap fetch"
+                );
+                ReplicationResult::Failed {
+                    cid: root_cid,
+                    error: format!("Failed to start Bitswap fetch: {}", e),
+                }
+            }
         }
     }
 
@@ -358,6 +416,15 @@ impl ReplicationLoop {
                         },
                         SyncEvent::SyncError { cid, error } => {
                             ReplicationResult::Failed { cid, error }
+                        }
+                        SyncEvent::DagNeedsFetch {
+                            root_cid,
+                            missing,
+                            providers,
+                            ..
+                        } => {
+                            Self::handle_dag_needs_fetch(&coordinator, root_cid, missing, providers)
+                                .await
                         }
                     };
                     results.push(result);
