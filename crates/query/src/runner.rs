@@ -1517,4 +1517,362 @@ mod tests {
         // Verify document was deleted
         assert!(mutator.created_docs().is_empty());
     }
+
+    // ==========================================================================
+    // Upsert mutation tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_execute_upsert_creates_when_not_exists() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Generate a valid docID that doesn't exist in the store
+        let mut template = Document::new();
+        template.set("name", "Template");
+        template.generate_and_set_doc_id().unwrap();
+        let new_doc_id = template.id().unwrap().to_string();
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        let mutation = format!(
+            r#"mutation {{ upsert_Users(docIDs: ["{}"], input: {{name: "Alice", age: 30}}) {{ _docID name age }} }}"#,
+            new_doc_id
+        );
+        let result = runner.execute_mutation(&mutation).await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+        assert_eq!(users[0].get("age").unwrap(), 30);
+
+        // Verify document was created
+        assert_eq!(mutator.created_docs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_upsert_updates_when_exists() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with a document
+        let mut existing_doc = Document::new();
+        existing_doc.set("name", "Alice");
+        existing_doc.set("age", 25i64);
+        existing_doc.generate_and_set_doc_id().unwrap();
+        let existing_id = existing_doc.id().unwrap().to_string();
+        mutator.add_doc("Users", existing_doc);
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        let mutation = format!(
+            r#"mutation {{ upsert_Users(docIDs: ["{}"], input: {{age: 30}}) {{ _docID name age }} }}"#,
+            existing_id
+        );
+        let result = runner.execute_mutation(&mutation).await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        // Name should be preserved from existing doc
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+        // Age should be updated
+        assert_eq!(users[0].get("age").unwrap(), 30);
+    }
+
+    #[tokio::test]
+    async fn test_execute_upsert_mixed_create_and_update() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with one document
+        let mut existing_doc = Document::new();
+        existing_doc.set("name", "Alice");
+        existing_doc.set("age", 25i64);
+        existing_doc.generate_and_set_doc_id().unwrap();
+        let existing_id = existing_doc.id().unwrap().to_string();
+        mutator.add_doc("Users", existing_doc);
+
+        // Generate a new ID that doesn't exist
+        let mut template = Document::new();
+        template.set("name", "Template");
+        template.generate_and_set_doc_id().unwrap();
+        let new_id = template.id().unwrap().to_string();
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        let mutation = format!(
+            r#"mutation {{ upsert_Users(docIDs: ["{}", "{}"], input: {{name: "Updated", age: 99}}) {{ _docID name age }} }}"#,
+            existing_id, new_id
+        );
+        let result = runner.execute_mutation(&mutation).await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 2);
+
+        // Both should have the upserted values
+        for user in users {
+            assert_eq!(user.get("name").unwrap(), "Updated");
+            assert_eq!(user.get("age").unwrap(), 99);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_upsert_create_without_doc_id() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Upsert without docIDs creates a new document
+        let result = runner
+            .execute_mutation(
+                r#"mutation { upsert_Users(input: {name: "NewUser", age: 42}) { _docID name age } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert!(users[0].get("_docID").is_some());
+        assert_eq!(users[0].get("name").unwrap(), "NewUser");
+        assert_eq!(users[0].get("age").unwrap(), 42);
+
+        // Verify document was created
+        assert_eq!(mutator.created_docs().len(), 1);
+    }
+
+    // ==========================================================================
+    // Filter-based mutation tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_execute_update_with_filter() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with documents
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 20i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_id = doc1.id().unwrap().to_string();
+        fetcher.add_doc("Users", doc1.clone());
+        mutator.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 30i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_id = doc2.id().unwrap().to_string();
+        fetcher.add_doc("Users", doc2.clone());
+        mutator.add_doc("Users", doc2);
+
+        let mut doc3 = Document::new();
+        doc3.set("name", "Charlie");
+        doc3.set("age", 40i64);
+        doc3.generate_and_set_doc_id().unwrap();
+        let doc3_id = doc3.id().unwrap().to_string();
+        fetcher.add_doc("Users", doc3.clone());
+        mutator.add_doc("Users", doc3);
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Update only users with age >= 30
+        let result = runner
+            .execute_mutation(
+                r#"mutation { update_Users(filter: {age: {_gte: 30}}, input: {name: "Updated"}) { _docID name } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        // Only Bob (30) and Charlie (40) should be updated
+        assert_eq!(users.len(), 2);
+
+        let updated_ids: Vec<&str> = users
+            .iter()
+            .map(|u| u.get("_docID").unwrap().as_str().unwrap())
+            .collect();
+        assert!(!updated_ids.contains(&doc1_id.as_str())); // Alice (20) not updated
+        assert!(updated_ids.contains(&doc2_id.as_str())); // Bob (30) updated
+        assert!(updated_ids.contains(&doc3_id.as_str())); // Charlie (40) updated
+    }
+
+    #[tokio::test]
+    async fn test_execute_delete_with_filter() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with documents
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 25i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1.clone());
+        mutator.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 35i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_id = doc2.id().unwrap().to_string();
+        fetcher.add_doc("Users", doc2.clone());
+        mutator.add_doc("Users", doc2);
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Delete only users with age > 30
+        let result = runner
+            .execute_mutation(
+                r#"mutation { delete_Users(filter: {age: {_gt: 30}}) { _docID } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        // Only Bob should be deleted
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("_docID").unwrap().as_str().unwrap(), doc2_id);
+    }
+
+    #[tokio::test]
+    async fn test_execute_upsert_with_filter() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with documents
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 25i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc1.clone());
+        mutator.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 35i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        let doc2_id = doc2.id().unwrap().to_string();
+        fetcher.add_doc("Users", doc2.clone());
+        mutator.add_doc("Users", doc2);
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Upsert users with age > 30 (should update Bob)
+        let result = runner
+            .execute_mutation(
+                r#"mutation { upsert_Users(filter: {age: {_gt: 30}}, input: {name: "Updated"}) { _docID name } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("_docID").unwrap().as_str().unwrap(), doc2_id);
+        assert_eq!(users[0].get("name").unwrap(), "Updated");
+    }
+
+    #[tokio::test]
+    async fn test_filter_mutation_no_matches_returns_empty() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with a document
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.set("age", 25i64);
+        doc.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc.clone());
+        mutator.add_doc("Users", doc);
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Filter matches nothing (no users with age > 100)
+        let result = runner
+            .execute_mutation(
+                r#"mutation { update_Users(filter: {age: {_gt: 100}}, input: {name: "Updated"}) { _docID } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        // Should return empty array, not an error
+        assert!(users.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_filter_delete_no_matches_returns_empty() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with a document
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.set("age", 25i64);
+        doc.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc.clone());
+        mutator.add_doc("Users", doc);
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Filter matches nothing
+        let result = runner
+            .execute_mutation(
+                r#"mutation { delete_Users(filter: {name: {_eq: "NonExistent"}}) { _docID } }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert!(users.is_empty());
+
+        // Original document should still exist
+        assert_eq!(mutator.created_docs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_doc_ids_takes_priority_over_filter() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with documents
+        let mut doc1 = Document::new();
+        doc1.set("name", "Alice");
+        doc1.set("age", 50i64);
+        doc1.generate_and_set_doc_id().unwrap();
+        let doc1_id = doc1.id().unwrap().to_string();
+        fetcher.add_doc("Users", doc1.clone());
+        mutator.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("name", "Bob");
+        doc2.set("age", 60i64);
+        doc2.generate_and_set_doc_id().unwrap();
+        fetcher.add_doc("Users", doc2.clone());
+        mutator.add_doc("Users", doc2);
+
+        let runner =
+            QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        // Provide both docIDs and filter - docIDs should take priority
+        // Filter would match both, but docIDs only specifies doc1
+        let mutation = format!(
+            r#"mutation {{ update_Users(docIDs: ["{}"], filter: {{age: {{_gte: 50}}}}, input: {{name: "Updated"}}) {{ _docID name }} }}"#,
+            doc1_id
+        );
+        let result = runner.execute_mutation(&mutation).await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        // Only doc1 should be updated (docIDs takes priority)
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("_docID").unwrap().as_str().unwrap(), doc1_id);
+    }
 }

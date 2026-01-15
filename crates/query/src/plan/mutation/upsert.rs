@@ -263,7 +263,7 @@ impl UpsertNode {
 
         // Set document ID at index 0
         if let Some(doc_id) = document.id() {
-            doc.set_doc_id(&doc_id.to_string());
+            doc.set_doc_id(doc_id.to_string());
         }
 
         // Map each field from the document
@@ -304,7 +304,14 @@ impl PlanNode for UpsertNode {
         if !self.did_upsert {
             if let Some(ref doc_ids) = self.doc_ids {
                 // Upsert by document IDs
-                let input = self.single_input.clone().unwrap_or_default();
+                let input = self.single_input.clone().unwrap_or_else(|| {
+                    tracing::warn!(
+                        collection = %self.collection_name,
+                        doc_id_count = doc_ids.len(),
+                        "Upsert called with doc_ids but no input fields - documents will be created/updated with empty data"
+                    );
+                    UpsertInput::default()
+                });
                 for doc_id_str in doc_ids.clone() {
                     self.upsert_by_id(&doc_id_str, &input).await?;
                 }
@@ -595,5 +602,116 @@ mod tests {
 
         let result = node.next().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_upsert_invalid_doc_id_returns_error() {
+        let mutator = Arc::new(MockMutator::new());
+        let mapping = make_test_mapping();
+
+        let input = UpsertInput::new()
+            .with_field("name", json!("Alice"));
+
+        // Use an invalid DocID format
+        let mut node = UpsertNode::new("Users", mutator, mapping)
+            .with_doc_ids(vec!["not-a-valid-docid".to_string()])
+            .with_input(input);
+
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+
+        let result = node.next().await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Invalid DocID") || err_msg.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn test_upsert_with_batch_inputs() {
+        let mutator = Arc::new(MockMutator::new());
+        let mapping = make_test_mapping();
+
+        let inputs = vec![
+            UpsertInput::new()
+                .with_field("name", json!("User1"))
+                .with_field("email", json!("user1@example.com")),
+            UpsertInput::new()
+                .with_field("name", json!("User2"))
+                .with_field("email", json!("user2@example.com")),
+            UpsertInput::new()
+                .with_field("name", json!("User3"))
+                .with_field("email", json!("user3@example.com")),
+        ];
+
+        let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
+            .with_inputs(inputs);
+
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+
+        let mut count = 0;
+        while node.next().await.unwrap() {
+            count += 1;
+        }
+
+        assert_eq!(count, 3);
+        assert_eq!(node.created_count(), 3);
+        assert_eq!(mutator.doc_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_empty_doc_ids_does_nothing() {
+        let mutator = Arc::new(MockMutator::new());
+        let mapping = make_test_mapping();
+
+        let input = UpsertInput::new()
+            .with_field("name", json!("Alice"));
+
+        // Empty doc_ids list
+        let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
+            .with_doc_ids(vec![])
+            .with_input(input);
+
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+
+        // No documents should be created
+        assert!(!node.next().await.unwrap());
+        assert_eq!(node.upserted_count(), 0);
+        assert_eq!(mutator.doc_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_reinit_clears_state() {
+        let mutator = Arc::new(MockMutator::new());
+        let mapping = make_test_mapping();
+
+        let input = UpsertInput::new()
+            .with_field("name", json!("Alice"));
+
+        let mut node = UpsertNode::new("Users", mutator.clone(), mapping)
+            .with_input(input);
+
+        // First run
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+        assert!(node.next().await.unwrap());
+        assert!(!node.next().await.unwrap());
+        assert_eq!(node.created_count(), 1);
+
+        // Close and reinit
+        node.close().await.unwrap();
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+
+        // Should be able to run again (created_count resets after init)
+        assert!(node.next().await.unwrap());
+        assert!(!node.next().await.unwrap());
+        assert_eq!(node.created_count(), 1); // Second batch count
+
+        // Note: Since same input creates same DocID (deterministic),
+        // the second create overwrites the first in storage
+        // Total unique docs is 1, not 2
+        assert_eq!(mutator.doc_count(), 1);
     }
 }
