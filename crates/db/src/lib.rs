@@ -57,7 +57,7 @@ pub use doc_fetcher::DbDocFetcher;
 pub use error::{Error, Result};
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
-pub use txn_registry::DbTransactionRegistry;
+pub use txn_registry::{CleanupResult, DbTransactionRegistry};
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};

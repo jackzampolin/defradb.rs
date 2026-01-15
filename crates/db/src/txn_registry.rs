@@ -33,6 +33,30 @@ use crate::doc_fetcher::DbDocFetcher;
 use crate::error::{Error, Result};
 use crate::txn_context::DbTransactionContext;
 
+/// Result of a stale transaction cleanup operation.
+///
+/// Provides visibility into both successful cleanups and failures,
+/// allowing callers to monitor for resource leaks.
+#[derive(Debug, Clone, Default)]
+pub struct CleanupResult {
+    /// Number of transactions successfully cleaned up.
+    pub cleaned: usize,
+    /// Transactions that failed to clean up: (transaction_id, error_message).
+    pub failed: Vec<(String, String)>,
+}
+
+impl CleanupResult {
+    /// Returns true if all cleanup operations succeeded.
+    pub fn is_complete(&self) -> bool {
+        self.failed.is_empty()
+    }
+
+    /// Total number of transactions that were attempted to be cleaned.
+    pub fn attempted(&self) -> usize {
+        self.cleaned + self.failed.len()
+    }
+}
+
 /// Transaction registry that manages database transactions for query execution.
 ///
 /// Implements `query::TransactionRegistry` to provide transaction lifecycle
@@ -149,12 +173,13 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// and rolls them back, freeing resources. This should be called periodically
     /// by a background task to prevent resource leaks from dropped `TransactionGuard`s.
     ///
-    /// Returns the number of transactions that were cleaned up.
+    /// Returns a `CleanupResult` containing both successfully cleaned transactions
+    /// and any failures. Check `result.is_complete()` to verify all cleanups succeeded.
     ///
     /// # Errors
     ///
     /// Returns an error if the lock is poisoned, indicating a panic elsewhere.
-    pub async fn cleanup_stale_transactions(&self, max_age: Duration) -> Result<usize> {
+    pub async fn cleanup_stale_transactions(&self, max_age: Duration) -> Result<CleanupResult> {
         let now = std::time::Instant::now();
 
         // Collect stale transaction IDs while holding the read lock briefly
@@ -170,7 +195,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 .collect()
         };
 
-        let mut cleaned = 0;
+        let mut result = CleanupResult::default();
         for txn_id in stale_ids {
             // Remove and rollback each stale transaction
             let ctx = {
@@ -195,18 +220,18 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                             error = %e,
                             "Failed to discard stale transaction during cleanup"
                         );
-                        // Don't count as cleaned - storage may still hold resources
+                        result.failed.push((txn_id.clone(), e.to_string()));
                     } else {
-                        cleaned += 1;
+                        result.cleaned += 1;
                     }
                 } else {
                     // Transaction was already consumed (committed/rolled back)
-                    cleaned += 1;
+                    result.cleaned += 1;
                 }
             }
         }
 
-        Ok(cleaned)
+        Ok(result)
     }
 
     /// Get the number of active transactions in the registry.
@@ -996,12 +1021,13 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Cleanup with a very short max_age (0 means everything is stale)
-        let cleaned = registry
+        let result = registry
             .cleanup_stale_transactions(std::time::Duration::from_millis(0))
             .await
             .unwrap();
 
-        assert_eq!(cleaned, 2, "Should have cleaned up 2 transactions");
+        assert_eq!(result.cleaned, 2, "Should have cleaned up 2 transactions");
+        assert!(result.is_complete(), "All cleanups should succeed");
         assert_eq!(
             registry.active_transaction_count().unwrap(),
             0,
@@ -1026,12 +1052,13 @@ mod tests {
         assert_eq!(registry.active_transaction_count().unwrap(), 2);
 
         // Cleanup with max_age that only catches the old transaction
-        let cleaned = registry
+        let result = registry
             .cleanup_stale_transactions(std::time::Duration::from_millis(40))
             .await
             .unwrap();
 
-        assert_eq!(cleaned, 1, "Should have cleaned up 1 old transaction");
+        assert_eq!(result.cleaned, 1, "Should have cleaned up 1 old transaction");
+        assert!(result.is_complete(), "All cleanups should succeed");
         assert_eq!(
             registry.active_transaction_count().unwrap(),
             1,
@@ -1105,7 +1132,11 @@ mod tests {
 
         // Step 4: A NEW transaction started after commit SHOULD see the data
         let new_reader_txn_id = registry.begin(true).await.unwrap();
-        let new_reader_ctx = registry.get(&new_reader_txn_id).into_result().unwrap().unwrap();
+        let new_reader_ctx = registry
+            .get(&new_reader_txn_id)
+            .into_result()
+            .unwrap()
+            .unwrap();
         let new_reader_fetcher = new_reader_ctx.doc_fetcher();
 
         let new_docs = new_reader_fetcher.get_all("Users").await.unwrap();

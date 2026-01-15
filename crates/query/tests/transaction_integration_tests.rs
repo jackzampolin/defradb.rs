@@ -139,11 +139,7 @@ async fn test_execute_multiple_queries_in_transaction() {
     for i in 0..3 {
         let request = QueryRequest::new("{ Users { name } }");
         let response = runner.execute_in_txn(request, &txn_handle).await;
-        assert!(
-            !response.has_errors(),
-            "Query {} should succeed",
-            i
-        );
+        assert!(!response.has_errors(), "Query {} should succeed", i);
     }
 
     runner.commit_txn(&txn_handle).await.unwrap();

@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::{Result, TransactionError};
 use crate::fetcher::{DocFetcher, FetchByIdsResult};
-use crate::txn::{GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry};
+use crate::txn::{
+    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
+};
 
 /// Mock fetcher for testing that stores documents in memory.
 pub struct MockFetcher {
