@@ -150,6 +150,17 @@ impl Mutation {
         self.document_mapping = mapping;
         self
     }
+
+    /// Get all requested simple fields (not nested selects or aggregates).
+    pub fn requested_fields(&self) -> Vec<&super::Field> {
+        self.fields
+            .iter()
+            .filter_map(|r| match r {
+                Requestable::Field(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Parse a mutation field name into (operation_type, collection_name).

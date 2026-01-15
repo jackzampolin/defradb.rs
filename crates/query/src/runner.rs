@@ -20,10 +20,11 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::json_convert::normal_value_to_json;
-use crate::mapper::{Requestable, Select};
-use crate::plan::{LimitNode, ScanNode, SelectNode};
+use crate::mapper::{Mutation, MutationType, Requestable, Select};
+use crate::mutator::DocMutator;
+use crate::plan::{CreateInput, CreateNode, DeleteNode, LimitNode, ScanNode, SelectNode, UpdateInput, UpdateNode};
 use crate::planner::{Doc, PlanNode};
-use crate::query_parse::parse_query;
+use crate::query_parse::{parse_mutations, parse_query};
 use crate::txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry,
 };
@@ -39,6 +40,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     collections: HashMap<String, Arc<CollectionVersion>>,
     /// Transaction registry for transaction lifecycle management
     registry: Arc<R>,
+    /// Document mutator for mutation operations (optional)
+    mutator: Option<Arc<dyn DocMutator>>,
 }
 
 impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
@@ -55,6 +58,7 @@ impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
             fetcher: Arc::new(fetcher),
             collections: collections_map,
             registry: Arc::new(NoOpTransactionRegistry),
+            mutator: None,
         }
     }
 }
@@ -70,7 +74,16 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             fetcher: Arc::new(fetcher),
             collections: collections_map,
             registry: Arc::new(registry),
+            mutator: None,
         }
+    }
+
+    /// Set the document mutator for mutation operations.
+    ///
+    /// This enables support for CREATE, UPDATE, and DELETE mutations.
+    pub fn with_mutator(mut self, mutator: Arc<dyn DocMutator>) -> Self {
+        self.mutator = Some(mutator);
+        self
     }
 
     /// Execute a GraphQL query and return JSON results.
@@ -148,6 +161,170 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         plan.close().await?;
 
         Ok(JsonValue::Array(results))
+    }
+
+    /// Execute a GraphQL mutation and return JSON results.
+    ///
+    /// Requires a mutator to be configured via `with_mutator()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let runner = QueryRunner::new(fetcher, collections)
+    ///     .with_mutator(mutator);
+    ///
+    /// let result = runner.execute_mutation(r#"
+    ///     mutation {
+    ///         create_Users(input: [{name: "Alice", age: 30}]) {
+    ///             _docID
+    ///             name
+    ///         }
+    ///     }
+    /// "#).await?;
+    /// ```
+    pub async fn execute_mutation(&self, mutation_str: &str) -> Result<JsonValue> {
+        let mutator = self.mutator.as_ref().ok_or_else(|| {
+            QueryError::execution("mutations require a mutator; call with_mutator() first")
+        })?;
+
+        self.execute_mutation_with_mutator(mutation_str, mutator.clone())
+            .await
+    }
+
+    /// Execute a GraphQL mutation with a specific mutator.
+    async fn execute_mutation_with_mutator(
+        &self,
+        mutation_str: &str,
+        mutator: Arc<dyn DocMutator>,
+    ) -> Result<JsonValue> {
+        let mutations = parse_mutations(mutation_str)?;
+
+        let mut results = Map::new();
+
+        for mutation in mutations {
+            let result = self.execute_single_mutation(&mutation, mutator.clone()).await?;
+            // Use collection name as key (Go behavior)
+            results.insert(mutation.collection_name.clone(), result);
+        }
+
+        Ok(JsonValue::Object(results))
+    }
+
+    /// Execute a single mutation operation.
+    async fn execute_single_mutation(
+        &self,
+        mutation: &Mutation,
+        mutator: Arc<dyn DocMutator>,
+    ) -> Result<JsonValue> {
+        // Validate collection exists
+        let _collection = self
+            .collections
+            .get(&mutation.collection_name)
+            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+
+        // Build document mapping from requested fields
+        let mapping = self.build_mutation_mapping(mutation)?;
+
+        // Build and execute the appropriate mutation plan
+        let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {
+            MutationType::Create => {
+                let inputs = self.build_create_inputs(mutation)?;
+                Box::new(
+                    CreateNode::new(&mutation.collection_name, mutator, mapping.clone())
+                        .with_inputs(inputs),
+                )
+            }
+            MutationType::Update => {
+                let input = self.build_update_input(mutation)?;
+                let mut node =
+                    UpdateNode::new(&mutation.collection_name, mutator, mapping.clone())
+                        .with_input(input);
+
+                if let Some(ref doc_ids) = mutation.doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
+                }
+                if let Some(ref filter) = mutation.filter {
+                    node = node.with_filter(filter.clone());
+                }
+
+                Box::new(node)
+            }
+            MutationType::Delete => {
+                let mut node =
+                    DeleteNode::new(&mutation.collection_name, mutator, mapping.clone());
+
+                if let Some(ref doc_ids) = mutation.doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
+                }
+                if let Some(ref filter) = mutation.filter {
+                    node = node.with_filter(filter.clone());
+                }
+
+                Box::new(node)
+            }
+        };
+
+        // Execute the plan
+        plan.init().await?;
+        plan.start().await?;
+
+        let mut results = Vec::new();
+
+        while plan.next().await? {
+            let doc = plan.value();
+            let json = self.doc_to_json(doc, &mapping)?;
+            results.push(json);
+        }
+
+        plan.close().await?;
+
+        Ok(JsonValue::Array(results))
+    }
+
+    /// Build document mapping for mutation result fields.
+    fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
+        let mut mapping = DocumentMapping::new();
+
+        // Add requested fields
+        for field in mutation.requested_fields() {
+            let index = mapping.next_index();
+            mapping.add(index, &field.name);
+            mapping.add_render_key(index, field.output_name());
+        }
+
+        // If no fields specified, at minimum return _docID
+        if mapping.next_index() == 0 {
+            mapping.add(0, "_docID");
+            mapping.add_render_key(0, "_docID");
+        }
+
+        Ok(mapping)
+    }
+
+    /// Build CreateInput objects from mutation input.
+    fn build_create_inputs(&self, mutation: &Mutation) -> Result<Vec<CreateInput>> {
+        let mut inputs = Vec::new();
+
+        for doc_input in &mutation.create_input {
+            let mut create_input = CreateInput::new();
+            for (field_name, value) in doc_input {
+                create_input = create_input.with_field(field_name.clone(), value.clone());
+            }
+            inputs.push(create_input);
+        }
+
+        Ok(inputs)
+    }
+
+    /// Build UpdateInput from mutation input.
+    fn build_update_input(&self, mutation: &Mutation) -> Result<UpdateInput> {
+        let mut update_input = UpdateInput::new();
+
+        for (field_name, value) in &mutation.update_input {
+            update_input = update_input.with_field(field_name.clone(), value.clone());
+        }
+
+        Ok(update_input)
     }
 
     /// Validate that the select doesn't use unsupported features.
@@ -1045,5 +1222,224 @@ mod tests {
             commit_result.is_ok(),
             "Commit should succeed after query error"
         );
+    }
+
+    // Mutation tests
+
+    /// Mock mutator for testing
+    struct MockMutator {
+        docs: std::sync::Mutex<Vec<(String, Document)>>,
+    }
+
+    impl MockMutator {
+        fn new() -> Self {
+            Self {
+                docs: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn created_docs(&self) -> Vec<(String, Document)> {
+            self.docs.lock().unwrap().clone()
+        }
+
+        fn add_doc(&self, collection: &str, doc: Document) {
+            self.docs
+                .lock()
+                .unwrap()
+                .push((collection.to_string(), doc));
+        }
+    }
+
+    #[async_trait]
+    impl crate::mutator::DocMutator for MockMutator {
+        async fn create(
+            &self,
+            collection_name: &str,
+            mut doc: Document,
+        ) -> Result<crate::mutator::CreateResult> {
+            doc.generate_and_set_doc_id()
+                .map_err(|e| QueryError::execution(format!("Failed to generate DocID: {}", e)))?;
+
+            let doc_id = doc.id().cloned().ok_or_else(|| {
+                QueryError::execution("Document should have ID after generation")
+            })?;
+
+            self.docs
+                .lock()
+                .unwrap()
+                .push((collection_name.to_string(), doc.clone()));
+
+            Ok(crate::mutator::CreateResult::new(doc_id, doc))
+        }
+
+        async fn update(
+            &self,
+            _collection_name: &str,
+            doc: Document,
+        ) -> Result<crate::mutator::UpdateResult> {
+            let modified = doc.values().len();
+            Ok(crate::mutator::UpdateResult::new(doc, modified))
+        }
+
+        async fn delete(
+            &self,
+            _collection_name: &str,
+            doc_id: &document::DocID,
+        ) -> Result<crate::mutator::DeleteResult> {
+            // Check if doc exists and remove it
+            let mut docs = self.docs.lock().unwrap();
+            let existed = docs
+                .iter()
+                .position(|(_, d)| d.id().map(|id| id.to_string()) == Some(doc_id.to_string()))
+                .map(|i| docs.remove(i))
+                .is_some();
+            Ok(crate::mutator::DeleteResult::new(doc_id.clone(), existed))
+        }
+
+        async fn exists(
+            &self,
+            _collection_name: &str,
+            doc_id: &document::DocID,
+        ) -> Result<bool> {
+            let docs = self.docs.lock().unwrap();
+            Ok(docs
+                .iter()
+                .any(|(_, d)| d.id().map(|id| id.to_string()) == Some(doc_id.to_string())))
+        }
+
+        async fn get_for_update(
+            &self,
+            _collection_name: &str,
+            doc_id: &document::DocID,
+        ) -> Result<Option<Document>> {
+            let docs = self.docs.lock().unwrap();
+            Ok(docs
+                .iter()
+                .find(|(_, d)| d.id().map(|id| id.to_string()) == Some(doc_id.to_string()))
+                .map(|(_, d)| d.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_mutation_without_mutator_returns_error() {
+        let fetcher = MockFetcher::new();
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+        let result = runner
+            .execute_mutation(r#"mutation { create_Users(input: [{name: "Alice"}]) { _docID } }"#)
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("mutations require a mutator"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_mutation() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        let result = runner
+            .execute_mutation(
+                r#"mutation { create_Users(input: [{name: "Alice", age: 30}]) { _docID name } }"#,
+            )
+            .await
+            .unwrap();
+
+        // Check response structure
+        assert!(result.is_object());
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert!(users[0].get("_docID").is_some());
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+
+        // Verify document was created via mutator
+        let created = mutator.created_docs();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "Users");
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_multiple_documents() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        let result = runner
+            .execute_mutation(
+                r#"mutation {
+                    create_Users(input: [
+                        {name: "Alice", age: 30},
+                        {name: "Bob", age: 25}
+                    ]) { _docID name }
+                }"#,
+            )
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 2);
+
+        let names: Vec<&str> = users
+            .iter()
+            .map(|u| u.get("name").unwrap().as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Alice"));
+        assert!(names.contains(&"Bob"));
+
+        // Verify both documents were created
+        let created = mutator.created_docs();
+        assert_eq!(created.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_execute_mutation_unknown_collection_returns_error() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator);
+
+        let result = runner
+            .execute_mutation(
+                r#"mutation { create_NonExistent(input: [{name: "Alice"}]) { _docID } }"#,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("collection not found"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_delete_mutation() {
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(MockMutator::new());
+
+        // Pre-populate with a document
+        let mut doc = Document::new();
+        doc.set("name", "Alice");
+        doc.set("age", 30i64);
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().to_string();
+        mutator.add_doc("Users", doc);
+
+        let runner = QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
+
+        let mutation = format!(
+            r#"mutation {{ delete_Users(docIDs: ["{}"]) {{ _docID }} }}"#,
+            doc_id
+        );
+        let result = runner.execute_mutation(&mutation).await.unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].get("_docID").unwrap().as_str().unwrap(), doc_id);
+
+        // Verify document was deleted
+        assert!(mutator.created_docs().is_empty());
     }
 }
