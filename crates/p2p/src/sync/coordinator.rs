@@ -155,7 +155,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     "Received GossipSub message"
                 );
 
-                // Parse CID and track that the peer has this block
+                // Parse CID - if invalid, return error early (don't call process_pushlog
+                // which will also fail with the same invalid CID)
                 match Cid::try_from(message.cid.as_slice()) {
                     Ok(cid) => {
                         self.peer_state.peer_has_cid(&propagation_source, cid);
@@ -165,8 +166,12 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                             peer_id = %propagation_source,
                             cid_bytes_len = message.cid.len(),
                             error = %e,
-                            "Failed to parse CID from gossip message"
+                            "Failed to parse CID from gossip message - skipping message"
                         );
+                        return Err(crate::error::Error::InvalidCid(format!(
+                            "Failed to parse CID from gossip message: {}",
+                            e
+                        )));
                     }
                 }
 
@@ -183,20 +188,35 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     "Received PushLog request"
                 );
 
-                // Parse CID and track that the peer has this block
-                match Cid::try_from(request.cid.as_slice()) {
+                // Parse CID - if invalid, send error response and return early
+                let cid = match Cid::try_from(request.cid.as_slice()) {
                     Ok(cid) => {
                         self.peer_state.peer_has_cid(&peer_id, cid);
+                        cid
                     }
                     Err(e) => {
+                        let error_msg = format!("Failed to parse CID: {}", e);
                         tracing::warn!(
                             peer_id = %peer_id,
                             cid_bytes_len = request.cid.len(),
                             error = %e,
-                            "Failed to parse CID from PushLog request"
+                            "Failed to parse CID from PushLog request - sending error response"
                         );
+                        let reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                        if let Err(send_err) = self.host.send_pushlog_response(channel, reply).await
+                        {
+                            tracing::warn!(
+                                peer_id = %peer_id,
+                                error = %send_err,
+                                "Failed to send error response for invalid CID"
+                            );
+                        }
+                        return Err(crate::error::Error::InvalidCid(error_msg));
                     }
-                }
+                };
+
+                // Log that we have a valid CID
+                tracing::trace!(?cid, "Parsed valid CID from PushLog request");
 
                 // Convert request to broadcast format and process
                 let broadcast = PushLogBroadcast::from_request(&request);

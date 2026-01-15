@@ -56,7 +56,7 @@ pub use broadcaster::{BroadcastResult, Broadcaster};
 pub use coordinator::SyncCoordinator;
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, SyncPlan};
 pub use manager::{SyncConfig, SyncEvent, SyncManager};
-pub use merge::{MergeHandler, MergeOutcome};
+pub use merge::{BlockMetadata, MergeHandler, MergeOutcome};
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use queue::ProcessQueue;
 pub use replication::{ReplicationConfig, ReplicationLoop, ReplicationResult};

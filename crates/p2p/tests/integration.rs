@@ -1261,8 +1261,8 @@ async fn test_peer_state_tracking_with_coordinator() {
 
     // Test peer stats
     let stats = coordinator1.peer_state().stats();
-    assert_eq!(stats.connected_peers, 1);
-    assert_eq!(stats.total_peers, 1);
+    assert_eq!(stats.connected_peers(), 1);
+    assert_eq!(stats.total_peers(), 1);
 
     // Cleanup
     handle1.shutdown().await.ok();
@@ -1355,7 +1355,7 @@ async fn test_peer_state_cid_tracking_before_connection() {
 
     // Peer entry should be created (bug fix verification)
     assert!(coordinator1.peer_state().peer_has(&peer_id2, &test_cid));
-    assert_eq!(coordinator1.peer_state().stats().total_peers, 1);
+    assert_eq!(coordinator1.peer_state().stats().total_peers(), 1);
 
     // But peer is not connected, so shouldn't appear in peers_with_cid
     assert!(coordinator1
@@ -1554,9 +1554,7 @@ async fn test_replication_loop_channel_closed_terminates() {
             &self,
             _cid: &cid::Cid,
             _block_data: &[u8],
-            _doc_id: &str,
-            _collection_id: &str,
-            _creator: &str,
+            _metadata: p2p::sync::BlockMetadata<'_>,
         ) -> Result<MergeOutcome, TestError> {
             Ok(MergeOutcome::Merged)
         }
@@ -1628,9 +1626,7 @@ async fn test_replication_loop_drain_empty_channel() {
             &self,
             _cid: &cid::Cid,
             _block_data: &[u8],
-            _doc_id: &str,
-            _collection_id: &str,
-            _creator: &str,
+            _metadata: p2p::sync::BlockMetadata<'_>,
         ) -> Result<MergeOutcome, TestError> {
             Ok(MergeOutcome::Merged)
         }
@@ -1754,7 +1750,7 @@ async fn test_dag_sync_handle_sync_complete_success() {
 
     // Complete with success - should return Ok
     dag_sync
-        .handle_sync_complete(cid, true)
+        .handle_sync_complete(cid, true, None)
         .await
         .expect("sync completion should succeed");
 
@@ -1777,7 +1773,7 @@ async fn test_dag_sync_handle_sync_complete_failure() {
     dag_sync.state().start_sync(cid).await;
 
     // Complete with failure - should return Err
-    let result = dag_sync.handle_sync_complete(cid, false).await;
+    let result = dag_sync.handle_sync_complete(cid, false, Some("sync failed")).await;
     assert!(result.is_err(), "sync failure should return error");
 
     // Should be neither syncing nor synced (can retry)
@@ -2032,9 +2028,7 @@ async fn test_replication_handles_missing_block_in_store() {
             &self,
             _cid: &cid::Cid,
             _block_data: &[u8],
-            _doc_id: &str,
-            _collection_id: &str,
-            _creator: &str,
+            _metadata: p2p::sync::BlockMetadata<'_>,
         ) -> Result<MergeOutcome, NeverCalledError> {
             panic!("Handler should not be called when block is not in store");
         }
@@ -2193,9 +2187,7 @@ async fn test_rebroadcast_on_merge_enabled() {
             &self,
             _cid: &cid::Cid,
             _block_data: &[u8],
-            _doc_id: &str,
-            _collection_id: &str,
-            _creator: &str,
+            _metadata: p2p::sync::BlockMetadata<'_>,
         ) -> Result<MergeOutcome, TestError> {
             self.called.store(true, Ordering::SeqCst);
             Ok(MergeOutcome::Merged)
@@ -2304,9 +2296,7 @@ async fn test_rebroadcast_on_merge_disabled_no_broadcast_attempt() {
             &self,
             _cid: &cid::Cid,
             _block_data: &[u8],
-            _doc_id: &str,
-            _collection_id: &str,
-            _creator: &str,
+            _metadata: p2p::sync::BlockMetadata<'_>,
         ) -> Result<MergeOutcome, SimpleError> {
             Ok(MergeOutcome::Merged)
         }

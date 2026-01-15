@@ -27,6 +27,13 @@ use libp2p::PeerId;
 /// This prevents unbounded memory growth in long-running nodes.
 const DEFAULT_MAX_CIDS_PER_PEER: usize = 10_000;
 
+/// Default maximum total CIDs across all peers.
+/// With 100 peers at 10k CIDs each = ~40MB memory usage.
+const DEFAULT_MAX_TOTAL_CIDS: usize = 1_000_000;
+
+/// Default maximum number of tracked peers.
+const DEFAULT_MAX_PEERS: usize = 1_000;
+
 /// Information about a single peer's sync state.
 #[derive(Debug)]
 struct PeerInfo {
@@ -78,6 +85,13 @@ impl PeerInfo {
 /// Tracks the sync state of all known peers.
 ///
 /// Thread-safe: can be shared across tasks.
+///
+/// # Memory Limits
+///
+/// To prevent unbounded memory growth, the tracker enforces three limits:
+/// - `max_cids_per_peer`: Maximum CIDs tracked for any single peer (LRU eviction)
+/// - `max_total_cids`: Maximum CIDs across ALL peers (oldest peers evicted first)
+/// - `max_peers`: Maximum number of tracked peers (oldest disconnected peers evicted)
 pub struct PeerStateTracker {
     /// Per-peer state
     peers: RwLock<HashMap<PeerId, PeerInfo>>,
@@ -85,6 +99,10 @@ pub struct PeerStateTracker {
     peer_ttl: Duration,
     /// Maximum CIDs to track per peer (prevents memory exhaustion)
     max_cids_per_peer: usize,
+    /// Maximum total CIDs across all peers
+    max_total_cids: usize,
+    /// Maximum number of tracked peers
+    max_peers: usize,
 }
 
 impl Default for PeerStateTracker {
@@ -100,6 +118,8 @@ impl PeerStateTracker {
             peers: RwLock::new(HashMap::new()),
             peer_ttl: Duration::from_secs(3600), // 1 hour default
             max_cids_per_peer: DEFAULT_MAX_CIDS_PER_PEER,
+            max_total_cids: DEFAULT_MAX_TOTAL_CIDS,
+            max_peers: DEFAULT_MAX_PEERS,
         }
     }
 
@@ -109,19 +129,160 @@ impl PeerStateTracker {
             peers: RwLock::new(HashMap::new()),
             peer_ttl,
             max_cids_per_peer: DEFAULT_MAX_CIDS_PER_PEER,
+            max_total_cids: DEFAULT_MAX_TOTAL_CIDS,
+            max_peers: DEFAULT_MAX_PEERS,
         }
     }
 
     /// Create with custom configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_ttl` - How long to keep disconnected peer info
+    /// * `max_cids_per_peer` - Max CIDs per peer (0 = use default)
+    ///
+    /// # Logging
+    ///
+    /// Logs a warning if `max_cids_per_peer` is 0 (falls back to default).
     pub fn with_config(peer_ttl: Duration, max_cids_per_peer: usize) -> Self {
+        let max_cids = if max_cids_per_peer == 0 {
+            tracing::warn!(
+                "max_cids_per_peer was 0, using default value {}",
+                DEFAULT_MAX_CIDS_PER_PEER
+            );
+            DEFAULT_MAX_CIDS_PER_PEER
+        } else {
+            max_cids_per_peer
+        };
         Self {
             peers: RwLock::new(HashMap::new()),
             peer_ttl,
-            max_cids_per_peer: if max_cids_per_peer == 0 {
+            max_cids_per_peer: max_cids,
+            max_total_cids: DEFAULT_MAX_TOTAL_CIDS,
+            max_peers: DEFAULT_MAX_PEERS,
+        }
+    }
+
+    /// Create with full custom configuration including global limits.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_ttl` - How long to keep disconnected peer info
+    /// * `max_cids_per_peer` - Max CIDs per peer (0 = use default)
+    /// * `max_total_cids` - Max total CIDs across all peers (0 = use default)
+    /// * `max_peers` - Max tracked peers (0 = use default)
+    pub fn with_full_config(
+        peer_ttl: Duration,
+        max_cids_per_peer: usize,
+        max_total_cids: usize,
+        max_peers: usize,
+    ) -> Self {
+        let max_cids = if max_cids_per_peer == 0 {
+            tracing::warn!(
+                "max_cids_per_peer was 0, using default value {}",
                 DEFAULT_MAX_CIDS_PER_PEER
+            );
+            DEFAULT_MAX_CIDS_PER_PEER
+        } else {
+            max_cids_per_peer
+        };
+        let max_total = if max_total_cids == 0 {
+            tracing::warn!(
+                "max_total_cids was 0, using default value {}",
+                DEFAULT_MAX_TOTAL_CIDS
+            );
+            DEFAULT_MAX_TOTAL_CIDS
+        } else {
+            max_total_cids
+        };
+        let max_p = if max_peers == 0 {
+            tracing::warn!("max_peers was 0, using default value {}", DEFAULT_MAX_PEERS);
+            DEFAULT_MAX_PEERS
+        } else {
+            max_peers
+        };
+        Self {
+            peers: RwLock::new(HashMap::new()),
+            peer_ttl,
+            max_cids_per_peer: max_cids,
+            max_total_cids: max_total,
+            max_peers: max_p,
+        }
+    }
+
+    /// Enforce global limits by evicting oldest disconnected peers and their CIDs.
+    ///
+    /// Called internally when adding peers or CIDs.
+    fn enforce_global_limits(&self, peers: &mut HashMap<PeerId, PeerInfo>) {
+        // Check peer count limit - evict oldest disconnected peers first
+        while peers.len() > self.max_peers {
+            // Find the oldest disconnected peer
+            let oldest_disconnected = peers
+                .iter()
+                .filter(|(_, info)| !info.connected)
+                .min_by_key(|(_, info)| info.last_seen)
+                .map(|(id, _)| *id);
+
+            if let Some(peer_id) = oldest_disconnected {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    "Evicting oldest disconnected peer to stay under max_peers limit"
+                );
+                peers.remove(&peer_id);
             } else {
-                max_cids_per_peer
-            },
+                // All peers are connected, can't evict
+                tracing::warn!(
+                    current = peers.len(),
+                    max = self.max_peers,
+                    "Cannot evict peers - all are connected"
+                );
+                break;
+            }
+        }
+
+        // Check total CID count limit - evict CIDs from peers with most CIDs
+        let total_cids: usize = peers.values().map(|info| info.known_cids.len()).sum();
+        if total_cids > self.max_total_cids {
+            let excess = total_cids - self.max_total_cids;
+            let mut evicted = 0;
+
+            // Evict from peers with the most CIDs (disconnected first)
+            let mut peer_cid_counts: Vec<_> = peers
+                .iter()
+                .map(|(id, info)| (*id, info.known_cids.len(), info.connected))
+                .collect();
+
+            // Sort by: disconnected first, then by CID count descending
+            peer_cid_counts.sort_by(|a, b| {
+                // Disconnected peers should come first
+                match (a.2, b.2) {
+                    (false, true) => std::cmp::Ordering::Less,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    _ => b.1.cmp(&a.1), // More CIDs first
+                }
+            });
+
+            for (peer_id, _, _) in peer_cid_counts {
+                if evicted >= excess {
+                    break;
+                }
+                if let Some(info) = peers.get_mut(&peer_id) {
+                    // Evict oldest CIDs from this peer
+                    while evicted < excess && !info.cid_order.is_empty() {
+                        if let Some(cid) = info.cid_order.pop_front() {
+                            info.known_cids.remove(&cid);
+                            evicted += 1;
+                        }
+                    }
+                }
+            }
+
+            if evicted > 0 {
+                tracing::debug!(
+                    evicted = evicted,
+                    "Evicted CIDs to stay under max_total_cids limit"
+                );
+            }
         }
     }
 
@@ -131,6 +292,7 @@ impl PeerStateTracker {
         let info = peers.entry(peer_id).or_insert_with(PeerInfo::new);
         info.connected = true;
         info.last_seen = Instant::now();
+        self.enforce_global_limits(&mut peers);
     }
 
     /// Record that a peer disconnected.
@@ -151,22 +313,25 @@ impl PeerStateTracker {
     /// Creates a peer entry if one doesn't exist (handles race conditions
     /// where CID announcements arrive before connection events).
     ///
-    /// Note: Per-peer CID tracking is bounded by `max_cids_per_peer`.
-    /// When the limit is reached, oldest CIDs are evicted (LRU).
+    /// Note: CID tracking is bounded by `max_cids_per_peer` (per-peer LRU)
+    /// and `max_total_cids` (global limit). When limits are reached, oldest
+    /// CIDs are evicted.
     pub fn peer_has_cid(&self, peer_id: &PeerId, cid: Cid) {
         let mut peers = self.peers.write();
         let max_cids = self.max_cids_per_peer;
         let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
         info.add_cid(cid, max_cids);
         info.last_seen = Instant::now();
+        self.enforce_global_limits(&mut peers);
     }
 
     /// Record multiple CIDs for a peer.
     ///
     /// Creates a peer entry if one doesn't exist.
     ///
-    /// Note: Per-peer CID tracking is bounded by `max_cids_per_peer`.
-    /// When the limit is reached, oldest CIDs are evicted (LRU).
+    /// Note: CID tracking is bounded by `max_cids_per_peer` (per-peer LRU)
+    /// and `max_total_cids` (global limit). When limits are reached, oldest
+    /// CIDs are evicted.
     pub fn peer_has_cids(&self, peer_id: &PeerId, cids: impl IntoIterator<Item = Cid>) {
         let mut peers = self.peers.write();
         let max_cids = self.max_cids_per_peer;
@@ -175,6 +340,7 @@ impl PeerStateTracker {
             info.add_cid(cid, max_cids);
         }
         info.last_seen = Instant::now();
+        self.enforce_global_limits(&mut peers);
     }
 
     /// Record that a peer subscribed to a collection.
@@ -283,23 +449,60 @@ impl PeerStateTracker {
         let connected = peers.values().filter(|info| info.connected).count();
         let total_cids: usize = peers.values().map(|info| info.known_cids.len()).sum();
 
-        PeerStats {
-            total_peers: peers.len(),
-            connected_peers: connected,
-            total_tracked_cids: total_cids,
-        }
+        PeerStats::new(peers.len(), connected, total_cids)
     }
 }
 
 /// Statistics about tracked peers.
+///
+/// Use accessor methods to read values. This ensures the invariant
+/// that `connected_peers <= total_peers` is always maintained.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PeerStats {
-    /// Total peers (connected + recently disconnected)
-    pub total_peers: usize,
-    /// Currently connected peers
-    pub connected_peers: usize,
-    /// Total CIDs tracked across all peers
-    pub total_tracked_cids: usize,
+    /// Total number of peers being tracked (connected + disconnected).
+    total_peers: usize,
+    /// Number of currently connected peers.
+    connected_peers: usize,
+    /// Total CIDs tracked across all peers.
+    total_tracked_cids: usize,
+}
+
+impl PeerStats {
+    /// Create new peer statistics (internal use only).
+    pub(crate) fn new(total_peers: usize, connected_peers: usize, total_tracked_cids: usize) -> Self {
+        debug_assert!(
+            connected_peers <= total_peers,
+            "connected_peers ({}) must be <= total_peers ({})",
+            connected_peers,
+            total_peers
+        );
+        Self {
+            total_peers,
+            connected_peers,
+            total_tracked_cids,
+        }
+    }
+
+    /// Get the total number of peers being tracked.
+    pub fn total_peers(&self) -> usize {
+        self.total_peers
+    }
+
+    /// Get the number of currently connected peers.
+    pub fn connected_peers(&self) -> usize {
+        self.connected_peers
+    }
+
+    /// Get the number of disconnected peers.
+    pub fn disconnected_peers(&self) -> usize {
+        self.total_peers - self.connected_peers
+    }
+
+    /// Get the total CIDs tracked across all peers.
+    pub fn total_tracked_cids(&self) -> usize {
+        self.total_tracked_cids
+    }
 }
 
 #[cfg(test)]
@@ -432,13 +635,13 @@ mod tests {
         tracker.peer_has_cid(&peer1, cid1);
 
         let stats = tracker.stats();
-        assert_eq!(stats.total_peers, 2);
-        assert_eq!(stats.connected_peers, 2);
-        assert_eq!(stats.total_tracked_cids, 1);
+        assert_eq!(stats.total_peers(), 2);
+        assert_eq!(stats.connected_peers(), 2);
+        assert_eq!(stats.total_tracked_cids(), 1);
 
         tracker.peer_disconnected(&peer2);
         let stats = tracker.stats();
-        assert_eq!(stats.connected_peers, 1);
+        assert_eq!(stats.connected_peers(), 1);
     }
 
     #[test]
@@ -451,7 +654,7 @@ mod tests {
 
         // Peer still exists right after disconnect
         let stats = tracker.stats();
-        assert_eq!(stats.total_peers, 1);
+        assert_eq!(stats.total_peers(), 1);
 
         // Wait for TTL to expire
         std::thread::sleep(Duration::from_millis(20));
@@ -459,7 +662,7 @@ mod tests {
         // Cleanup should remove the stale peer
         tracker.cleanup_stale();
         let stats = tracker.stats();
-        assert_eq!(stats.total_peers, 0);
+        assert_eq!(stats.total_peers(), 0);
     }
 
     #[test]
@@ -490,13 +693,13 @@ mod tests {
 
         // Peer is not connected yet
         assert!(!tracker.is_connected(&peer));
-        assert_eq!(tracker.stats().total_peers, 0);
+        assert_eq!(tracker.stats().total_peers(), 0);
 
         // Record that the peer has a CID (before peer_connected is called)
         tracker.peer_has_cid(&peer, cid);
 
         // Peer entry should be created (but not connected)
-        assert_eq!(tracker.stats().total_peers, 1);
+        assert_eq!(tracker.stats().total_peers(), 1);
         assert!(!tracker.is_connected(&peer)); // Still not connected
         assert!(tracker.peer_has(&peer, &cid)); // But we track the CID
 
@@ -526,8 +729,8 @@ mod tests {
         tracker.peer_has_cids(&peer, vec![cid1, cid2]);
 
         // Peer entry should be created
-        assert_eq!(tracker.stats().total_peers, 1);
-        assert_eq!(tracker.stats().total_tracked_cids, 2);
+        assert_eq!(tracker.stats().total_peers(), 1);
+        assert_eq!(tracker.stats().total_tracked_cids(), 2);
         assert!(tracker.peer_has(&peer, &cid1));
         assert!(tracker.peer_has(&peer, &cid2));
 

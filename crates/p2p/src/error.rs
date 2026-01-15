@@ -155,9 +155,14 @@ pub enum Error {
     #[error("failed to send response: {0}")]
     ResponseSend(String),
 
-    /// DAG sync failed.
-    #[error("DAG sync failed for CID: {0}")]
-    DagSyncFailed(String),
+    /// DAG sync failed with reason.
+    #[error("DAG sync failed for CID {cid}: {reason}")]
+    DagSyncFailed {
+        /// The CID that failed to sync
+        cid: String,
+        /// Why the sync failed
+        reason: String,
+    },
 
     /// Recovery completed with failures.
     #[error("recovery completed with {failed} failures out of {total} blocks")]

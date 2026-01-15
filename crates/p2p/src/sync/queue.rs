@@ -54,6 +54,74 @@ impl ProcessQueue {
         }
     }
 
+    /// Get the number of CIDs currently being processed.
+    ///
+    /// Useful for monitoring and debugging.
+    pub async fn active_count(&self) -> usize {
+        self.inner.waiters.lock().await.len()
+    }
+
+    /// Get all CIDs currently being processed.
+    ///
+    /// Useful for debugging stuck operations.
+    pub async fn active_cids(&self) -> Vec<Cid> {
+        self.inner.waiters.lock().await.keys().cloned().collect()
+    }
+
+    /// Force release a stuck CID.
+    ///
+    /// Use this to recover from situations where a ProcessGuard was dropped
+    /// outside a tokio runtime and the CID became permanently locked.
+    ///
+    /// # Safety
+    ///
+    /// Only call this for CIDs that you are certain are stuck. Calling this
+    /// while a legitimate processing operation is in progress may cause
+    /// duplicate processing.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the CID was released, `false` if it wasn't locked.
+    pub async fn force_release(&self, cid: &Cid) -> bool {
+        let mut waiters = self.inner.waiters.lock().await;
+        if let Some(waiting) = waiters.remove(cid) {
+            tracing::warn!(
+                ?cid,
+                waiter_count = waiting.len(),
+                "Force-releasing stuck CID"
+            );
+            // Notify any waiters that processing is "complete"
+            for tx in waiting {
+                let _ = tx.send(());
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Force release all stuck CIDs.
+    ///
+    /// Use this during cleanup or recovery to release all locked CIDs.
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of CIDs that were released.
+    pub async fn force_release_all(&self) -> usize {
+        let mut waiters = self.inner.waiters.lock().await;
+        let count = waiters.len();
+        if count > 0 {
+            tracing::warn!(count = count, "Force-releasing all stuck CIDs");
+            for (cid, waiting) in waiters.drain() {
+                tracing::debug!(?cid, "Force-releasing CID");
+                for tx in waiting {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        count
+    }
+
     /// Try to acquire exclusive processing rights for a CID.
     ///
     /// Returns:

@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 
 use super::coordinator::SyncCoordinator;
 use super::manager::SyncEvent;
-use super::merge::{MergeHandler, MergeOutcome};
+use super::merge::{BlockMetadata, MergeHandler, MergeOutcome};
 
 /// Result of a replication loop iteration.
 #[derive(Debug, Clone)]
@@ -188,9 +188,7 @@ impl ReplicationLoop {
                     handler,
                     config,
                     cid,
-                    &doc_id,
-                    &collection_id,
-                    &creator,
+                    BlockMetadata::normal(&doc_id, &collection_id, &creator),
                 )
                 .await
             }
@@ -208,9 +206,7 @@ impl ReplicationLoop {
         handler: &H,
         config: &ReplicationConfig,
         cid: Cid,
-        doc_id: &str,
-        collection_id: &str,
-        creator: &str,
+        metadata: BlockMetadata<'_>,
     ) -> ReplicationResult
     where
         B: Blockstore + 'static,
@@ -233,11 +229,12 @@ impl ReplicationLoop {
             }
         };
 
+        // Extract doc_id for use in result (use empty string if recovery mode)
+        let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
+        let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
+
         // Delegate merge to handler
-        match handler
-            .handle_block(&cid, &block_data, doc_id, collection_id, creator)
-            .await
-        {
+        match handler.handle_block(&cid, &block_data, metadata).await {
             Ok(MergeOutcome::Merged) => {
                 // Merge successful - mark as merged
                 if let Err(e) = coordinator.mark_as_merged(&cid).await {
@@ -249,38 +246,47 @@ impl ReplicationLoop {
                     };
                 }
 
-                // Optionally re-broadcast
-                if config.rebroadcast_on_merge {
+                // Optionally re-broadcast (skip if metadata incomplete - can't broadcast without doc/collection IDs)
+                if config.rebroadcast_on_merge && !collection_id_for_broadcast.is_empty() {
                     match coordinator
-                        .broadcast_local_update(&cid, &block_data, doc_id, collection_id)
+                        .broadcast_local_update(
+                            &cid,
+                            &block_data,
+                            &doc_id_for_result,
+                            collection_id_for_broadcast,
+                        )
                         .await
                     {
                         Ok(super::BroadcastResult::Success) => {
                             // Both topics succeeded - nothing to report
                         }
                         Ok(super::BroadcastResult::PartialDocumentOnly { collection_error }) => {
-                            // Partial success - log warning but don't fail
-                            tracing::warn!(
-                                ?cid,
-                                doc_id,
-                                error = %collection_error,
-                                "Partial broadcast: document topic succeeded but collection topic failed"
-                            );
+                            // Partial success - return distinct result so callers know
+                            return ReplicationResult::MergedButBroadcastFailed {
+                                cid,
+                                doc_id: doc_id_for_result,
+                                broadcast_error: format!(
+                                    "Partial: document topic succeeded but collection topic failed: {}",
+                                    collection_error
+                                ),
+                            };
                         }
                         Ok(super::BroadcastResult::PartialCollectionOnly { document_error }) => {
-                            // Partial success - log warning but don't fail
-                            tracing::warn!(
-                                ?cid,
-                                doc_id,
-                                error = %document_error,
-                                "Partial broadcast: collection topic succeeded but document topic failed"
-                            );
+                            // Partial success - return distinct result so callers know
+                            return ReplicationResult::MergedButBroadcastFailed {
+                                cid,
+                                doc_id: doc_id_for_result,
+                                broadcast_error: format!(
+                                    "Partial: collection topic succeeded but document topic failed: {}",
+                                    document_error
+                                ),
+                            };
                         }
                         Err(e) => {
                             // Total failure - return a distinct result
                             return ReplicationResult::MergedButBroadcastFailed {
                                 cid,
-                                doc_id: doc_id.to_string(),
+                                doc_id: doc_id_for_result,
                                 broadcast_error: e.to_string(),
                             };
                         }
@@ -289,7 +295,7 @@ impl ReplicationLoop {
 
                 ReplicationResult::Merged {
                     cid,
-                    doc_id: doc_id.to_string(),
+                    doc_id: doc_id_for_result,
                 }
             }
             Ok(MergeOutcome::Skipped { reason }) => {
@@ -342,9 +348,7 @@ impl ReplicationLoop {
                                 handler.as_ref(),
                                 &config,
                                 cid,
-                                &doc_id,
-                                &collection_id,
-                                &creator,
+                                BlockMetadata::normal(&doc_id, &collection_id, &creator),
                             )
                             .await
                         }
@@ -371,12 +375,14 @@ impl ReplicationLoop {
     /// Call this at startup to process any blocks that were stored
     /// but not yet merged (e.g., due to crash recovery).
     ///
-    /// # Note
+    /// # Recovery Mode
     ///
-    /// Recovery mode passes empty strings for doc_id, collection_id, and creator
-    /// because this metadata is not persisted with unmerged blocks. The MergeHandler
-    /// implementation must be able to extract this information from the block data
-    /// itself, or handle empty metadata gracefully.
+    /// During recovery, `BlockMetadata::recovery()` is passed to the handler with
+    /// all metadata fields set to `None`. The `MergeHandler` implementation MUST:
+    /// 1. Extract doc_id, collection_id, and creator from the block data itself
+    /// 2. Return an error if extraction fails (do NOT silently use defaults)
+    ///
+    /// This ensures data integrity is maintained even after crashes.
     ///
     /// # Returns
     ///
@@ -411,7 +417,7 @@ impl ReplicationLoop {
 
         tracing::warn!(
             count = total,
-            "Recovering unmerged blocks - metadata (doc_id, collection_id) unavailable, handler must extract from block data"
+            "Recovering unmerged blocks - metadata unavailable, handler must extract from block data"
         );
 
         let mut results = Vec::new();
@@ -419,16 +425,14 @@ impl ReplicationLoop {
         let mut failure_count = 0;
 
         for cid in unmerged {
-            tracing::debug!(cid = %cid, "Recovering unmerged block");
+            tracing::debug!(cid = %cid, "Recovering unmerged block in recovery mode");
 
             let result = Self::handle_block_received(
                 &coordinator,
                 handler.as_ref(),
                 &config,
                 cid,
-                "", // Metadata unavailable in recovery mode
-                "",
-                "",
+                BlockMetadata::recovery(),
             )
             .await;
 
@@ -522,9 +526,7 @@ mod tests {
             &self,
             _cid: &Cid,
             _block_data: &[u8],
-            _doc_id: &str,
-            _collection_id: &str,
-            _creator: &str,
+            _metadata: BlockMetadata<'_>,
         ) -> Result<MergeOutcome, Self::Error> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
 
@@ -566,7 +568,7 @@ mod tests {
         // We can't easily test the full loop without a coordinator
         // but we can verify the handler trait works
         let result = handler
-            .handle_block(&cid, b"test data", "doc1", "col1", "peer1")
+            .handle_block(&cid, b"test data", BlockMetadata::normal("doc1", "col1", "peer1"))
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_merged());
@@ -579,7 +581,7 @@ mod tests {
         let handler = TestMergeHandler::new(true, true); // succeed but skip
 
         let result = handler
-            .handle_block(&cid, b"test", "doc", "col", "peer")
+            .handle_block(&cid, b"test", BlockMetadata::normal("doc", "col", "peer"))
             .await;
         assert!(result.is_ok());
         let outcome = result.unwrap();
@@ -598,8 +600,23 @@ mod tests {
         let handler = TestMergeHandler::new(false, false); // fail
 
         let result = handler
-            .handle_block(&cid, b"test", "doc", "col", "peer")
+            .handle_block(&cid, b"test", BlockMetadata::normal("doc", "col", "peer"))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handler_recovery_mode() {
+        let cid = test_cid();
+        let handler = TestMergeHandler::new(true, false);
+
+        // Recovery mode - metadata is None
+        let metadata = BlockMetadata::recovery();
+        assert!(metadata.is_recovery);
+        assert!(metadata.is_incomplete());
+        assert!(metadata.doc_id.is_none());
+
+        let result = handler.handle_block(&cid, b"test", metadata).await;
+        assert!(result.is_ok());
     }
 }

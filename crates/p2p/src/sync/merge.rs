@@ -49,10 +49,63 @@ impl MergeOutcome {
     }
 }
 
+/// Metadata about a block being merged.
+///
+/// During normal operation, all fields are populated from the PushLog message.
+/// During crash recovery, metadata may be unavailable (fields are None) and
+/// implementations must extract it from the block data itself.
+#[derive(Debug, Clone)]
+pub struct BlockMetadata<'a> {
+    /// Document ID this block belongs to (None during recovery)
+    pub doc_id: Option<&'a str>,
+    /// Collection ID (None during recovery)
+    pub collection_id: Option<&'a str>,
+    /// Peer that created this block (None during recovery)
+    pub creator: Option<&'a str>,
+    /// Whether this is a recovery operation (block was stored but not merged before crash)
+    pub is_recovery: bool,
+}
+
+impl<'a> BlockMetadata<'a> {
+    /// Create metadata for a normal (non-recovery) merge operation.
+    pub fn normal(doc_id: &'a str, collection_id: &'a str, creator: &'a str) -> Self {
+        Self {
+            doc_id: Some(doc_id),
+            collection_id: Some(collection_id),
+            creator: Some(creator),
+            is_recovery: false,
+        }
+    }
+
+    /// Create metadata for a recovery operation where metadata is unavailable.
+    pub fn recovery() -> Self {
+        Self {
+            doc_id: None,
+            collection_id: None,
+            creator: None,
+            is_recovery: true,
+        }
+    }
+
+    /// Check if any metadata is missing.
+    pub fn is_incomplete(&self) -> bool {
+        self.doc_id.is_none() || self.collection_id.is_none() || self.creator.is_none()
+    }
+}
+
 /// Handler for merging incoming blocks.
 ///
 /// Implement this trait in the database layer to handle CRDT merges.
 /// The P2P layer calls this when a new block is received.
+///
+/// # Recovery Mode
+///
+/// During crash recovery, `handle_block` is called with `metadata.is_recovery = true`
+/// and all metadata fields set to `None`. In this case, implementations MUST:
+/// 1. Extract doc_id, collection_id, and creator from the block data itself
+/// 2. Return an error if extraction fails (do NOT silently skip or merge incorrectly)
+///
+/// This ensures data integrity is maintained even after crashes.
 #[async_trait]
 pub trait MergeHandler: Send + Sync {
     /// Error type for merge operations
@@ -70,9 +123,13 @@ pub trait MergeHandler: Send + Sync {
     ///
     /// * `cid` - The CID of the block
     /// * `block_data` - The raw block data
-    /// * `doc_id` - The document this block belongs to
-    /// * `collection_id` - The collection ID
-    /// * `creator` - The peer that created this block
+    /// * `metadata` - Block metadata (may be incomplete during recovery)
+    ///
+    /// # Recovery Mode
+    ///
+    /// When `metadata.is_recovery` is true, the metadata fields will be `None`.
+    /// The implementation MUST extract metadata from block_data in this case.
+    /// Return an error if extraction fails - do not silently use defaults.
     ///
     /// # Returns
     ///
@@ -83,9 +140,7 @@ pub trait MergeHandler: Send + Sync {
         &self,
         cid: &Cid,
         block_data: &[u8],
-        doc_id: &str,
-        collection_id: &str,
-        creator: &str,
+        metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, Self::Error>;
 }
 
