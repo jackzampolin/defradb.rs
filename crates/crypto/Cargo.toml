@@ -28,6 +28,15 @@ subtle = "2.5"            # Constant-time operations for key comparison
 # Encoding and serialization
 hex = "0.4"               # Hex encoding/decoding
 serde.workspace = true
+serde_bytes.workspace = true  # Efficient byte serialization
+serde_ipld_dagcbor.workspace = true  # DAG-CBOR serialization for Merkle proofs
+
+# IPLD
+cid.workspace = true      # Content identifiers
+multihash.workspace = true # Multihash for CID computation
+
+# Async
+async-trait.workspace = true  # Async traits for ProofBlockstore
 
 # DID support
 multibase = "0.9"         # Multibase encoding for DID keys
@@ -40,3 +49,4 @@ thiserror.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 serial_test = "3.0"
+tokio.workspace = true    # Async runtime for tests
