@@ -5,7 +5,7 @@ use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 
 use crate::document::DocumentMapping;
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 use crate::mapper::{OrderBy, OrderCondition, OrderDirection};
 use crate::planner::{Doc, PlanNode};
 
@@ -20,17 +20,11 @@ use crate::planner::{Doc, PlanNode};
 /// - Multi-field ordering with proper precedence
 /// - Stable sort preserves original order for equal elements
 pub struct OrderByNode {
-    /// Source plan node
     source: Box<dyn PlanNode>,
-    /// Order by specification
     order_by: OrderBy,
-    /// Document mapping for field lookups
     document_mapping: DocumentMapping,
-    /// Buffered and sorted documents
     buffer: Vec<Doc>,
-    /// Current position in buffer
     position: usize,
-    /// Current document
     current_doc: Doc,
 }
 
@@ -79,7 +73,8 @@ impl OrderByNode {
     /// Compare two non-null JSON values
     fn compare_non_null(a: &JsonValue, b: &JsonValue) -> Ordering {
         match (a, b) {
-            // Numbers
+            // Numbers: Convert to f64 for comparison. Large integers beyond ~2^53 may
+            // lose precision. NaN values are treated as equal to avoid non-determinism.
             (JsonValue::Number(a_num), JsonValue::Number(b_num)) => {
                 let a_f = a_num.as_f64().unwrap_or(0.0);
                 let b_f = b_num.as_f64().unwrap_or(0.0);
@@ -187,6 +182,19 @@ impl PlanNode for OrderByNode {
     }
 
     async fn start(&mut self) -> Result<()> {
+        // Validate that all ORDER BY fields exist in the document mapping
+        for condition in &self.order_by.conditions {
+            if !condition.fields.is_empty() {
+                let field_name = &condition.fields[0];
+                if self.document_mapping.first_index_of_name(field_name).is_none() {
+                    return Err(QueryError::execution(format!(
+                        "ORDER BY field '{}' does not exist in the document schema",
+                        field_name
+                    )));
+                }
+            }
+        }
+
         self.source.start().await?;
 
         // Buffer all documents from source
@@ -660,5 +668,109 @@ mod tests {
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(vec![]);
         let orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
         assert_eq!(orderby.kind(), "orderByNode");
+    }
+
+    #[tokio::test]
+    async fn test_orderby_nonexistent_field_returns_error() {
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+
+        let docs = vec![
+            make_doc("doc1", "Alice", 30),
+            make_doc("doc2", "Bob", 25),
+        ];
+
+        // Order by a field that doesn't exist in the mapping
+        let order_by = OrderBy::new()
+            .with_condition(OrderCondition::new("nonexistent_field", OrderDirection::Asc));
+
+        let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
+        let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
+
+        orderby.init().await.unwrap();
+        let result = orderby.start().await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("ORDER BY field 'nonexistent_field' does not exist"),
+            "Expected error about nonexistent field, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_orderby_stable_sort_preserves_insertion_order() {
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+
+        // All documents have the same age (30) but different names and doc IDs
+        // The stable sort should preserve their original insertion order
+        let docs = vec![
+            make_doc("doc1", "First", 30),
+            make_doc("doc2", "Second", 30),
+            make_doc("doc3", "Third", 30),
+            make_doc("doc4", "Fourth", 30),
+        ];
+
+        // Order by age - all ages are equal, so stable sort should preserve order
+        let order_by = OrderBy::new()
+            .with_condition(OrderCondition::new("age", OrderDirection::Asc));
+
+        let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
+        let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
+
+        orderby.init().await.unwrap();
+        orderby.start().await.unwrap();
+
+        let mut results = Vec::new();
+        while orderby.next().await.unwrap() {
+            results.push(orderby.value().get(0).cloned()); // Get doc_id
+        }
+
+        assert_eq!(results.len(), 4);
+        // Verify original insertion order is preserved for equal sort keys
+        assert_eq!(results[0], Some(json!("doc1")));
+        assert_eq!(results[1], Some(json!("doc2")));
+        assert_eq!(results[2], Some(json!("doc3")));
+        assert_eq!(results[3], Some(json!("doc4")));
+    }
+
+    #[tokio::test]
+    async fn test_orderby_multiple_null_values() {
+        let collection = make_test_collection();
+        let mapping = make_test_mapping();
+
+        // Multiple documents with null ages
+        let docs = vec![
+            make_doc_with_null_age("doc1", "Alice"),
+            make_doc("doc2", "Bob", 30),
+            make_doc_with_null_age("doc3", "Charlie"),
+            make_doc("doc4", "Diana", 25),
+        ];
+
+        let order_by = OrderBy::new()
+            .with_condition(OrderCondition::new("age", OrderDirection::Asc));
+
+        let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
+        let mut orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
+
+        orderby.init().await.unwrap();
+        orderby.start().await.unwrap();
+
+        let mut results = Vec::new();
+        while orderby.next().await.unwrap() {
+            results.push((
+                orderby.value().get(0).cloned(), // doc_id
+                orderby.value().get(2).cloned(), // age
+            ));
+        }
+
+        assert_eq!(results.len(), 4);
+        // Nulls first (in original order due to stable sort), then sorted by age
+        assert_eq!(results[0], (Some(json!("doc1")), None)); // null
+        assert_eq!(results[1], (Some(json!("doc3")), None)); // null
+        assert_eq!(results[2], (Some(json!("doc4")), Some(json!(25)))); // 25
+        assert_eq!(results[3], (Some(json!("doc2")), Some(json!(30)))); // 30
     }
 }
