@@ -10,14 +10,17 @@
 
 //! Start command implementation
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Args;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::config::{Config, DatastoreType};
 use crate::error::{Error, Result};
+
 
 const DEV_MODE_BANNER: &str = r#"
 ******************************************
@@ -40,7 +43,7 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_txn_retries: Option<u32>,
 
-    /// Specify the datastore to use (supported: badger, memory)
+    /// Specify the datastore to use (supported: badger, rocksdb, memory)
     #[arg(long)]
     pub store: Option<String>,
 
@@ -297,6 +300,7 @@ mod tests {
 struct Node {
     config: Config,
     p2p_handle: Option<p2p::P2PHostHandle>,
+    http_server: Option<defra_http::Server>,
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: mpsc::Receiver<()>,
 }
@@ -308,21 +312,12 @@ impl Node {
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
 
-        // Initialize storage and P2P together (P2P needs concrete blockstore type)
-        // We use a helper function to avoid code duplication
-        let p2p_handle = match config.datastore.store {
+        // Initialize storage, database, and set up P2P and HTTP server
+        let (p2p_handle, http_server) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
-
-                if config.net.p2p_disabled {
-                    None
-                } else {
-                    info!("Initializing P2P network");
-                    let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
-                    let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-                    Some(Self::start_p2p(&config, bitswap_store).await?)
-                }
+                Self::init_store_and_server(store, &config).await?
             }
             DatastoreType::Badger => {
                 info!(
@@ -330,15 +325,7 @@ impl Node {
                     config.data_path().display()
                 );
                 let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
-
-                if config.net.p2p_disabled {
-                    None
-                } else {
-                    info!("Initializing P2P network");
-                    let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
-                    let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-                    Some(Self::start_p2p(&config, bitswap_store).await?)
-                }
+                Self::init_store_and_server(store, &config).await?
             }
         };
 
@@ -347,9 +334,90 @@ impl Node {
         Ok(Self {
             config,
             p2p_handle,
+            http_server: Some(http_server),
             shutdown_tx,
             shutdown_rx,
         })
+    }
+
+    /// Initialize store, database, P2P, and HTTP server.
+    ///
+    /// This function creates the database, loads collections, sets up the query
+    /// runner with proper transaction support, and returns the HTTP server.
+    async fn init_store_and_server<S>(
+        store: Arc<S>,
+        config: &Config,
+    ) -> Result<(Option<p2p::P2PHostHandle>, defra_http::Server)>
+    where
+        S: storage::corekv::Store + 'static,
+    {
+        // Open database and load collections from storage
+        let database = Arc::new(
+            db::DB::open_from_arc(store.clone())
+                .await
+                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?,
+        );
+
+        let collection_count = database
+            .list_collections()
+            .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?
+            .len();
+        info!("Loaded {} collection schema(s)", collection_count);
+
+        // Set up P2P if enabled
+        let p2p = if config.net.p2p_disabled {
+            None
+        } else {
+            info!("Initializing P2P network");
+            let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
+            let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
+            Some(Self::start_p2p(config, bitswap_store).await?)
+        };
+
+        // Create HTTP server with database-backed query runner
+        let http_server = {
+            let api_address: SocketAddr = config
+                .api
+                .address
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    Error::InvalidApiAddress(config.api.address.clone(), e.to_string())
+                })?;
+
+            let server_config = defra_http::ServerConfig {
+                address: api_address,
+                allowed_origins: config.api.allowed_origins.clone(),
+            };
+
+            // Create auto-committing fetcher for non-transactional queries
+            let fetcher = db::AutoCommitFetcher::new(database.clone());
+
+            // Create transaction registry for explicit transaction support
+            let registry = db::DbTransactionRegistry::new(database.clone());
+
+            // Get collection schemas for the query runner
+            let collections: Vec<schema::CollectionVersion> = database
+                .list_collections()
+                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?
+                .iter()
+                .filter_map(|name| {
+                    database
+                        .get_collection(name)
+                        .ok()
+                        .flatten()
+                        .map(|c| c.schema().clone())
+                })
+                .collect();
+
+            // Create query runner with transaction support
+            let executor = query::QueryRunner::with_registry(fetcher, collections, registry);
+            let server = defra_http::Server::with_config(executor, server_config);
+
+            info!("HTTP server configured on {}", api_address);
+            server
+        };
+
+        Ok((p2p, http_server))
     }
 
     /// Start P2P networking with the given bitswap store
@@ -425,6 +493,18 @@ impl Node {
         info!("DefraDB node started");
         info!("API endpoint: http://{}", self.config.api.address);
 
+        // Start HTTP server
+        let http_task: Option<JoinHandle<()>> = if let Some(server) = self.http_server.take() {
+            info!("Starting HTTP server on {}", self.config.api.address);
+            Some(tokio::spawn(async move {
+                if let Err(e) = server.run().await {
+                    error!("HTTP server error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
+
         // Set up signal handling
         let shutdown_tx = self.shutdown_tx.clone();
 
@@ -472,10 +552,52 @@ impl Node {
             });
         }
 
-        // Wait for shutdown signal
-        self.shutdown_rx.recv().await;
+        // Wait for shutdown signal OR HTTP server crash
+        let mut http_task = http_task;
+        let http_crashed = match &mut http_task {
+            Some(task) => {
+                tokio::select! {
+                    _ = self.shutdown_rx.recv() => false,
+                    result = task => {
+                        match result {
+                            Ok(()) => {
+                                error!("HTTP server exited unexpectedly");
+                            }
+                            Err(e) if e.is_panic() => {
+                                error!("HTTP server panicked: {}", e);
+                            }
+                            Err(e) => {
+                                error!("HTTP server task failed: {}", e);
+                            }
+                        }
+                        true
+                    }
+                }
+            }
+            None => {
+                self.shutdown_rx.recv().await;
+                false
+            }
+        };
 
-        info!("Shutting down DefraDB node...");
+        if http_crashed {
+            info!("Initiating shutdown due to HTTP server failure...");
+        } else {
+            info!("Shutting down DefraDB node...");
+            // Only abort if we're shutting down normally (not due to crash)
+            if let Some(task) = http_task {
+                info!("Stopping HTTP server...");
+                task.abort();
+                match tokio::time::timeout(std::time::Duration::from_secs(1), task).await {
+                    Ok(_) => info!("HTTP server stopped"),
+                    Err(_) => warn!(
+                        timeout_secs = 1,
+                        "HTTP server shutdown timed out - server was forcefully terminated. \
+                         This may occur if requests were still in flight."
+                    ),
+                }
+            }
+        }
 
         // Shutdown P2P
         // Note: We log but don't return errors here because:
@@ -490,5 +612,430 @@ impl Node {
 
         info!("DefraDB node shutdown complete");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod http_integration_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Wait for server to be ready by polling health endpoint with retries.
+    async fn wait_for_server(api_url: &str, max_attempts: u32) {
+        let client = reqwest::Client::new();
+        for attempt in 1..=max_attempts {
+            match client
+                .get(format!("{}/health-check", api_url))
+                .timeout(Duration::from_millis(100))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => return,
+                _ => {
+                    if attempt < max_attempts {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        }
+        panic!(
+            "Server at {} failed to become ready after {} attempts",
+            api_url, max_attempts
+        );
+    }
+
+    /// Create a test config with random port and P2P disabled
+    fn test_config(port: u16, temp_dir: &std::path::Path) -> Config {
+        Config {
+            rootdir: temp_dir.to_path_buf(),
+            log: crate::config::LogConfig::default(),
+            api: crate::config::ApiConfig {
+                address: format!("127.0.0.1:{}", port),
+                allowed_origins: vec![],
+                pubkey_path: String::new(),
+                privkey_path: String::new(),
+            },
+            datastore: crate::config::DatastoreConfig {
+                store: DatastoreType::Memory,
+                path: String::new(),
+                max_txn_retries: 5,
+                valuelogfilesize: 1 << 30,
+                no_encryption: true,
+                no_signing: true,
+                no_searchable_encryption: true,
+                default_key_type: "ed25519".to_string(),
+            },
+            net: crate::config::NetConfig {
+                p2p_disabled: true, // Disable P2P for HTTP-only tests
+                p2p_addresses: vec![],
+                peers: vec![],
+                pubsub_enabled: false,
+                relay_enabled: false,
+            },
+            keyring: crate::config::KeyringConfig::default(),
+            development: false,
+            secret_file: String::new(),
+            telemetry_disabled: true,
+            replicator_retry_intervals: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_server_starts_and_serves_health_check() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        let config = test_config(port, temp_dir.path());
+        let api_url = format!("http://127.0.0.1:{}", port);
+
+        // Create node
+        let node = Node::new(config).await.unwrap();
+
+        // Get shutdown sender before moving node
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        // Spawn node in background
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        // Wait for server to be ready
+        wait_for_server(&api_url, 20).await;
+
+        // Test health check endpoint
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}/health-check", api_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to health check");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.text().await.unwrap();
+        assert_eq!(body, "Healthy");
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), node_handle)
+            .await
+            .expect("Node shutdown timed out")
+            .expect("Node task panicked");
+        assert!(result.is_ok(), "Node shutdown failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_http_server_serves_version_endpoint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        let config = test_config(port, temp_dir.path());
+        let api_url = format!("http://127.0.0.1:{}", port);
+
+        let node = Node::new(config).await.unwrap();
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        wait_for_server(&api_url, 20).await;
+
+        // Test version endpoint
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}/api/v0/version", api_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to version endpoint");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body.get("version").is_some(), "Response should contain version");
+        assert!(body.get("commit").is_some(), "Response should contain commit");
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_http_server_serves_graphql_endpoint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        let config = test_config(port, temp_dir.path());
+        let api_url = format!("http://127.0.0.1:{}", port);
+
+        let node = Node::new(config).await.unwrap();
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        wait_for_server(&api_url, 20).await;
+
+        // Test GraphQL endpoint - expect error since no schema is loaded
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{}/api/v0/graphql", api_url))
+            .header("content-type", "application/json")
+            .body(r#"{"query": "{ users { name } }"}"#)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to graphql endpoint");
+
+        // Should return 200 OK even with errors (GraphQL spec)
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        // With empty schema, we expect an error about collection not found
+        assert!(
+            body.get("errors").is_some() || body.get("data").is_some(),
+            "Response should be valid GraphQL response"
+        );
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_http_server_schema_endpoint_returns_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        let config = test_config(port, temp_dir.path());
+        let api_url = format!("http://127.0.0.1:{}", port);
+
+        let node = Node::new(config).await.unwrap();
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        wait_for_server(&api_url, 20).await;
+
+        // Test schema endpoint - should return empty or minimal schema
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}/api/v0/schema", api_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to schema endpoint");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
+    }
+
+    /// Create a test config with RocksDB backend
+    fn test_config_rocksdb(port: u16, temp_dir: &std::path::Path) -> Config {
+        Config {
+            rootdir: temp_dir.to_path_buf(),
+            log: crate::config::LogConfig::default(),
+            api: crate::config::ApiConfig {
+                address: format!("127.0.0.1:{}", port),
+                allowed_origins: vec![],
+                pubkey_path: String::new(),
+                privkey_path: String::new(),
+            },
+            datastore: crate::config::DatastoreConfig {
+                store: DatastoreType::Badger, // Use RocksDB backend
+                path: String::new(),
+                max_txn_retries: 5,
+                valuelogfilesize: 1 << 30,
+                no_encryption: true,
+                no_signing: true,
+                no_searchable_encryption: true,
+                default_key_type: "ed25519".to_string(),
+            },
+            net: crate::config::NetConfig {
+                p2p_disabled: true,
+                p2p_addresses: vec![],
+                peers: vec![],
+                pubsub_enabled: false,
+                relay_enabled: false,
+            },
+            keyring: crate::config::KeyringConfig::default(),
+            development: false,
+            secret_file: String::new(),
+            telemetry_disabled: true,
+            replicator_retry_intervals: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_server_with_rocksdb_backend() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        let config = test_config_rocksdb(port, temp_dir.path());
+        let api_url = format!("http://127.0.0.1:{}", port);
+
+        // Create node with RocksDB backend
+        let node = Node::new(config).await.unwrap();
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        wait_for_server(&api_url, 20).await;
+
+        // Test health check works with RocksDB
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}/health-check", api_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to health check");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "Healthy");
+
+        // Test schema endpoint - should be empty for fresh database
+        let response = client
+            .get(format!("{}/api/v0/schema", api_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to connect to schema endpoint");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
+    }
+
+    /// End-to-end test: pre-seed database with documents, query via HTTP
+    #[tokio::test]
+    async fn test_http_graphql_returns_documents_from_database() {
+        use document::NormalValue;
+        use schema::{CollectionVersion, FieldDescription, FieldKind};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let port = portpicker::pick_unused_port().expect("No free ports");
+        // Use the same path that Node will use (rootdir when datastore.path is empty)
+        let data_path = temp_dir.path();
+
+        // Phase 1: Pre-seed database with collection and documents
+        {
+            let store = storage::RocksDBStore::open(data_path).unwrap();
+            let database = db::DB::new(store);
+
+            // Create Users collection
+            let schema = CollectionVersion::new(
+                "Users",
+                "v1",
+                "col-users",
+                vec![
+                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                    FieldDescription::new("2", "name", FieldKind::string()),
+                    FieldDescription::new("3", "age", FieldKind::int()),
+                ],
+            );
+            database.create_collection(schema).await.unwrap();
+
+            // Insert test documents
+            let collection = database.get_collection("Users").unwrap().unwrap();
+            let txn = database.new_txn(false).await.unwrap();
+
+            let mut doc1 = document::Document::new();
+            doc1.set("name", NormalValue::String("Alice".to_string()));
+            doc1.set("age", NormalValue::Int(30));
+            doc1.generate_and_set_doc_id().unwrap();
+            collection.create(&txn, &doc1).await.unwrap();
+
+            let mut doc2 = document::Document::new();
+            doc2.set("name", NormalValue::String("Bob".to_string()));
+            doc2.set("age", NormalValue::Int(25));
+            doc2.generate_and_set_doc_id().unwrap();
+            collection.create(&txn, &doc2).await.unwrap();
+
+            txn.commit().await.unwrap();
+            database.close().await.unwrap();
+        }
+
+        // Phase 2: Start server and query via HTTP
+        let config = Config {
+            rootdir: temp_dir.path().to_path_buf(),
+            log: crate::config::LogConfig::default(),
+            api: crate::config::ApiConfig {
+                address: format!("127.0.0.1:{}", port),
+                allowed_origins: vec![],
+                pubkey_path: String::new(),
+                privkey_path: String::new(),
+            },
+            datastore: crate::config::DatastoreConfig {
+                store: DatastoreType::Badger, // Uses RocksDB
+                path: String::new(),
+                max_txn_retries: 5,
+                valuelogfilesize: 1 << 30,
+                no_encryption: true,
+                no_signing: true,
+                no_searchable_encryption: true,
+                default_key_type: "ed25519".to_string(),
+            },
+            net: crate::config::NetConfig {
+                p2p_disabled: true,
+                p2p_addresses: vec![],
+                peers: vec![],
+                pubsub_enabled: false,
+                relay_enabled: false,
+            },
+            keyring: crate::config::KeyringConfig::default(),
+            development: false,
+            secret_file: String::new(),
+            telemetry_disabled: true,
+            replicator_retry_intervals: vec![],
+        };
+
+        let api_url = format!("http://127.0.0.1:{}", port);
+        let node = Node::new(config).await.unwrap();
+        let shutdown_tx = node.shutdown_tx.clone();
+
+        let node_handle = tokio::spawn(async move {
+            node.run().await
+        });
+
+        wait_for_server(&api_url, 20).await;
+
+        // Query documents via GraphQL
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{}/api/v0/graphql", api_url))
+            .header("content-type", "application/json")
+            .body(r#"{"query": "{ Users { name age } }"}"#)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Failed to query graphql endpoint");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let body: serde_json::Value = response.json().await.unwrap();
+
+        // Verify we got data back (not just errors)
+        let data = body.get("data").expect("Response should have data field");
+        let users = data.get("Users").expect("Data should have Users field");
+        let users_array = users.as_array().expect("Users should be an array");
+
+        assert_eq!(users_array.len(), 2, "Should have 2 users");
+
+        // Verify document contents
+        let names: Vec<&str> = users_array
+            .iter()
+            .filter_map(|u| u.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"Alice"), "Should contain Alice");
+        assert!(names.contains(&"Bob"), "Should contain Bob");
+
+        // Shutdown
+        shutdown_tx.send(()).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
     }
 }

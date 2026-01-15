@@ -42,6 +42,7 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
+pub mod auto_commit_fetcher;
 pub mod collection;
 pub mod collection_name;
 pub mod collection_snapshot;
@@ -49,11 +50,13 @@ pub mod database;
 pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
+pub mod schema_loader;
 pub mod txn;
 pub mod txn_context;
 pub mod txn_registry;
 
 // Re-export commonly used types
+pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use collection::Collection;
 pub use collection_name::CollectionName;
 pub use collection_snapshot::CollectionSnapshot;
@@ -64,6 +67,7 @@ pub use error::{Error, Result};
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};
+pub use schema_loader::load_active_collections;
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};

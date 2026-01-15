@@ -73,6 +73,51 @@ impl<S: Store> DB<S> {
         Ok(db)
     }
 
+    /// Create a new database from an Arc-wrapped store.
+    ///
+    /// Use this when you already have an `Arc<S>` and want to share
+    /// the store between the database and other components (e.g., blockstore).
+    ///
+    /// Note: This creates a DB with an empty collection cache. Use `open_from_arc()`
+    /// to load existing collections from the store.
+    ///
+    /// **Warning:** When multiple DB instances share a store via `from_arc()`,
+    /// transaction IDs may collide if both instances create transactions concurrently.
+    /// This is acceptable for read-heavy workloads but may cause issues with
+    /// concurrent writes from multiple DB instances.
+    pub fn from_arc(store: Arc<S>) -> Self {
+        Self::from_arc_with_options(store, DbOptions::default())
+    }
+
+    /// Create a new database from an Arc-wrapped store with options.
+    ///
+    /// **Warning:** When multiple DB instances share a store via `from_arc()`,
+    /// transaction IDs may collide if both instances create transactions concurrently.
+    pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Self {
+        Self {
+            store,
+            options,
+            txn_id_counter: AtomicU64::new(0),
+            collections: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Open a database from an Arc-wrapped store and load existing collections.
+    ///
+    /// Use this when you already have an `Arc<S>` and want to share
+    /// the store between the database and other components (e.g., blockstore),
+    /// while also loading existing collections from the store.
+    pub async fn open_from_arc(store: Arc<S>) -> Result<Self> {
+        Self::open_from_arc_with_options(store, DbOptions::default()).await
+    }
+
+    /// Open a database from an Arc-wrapped store with options and load existing collections.
+    pub async fn open_from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
+        let db = Self::from_arc_with_options(store, options);
+        db.load_collections().await?;
+        Ok(db)
+    }
+
     /// Get the next transaction ID.
     fn next_txn_id(&self) -> u64 {
         self.txn_id_counter.fetch_add(1, Ordering::SeqCst) + 1
@@ -1191,5 +1236,72 @@ mod tests {
         assert!(db.has_collection("Users").unwrap());
         assert!(db.has_collection("HiddenCollection").unwrap());
         assert_eq!(db.list_collections().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_db_from_arc_creates_working_database() {
+        let store = Arc::new(MemoryStore::new());
+        let db = DB::from_arc(store);
+
+        // Verify transactions work
+        let txn = db.new_txn(false).await.unwrap();
+        assert_eq!(txn.id().unwrap(), 1);
+
+        let txn2 = db.new_txn(false).await.unwrap();
+        assert_eq!(txn2.id().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_db_from_arc_with_options() {
+        let store = Arc::new(MemoryStore::new());
+        let options = DbOptions {
+            max_txn_retries: Some(10),
+            chunk_size: Some(2048),
+        };
+        let db = DB::from_arc_with_options(store, options);
+
+        assert_eq!(db.options().max_txn_retries, Some(10));
+        assert_eq!(db.options().chunk_size, Some(2048));
+    }
+
+    #[tokio::test]
+    async fn test_db_from_arc_shares_store_with_caller() {
+        let store = Arc::new(MemoryStore::new());
+        let db = DB::from_arc(store.clone());
+
+        // Write via db
+        let txn = db.new_txn(false).await.unwrap();
+        txn.datastore()
+            .unwrap()
+            .set(b"shared_key", b"shared_value")
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Verify data is visible via same store (proves Arc sharing works)
+        let db2 = DB::from_arc(store);
+        let txn2 = db2.new_txn(true).await.unwrap();
+        let value = txn2.datastore().unwrap().get(b"shared_key").await.unwrap();
+        assert_eq!(value, Some(b"shared_value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_db_from_arc_txn_isolation() {
+        let store = Arc::new(MemoryStore::new());
+        let db = DB::from_arc(store);
+
+        // Write in first transaction
+        let txn1 = db.new_txn(false).await.unwrap();
+        txn1.datastore()
+            .unwrap()
+            .set(b"key", b"value1")
+            .await
+            .unwrap();
+        txn1.commit().await.unwrap();
+
+        // Read in second transaction
+        let txn2 = db.new_txn(true).await.unwrap();
+        let value = txn2.datastore().unwrap().get(b"key").await.unwrap();
+        assert_eq!(value, Some(b"value1".to_vec()));
     }
 }

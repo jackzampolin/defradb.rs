@@ -259,7 +259,7 @@ impl CreateNode {
         let mut doc = Doc::new(num_fields);
 
         // Set document ID at index 0
-        doc.set_doc_id(&result.doc_id.to_string());
+        doc.set_doc_id(result.doc_id.to_string());
 
         // Map each field from the created document
         for (field_name, field_value) in result.document.values() {
