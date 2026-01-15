@@ -39,7 +39,7 @@
 //! }
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,23 +74,24 @@ impl DagSyncConfig {
     /// * `max_depth` - Maximum sync depth (None = unlimited)
     /// * `max_concurrent_fetches` - Max concurrent fetches (guaranteed non-zero)
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `block_fetch_timeout` is zero.
+    /// Returns `Error::InvalidConfig` if `block_fetch_timeout` is zero.
     pub fn new(
         block_fetch_timeout: Duration,
         max_depth: Option<NonZeroUsize>,
         max_concurrent_fetches: NonZeroUsize,
-    ) -> Self {
-        assert!(
-            !block_fetch_timeout.is_zero(),
-            "block_fetch_timeout must be greater than zero"
-        );
-        Self {
+    ) -> Result<Self> {
+        if block_fetch_timeout.is_zero() {
+            return Err(crate::error::Error::InvalidConfig(
+                "block_fetch_timeout must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self {
             block_fetch_timeout,
             max_depth,
             max_concurrent_fetches,
-        }
+        })
     }
 
     /// Get the block fetch timeout.
@@ -109,10 +110,18 @@ impl DagSyncConfig {
     }
 
     /// Builder method to set block fetch timeout.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        assert!(!timeout.is_zero(), "timeout must be greater than zero");
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidConfig` if `timeout` is zero.
+    pub fn with_timeout(mut self, timeout: Duration) -> Result<Self> {
+        if timeout.is_zero() {
+            return Err(crate::error::Error::InvalidConfig(
+                "timeout must be greater than zero".to_string(),
+            ));
+        }
         self.block_fetch_timeout = timeout;
-        self
+        Ok(self)
     }
 
     /// Builder method to set max depth.
@@ -139,13 +148,30 @@ impl Default for DagSyncConfig {
     }
 }
 
+/// Default maximum number of synced CIDs to track before eviction.
+const DEFAULT_MAX_SYNCED_CIDS: usize = 100_000;
+
 /// Internal state for DagSyncState, protected by a single lock.
-#[derive(Default)]
 struct SyncStateInner {
     /// CIDs currently being synced
     syncing: HashSet<Cid>,
     /// CIDs that have been synced in this session
     synced: HashSet<Cid>,
+    /// Order of synced CIDs for FIFO eviction (oldest first)
+    synced_order: VecDeque<Cid>,
+    /// Maximum number of synced CIDs before eviction
+    max_synced: usize,
+}
+
+impl Default for SyncStateInner {
+    fn default() -> Self {
+        Self {
+            syncing: HashSet::new(),
+            synced: HashSet::new(),
+            synced_order: VecDeque::new(),
+            max_synced: DEFAULT_MAX_SYNCED_CIDS,
+        }
+    }
 }
 
 /// Tracks ongoing DAG sync operations.
@@ -155,18 +181,44 @@ struct SyncStateInner {
 /// - Track which blocks are being fetched
 /// - Cancel sync operations when needed
 ///
+/// The synced set has a configurable maximum size. When the limit is reached,
+/// the oldest synced CIDs are evicted to make room for new ones. This prevents
+/// unbounded memory growth in long-running nodes.
+///
 /// All state is protected by a single lock to prevent race conditions
 /// between checking and modifying sync state.
-#[derive(Default)]
 pub struct DagSyncState {
     /// Combined state protected by a single lock
     state: RwLock<SyncStateInner>,
 }
 
+impl Default for DagSyncState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DagSyncState {
-    /// Create a new sync state tracker.
+    /// Create a new sync state tracker with default settings.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            state: RwLock::new(SyncStateInner::default()),
+        }
+    }
+
+    /// Create a new sync state tracker with custom max synced limit.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_synced` - Maximum number of synced CIDs to track. When exceeded,
+    ///   the oldest synced CIDs are evicted.
+    pub fn with_max_synced(max_synced: usize) -> Self {
+        Self {
+            state: RwLock::new(SyncStateInner {
+                max_synced,
+                ..Default::default()
+            }),
+        }
     }
 
     /// Check if a CID is currently being synced.
@@ -195,10 +247,36 @@ impl DagSyncState {
     }
 
     /// Mark a CID as successfully synced.
+    ///
+    /// If the synced set exceeds the maximum size, the oldest synced CIDs
+    /// are evicted to make room.
     pub async fn complete_sync(&self, cid: Cid) {
         let mut state = self.state.write().await;
         state.syncing.remove(&cid);
-        state.synced.insert(cid);
+
+        // Only add if not already synced (avoid duplicate in order queue)
+        if state.synced.insert(cid) {
+            state.synced_order.push_back(cid);
+
+            // Evict oldest synced CIDs if over limit
+            while state.synced.len() > state.max_synced {
+                if let Some(old_cid) = state.synced_order.pop_front() {
+                    state.synced.remove(&old_cid);
+                    debug!(
+                        cid = %old_cid,
+                        synced_count = state.synced.len(),
+                        max_synced = state.max_synced,
+                        "Evicted old synced CID to stay within memory limit"
+                    );
+                } else {
+                    // Order queue is empty but synced set isn't - shouldn't happen
+                    // but handle gracefully by clearing everything
+                    warn!("Synced order queue empty but synced set is not - clearing synced set");
+                    state.synced.clear();
+                    break;
+                }
+            }
+        }
     }
 
     /// Cancel a sync operation (e.g., on error).
@@ -212,11 +290,17 @@ impl DagSyncState {
         self.state.read().await.syncing.iter().cloned().collect()
     }
 
+    /// Get the number of synced CIDs being tracked.
+    pub async fn synced_count(&self) -> usize {
+        self.state.read().await.synced.len()
+    }
+
     /// Clear all state (for testing or reset).
     pub async fn clear(&self) {
         let mut state = self.state.write().await;
         state.syncing.clear();
         state.synced.clear();
+        state.synced_order.clear();
     }
 }
 
@@ -327,11 +411,9 @@ impl DagSync {
         // Get potential providers from peer state
         let providers = self.get_providers(&missing);
 
-        Ok(SyncPlan::NeedsFetch {
-            root: block_cid,
-            missing,
-            providers,
-        })
+        // Use validated constructor - will always return Some since we checked missing.is_empty() above
+        Ok(SyncPlan::needs_fetch_new(block_cid, missing, providers)
+            .expect("missing is non-empty, validated above"))
     }
 
     /// Get potential providers for a set of CIDs.
@@ -403,6 +485,52 @@ impl DagSync {
     }
 }
 
+/// Data for a NeedsFetch sync plan with enforced invariants.
+///
+/// The `missing` field is guaranteed to be non-empty.
+/// Use `NeedsFetchData::new()` to construct.
+#[derive(Debug, Clone)]
+pub struct NeedsFetchData {
+    /// Root block CID that triggered the sync.
+    root: Cid,
+    /// CIDs that need to be fetched (guaranteed non-empty).
+    missing: Vec<Cid>,
+    /// Potential providers for the blocks.
+    providers: Vec<PeerId>,
+}
+
+impl NeedsFetchData {
+    /// Create a new NeedsFetchData with validation.
+    ///
+    /// Returns `None` if `missing` is empty.
+    pub fn new(root: Cid, missing: Vec<Cid>, providers: Vec<PeerId>) -> Option<Self> {
+        if missing.is_empty() {
+            None
+        } else {
+            Some(Self {
+                root,
+                missing,
+                providers,
+            })
+        }
+    }
+
+    /// Get the root CID.
+    pub fn root(&self) -> Cid {
+        self.root
+    }
+
+    /// Get the missing CIDs (guaranteed non-empty).
+    pub fn missing(&self) -> &[Cid] {
+        &self.missing
+    }
+
+    /// Get the providers.
+    pub fn providers(&self) -> &[PeerId] {
+        &self.providers
+    }
+}
+
 /// Result of preparing a sync operation.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -418,16 +546,9 @@ pub enum SyncPlan {
 
     /// Need to fetch missing blocks via Bitswap.
     ///
-    /// Use `SyncPlan::needs_fetch_new()` to create this variant,
+    /// Use `SyncPlan::needs_fetch_new()` or `NeedsFetchData::new()` to create,
     /// which enforces the invariant that `missing` is non-empty.
-    NeedsFetch {
-        /// Root block CID that triggered the sync.
-        root: Cid,
-        /// CIDs that need to be fetched (guaranteed non-empty).
-        missing: Vec<Cid>,
-        /// Potential providers for the blocks.
-        providers: Vec<PeerId>,
-    },
+    NeedsFetch(NeedsFetchData),
 }
 
 impl SyncPlan {
@@ -435,36 +556,26 @@ impl SyncPlan {
     ///
     /// Returns `None` if `missing` is empty (use `SyncPlan::Complete` instead).
     pub fn needs_fetch_new(root: Cid, missing: Vec<Cid>, providers: Vec<PeerId>) -> Option<Self> {
-        if missing.is_empty() {
-            None
-        } else {
-            Some(Self::NeedsFetch {
-                root,
-                missing,
-                providers,
-            })
-        }
+        NeedsFetchData::new(root, missing, providers).map(Self::NeedsFetch)
     }
 
     /// Get the root CID if this is a NeedsFetch plan.
     pub fn root(&self) -> Option<Cid> {
         match self {
-            SyncPlan::NeedsFetch { root, .. } => Some(*root),
+            SyncPlan::NeedsFetch(data) => Some(data.root()),
             _ => None,
         }
     }
-}
 
-impl SyncPlan {
     /// Check if a fetch is needed.
     pub fn needs_fetch(&self) -> bool {
-        matches!(self, SyncPlan::NeedsFetch { .. })
+        matches!(self, SyncPlan::NeedsFetch(_))
     }
 
     /// Get the missing CIDs if a fetch is needed.
     pub fn missing(&self) -> Option<&[Cid]> {
         match self {
-            SyncPlan::NeedsFetch { missing, .. } => Some(missing),
+            SyncPlan::NeedsFetch(data) => Some(data.missing()),
             _ => None,
         }
     }
@@ -472,7 +583,15 @@ impl SyncPlan {
     /// Get the providers if a fetch is needed.
     pub fn providers(&self) -> Option<&[PeerId]> {
         match self {
-            SyncPlan::NeedsFetch { providers, .. } => Some(providers),
+            SyncPlan::NeedsFetch(data) => Some(data.providers()),
+            _ => None,
+        }
+    }
+
+    /// Get the NeedsFetchData if this is a NeedsFetch plan.
+    pub fn fetch_data(&self) -> Option<&NeedsFetchData> {
+        match self {
+            SyncPlan::NeedsFetch(data) => Some(data),
             _ => None,
         }
     }
@@ -572,15 +691,11 @@ mod tests {
         let plan = dag_sync.prepare_sync(root, &links, local_has).await.unwrap();
 
         match plan {
-            SyncPlan::NeedsFetch {
-                root: r,
-                missing,
-                providers,
-            } => {
-                assert_eq!(r, root);
-                assert_eq!(missing.len(), 1);
-                assert_eq!(missing[0], test_cid3());
-                assert!(!providers.is_empty());
+            SyncPlan::NeedsFetch(data) => {
+                assert_eq!(data.root(), root);
+                assert_eq!(data.missing().len(), 1);
+                assert_eq!(data.missing()[0], test_cid3());
+                assert!(!data.providers().is_empty());
             }
             _ => panic!("Expected NeedsFetch"),
         }
@@ -658,20 +773,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_plan_accessors() {
-        let plan = SyncPlan::NeedsFetch {
-            root: test_cid(),
-            missing: vec![test_cid2()],
-            providers: vec![PeerId::random()],
-        };
+        let plan = SyncPlan::needs_fetch_new(
+            test_cid(),
+            vec![test_cid2()],
+            vec![PeerId::random()],
+        )
+        .expect("missing is non-empty");
 
         assert!(plan.needs_fetch());
         assert_eq!(plan.missing().unwrap().len(), 1);
         assert_eq!(plan.providers().unwrap().len(), 1);
+        assert!(plan.fetch_data().is_some());
 
         let plan2 = SyncPlan::Complete;
         assert!(!plan2.needs_fetch());
         assert!(plan2.missing().is_none());
         assert!(plan2.providers().is_none());
+        assert!(plan2.fetch_data().is_none());
+    }
+
+    #[test]
+    fn test_needs_fetch_data_empty_missing_returns_none() {
+        let result = NeedsFetchData::new(test_cid(), vec![], vec![]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_needs_fetch_data_non_empty_missing_returns_some() {
+        let result = NeedsFetchData::new(test_cid(), vec![test_cid2()], vec![]);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.root(), test_cid());
+        assert_eq!(data.missing().len(), 1);
+        assert!(data.providers().is_empty());
     }
 
     #[tokio::test]
@@ -698,9 +832,9 @@ mod tests {
             .unwrap();
 
         match plan {
-            SyncPlan::NeedsFetch { providers, .. } => {
+            SyncPlan::NeedsFetch(data) => {
                 // Should prefer peer1 since it has the CID
-                assert!(providers.contains(&peer1));
+                assert!(data.providers().contains(&peer1));
             }
             _ => panic!("Expected NeedsFetch"),
         }
@@ -773,21 +907,38 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "block_fetch_timeout must be greater than zero")]
-    fn test_dag_sync_config_zero_timeout_panics() {
-        // DagSyncConfig::new should panic if block_fetch_timeout is zero
-        DagSyncConfig::new(
+    fn test_dag_sync_config_zero_timeout_returns_error() {
+        // DagSyncConfig::new should return error if block_fetch_timeout is zero
+        let result = DagSyncConfig::new(
             Duration::ZERO,
             None,
             NonZeroUsize::new(16).unwrap(),
         );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("block_fetch_timeout"));
     }
 
     #[test]
-    #[should_panic(expected = "timeout must be greater than zero")]
-    fn test_dag_sync_config_with_timeout_zero_panics() {
-        // with_timeout builder method should also panic on zero
-        DagSyncConfig::default().with_timeout(Duration::ZERO);
+    fn test_dag_sync_config_with_timeout_zero_returns_error() {
+        // with_timeout builder method should return error on zero
+        let result = DagSyncConfig::default().with_timeout(Duration::ZERO);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn test_dag_sync_config_valid_timeout_succeeds() {
+        // Valid timeout should succeed
+        let result = DagSyncConfig::new(
+            Duration::from_secs(10),
+            None,
+            NonZeroUsize::new(16).unwrap(),
+        );
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.block_fetch_timeout(), Duration::from_secs(10));
     }
 
     #[test]
@@ -804,11 +955,86 @@ mod tests {
     fn test_dag_sync_config_builder() {
         let config = DagSyncConfig::default()
             .with_timeout(Duration::from_secs(60))
+            .expect("valid timeout")
             .with_max_depth(Some(NonZeroUsize::new(10).unwrap()))
             .with_max_concurrent_fetches(NonZeroUsize::new(32).unwrap());
 
         assert_eq!(config.block_fetch_timeout(), Duration::from_secs(60));
         assert_eq!(config.max_depth(), Some(NonZeroUsize::new(10).unwrap()));
         assert_eq!(config.max_concurrent_fetches().get(), 32);
+    }
+
+    #[tokio::test]
+    async fn test_sync_state_eviction() {
+        // Create state with very small max to test eviction
+        let state = DagSyncState::with_max_synced(3);
+
+        // Create 5 different CIDs
+        let cids: Vec<Cid> = (0..5)
+            .map(|i| {
+                let bytes = format!(
+                    "bafybeig{}yrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                    i
+                );
+                // Use a simple hash-based approach to generate different CIDs
+                use cid::multihash::{Code, MultihashDigest};
+                let hash = Code::Sha2_256.digest(bytes.as_bytes());
+                Cid::new_v1(0x71, hash)
+            })
+            .collect();
+
+        // Sync all 5 CIDs
+        for cid in &cids {
+            state.start_sync(*cid).await;
+            state.complete_sync(*cid).await;
+        }
+
+        // Should only have 3 synced (the limit)
+        assert_eq!(state.synced_count().await, 3);
+
+        // First 2 CIDs should have been evicted
+        assert!(!state.is_synced(&cids[0]).await);
+        assert!(!state.is_synced(&cids[1]).await);
+
+        // Last 3 CIDs should still be synced
+        assert!(state.is_synced(&cids[2]).await);
+        assert!(state.is_synced(&cids[3]).await);
+        assert!(state.is_synced(&cids[4]).await);
+
+        // Evicted CIDs can be synced again
+        assert!(state.start_sync(cids[0]).await);
+    }
+
+    #[tokio::test]
+    async fn test_sync_state_eviction_no_duplicates() {
+        // Completing sync for the same CID twice should not cause issues
+        let state = DagSyncState::with_max_synced(2);
+        let cid = test_cid();
+
+        state.start_sync(cid).await;
+        state.complete_sync(cid).await;
+
+        // Complete again - should be idempotent
+        state.complete_sync(cid).await;
+
+        assert_eq!(state.synced_count().await, 1);
+        assert!(state.is_synced(&cid).await);
+    }
+
+    #[tokio::test]
+    async fn test_sync_state_synced_count() {
+        let state = DagSyncState::new();
+        let cid1 = test_cid();
+        let cid2 = test_cid2();
+
+        assert_eq!(state.synced_count().await, 0);
+
+        state.start_sync(cid1).await;
+        state.complete_sync(cid1).await;
+        assert_eq!(state.synced_count().await, 1);
+
+        state.start_sync(cid2).await;
+        state.complete_sync(cid2).await;
+        assert_eq!(state.synced_count().await, 2);
     }
 }

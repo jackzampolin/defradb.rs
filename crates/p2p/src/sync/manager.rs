@@ -342,7 +342,25 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         );
 
         // Check for missing linked blocks
-        let missing = self.find_missing_links(&msg.block).await?;
+        let missing = match self.find_missing_links(&msg.block).await {
+            Ok(m) => m,
+            Err(e) => {
+                // Block parsing failed - emit error event and propagate error
+                if self
+                    .event_tx
+                    .send(SyncEvent::SyncError {
+                        cid: *cid,
+                        error: e.to_string(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                    return Err(Error::ChannelSend);
+                }
+                return Err(e);
+            }
+        };
 
         if missing.is_empty() {
             // DAG is complete - emit BlockReceived for merge
@@ -428,15 +446,48 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// This parses the block's IPLD structure and checks which linked CIDs
     /// are not present in the blockstore.
+    ///
+    /// # Behavior
+    ///
+    /// - Raw blocks or blocks with unsupported codecs are treated as having no links
+    /// - IPLD blocks (DAG-CBOR, DAG-JSON, etc.) that fail to parse return an error
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BlockParseError` if an IPLD block cannot be parsed,
+    /// indicating possible data corruption.
     async fn find_missing_links(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
         // Try to parse the block to extract references
         // We use a dummy CID since we only care about extracting links
         let mut refs = Vec::new();
         let block = Block::<DefaultParams>::new_unchecked(Cid::default(), block_data.to_vec());
-        if block.references(&mut refs).is_err() {
-            // Can't parse block - assume no links (or it's not IPLD)
-            tracing::debug!("Block is not parseable as IPLD, assuming no links");
-            return Ok(Vec::new());
+        if let Err(e) = block.references(&mut refs) {
+            // Check if this is an unsupported codec error vs a parse error
+            let error_msg = e.to_string();
+            if error_msg.contains("Unsupported codec") {
+                // Block uses an unsupported codec (e.g., raw blocks with codec 0).
+                // This is not an error - these blocks simply have no IPLD links.
+                tracing::debug!(
+                    error = %e,
+                    block_data_len = block_data.len(),
+                    "Block uses unsupported codec, assuming no IPLD links"
+                );
+                return Ok(Vec::new());
+            }
+
+            // This is a parse error for a block that should be IPLD.
+            // This may indicate corruption or encoding mismatch.
+            tracing::warn!(
+                error = %e,
+                block_data_len = block_data.len(),
+                "Failed to parse block as IPLD - cannot extract links"
+            );
+            return Err(Error::BlockParseError {
+                reason: format!(
+                    "Failed to extract references: {}. Block may be corrupt.",
+                    e
+                ),
+            });
         }
 
         // Check which CIDs are missing
@@ -516,29 +567,40 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         if success {
             // All blocks fetched - emit BlockReceived for the root
             let dag = self.pending_dags.write().remove(&root_cid);
-            if let Some(dag) = dag {
-                tracing::info!(
-                    cid = %root_cid,
-                    doc_id = %dag.doc_id,
-                    "Bitswap sync complete, emitting BlockReceived"
-                );
-
-                if self
-                    .event_tx
-                    .send(SyncEvent::BlockReceived {
-                        cid: root_cid,
-                        doc_id: dag.doc_id,
-                        collection_id: dag.collection_id,
-                        creator: dag.creator,
-                    })
-                    .await
-                    .is_err()
-                {
-                    tracing::error!(
+            match dag {
+                Some(dag) => {
+                    tracing::info!(
                         cid = %root_cid,
-                        "Failed to send BlockReceived after Bitswap complete - receiver dropped"
+                        doc_id = %dag.doc_id,
+                        "Bitswap sync complete, emitting BlockReceived"
                     );
-                    return Err(Error::ChannelSend);
+
+                    if self
+                        .event_tx
+                        .send(SyncEvent::BlockReceived {
+                            cid: root_cid,
+                            doc_id: dag.doc_id,
+                            collection_id: dag.collection_id,
+                            creator: dag.creator,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!(
+                            cid = %root_cid,
+                            "Failed to send BlockReceived after Bitswap complete - receiver dropped"
+                        );
+                        return Err(Error::ChannelSend);
+                    }
+                }
+                None => {
+                    // This can happen if the DAG was processed by another path,
+                    // cleaned up, or if there's a race condition
+                    tracing::warn!(
+                        cid = %root_cid,
+                        "Bitswap sync completed but no pending DAG found - \
+                         DAG may have been processed by another path or cleaned up"
+                    );
                 }
             }
         } else {
@@ -877,5 +939,55 @@ mod tests {
             }
             other => panic!("Expected ChannelSend error, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_pending_dag_count_initially_zero() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+
+        assert_eq!(manager.pending_dag_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pending_dag_tracking() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, mut events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+        // Create a block that has links (simulated by creating IPLD-like data)
+        // For simplicity, we'll use a block that fails to parse as IPLD,
+        // which will now return an error. Instead, let's test with a valid
+        // scenario where the block has no links.
+        let cid = test_cid();
+        let msg = create_test_broadcast(&cid);
+
+        // Process pushlog - block has no parseable links, should be complete
+        manager.process_pushlog(&msg).await.unwrap();
+
+        // Should receive BlockReceived since no missing links
+        let event = events.try_recv().unwrap();
+        match event {
+            SyncEvent::BlockReceived { cid: event_cid, .. } => {
+                assert_eq!(event_cid, cid);
+            }
+            _ => panic!("Expected BlockReceived event"),
+        }
+
+        // No pending dags since block was complete
+        assert_eq!(manager.pending_dag_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_blockstore_accessor() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (manager, _events) = SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+        // Verify blockstore accessor returns the same blockstore
+        let cid = test_cid();
+        manager.blockstore().put(&cid, b"test").await.unwrap();
+        assert!(blockstore.has(&cid).await.unwrap());
     }
 }

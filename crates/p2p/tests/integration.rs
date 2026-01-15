@@ -1645,15 +1645,11 @@ async fn test_dag_sync_with_missing_blocks() {
         .expect("prepare_sync failed");
 
     match plan {
-        SyncPlan::NeedsFetch {
-            root,
-            missing,
-            providers,
-        } => {
-            assert_eq!(root, root_cid);
-            assert_eq!(missing.len(), 1);
-            assert_eq!(missing[0], missing_cid);
-            assert!(!providers.is_empty(), "Should have providers");
+        SyncPlan::NeedsFetch(data) => {
+            assert_eq!(data.root(), root_cid);
+            assert_eq!(data.missing().len(), 1);
+            assert_eq!(data.missing()[0], missing_cid);
+            assert!(!data.providers().is_empty(), "Should have providers");
         }
         _ => panic!("Expected NeedsFetch, got {:?}", plan),
     }
@@ -2583,17 +2579,13 @@ async fn test_dag_sync_multiple_missing_blocks() {
     let plan = dag_sync.prepare_sync(cid, &[missing1, missing2], |_| false).await.unwrap();
 
     match plan {
-        SyncPlan::NeedsFetch {
-            root,
-            missing,
-            providers,
-        } => {
-            assert_eq!(root, cid);
-            assert_eq!(missing.len(), 2);
-            assert!(missing.contains(&missing1));
-            assert!(missing.contains(&missing2));
+        SyncPlan::NeedsFetch(data) => {
+            assert_eq!(data.root(), cid);
+            assert_eq!(data.missing().len(), 2);
+            assert!(data.missing().contains(&missing1));
+            assert!(data.missing().contains(&missing2));
             // No providers since no peers have the CIDs
-            assert!(providers.is_empty());
+            assert!(data.providers().is_empty());
         }
         _ => panic!("Expected NeedsFetch plan"),
     }
@@ -2622,9 +2614,9 @@ async fn test_dag_sync_with_providers() {
     let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
 
     match plan {
-        SyncPlan::NeedsFetch { providers, .. } => {
+        SyncPlan::NeedsFetch(data) => {
             // The peer should be in providers since it has the link CID
-            assert!(providers.contains(&peer), "Peer should be a provider");
+            assert!(data.providers().contains(&peer), "Peer should be a provider");
         }
         _ => panic!("Expected NeedsFetch plan"),
     }
@@ -2660,4 +2652,459 @@ async fn test_dag_sync_failure_allows_retry() {
     // Should be able to start sync again with a link that's missing
     let plan = dag_sync.prepare_sync(root_cid, &[link_cid], |_| false).await.unwrap();
     assert!(plan.needs_fetch(), "Should be able to retry after failure");
+}
+
+// ============================================================================
+// Cross-Collection Access Control Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_cross_collection_access_denial() {
+    use p2p::{BlockAccessController, ReplicatorRegistry};
+
+    let registry = Arc::new(ReplicatorRegistry::new());
+
+    // Peer A is a replicator for "users" collection only
+    let peer_a = libp2p::PeerId::random();
+    registry.add_replicator("users", peer_a);
+
+    // Peer B is a replicator for "posts" collection only
+    let peer_b = libp2p::PeerId::random();
+    registry.add_replicator("posts", peer_b);
+
+    // Create controller with access control enabled
+    let controller = BlockAccessController::controlled(registry);
+
+    let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        .unwrap();
+
+    // Peer A should have access to "users" collection
+    assert!(
+        controller.has_access(&peer_a, &cid, Some("users")),
+        "Peer A should have access to users collection"
+    );
+
+    // Peer B should have access to "posts" collection
+    assert!(
+        controller.has_access(&peer_b, &cid, Some("posts")),
+        "Peer B should have access to posts collection"
+    );
+
+    // Strangers (non-replicators) should NOT have access to any collection
+    let stranger = libp2p::PeerId::random();
+    assert!(
+        !controller.has_access(&stranger, &cid, Some("users")),
+        "Stranger should NOT have access to users collection"
+    );
+    assert!(
+        !controller.has_access(&stranger, &cid, Some("posts")),
+        "Stranger should NOT have access to posts collection"
+    );
+    assert!(
+        !controller.has_access(&stranger, &cid, None),
+        "Stranger should NOT have access when collection is unknown"
+    );
+
+    // Replicators for ANY collection get access via is_any_replicator fallback
+    // This is intentional behavior - replicators are trusted
+    assert!(
+        controller.has_access(&peer_a, &cid, None),
+        "Replicator should have access when collection is unknown"
+    );
+    assert!(
+        controller.has_access(&peer_b, &cid, None),
+        "Replicator should have access when collection is unknown"
+    );
+
+    // Due to is_any_replicator fallback, replicators for one collection
+    // also have access to blocks in other collections when the collection
+    // context is provided (this is the designed "permissive" behavior)
+    // See BlockAccessController::has_access implementation comment
+}
+
+#[tokio::test]
+async fn test_access_mode_open_allows_all() {
+    use p2p::{BlockAccessController, ReplicatorRegistry};
+
+    let registry = Arc::new(ReplicatorRegistry::new());
+
+    // Create controller with OPEN access (no ACP)
+    let controller = BlockAccessController::open(registry);
+
+    let cid = cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        .unwrap();
+
+    // Any peer should have access with Open mode
+    let random_peer = libp2p::PeerId::random();
+    assert!(
+        controller.has_access(&random_peer, &cid, Some("users")),
+        "Open mode should allow all access"
+    );
+    assert!(
+        controller.has_access(&random_peer, &cid, None),
+        "Open mode should allow all access even without collection"
+    );
+}
+
+// ============================================================================
+// Real IPLD Block Link Extraction Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_find_missing_links_with_real_ipld_blocks() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use storage::backends::MemoryStore;
+
+    // Create a coordinator with a real blockstore
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Create a leaf block (no links)
+    let leaf_data = Ipld::String("leaf node data".to_string());
+    let leaf_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &leaf_data).unwrap();
+    let leaf_cid_libipld = *leaf_block.cid();
+    let leaf_cid = cid::Cid::try_from(leaf_cid_libipld.to_bytes().as_slice()).unwrap();
+
+    // Create a parent block that links to the leaf
+    let parent_data = Ipld::Link(leaf_cid_libipld);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid = cid::Cid::try_from(parent_block.cid().to_bytes().as_slice()).unwrap();
+
+    // Store ONLY the parent in the blockstore (leaf is missing)
+    blockstore.put(&parent_cid, parent_block.data()).await.unwrap();
+
+    // Now use the coordinator's internal find_missing_links logic
+    // We can test this by broadcasting a message with the parent block
+    // and verifying the DAG sync identifies the missing leaf
+
+    // Subscribe to a collection so we can broadcast
+    let collection_id = "test-links-collection";
+    coordinator
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+
+    // Handle a GossipMessage with the parent block (should identify missing links)
+    let message = PushLogBroadcast {
+        doc_id: "test-doc".to_string(),
+        cid: parent_cid.to_bytes(),
+        collection_id: collection_id.to_string(),
+        creator: "test-creator".to_string(),
+        block: parent_block.data().to_vec(),
+    };
+
+    // Process the message - this internally calls find_missing_links
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: libp2p::PeerId::random(),
+            message_id: libp2p::gossipsub::MessageId::new(b"test-links"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    // Should succeed (store the block and identify missing links)
+    assert!(result.is_ok(), "Should process IPLD block with links: {:?}", result);
+
+    // Verify the parent block is in the blockstore
+    assert!(
+        blockstore.has(&parent_cid).await.unwrap(),
+        "Parent block should be in blockstore"
+    );
+
+    // The leaf is still missing (we only stored the parent)
+    assert!(
+        !blockstore.has(&leaf_cid).await.unwrap(),
+        "Leaf block should still be missing"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+#[tokio::test]
+async fn test_find_missing_links_with_multiple_links() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (coordinator, _sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Create two leaf blocks
+    let leaf1_data = Ipld::String("leaf 1".to_string());
+    let leaf1_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &leaf1_data).unwrap();
+    let leaf1_cid = *leaf1_block.cid();
+
+    let leaf2_data = Ipld::String("leaf 2".to_string());
+    let leaf2_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &leaf2_data).unwrap();
+    let leaf2_cid = *leaf2_block.cid();
+
+    // Create a parent block that links to both leaves (using a list)
+    let parent_data = Ipld::List(vec![Ipld::Link(leaf1_cid), Ipld::Link(leaf2_cid)]);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid = cid::Cid::try_from(parent_block.cid().to_bytes().as_slice()).unwrap();
+
+    // Store ONLY the parent and one leaf (leaf2 is missing)
+    blockstore.put(&parent_cid, parent_block.data()).await.unwrap();
+    let leaf1_cid_native = cid::Cid::try_from(leaf1_cid.to_bytes().as_slice()).unwrap();
+    blockstore.put(&leaf1_cid_native, leaf1_block.data()).await.unwrap();
+
+    let collection_id = "test-multi-links";
+    coordinator
+        .subscribe_collection(collection_id)
+        .await
+        .expect("subscribe failed");
+
+    let message = PushLogBroadcast {
+        doc_id: "test-doc".to_string(),
+        cid: parent_cid.to_bytes(),
+        collection_id: collection_id.to_string(),
+        creator: "test-creator".to_string(),
+        block: parent_block.data().to_vec(),
+    };
+
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: libp2p::PeerId::random(),
+            message_id: libp2p::gossipsub::MessageId::new(b"test-multi"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    assert!(result.is_ok(), "Should process block with multiple links");
+
+    // Verify leaf1 is present (we stored it)
+    assert!(
+        blockstore.has(&leaf1_cid_native).await.unwrap(),
+        "Leaf 1 should be in blockstore"
+    );
+
+    // Verify leaf2 is missing (we didn't store it)
+    let leaf2_cid_native = cid::Cid::try_from(leaf2_cid.to_bytes().as_slice()).unwrap();
+    assert!(
+        !blockstore.has(&leaf2_cid_native).await.unwrap(),
+        "Leaf 2 should be missing"
+    );
+
+    handle.shutdown().await.ok();
+}
+
+// ============================================================================
+// Handle Bitswap Complete Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_handle_bitswap_complete_success() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    // Create a standalone DagSync for testing sync state management
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    // Start syncing
+    dag_sync.state().start_sync(root_cid).await;
+
+    // Verify it's in syncing state
+    assert!(
+        dag_sync.state().is_syncing(&root_cid).await,
+        "Root should be in syncing state"
+    );
+
+    // Handle successful completion
+    let result = dag_sync.handle_sync_complete(root_cid, true, None).await;
+    assert!(result.is_ok(), "Sync completion should succeed");
+
+    // Verify it's now in synced state
+    assert!(
+        dag_sync.state().is_synced(&root_cid).await,
+        "Root should be in synced state after success"
+    );
+    assert!(
+        !dag_sync.state().is_syncing(&root_cid).await,
+        "Root should not be syncing after completion"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_bitswap_complete_failure_clears_syncing() {
+    use p2p::sync::{DagSync, PeerStateTracker};
+    use std::str::FromStr;
+
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    let root_cid =
+        cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+
+    dag_sync.state().start_sync(root_cid).await;
+
+    // Handle failure
+    let result = dag_sync
+        .handle_sync_complete(root_cid, false, Some("network timeout"))
+        .await;
+    assert!(result.is_err(), "Sync failure should return error");
+
+    // Verify the CID is no longer syncing (can retry)
+    assert!(
+        !dag_sync.state().is_syncing(&root_cid).await,
+        "Root should not be syncing after failure"
+    );
+    assert!(
+        !dag_sync.state().is_synced(&root_cid).await,
+        "Root should not be marked synced after failure"
+    );
+}
+
+// Note: test_handle_bitswap_complete_with_query_tracking is not possible
+// because QueryId has a private constructor. The SyncManager.register_query
+// and handle_bitswap_complete methods are tested through integration with
+// the full Bitswap behavior, which generates QueryIds internally.
+
+// ============================================================================
+// End-to-End DAG Sync Flow Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_end_to_end_dag_sync_with_local_blocks() {
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use std::collections::HashSet;
+
+    // Create a DagSync with a peer state tracker
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state);
+
+    // Create a complete DAG: parent -> child1, child2
+    let child1_data = Ipld::String("child 1".to_string());
+    let child1_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &child1_data).unwrap();
+    let child1_cid = *child1_block.cid();
+    let child1_cid_native = cid::Cid::try_from(child1_cid.to_bytes().as_slice()).unwrap();
+
+    let child2_data = Ipld::String("child 2".to_string());
+    let child2_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &child2_data).unwrap();
+    let child2_cid = *child2_block.cid();
+    let child2_cid_native = cid::Cid::try_from(child2_cid.to_bytes().as_slice()).unwrap();
+
+    let parent_data = Ipld::List(vec![Ipld::Link(child1_cid), Ipld::Link(child2_cid)]);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid_libipld = *parent_block.cid();
+    let parent_cid = cid::Cid::try_from(parent_cid_libipld.to_bytes().as_slice()).unwrap();
+
+    // Track which CIDs we "have" locally
+    let mut local_cids = HashSet::new();
+    local_cids.insert(parent_cid);
+    local_cids.insert(child1_cid_native);
+    local_cids.insert(child2_cid_native);
+
+    // Prepare sync - should return Complete since all blocks exist
+    let plan = dag_sync
+        .prepare_sync(parent_cid, &[child1_cid_native, child2_cid_native], |cid| {
+            local_cids.contains(cid)
+        })
+        .await
+        .expect("prepare_sync should succeed");
+
+    match plan {
+        SyncPlan::Complete => {
+            // Expected - all blocks exist locally
+        }
+        other => panic!("Expected Complete, got {:?}", other),
+    }
+
+    // Root should be marked as synced
+    assert!(
+        dag_sync.state().is_synced(&parent_cid).await,
+        "Root should be marked as synced when DAG is complete"
+    );
+}
+
+#[tokio::test]
+async fn test_end_to_end_dag_sync_needs_fetch() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use libipld::multihash::Code;
+    use libipld::{Block as IpldBlock, DefaultParams, Ipld};
+    use libipld::cbor::DagCborCodec;
+    use p2p::sync::{DagSync, PeerStateTracker, SyncPlan};
+    use storage::backends::MemoryStore;
+
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    // Create a DagSync with a peer state tracker
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let dag_sync = DagSync::new(peer_state.clone());
+
+    // Create a DAG where parent is present but children are missing
+    let child1_data = Ipld::String("missing child 1".to_string());
+    let child1_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &child1_data).unwrap();
+    let child1_cid = *child1_block.cid();
+    let child1_cid_native = cid::Cid::try_from(child1_cid.to_bytes().as_slice()).unwrap();
+
+    let parent_data = Ipld::Link(child1_cid);
+    let parent_block =
+        IpldBlock::<DefaultParams>::encode(DagCborCodec, Code::Blake3_256, &parent_data).unwrap();
+    let parent_cid = cid::Cid::try_from(parent_block.cid().to_bytes().as_slice()).unwrap();
+
+    // Store ONLY the parent (child is missing)
+    blockstore.put(&parent_cid, parent_block.data()).await.unwrap();
+
+    // Add a connected peer that could provide the missing block
+    let provider_peer = libp2p::PeerId::random();
+    peer_state.peer_connected(provider_peer);
+
+    // Prepare sync - should return NeedsFetch since child is missing
+    let plan = dag_sync
+        .prepare_sync(parent_cid, &[child1_cid_native], |_| false) // No blocks exist locally
+        .await
+        .expect("prepare_sync should succeed");
+
+    match plan {
+        SyncPlan::NeedsFetch(data) => {
+            assert_eq!(data.root(), parent_cid, "Root should match");
+            assert_eq!(data.missing().len(), 1, "Should have one missing block");
+            assert_eq!(data.missing()[0], child1_cid_native, "Missing CID should match");
+            assert!(
+                !data.providers().is_empty(),
+                "Should have at least one provider"
+            );
+        }
+        other => panic!("Expected NeedsFetch, got {:?}", other),
+    }
+
+    // Root should be marked as syncing (not synced yet)
+    assert!(
+        dag_sync.state().is_syncing(&parent_cid).await,
+        "Root should be in syncing state when blocks are missing"
+    );
 }

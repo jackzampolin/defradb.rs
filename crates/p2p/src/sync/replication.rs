@@ -507,6 +507,25 @@ impl ReplicationLoop {
                 ReplicationResult::Merged { .. } | ReplicationResult::Skipped { .. } => {
                     success_count += 1;
                 }
+                ReplicationResult::MergedButNotMarked { cid, error } => {
+                    // Merge succeeded but bookkeeping failed - count as success
+                    success_count += 1;
+                    tracing::warn!(
+                        cid = %cid,
+                        error = %error,
+                        "Block merged during recovery but marking failed - will be reprocessed next startup"
+                    );
+                }
+                ReplicationResult::MergedButBroadcastFailed { cid, doc_id, broadcast_error } => {
+                    // Merge succeeded - count as success (broadcast not expected during recovery)
+                    success_count += 1;
+                    tracing::debug!(
+                        cid = %cid,
+                        doc_id = %doc_id,
+                        error = %broadcast_error,
+                        "Block merged during recovery but broadcast failed (expected - recovery mode)"
+                    );
+                }
                 ReplicationResult::Failed { cid, error } => {
                     failure_count += 1;
                     tracing::error!(
@@ -515,7 +534,19 @@ impl ReplicationLoop {
                         "Failed to recover block - manual intervention may be required"
                     );
                 }
-                _ => {}
+                ReplicationResult::BitswapFetchStarted { root_cid, .. } => {
+                    // Unexpected during recovery - blocks should already be in blockstore
+                    tracing::warn!(
+                        cid = %root_cid,
+                        "Unexpected BitswapFetchStarted during recovery - block may have missing links"
+                    );
+                }
+                ReplicationResult::ChannelClosed => {
+                    tracing::error!(
+                        "Channel closed during recovery - some blocks may not be recovered"
+                    );
+                    break; // Exit recovery loop early
+                }
             }
 
             results.push(result);

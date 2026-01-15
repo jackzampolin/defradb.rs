@@ -174,6 +174,17 @@ pub enum Error {
         /// Total blocks attempted
         total: usize,
     },
+
+    /// Block could not be parsed as IPLD.
+    #[error("failed to parse block as IPLD: {reason}")]
+    BlockParseError {
+        /// Why the block couldn't be parsed
+        reason: String,
+    },
+
+    /// Invalid configuration value.
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl From<serde_cbor::Error> for Error {
