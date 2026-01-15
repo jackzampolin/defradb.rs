@@ -1078,4 +1078,92 @@ mod tests {
             err_msg
         );
     }
+
+    #[tokio::test]
+    async fn test_signed_proof_corrupted_signature_fails() {
+        use crate::keys::generation::generate_ed25519;
+        use crate::keys::PrivateKey;
+
+        let private_key = generate_ed25519().unwrap();
+
+        let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+        let cid = block.generate_cid().unwrap();
+        let node = ProofNode::from_block(&block).unwrap();
+        let proof = MerkleProof::new(cid, cid, vec![node]);
+
+        let mut signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
+
+        // Corrupt the signature value by flipping bits
+        if !signed.signature.value.is_empty() {
+            signed.signature.value[0] ^= 0xFF;
+        }
+
+        // Verification should fail (return false, not error)
+        assert!(
+            !signed.verify_with_embedded_key().unwrap(),
+            "Corrupted signature should fail verification"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_with_embedded_key_invalid_utf8_identity_fails() {
+        use crate::keys::generation::generate_ed25519;
+        use crate::keys::PrivateKey;
+
+        let private_key = generate_ed25519().unwrap();
+
+        let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+        let cid = block.generate_cid().unwrap();
+        let node = ProofNode::from_block(&block).unwrap();
+        let proof = MerkleProof::new(cid, cid, vec![node]);
+
+        let mut signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
+
+        // Replace identity with invalid UTF-8 bytes
+        signed.signature.header.identity = vec![0xFF, 0xFE, 0x00, 0x01];
+
+        let result = signed.verify_with_embedded_key();
+        assert!(result.is_err(), "Invalid UTF-8 identity should return error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid identity encoding"),
+            "Error should mention invalid identity encoding: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_proof_node_decode_block_invalid_cbor_fails() {
+        let node = ProofNode {
+            cid: Cid::default(),
+            data: vec![0xFF, 0xFF, 0xFF], // Invalid CBOR
+        };
+
+        let result = node.decode_block();
+        assert!(result.is_err(), "Invalid CBOR should return error");
+    }
+
+    #[test]
+    fn test_merkle_proof_from_dag_cbor_invalid_bytes_fails() {
+        let result = MerkleProof::from_dag_cbor(&[0xFF, 0xFF, 0xFF]);
+        assert!(result.is_err(), "Invalid DAG-CBOR should return error");
+    }
+
+    #[test]
+    fn test_proof_wrong_leaf_cid_fails() {
+        let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+        let cid = block.generate_cid().unwrap();
+        let node = ProofNode::from_block(&block).unwrap();
+
+        // Create a different block for wrong leaf CID
+        let other_block = Block::new(create_test_delta("doc2", "age"), vec![], vec![]);
+        let wrong_leaf = other_block.generate_cid().unwrap();
+
+        // Wrong leaf CID doesn't match path[0].cid
+        let proof = MerkleProof::new(wrong_leaf, cid, vec![node]);
+        assert!(
+            !proof.verify().unwrap(),
+            "Proof with wrong leaf CID should fail"
+        );
+    }
 }
