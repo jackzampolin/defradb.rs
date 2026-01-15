@@ -792,4 +792,320 @@ mod tests {
         assert_eq!(author_id.kind, FieldKind::doc_id());
         assert_eq!(posts.fields.len(), 4);
     }
+
+    #[test]
+    fn test_finalize_relations_auto_sets_primary() {
+        // One-to-many: non-array side should auto-become primary
+        let users_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            // Array side - should NOT be primary
+            FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+                .with_relation_name("user_posts"),
+        ];
+        let posts_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            // Non-array side - should auto-become primary
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts"),
+        ];
+
+        let mut collections = HashMap::new();
+        collections.insert(
+            "users".to_string(),
+            CollectionVersion::new("users", "v1", "coll-users", users_fields),
+        );
+        collections.insert(
+            "posts".to_string(),
+            CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
+        );
+
+        let mut counter = 100;
+        CollectionVersion::finalize_relations(&mut collections, || {
+            counter += 1;
+            counter.to_string()
+        });
+
+        let users = collections.get("users").unwrap();
+        let posts = collections.get("posts").unwrap();
+
+        // Array side should NOT be primary
+        let posts_field = users.field_by_name("posts").unwrap();
+        assert!(!posts_field.is_primary, "Array side should not be primary");
+
+        // Non-array side should be auto-set to primary
+        let author_field = posts.field_by_name("author").unwrap();
+        assert!(
+            author_field.is_primary,
+            "Non-array side should auto-become primary"
+        );
+
+        // The _id field should also be primary
+        let author_id = posts.field_by_name("author_id").unwrap();
+        assert!(author_id.is_primary, "_id field should also be primary");
+    }
+
+    #[test]
+    fn test_multiple_relations_same_collections() {
+        // Post has both author and reviewer pointing to users
+        let posts_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            FieldDescription::new("3", "author", FieldKind::relation("users", false))
+                .with_relation_name("post_author")
+                .as_primary(),
+            FieldDescription::new("4", "reviewer", FieldKind::relation("users", false))
+                .with_relation_name("post_reviewer")
+                .as_primary(),
+        ];
+
+        let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", posts_fields);
+
+        let mut counter = 100;
+        coll.add_relation_id_fields(|| {
+            counter += 1;
+            counter.to_string()
+        });
+
+        // Both relations should get _id fields
+        let author_id = coll.field_by_name("author_id");
+        let reviewer_id = coll.field_by_name("reviewer_id");
+
+        assert!(author_id.is_some(), "author_id should be generated");
+        assert!(reviewer_id.is_some(), "reviewer_id should be generated");
+
+        // Each _id should have correct relation_name
+        assert_eq!(
+            author_id.unwrap().relation_name,
+            Some("post_author".to_string())
+        );
+        assert_eq!(
+            reviewer_id.unwrap().relation_name,
+            Some("post_reviewer".to_string())
+        );
+
+        // Should have 6 fields total: _docID, title, author, author_id, reviewer, reviewer_id
+        assert_eq!(coll.fields.len(), 6);
+    }
+
+    #[test]
+    fn test_self_referential_relation() {
+        // Node with parent (non-array) and children (array)
+        let node_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // Non-array self-ref - should get _id field (empty relative_id = same collection)
+            FieldDescription::new("3", "parent", FieldKind::self_ref("", false))
+                .with_relation_name("node_hierarchy"),
+            // Array self-ref - should NOT get _id field
+            FieldDescription::new("4", "children", FieldKind::self_ref("", true))
+                .with_relation_name("node_hierarchy"),
+        ];
+
+        let mut coll = CollectionVersion::new("nodes", "v1", "coll-nodes", node_fields);
+
+        let mut counter = 100;
+        coll.add_relation_id_fields(|| {
+            counter += 1;
+            counter.to_string()
+        });
+
+        // parent should get parent_id
+        let parent_id = coll.field_by_name("parent_id");
+        assert!(parent_id.is_some(), "parent_id should be generated");
+        assert_eq!(
+            parent_id.unwrap().relation_name,
+            Some("node_hierarchy".to_string())
+        );
+
+        // children should NOT get children_id
+        assert!(
+            coll.field_by_name("children_id").is_none(),
+            "children_id should not be generated for array"
+        );
+
+        // Should have 5 fields: _docID, name, parent, parent_id, children
+        assert_eq!(coll.fields.len(), 5);
+    }
+
+    #[test]
+    fn test_finalize_orphaned_relation() {
+        // Post has author pointing to nonexistent "users" collection
+        let posts_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts"),
+        ];
+
+        let mut collections = HashMap::new();
+        collections.insert(
+            "posts".to_string(),
+            CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
+        );
+        // Note: "users" collection intentionally NOT added
+
+        let mut counter = 100;
+        CollectionVersion::finalize_relations(&mut collections, || {
+            counter += 1;
+            counter.to_string()
+        });
+
+        let posts = collections.get("posts").unwrap();
+
+        // Should still add author_id field even though target doesn't exist
+        // (validation catches missing target separately)
+        let author_id = posts.field_by_name("author_id");
+        assert!(
+            author_id.is_some(),
+            "author_id should be generated even for orphaned relation"
+        );
+    }
+
+    #[test]
+    fn test_relation_id_field_position() {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            FieldDescription::new("3", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts"),
+            FieldDescription::new("4", "tags", FieldKind::string_array()),
+        ];
+        let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
+
+        coll.add_relation_id_fields(|| "99".to_string());
+
+        // Find positions
+        let author_idx = coll.fields.iter().position(|f| f.name == "author").unwrap();
+        let author_id_idx = coll
+            .fields
+            .iter()
+            .position(|f| f.name == "author_id")
+            .unwrap();
+        let tags_idx = coll.fields.iter().position(|f| f.name == "tags").unwrap();
+
+        // author_id should be immediately after author
+        assert_eq!(
+            author_id_idx,
+            author_idx + 1,
+            "author_id should be immediately after author"
+        );
+
+        // tags should come after author_id
+        assert!(tags_idx > author_id_idx, "tags should come after author_id");
+    }
+
+    #[test]
+    fn test_finalize_relations_idempotent() {
+        let users_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+                .with_relation_name("user_posts"),
+        ];
+        let posts_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts"),
+        ];
+
+        let mut collections = HashMap::new();
+        collections.insert(
+            "users".to_string(),
+            CollectionVersion::new("users", "v1", "coll-users", users_fields),
+        );
+        collections.insert(
+            "posts".to_string(),
+            CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
+        );
+
+        let mut counter = 100;
+
+        // First finalization
+        CollectionVersion::finalize_relations(&mut collections, || {
+            counter += 1;
+            counter.to_string()
+        });
+
+        let posts_after_first = collections.get("posts").unwrap().clone();
+        let first_field_count = posts_after_first.fields.len();
+
+        // Second finalization (should be idempotent)
+        CollectionVersion::finalize_relations(&mut collections, || {
+            counter += 1;
+            counter.to_string()
+        });
+
+        let posts_after_second = collections.get("posts").unwrap();
+
+        // Field count should not change
+        assert_eq!(
+            posts_after_second.fields.len(),
+            first_field_count,
+            "Field count should not change on second finalization"
+        );
+
+        // Should still have exactly one author_id
+        let author_id_count = posts_after_second
+            .fields
+            .iter()
+            .filter(|f| f.name == "author_id")
+            .count();
+        assert_eq!(
+            author_id_count, 1,
+            "Should have exactly one author_id field"
+        );
+    }
+
+    #[test]
+    fn test_one_to_one_both_non_array() {
+        // One-to-one: Book <-> Author (neither is array)
+        // The side with @primary should be primary
+        let books_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            FieldDescription::new("3", "author", FieldKind::relation("authors", false))
+                .with_relation_name("book_author")
+                .as_primary(),
+        ];
+        let authors_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // Secondary side - not primary
+            FieldDescription::new("3", "published", FieldKind::relation("books", false))
+                .with_relation_name("book_author"),
+        ];
+
+        let mut collections = HashMap::new();
+        collections.insert(
+            "books".to_string(),
+            CollectionVersion::new("books", "v1", "coll-books", books_fields),
+        );
+        collections.insert(
+            "authors".to_string(),
+            CollectionVersion::new("authors", "v1", "coll-authors", authors_fields),
+        );
+
+        let mut counter = 100;
+        CollectionVersion::finalize_relations(&mut collections, || {
+            counter += 1;
+            counter.to_string()
+        });
+
+        let books = collections.get("books").unwrap();
+        let authors = collections.get("authors").unwrap();
+
+        // Primary side should have _id field
+        assert!(
+            books.field_by_name("author_id").is_some(),
+            "Primary side should have _id field"
+        );
+
+        // Secondary side should also have _id field (one-to-one)
+        assert!(
+            authors.field_by_name("published_id").is_some(),
+            "Secondary side in one-to-one should also have _id field"
+        );
+
+        // Verify is_primary flags preserved
+        assert!(books.field_by_name("author").unwrap().is_primary);
+        assert!(!authors.field_by_name("published").unwrap().is_primary);
+    }
 }

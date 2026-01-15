@@ -395,3 +395,237 @@ proptest! {
         prop_assert!(kind.is_array());
     }
 }
+
+// ============================================================================
+// Relation Field Property Tests
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Property: _id field generation produces correct field names
+    #[test]
+    fn id_field_naming_consistent(field_name in "[a-z]{1,20}") {
+        let id_name = CollectionVersion::relation_id_field_name(&field_name);
+        prop_assert_eq!(id_name, format!("{}_id", field_name));
+    }
+
+    /// Property: Non-array relation fields always get _id fields
+    #[test]
+    fn non_array_relations_get_id_fields(
+        collection_name in arb_valid_collection_name(),
+        field_name in "[a-z]{1,15}",
+        target_collection in "[a-z]{1,15}",
+    ) {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", &field_name, FieldKind::relation(&target_collection, false))
+                .with_relation_name("test_relation"),
+        ];
+        let mut coll = CollectionVersion::new(&collection_name, "v1", "coll-test", fields);
+
+        let mut counter = 100;
+        coll.add_relation_id_fields(|| {
+            counter += 1;
+            counter.to_string()
+        });
+
+        let expected_id_name = format!("{}_id", field_name);
+        let id_field = coll.field_by_name(&expected_id_name);
+        prop_assert!(id_field.is_some(), "Expected _id field for non-array relation");
+    }
+
+    /// Property: Array relation fields never get _id fields
+    #[test]
+    fn array_relations_no_id_fields(
+        collection_name in arb_valid_collection_name(),
+        field_name in "[a-z]{1,15}",
+        target_collection in "[a-z]{1,15}",
+    ) {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", &field_name, FieldKind::relation(&target_collection, true))
+                .with_relation_name("test_relation"),
+        ];
+        let mut coll = CollectionVersion::new(&collection_name, "v1", "coll-test", fields);
+
+        coll.add_relation_id_fields(|| "gen-999".to_string());
+
+        let expected_id_name = format!("{}_id", field_name);
+        let id_field = coll.field_by_name(&expected_id_name);
+        prop_assert!(id_field.is_none(), "Array relations should NOT get _id fields");
+    }
+
+    /// Property: _id fields inherit is_primary from relation field
+    #[test]
+    fn id_fields_inherit_primary_status(
+        field_name in "[a-z]{1,15}",
+        is_primary in any::<bool>(),
+    ) {
+        let mut rel_field = FieldDescription::new("1", &field_name, FieldKind::relation("target", false))
+            .with_relation_name("test_relation");
+        if is_primary {
+            rel_field = rel_field.as_primary();
+        }
+
+        let fields = vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            rel_field,
+        ];
+        let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
+
+        coll.add_relation_id_fields(|| "gen-999".to_string());
+
+        let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
+        prop_assert_eq!(id_field.is_primary, is_primary, "is_primary should be inherited");
+    }
+
+    /// Property: _id fields always have LwwRegister CRDT type
+    #[test]
+    fn id_fields_have_lww_crdt(field_name in "[a-z]{1,15}") {
+        let fields = vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("1", &field_name, FieldKind::relation("target", false))
+                .with_relation_name("test_relation"),
+        ];
+        let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
+
+        coll.add_relation_id_fields(|| "gen-999".to_string());
+
+        let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
+        prop_assert_eq!(id_field.crdt_type, CType::LwwRegister);
+    }
+
+    /// Property: add_relation_id_fields is idempotent
+    #[test]
+    fn id_field_generation_idempotent(field_name in "[a-z]{1,15}") {
+        let fields = vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("1", &field_name, FieldKind::relation("target", false))
+                .with_relation_name("test_relation"),
+        ];
+        let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
+
+        let mut counter = 100;
+        coll.add_relation_id_fields(|| {
+            counter += 1;
+            counter.to_string()
+        });
+        let field_count_after_first = coll.fields.len();
+
+        coll.add_relation_id_fields(|| {
+            counter += 1;
+            counter.to_string()
+        });
+        let field_count_after_second = coll.fields.len();
+
+        prop_assert_eq!(
+            field_count_after_first, field_count_after_second,
+            "Idempotent: field count should not change"
+        );
+    }
+
+    /// Property: _id fields inherit relation_name from relation field
+    #[test]
+    fn id_fields_inherit_relation_name(
+        field_name in "[a-z]{1,15}",
+        relation_name in "[a-z_]{3,20}",
+    ) {
+        let fields = vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("1", &field_name, FieldKind::relation("target", false))
+                .with_relation_name(&relation_name),
+        ];
+        let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
+
+        coll.add_relation_id_fields(|| "gen-999".to_string());
+
+        let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
+        prop_assert_eq!(
+            id_field.relation_name.clone(),
+            Some(relation_name),
+            "relation_name should be inherited"
+        );
+    }
+}
+
+// ============================================================================
+// Primary Validation Property Tests
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property: Exactly one primary in two-sided relation passes validation
+    #[test]
+    fn one_primary_valid(
+        col1_name in arb_valid_collection_name(),
+        col2_name in arb_valid_collection_name(),
+        relation_name in "[a-z_]{3,20}",
+        primary_on_first in any::<bool>(),
+    ) {
+        // Ensure different names
+        prop_assume!(col1_name != col2_name);
+
+        let mut field1 = FieldDescription::new("1", "rel", FieldKind::relation(&col2_name.to_lowercase(), false))
+            .with_relation_name(&relation_name);
+        let mut field2 = FieldDescription::new("1", "rel", FieldKind::relation(&col1_name.to_lowercase(), false))
+            .with_relation_name(&relation_name);
+
+        if primary_on_first {
+            field1 = field1.as_primary();
+        } else {
+            field2 = field2.as_primary();
+        }
+
+        let coll1 = CollectionVersion::new(&col1_name, "v1", "coll-1", vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            field1,
+        ]);
+        let coll2 = CollectionVersion::new(&col2_name, "v1", "coll-2", vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            field2,
+        ]);
+
+        let mut collections = HashMap::new();
+        collections.insert(col1_name.to_lowercase(), coll1);
+        collections.insert(col2_name.to_lowercase(), coll2);
+
+        let result = validate_schema(&collections);
+        prop_assert!(result.is_ok(), "One primary should pass: {:?}", result.err());
+    }
+
+    /// Property: Both sides primary in two-sided relation fails validation
+    #[test]
+    fn both_primary_invalid(
+        col1_name in arb_valid_collection_name(),
+        col2_name in arb_valid_collection_name(),
+        relation_name in "[a-z_]{3,20}",
+    ) {
+        // Ensure different names
+        prop_assume!(col1_name != col2_name);
+
+        let field1 = FieldDescription::new("1", "rel", FieldKind::relation(&col2_name.to_lowercase(), false))
+            .with_relation_name(&relation_name)
+            .as_primary();
+        let field2 = FieldDescription::new("1", "rel", FieldKind::relation(&col1_name.to_lowercase(), false))
+            .with_relation_name(&relation_name)
+            .as_primary(); // BOTH primary!
+
+        let coll1 = CollectionVersion::new(&col1_name, "v1", "coll-1", vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            field1,
+        ]);
+        let coll2 = CollectionVersion::new(&col2_name, "v1", "coll-2", vec![
+            FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+            field2,
+        ]);
+
+        let mut collections = HashMap::new();
+        collections.insert(col1_name.to_lowercase(), coll1);
+        collections.insert(col2_name.to_lowercase(), coll2);
+
+        let result = validate_schema(&collections);
+        prop_assert!(result.is_err(), "Both primary should fail");
+    }
+}
