@@ -452,9 +452,13 @@ impl P2PHost {
         info!("Local peer ID: {}", local_peer_id);
 
         // Pass keypair and blockstore to behaviour for message signing and block exchange
-        let behaviour =
-            DefraBehaviour::new(local_peer_id, local_public_key, keypair.clone(), bitswap_store)
-                .map_err(|e| Error::Behaviour(e.to_string()))?;
+        let behaviour = DefraBehaviour::new(
+            local_peer_id,
+            local_public_key,
+            keypair.clone(),
+            bitswap_store,
+        )
+        .map_err(|e| Error::Behaviour(e.to_string()))?;
 
         let swarm = SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
@@ -670,10 +674,10 @@ impl P2PHost {
                     missing_count = missing.len(),
                     "Starting Bitswap sync"
                 );
-                let query_id = self
-                    .swarm
-                    .behaviour_mut()
-                    .bitswap_sync(cid, providers, missing.into_iter());
+                let query_id =
+                    self.swarm
+                        .behaviour_mut()
+                        .bitswap_sync(cid, providers, missing.into_iter());
                 if response.send(Ok(query_id)).is_err() {
                     debug!(cid = %cid, "BitswapSync command response dropped - caller cancelled");
                 }
@@ -712,21 +716,36 @@ impl P2PHost {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("Listening on {}", address);
-                if self.event_tx.send(HostEvent::Listening(address.clone())).await.is_err() {
+                if self
+                    .event_tx
+                    .send(HostEvent::Listening(address.clone()))
+                    .await
+                    .is_err()
+                {
                     warn!(address = %address, "Failed to send Listening event - receiver dropped");
                 }
             }
 
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 info!("Connected to peer: {}", peer_id);
-                if self.event_tx.send(HostEvent::PeerConnected(peer_id)).await.is_err() {
+                if self
+                    .event_tx
+                    .send(HostEvent::PeerConnected(peer_id))
+                    .await
+                    .is_err()
+                {
                     warn!(peer_id = %peer_id, "Failed to send PeerConnected event - receiver dropped");
                 }
             }
 
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 info!("Disconnected from peer: {}", peer_id);
-                if self.event_tx.send(HostEvent::PeerDisconnected(peer_id)).await.is_err() {
+                if self
+                    .event_tx
+                    .send(HostEvent::PeerDisconnected(peer_id))
+                    .await
+                    .is_err()
+                {
                     warn!(peer_id = %peer_id, "Failed to send PeerDisconnected event - receiver dropped");
                 }
             }
@@ -736,7 +755,12 @@ impl P2PHost {
                     debug!("mDNS discovered peer: {} at {}", peer_id, addr);
                     debug!(peer_id = %peer_id, address = %addr, "Adding external address from mDNS discovery");
                     self.swarm.add_external_address(addr);
-                    if self.event_tx.send(HostEvent::PeerDiscovered(peer_id)).await.is_err() {
+                    if self
+                        .event_tx
+                        .send(HostEvent::PeerDiscovered(peer_id))
+                        .await
+                        .is_err()
+                    {
                         warn!(peer_id = %peer_id, "Failed to send PeerDiscovered event - receiver dropped");
                     }
                 }
@@ -768,9 +792,7 @@ impl P2PHost {
                 self.handle_kademlia_event(kad_event).await;
             }
 
-            SwarmEvent::OutgoingConnectionError {
-                peer_id, error, ..
-            } => {
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 warn!(
                     peer_id = ?peer_id,
                     error = %error,
@@ -812,7 +834,10 @@ impl P2PHost {
                 );
             }
 
-            SwarmEvent::ExpiredListenAddr { listener_id, address } => {
+            SwarmEvent::ExpiredListenAddr {
+                listener_id,
+                address,
+            } => {
                 debug!(
                     listener_id = ?listener_id,
                     address = %address,
@@ -909,7 +934,10 @@ impl P2PHost {
             } => {
                 error!("Outbound request {:?} failed: {:?}", request_id, error);
                 if let Some(sender) = self.pending_requests.remove(&request_id) {
-                    if sender.send(Err(Error::Transport(format!("{:?}", error)))).is_err() {
+                    if sender
+                        .send(Err(Error::Transport(format!("{:?}", error))))
+                        .is_err()
+                    {
                         debug!(request_id = ?request_id, "PushLog error response dropped - caller cancelled");
                     }
                 }

@@ -19,7 +19,6 @@ use query::error::TransactionError;
 use query::txn::{
     GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
 };
-use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -28,6 +27,7 @@ use storage::corekv::Store;
 use tracing::{error, warn};
 
 use crate::collection::Collection;
+use crate::collection_snapshot::CollectionSnapshot;
 use crate::database::DB;
 use crate::doc_fetcher::DbDocFetcher;
 use crate::error::{Error, Result};
@@ -77,22 +77,17 @@ impl CleanupResult {
 /// operation would be unsafe.
 pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
-    collections: Arc<HashMap<String, Collection>>,
     transactions: RwLock<HashMap<String, Arc<DbTransactionContext<S>>>>,
     id_counter: AtomicU64,
 }
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Create a new transaction registry.
-    pub fn new(db: Arc<DB<S>>, schema: Vec<CollectionVersion>) -> Self {
-        let collections: HashMap<String, Collection> = schema
-            .into_iter()
-            .map(|cv| (cv.name.clone(), Collection::new(cv)))
-            .collect();
-
+    ///
+    /// Collections are sourced from the DB's collection cache.
+    pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
-            collections: Arc::new(collections),
             transactions: RwLock::new(HashMap::new()),
             id_counter: AtomicU64::new(0),
         }
@@ -103,14 +98,14 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         &self.db
     }
 
-    /// Get the collection definitions.
-    pub fn collections(&self) -> &Arc<HashMap<String, Collection>> {
-        &self.collections
+    /// Get a snapshot of all collections from the DB.
+    pub fn collections(&self) -> Result<CollectionSnapshot> {
+        self.db.collections_snapshot()
     }
 
-    /// Get a collection by name.
-    pub fn collection(&self, name: &str) -> Option<&Collection> {
-        self.collections.get(name)
+    /// Get a collection by name from the DB.
+    pub fn collection(&self, name: &str) -> Result<Option<Collection>> {
+        self.db.get_collection(name)
     }
 
     /// Get an existing transaction by ID (for internal use).
@@ -261,7 +256,12 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .await
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
 
-        let fetcher = Arc::new(DbDocFetcher::new(db_txn, self.collections.clone()));
+        // Snapshot collections at transaction start for snapshot isolation -
+        // the transaction sees a consistent view of collections throughout its lifetime
+        let collections = self.db.collections_snapshot().map_err(|e| {
+            TransactionError::execution(format!("failed to snapshot collections: {}", e))
+        })?;
+        let fetcher = Arc::new(DbDocFetcher::new(db_txn, collections));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
 
         self.transactions
@@ -373,10 +373,19 @@ mod tests {
         )]
     }
 
+    /// Create a test DB with collections pre-registered.
+    async fn test_db_with_collections() -> Arc<DB<MemoryStore>> {
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        for schema in test_schema() {
+            db.create_collection(schema).await.unwrap();
+        }
+        db
+    }
+
     #[tokio::test]
     async fn test_begin_transaction() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         assert!(txn_id.starts_with("txn-"));
@@ -384,8 +393,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_begin_readonly_transaction() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -394,8 +403,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_begin_readwrite_transaction() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -404,8 +413,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_transaction_id_matches() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -414,8 +423,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_begin_and_commit() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         let result = registry.commit(&txn_id).await;
@@ -424,8 +433,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_begin_and_rollback() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         let result = registry.rollback(&txn_id).await;
@@ -434,8 +443,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_nonexistent_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
         let result = registry.commit(&nonexistent).await;
@@ -445,8 +454,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_nonexistent_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
         let result = registry.rollback(&nonexistent).await;
@@ -456,8 +465,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_nonexistent_returns_not_found() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
         assert!(matches!(
@@ -468,8 +477,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_double_commit_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         registry.commit(&txn_id).await.unwrap();
@@ -480,8 +489,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_double_rollback_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         registry.rollback(&txn_id).await.unwrap();
@@ -492,8 +501,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_after_rollback_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         registry.rollback(&txn_id).await.unwrap();
@@ -504,8 +513,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_after_commit_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         registry.commit(&txn_id).await.unwrap();
@@ -517,8 +526,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_returns_not_found_after_commit() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         assert!(registry.get(&txn_id).is_found());
@@ -532,8 +541,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_returns_not_found_after_rollback() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(false).await.unwrap();
         assert!(registry.get(&txn_id).is_found());
@@ -547,8 +556,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doc_fetcher_get_all_empty_collection() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -562,8 +571,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doc_fetcher_get_all_unknown_collection() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -578,8 +587,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doc_fetcher_get_by_ids_empty() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -594,8 +603,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doc_fetcher_get_by_ids_invalid_id_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -612,8 +621,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_consumed_returns_false_before_take() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
@@ -628,8 +637,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_consumed_returns_true_after_take() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
@@ -645,8 +654,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doc_fetcher_after_txn_consumed_returns_error() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
@@ -666,9 +675,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_transaction_sees_committed_data() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
-        let collection = Collection::new(test_schema().pop().unwrap());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db.clone());
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Write data in a separate transaction
         let write_txn = db.new_txn(false).await.unwrap();
@@ -693,9 +702,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_by_ids_returns_matching_docs() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
-        let collection = Collection::new(test_schema().pop().unwrap());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db.clone());
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Create two documents
         let write_txn = db.new_txn(false).await.unwrap();
@@ -731,8 +740,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_concurrent_transactions() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn1 = registry.begin(true).await.unwrap();
         let txn2 = registry.begin(true).await.unwrap();
@@ -752,8 +761,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_transaction_ids_are_unique() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let mut ids = Vec::new();
         for _ in 0..10 {
@@ -769,8 +778,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_discards_uncommitted_writes() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let collection = Collection::new(test_schema().pop().unwrap());
+        let db = test_db_with_collections().await;
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Write data in a transaction but rollback instead of commit
         let write_txn = db.new_txn(false).await.unwrap();
@@ -795,9 +804,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_transaction_does_not_see_uncommitted_writes() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
-        let collection = Collection::new(test_schema().pop().unwrap());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db.clone());
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Start a reader transaction FIRST
         let reader_txn_id = registry.begin(true).await.unwrap();
@@ -824,8 +833,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_parallel_transaction_operations() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+        let db = test_db_with_collections().await;
+        let registry = Arc::new(DbTransactionRegistry::new(db));
 
         let handles: Vec<_> = (0..10)
             .map(|i| {
@@ -859,8 +868,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doc_fetcher_get_by_ids_unknown_collection() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         let txn_id = registry.begin(true).await.unwrap();
         let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
@@ -877,9 +886,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_by_ids_with_nonexistent_valid_id() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
-        let collection = Collection::new(test_schema().pop().unwrap());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db.clone());
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Create one document
         let write_txn = db.new_txn(false).await.unwrap();
@@ -930,8 +939,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_commit_same_transaction() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+        let db = test_db_with_collections().await;
+        let registry = Arc::new(DbTransactionRegistry::new(db));
 
         let txn_id = registry.begin(false).await.unwrap();
 
@@ -956,8 +965,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_rollback_same_transaction() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+        let db = test_db_with_collections().await;
+        let registry = Arc::new(DbTransactionRegistry::new(db));
 
         let txn_id = registry.begin(false).await.unwrap();
 
@@ -982,8 +991,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_commit_and_rollback_same_transaction() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = Arc::new(DbTransactionRegistry::new(db, test_schema()));
+        let db = test_db_with_collections().await;
+        let registry = Arc::new(DbTransactionRegistry::new(db));
 
         let txn_id = registry.begin(false).await.unwrap();
 
@@ -1008,8 +1017,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_stale_transactions() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         // Begin some transactions
         let _txn1 = registry.begin(true).await.unwrap();
@@ -1037,8 +1046,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_only_old_transactions() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         // Begin an "old" transaction
         let _old_txn = registry.begin(true).await.unwrap();
@@ -1057,7 +1066,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.cleaned, 1, "Should have cleaned up 1 old transaction");
+        assert_eq!(
+            result.cleaned, 1,
+            "Should have cleaned up 1 old transaction"
+        );
         assert!(result.is_complete(), "All cleanups should succeed");
         assert_eq!(
             registry.active_transaction_count().unwrap(),
@@ -1072,8 +1084,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_transaction_count() {
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db, test_schema());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db);
 
         assert_eq!(registry.active_transaction_count().unwrap(), 0);
 
@@ -1094,9 +1106,9 @@ mod tests {
     async fn test_snapshot_isolation_after_external_commit() {
         // This test verifies snapshot isolation: a transaction started before
         // another transaction commits should NOT see the committed data.
-        let db = Arc::new(DB::new(MemoryStore::new()));
-        let registry = DbTransactionRegistry::new(db.clone(), test_schema());
-        let collection = Collection::new(test_schema().pop().unwrap());
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db.clone());
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Step 1: Start reader transaction A FIRST (gets snapshot at this point)
         let reader_txn_id = registry.begin(true).await.unwrap();
@@ -1151,5 +1163,141 @@ mod tests {
         );
 
         registry.rollback(&new_reader_txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_new_transaction_sees_recently_created_collection() {
+        // Test that a transaction started AFTER a collection is created can see that collection
+        let db = Arc::new(DB::new(MemoryStore::new()));
+        let registry = DbTransactionRegistry::new(db.clone());
+
+        // Create collection after registry is created
+        db.create_collection(CollectionVersion::new(
+            "NewCollection",
+            "v1",
+            "col-new",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        ))
+        .await
+        .unwrap();
+
+        // New transaction should see the collection
+        let txn_id = registry.begin(true).await.unwrap();
+        let collections = registry.collections().unwrap();
+        assert!(
+            collections.contains("NewCollection"),
+            "New transaction should see recently created collection"
+        );
+
+        registry.rollback(&txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_collection_snapshot_isolation_during_deletion() {
+        // Test snapshot isolation: a transaction that started before a collection
+        // is deleted should still be able to query that collection
+        let db = test_db_with_collections().await;
+        let registry = DbTransactionRegistry::new(db.clone());
+        let collection = db.get_collection("Users").unwrap().unwrap();
+
+        // Add some data to the collection first
+        {
+            let write_txn = db.new_txn(false).await.unwrap();
+            let mut doc = Document::new();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+            doc.set("age", NormalValue::Int(30));
+            doc.generate_and_set_doc_id().unwrap();
+            collection.create(&write_txn, &doc).await.unwrap();
+            write_txn.commit().await.unwrap();
+        }
+
+        // Start a transaction BEFORE deletion
+        let reader_txn_id = registry.begin(true).await.unwrap();
+        let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
+        let reader_fetcher = reader_ctx.doc_fetcher();
+
+        // Verify reader can see the collection with data
+        let docs_before = reader_fetcher.get_all("Users").await.unwrap();
+        assert_eq!(
+            docs_before.len(),
+            1,
+            "Should see 1 document before deletion"
+        );
+
+        // Now delete the collection from the DB
+        db.delete_collection("Users").await.unwrap();
+
+        // The reader transaction should STILL be able to query the collection
+        // because it has a snapshot from before the deletion
+        let docs_after = reader_fetcher.get_all("Users").await.unwrap();
+        assert_eq!(
+            docs_after.len(),
+            1,
+            "Reader should still see document after deletion due to snapshot isolation"
+        );
+        assert_eq!(
+            docs_after[0].get("name").unwrap().as_str(),
+            Some("Alice"),
+            "Should see the same document content"
+        );
+
+        // However, the DB should report the collection as gone
+        assert!(
+            !db.has_collection("Users").unwrap(),
+            "DB should report collection as deleted"
+        );
+
+        registry.rollback(&reader_txn_id).await.unwrap();
+
+        // A NEW transaction should NOT see the deleted collection
+        let new_txn_id = registry.begin(true).await.unwrap();
+        let new_ctx = registry.get(&new_txn_id).into_result().unwrap().unwrap();
+        let new_fetcher = new_ctx.doc_fetcher();
+
+        let result = new_fetcher.get_all("Users").await;
+        assert!(
+            result.is_err(),
+            "New transaction should not see deleted collection"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("Users"),
+            "Error should mention the collection name"
+        );
+
+        registry.rollback(&new_txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_collections_snapshot_is_isolated_from_modifications() {
+        // Test that modifying a snapshot does not affect the original cache
+        let db = test_db_with_collections().await;
+
+        let snapshot = db.collections_snapshot().unwrap();
+        assert!(snapshot.contains("Users"));
+
+        // The snapshot should be an independent copy
+        // (This is implicitly tested by the fact that CollectionSnapshot
+        // wraps an Arc and doesn't expose mutable methods)
+
+        // Adding a new collection should not affect existing snapshots
+        db.create_collection(CollectionVersion::new(
+            "Posts",
+            "v1",
+            "col-posts",
+            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+        ))
+        .await
+        .unwrap();
+
+        // Original snapshot should still only have Users
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.contains("Users"));
+        assert!(!snapshot.contains("Posts"));
+
+        // New snapshot should have both
+        let new_snapshot = db.collections_snapshot().unwrap();
+        assert_eq!(new_snapshot.len(), 2);
+        assert!(new_snapshot.contains("Users"));
+        assert!(new_snapshot.contains("Posts"));
     }
 }

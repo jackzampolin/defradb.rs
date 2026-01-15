@@ -198,12 +198,7 @@ impl BlockAccessController {
     /// * `peer_id` - The peer requesting access
     /// * `cid` - The block being requested
     /// * `collection_id` - The collection the block belongs to (if known)
-    pub fn has_access(
-        &self,
-        peer_id: &PeerId,
-        _cid: &Cid,
-        collection_id: Option<&str>,
-    ) -> bool {
+    pub fn has_access(&self, peer_id: &PeerId, _cid: &Cid, collection_id: Option<&str>) -> bool {
         // Fast path: Open mode allows all access
         if self.mode.is_open() {
             return true;

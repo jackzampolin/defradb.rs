@@ -470,7 +470,11 @@ pub struct PeerStats {
 
 impl PeerStats {
     /// Create new peer statistics (internal use only).
-    pub(crate) fn new(total_peers: usize, connected_peers: usize, total_tracked_cids: usize) -> Self {
+    pub(crate) fn new(
+        total_peers: usize,
+        connected_peers: usize,
+        total_tracked_cids: usize,
+    ) -> Self {
         debug_assert!(
             connected_peers <= total_peers,
             "connected_peers ({}) must be <= total_peers ({})",
@@ -747,16 +751,16 @@ mod tests {
         tracker.peer_connected(peer);
 
         // Create 5 different CIDs
-        let cid1 = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
-            .unwrap();
-        let cid2 = Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy")
-            .unwrap();
-        let cid3 = Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
-            .unwrap();
-        let cid4 = Cid::from_str("bafybeibdqagjfxgsqiafpmyohldmiu4qn6ucudpzqlxkfrmb6dzbggbkxy")
-            .unwrap();
-        let cid5 = Cid::from_str("bafkreigaknpexyvxt76zgkitavbwx6ejgfheup5oybpm77oxmxbyjaoj4i")
-            .unwrap();
+        let cid1 =
+            Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+        let cid2 =
+            Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+        let cid3 =
+            Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
+        let cid4 =
+            Cid::from_str("bafybeibdqagjfxgsqiafpmyohldmiu4qn6ucudpzqlxkfrmb6dzbggbkxy").unwrap();
+        let cid5 =
+            Cid::from_str("bafkreigaknpexyvxt76zgkitavbwx6ejgfheup5oybpm77oxmxbyjaoj4i").unwrap();
 
         // Add first 3 CIDs - all should be present
         tracker.peer_has_cid(&peer, cid1);
@@ -794,12 +798,12 @@ mod tests {
         let peer = test_peer_id();
         tracker.peer_connected(peer);
 
-        let cid1 = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
-            .unwrap();
-        let cid2 = Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy")
-            .unwrap();
-        let cid3 = Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
-            .unwrap();
+        let cid1 =
+            Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+        let cid2 =
+            Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap();
+        let cid3 =
+            Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap();
 
         // Add 3 CIDs
         tracker.peer_has_cid(&peer, cid1);
@@ -831,10 +835,9 @@ mod tests {
             let tracker_clone = Arc::clone(&tracker);
             let handle = thread::spawn(move || {
                 let peer = PeerId::random();
-                let cid = Cid::from_str(
-                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-                )
-                .unwrap();
+                let cid =
+                    Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+                        .unwrap();
 
                 // Perform various operations
                 tracker_clone.peer_connected(peer);
@@ -910,9 +913,9 @@ mod tests {
         // Create tracker with small max_peers limit
         let tracker = PeerStateTracker::with_full_config(
             Duration::from_secs(3600),
-            100,   // max_cids_per_peer
-            1000,  // max_total_cids
-            5,     // max_peers (small for testing)
+            100,  // max_cids_per_peer
+            1000, // max_total_cids
+            5,    // max_peers (small for testing)
         );
 
         // Add 6 peers - peer 6 should trigger eviction
@@ -933,9 +936,9 @@ mod tests {
         // Test that disconnected peers get evicted before connected ones
         let tracker = PeerStateTracker::with_full_config(
             Duration::from_secs(3600),
-            100,   // max_cids_per_peer
-            1000,  // max_total_cids
-            3,     // max_peers (small for testing)
+            100,  // max_cids_per_peer
+            1000, // max_total_cids
+            3,    // max_peers (small for testing)
         );
 
         // Add 2 peers

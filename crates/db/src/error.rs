@@ -27,6 +27,9 @@ pub enum Error {
     #[error("invalid document: {0}")]
     InvalidDocument(String),
 
+    #[error("invalid collection name: {0}")]
+    InvalidCollectionName(String),
+
     #[error("transaction not active")]
     TxnNotActive,
 
@@ -47,6 +50,11 @@ pub enum Error {
 
     #[error("transaction registry lock poisoned: {0}")]
     LockPoisoned(String),
+
+    #[error(
+        "cache update failed after successful commit for collection '{0}' - call reload_cache() or restart to recover"
+    )]
+    CacheUpdateFailedAfterCommit(String),
 
     #[error("{0}")]
     Other(String),

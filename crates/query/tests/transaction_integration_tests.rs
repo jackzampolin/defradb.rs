@@ -26,11 +26,20 @@ fn test_schema() -> Vec<CollectionVersion> {
     )]
 }
 
+/// Create a test DB with collections pre-registered.
+async fn test_db_with_collections() -> Arc<DB<MemoryStore>> {
+    let db = Arc::new(DB::new(MemoryStore::new()));
+    for schema in test_schema() {
+        db.create_collection(schema).await.unwrap();
+    }
+    db
+}
+
 #[tokio::test]
 async fn test_transaction_begin_commit_flow() {
     // Setup: create DB, registry, and query runner
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
 
     // For this test we need a fetcher that can read from the DB.
     // Since we're testing transactions, we'll use the registry's transaction-scoped fetcher.
@@ -49,8 +58,8 @@ async fn test_transaction_begin_commit_flow() {
 
 #[tokio::test]
 async fn test_transaction_begin_rollback_flow() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -64,8 +73,8 @@ async fn test_transaction_begin_rollback_flow() {
 
 #[tokio::test]
 async fn test_transaction_double_commit_fails() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -82,8 +91,8 @@ async fn test_transaction_double_commit_fails() {
 
 #[tokio::test]
 async fn test_transaction_commit_after_rollback_fails() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -99,8 +108,8 @@ async fn test_transaction_commit_after_rollback_fails() {
 
 #[tokio::test]
 async fn test_execute_query_in_transaction() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -128,8 +137,8 @@ async fn test_execute_query_in_transaction() {
 
 #[tokio::test]
 async fn test_execute_multiple_queries_in_transaction() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -147,8 +156,8 @@ async fn test_execute_multiple_queries_in_transaction() {
 
 #[tokio::test]
 async fn test_query_on_nonexistent_transaction_fails() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -163,8 +172,8 @@ async fn test_query_on_nonexistent_transaction_fails() {
 
 #[tokio::test]
 async fn test_query_after_commit_fails() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -181,8 +190,8 @@ async fn test_query_after_commit_fails() {
 
 #[tokio::test]
 async fn test_query_after_rollback_fails() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -199,8 +208,8 @@ async fn test_query_after_rollback_fails() {
 
 #[tokio::test]
 async fn test_readonly_transaction_flag() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -217,8 +226,8 @@ async fn test_readonly_transaction_flag() {
 
 #[tokio::test]
 async fn test_transaction_guard_commit() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -236,8 +245,8 @@ async fn test_transaction_guard_commit() {
 
 #[tokio::test]
 async fn test_transaction_guard_rollback() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -253,8 +262,8 @@ async fn test_transaction_guard_rollback() {
 
 #[tokio::test]
 async fn test_concurrent_transactions() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 
@@ -282,8 +291,8 @@ async fn test_concurrent_transactions() {
 
 #[tokio::test]
 async fn test_query_error_does_not_invalidate_transaction() {
-    let db = Arc::new(DB::new(MemoryStore::new()));
-    let registry = DbTransactionRegistry::new(db.clone(), test_schema());
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
     let fetcher = query::test_utils::MockFetcher::new();
     let runner = QueryRunner::with_registry(fetcher, test_schema(), registry);
 

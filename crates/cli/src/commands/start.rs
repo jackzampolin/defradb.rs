@@ -408,9 +408,7 @@ impl Node {
         // Log bootstrap peers (connection will be handled by mDNS discovery)
         if !config.net.peers.is_empty() {
             info!("Bootstrap peers configured: {:?}", config.net.peers);
-            info!(
-                "Note: Direct peer connection requires peer ID; mDNS will discover local peers"
-            );
+            info!("Note: Direct peer connection requires peer ID; mDNS will discover local peers");
         }
 
         // Get and display peer ID
