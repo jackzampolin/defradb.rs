@@ -18,6 +18,11 @@ storage = { path = "../storage" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 p2p = { path = "../p2p" }
+defra-http = { path = "../http" }
+query = { path = "../query" }
+db = { path = "../db" }
+schema = { path = "../schema" }
+document = { path = "../document" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -25,6 +30,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # Async runtime
 tokio = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -44,3 +50,9 @@ dirs = "5.0"
 
 # IPLD (for Bitswap type parameters)
 libipld = { workspace = true }
+
+[dev-dependencies]
+# HTTP client for integration tests
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3.17"
+portpicker = "0.1"
