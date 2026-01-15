@@ -21,7 +21,6 @@ use tracing::{error, info, warn};
 use crate::config::{Config, DatastoreType};
 use crate::error::{Error, Result};
 
-
 const DEV_MODE_BANNER: &str = r#"
 ******************************************
 **     DEVELOPMENT MODE IS ENABLED      **
@@ -376,13 +375,14 @@ impl Node {
 
         // Create HTTP server with database-backed query runner
         let http_server = {
-            let api_address: SocketAddr = config
-                .api
-                .address
-                .parse()
-                .map_err(|e: std::net::AddrParseError| {
-                    Error::InvalidApiAddress(config.api.address.clone(), e.to_string())
-                })?;
+            let api_address: SocketAddr =
+                config
+                    .api
+                    .address
+                    .parse()
+                    .map_err(|e: std::net::AddrParseError| {
+                        Error::InvalidApiAddress(config.api.address.clone(), e.to_string())
+                    })?;
 
             let server_config = defra_http::ServerConfig {
                 address: api_address,
@@ -391,6 +391,9 @@ impl Node {
 
             // Create auto-committing fetcher for non-transactional queries
             let fetcher = db::AutoCommitFetcher::new(database.clone());
+
+            // Create auto-committing mutator for non-transactional mutations
+            let mutator = std::sync::Arc::new(db::AutoCommitMutator::new(database.clone()));
 
             // Create transaction registry for explicit transaction support
             let registry = db::DbTransactionRegistry::new(database.clone());
@@ -409,8 +412,9 @@ impl Node {
                 })
                 .collect();
 
-            // Create query runner with transaction support
-            let executor = query::QueryRunner::with_registry(fetcher, collections, registry);
+            // Create query runner with transaction and mutation support
+            let executor = query::QueryRunner::with_registry(fetcher, collections, registry)
+                .with_mutator(mutator);
             let server = defra_http::Server::with_config(executor, server_config);
 
             info!("HTTP server configured on {}", api_address);
@@ -694,9 +698,7 @@ mod http_integration_tests {
         let shutdown_tx = node.shutdown_tx.clone();
 
         // Spawn node in background
-        let node_handle = tokio::spawn(async move {
-            node.run().await
-        });
+        let node_handle = tokio::spawn(async move { node.run().await });
 
         // Wait for server to be ready
         wait_for_server(&api_url, 20).await;
@@ -733,9 +735,7 @@ mod http_integration_tests {
         let node = Node::new(config).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
-        let node_handle = tokio::spawn(async move {
-            node.run().await
-        });
+        let node_handle = tokio::spawn(async move { node.run().await });
 
         wait_for_server(&api_url, 20).await;
 
@@ -750,8 +750,14 @@ mod http_integration_tests {
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body: serde_json::Value = response.json().await.unwrap();
-        assert!(body.get("version").is_some(), "Response should contain version");
-        assert!(body.get("commit").is_some(), "Response should contain commit");
+        assert!(
+            body.get("version").is_some(),
+            "Response should contain version"
+        );
+        assert!(
+            body.get("commit").is_some(),
+            "Response should contain commit"
+        );
 
         // Shutdown
         shutdown_tx.send(()).await.unwrap();
@@ -768,9 +774,7 @@ mod http_integration_tests {
         let node = Node::new(config).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
-        let node_handle = tokio::spawn(async move {
-            node.run().await
-        });
+        let node_handle = tokio::spawn(async move { node.run().await });
 
         wait_for_server(&api_url, 20).await;
 
@@ -809,9 +813,7 @@ mod http_integration_tests {
         let node = Node::new(config).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
-        let node_handle = tokio::spawn(async move {
-            node.run().await
-        });
+        let node_handle = tokio::spawn(async move { node.run().await });
 
         wait_for_server(&api_url, 20).await;
 
@@ -878,9 +880,7 @@ mod http_integration_tests {
         let node = Node::new(config).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
-        let node_handle = tokio::spawn(async move {
-            node.run().await
-        });
+        let node_handle = tokio::spawn(async move { node.run().await });
 
         wait_for_server(&api_url, 20).await;
 
@@ -998,9 +998,7 @@ mod http_integration_tests {
         let node = Node::new(config).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
-        let node_handle = tokio::spawn(async move {
-            node.run().await
-        });
+        let node_handle = tokio::spawn(async move { node.run().await });
 
         wait_for_server(&api_url, 20).await;
 

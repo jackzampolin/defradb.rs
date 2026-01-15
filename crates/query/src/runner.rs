@@ -1569,11 +1569,7 @@ mod tests {
         let mut unique_ids = doc_ids.clone();
         unique_ids.sort();
         unique_ids.dedup();
-        assert_eq!(
-            unique_ids.len(),
-            3,
-            "Each document should have a unique ID"
-        );
+        assert_eq!(unique_ids.len(), 3, "Each document should have a unique ID");
     }
 
     #[tokio::test]
@@ -2018,9 +2014,7 @@ mod tests {
 
         // Delete only users with age > 30
         let result = runner
-            .execute_mutation(
-                r#"mutation { delete_Users(filter: {age: {_gt: 30}}) { _docID } }"#,
-            )
+            .execute_mutation(r#"mutation { delete_Users(filter: {age: {_gt: 30}}) { _docID } }"#)
             .await
             .unwrap();
 

@@ -402,7 +402,10 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
             }
 
             // UPDATE/DELETE/UPSERT: docIDs to target
-            (MutationType::Update | MutationType::Delete | MutationType::Upsert, "docIDs" | "_docIDs") => {
+            (
+                MutationType::Update | MutationType::Delete | MutationType::Upsert,
+                "docIDs" | "_docIDs",
+            ) => {
                 let doc_ids = parse_doc_ids_value(arg_value)?;
                 mutation.doc_ids = Some(doc_ids);
             }
