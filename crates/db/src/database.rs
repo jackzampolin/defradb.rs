@@ -161,17 +161,13 @@ impl<S: Store> DB<S> {
         self.txn_id_counter.load(Ordering::SeqCst)
     }
 
-    // =========================================================================
-    // Collection Lifecycle Management
-    // =========================================================================
-
     /// Load all collections from the SystemStore into the in-memory cache.
     pub async fn load_collections(&self) -> Result<()> {
         let txn = self.new_txn(true).await?;
         let prefix = CollectionNameKey::name_prefix();
         let mut collections = HashMap::new();
 
-        // Use a block to ensure systemstore reference is dropped before discard
+        // Block ensures systemstore reference is dropped before discard
         {
             let systemstore = txn.systemstore()?;
             let opts = IterOptions::new().with_prefix(prefix.clone());
@@ -179,17 +175,22 @@ impl<S: Store> DB<S> {
             let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
 
             while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                // Extract collection name from key: /collection/name/{name}
                 let key_str = String::from_utf8_lossy(&pair.key);
                 let prefix_str = String::from_utf8_lossy(&prefix);
                 let name = key_str
                     .strip_prefix(&*prefix_str)
-                    .unwrap_or(&key_str)
+                    .ok_or_else(|| {
+                        Error::Other(format!(
+                            "collection key '{}' does not match expected prefix '{}'",
+                            key_str, prefix_str
+                        ))
+                    })?
                     .to_string();
 
-                // Deserialize CollectionVersion from JSON
-                let schema: CollectionVersion = serde_json::from_slice(&pair.value)
-                    .map_err(|e| Error::Serialization(format!("failed to deserialize schema: {}", e)))?;
+                let schema: CollectionVersion =
+                    serde_json::from_slice(&pair.value).map_err(|e| {
+                        Error::Serialization(format!("failed to deserialize schema: {}", e))
+                    })?;
 
                 collections.insert(name, Collection::new(schema));
             }
@@ -197,37 +198,49 @@ impl<S: Store> DB<S> {
             iter.close().await.map_err(Error::Storage)?;
         }
 
-        txn.discard().map_err(|_| Error::TxnNotActive)?;
+        txn.discard()
+            .map_err(|e| Error::Other(format!("failed to discard transaction: {}", e)))?;
 
-        // Update in-memory cache
-        let mut cache = self
-            .collections
-            .write()
-            .map_err(|_| Error::Other("collection cache lock poisoned".into()))?;
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(error = ?e, "Collection cache lock poisoned during load");
+            Error::LockPoisoned("collection cache lock poisoned during load".into())
+        })?;
         *cache = collections;
 
         Ok(())
     }
 
     /// Create a new collection with schema persistence.
+    ///
+    /// Uses store-level atomicity to prevent duplicates - checks existence within
+    /// the transaction before writing.
     pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
         let name = schema.name.clone();
 
-        // Check if collection already exists
-        if self.has_collection(&name) {
+        let txn = self.new_txn(false).await?;
+        let key = CollectionNameKey::new(&name);
+
+        // Check if collection exists in store (must drop systemstore before discard)
+        let exists = {
+            let systemstore = txn.systemstore()?;
+            systemstore
+                .get(&key.bytes())
+                .await
+                .map_err(Error::Storage)?
+                .is_some()
+        };
+
+        if exists {
+            txn.discard()
+                .map_err(|e| Error::Other(format!("failed to discard: {}", e)))?;
             return Err(Error::CollectionAlreadyExists(name));
         }
 
-        // Persist schema to SystemStore
-        let txn = self.new_txn(false).await?;
-
-        let key = CollectionNameKey::new(&name);
-        let data = serde_json::to_vec(&schema)
-            .map_err(|e| Error::Serialization(format!("failed to serialize schema: {}", e)))?;
-
-        // Use a block to ensure systemstore reference is dropped before commit
+        // Write schema to store
         {
             let systemstore = txn.systemstore()?;
+            let data = serde_json::to_vec(&schema)
+                .map_err(|e| Error::Serialization(format!("failed to serialize schema: {}", e)))?;
             systemstore
                 .set(&key.bytes(), &data)
                 .await
@@ -236,30 +249,61 @@ impl<S: Store> DB<S> {
 
         txn.commit().await?;
 
-        // Update in-memory cache
-        let mut cache = self
-            .collections
-            .write()
-            .map_err(|_| Error::Other("collection cache lock poisoned".into()))?;
+        // Update cache after successful commit
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(error = ?e, "Collection cache lock poisoned during create");
+            Error::LockPoisoned("collection cache lock poisoned during create".into())
+        })?;
         cache.insert(name, Collection::new(schema));
 
         Ok(())
     }
 
     /// Delete a collection and all its documents.
+    ///
+    /// Checks store for existence within transaction for atomic delete.
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
-        // Check if collection exists
-        let collection = self
-            .get_collection(name)
-            .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;
+        // Get collection_id from cache (read lock, released before async ops)
+        let collection_id = {
+            let cache = self.collections.read().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during delete");
+                Error::LockPoisoned("collection cache lock poisoned during delete".into())
+            })?;
+            cache
+                .get(name)
+                .map(|c| c.collection_id().to_string())
+                .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?
+        };
 
         let txn = self.new_txn(false).await?;
+        let schema_key = CollectionNameKey::new(name);
 
-        // Use a block to ensure store references are dropped before commit
+        // Verify collection still exists in store (must drop systemstore before discard)
+        let exists = {
+            let systemstore = txn.systemstore()?;
+            systemstore
+                .get(&schema_key.bytes())
+                .await
+                .map_err(Error::Storage)?
+                .is_some()
+        };
+
+        if !exists {
+            txn.discard()
+                .map_err(|e| Error::Other(format!("failed to discard: {}", e)))?;
+            return Err(Error::CollectionNotFound(name.to_string()));
+        }
+
+        // Delete schema and documents
         {
-            // Delete all documents in the collection
+            let systemstore = txn.systemstore()?;
+            systemstore
+                .delete(&schema_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+
             let datastore = txn.datastore()?;
-            let doc_prefix = format!("/d/{}/", collection.collection_id());
+            let doc_prefix = format!("/d/{}/", collection_id);
             let opts = IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
 
             let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
@@ -273,23 +317,15 @@ impl<S: Store> DB<S> {
             for key in keys_to_delete {
                 datastore.delete(&key).await.map_err(Error::Storage)?;
             }
-
-            // Delete schema from SystemStore
-            let systemstore = txn.systemstore()?;
-            let key = CollectionNameKey::new(name);
-            systemstore
-                .delete(&key.bytes())
-                .await
-                .map_err(Error::Storage)?;
         }
 
         txn.commit().await?;
 
-        // Remove from in-memory cache
-        let mut cache = self
-            .collections
-            .write()
-            .map_err(|_| Error::Other("collection cache lock poisoned".into()))?;
+        // Update cache after successful commit
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(error = ?e, "Collection cache lock poisoned during delete");
+            Error::LockPoisoned("collection cache lock poisoned during delete".into())
+        })?;
         cache.remove(name);
 
         Ok(())
@@ -297,37 +333,44 @@ impl<S: Store> DB<S> {
 
     /// List all collection names.
     pub fn list_collections(&self) -> Result<Vec<String>> {
-        let cache = self
-            .collections
-            .read()
-            .map_err(|_| Error::Other("collection cache lock poisoned".into()))?;
+        let cache = self.collections.read().map_err(|e| {
+            tracing::error!(error = ?e, "Collection cache lock poisoned during list");
+            Error::LockPoisoned("collection cache lock poisoned during list".into())
+        })?;
         Ok(cache.keys().cloned().collect())
     }
 
     /// Get a collection by name.
-    pub fn get_collection(&self, name: &str) -> Option<Collection> {
-        self.collections
+    pub fn get_collection(&self, name: &str) -> Result<Option<Collection>> {
+        let cache = self
+            .collections
             .read()
-            .ok()
-            .and_then(|cache| cache.get(name).cloned())
+            .map_err(|e| {
+                tracing::error!(error = ?e, collection_name = %name, "Collection cache lock poisoned during get");
+                Error::LockPoisoned("collection cache lock poisoned during get".into())
+            })?;
+        Ok(cache.get(name).cloned())
     }
 
     /// Check if a collection exists.
-    pub fn has_collection(&self, name: &str) -> bool {
-        self.collections
+    pub fn has_collection(&self, name: &str) -> Result<bool> {
+        let cache = self
+            .collections
             .read()
-            .ok()
-            .map(|cache| cache.contains_key(name))
-            .unwrap_or(false)
+            .map_err(|e| {
+                tracing::error!(error = ?e, collection_name = %name, "Collection cache lock poisoned during has_collection");
+                Error::LockPoisoned("collection cache lock poisoned during has_collection".into())
+            })?;
+        Ok(cache.contains_key(name))
     }
 
     /// Get a snapshot of all collections (for use by DbTransactionRegistry).
-    pub fn collections_snapshot(&self) -> HashMap<String, Collection> {
-        self.collections
-            .read()
-            .ok()
-            .map(|cache| cache.clone())
-            .unwrap_or_default()
+    pub fn collections_snapshot(&self) -> Result<HashMap<String, Collection>> {
+        let cache = self.collections.read().map_err(|e| {
+            tracing::error!(error = ?e, "Collection cache lock poisoned during snapshot");
+            Error::LockPoisoned("collection cache lock poisoned during snapshot".into())
+        })?;
+        Ok(cache.clone())
     }
 }
 
@@ -444,10 +487,6 @@ mod tests {
         assert_eq!(value, None);
     }
 
-    // =========================================================================
-    // Collection Lifecycle Tests
-    // =========================================================================
-
     use schema::{CollectionVersion, FieldDescription, FieldKind};
 
     fn test_users_schema() -> CollectionVersion {
@@ -471,8 +510,8 @@ mod tests {
         let schema = test_users_schema();
         db.create_collection(schema).await.unwrap();
 
-        assert!(db.has_collection("Users"));
-        let coll = db.get_collection("Users").unwrap();
+        assert!(db.has_collection("Users").unwrap());
+        let coll = db.get_collection("Users").unwrap().unwrap();
         assert_eq!(coll.name(), "Users");
     }
 
@@ -486,7 +525,11 @@ mod tests {
 
         // Second create with same name should fail
         let result = db.create_collection(schema).await;
-        assert!(matches!(result, Err(Error::CollectionAlreadyExists(_))));
+        assert!(
+            matches!(result, Err(Error::CollectionAlreadyExists(_))),
+            "Expected CollectionAlreadyExists, got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -524,10 +567,10 @@ mod tests {
         let db = DB::new(store);
 
         db.create_collection(test_users_schema()).await.unwrap();
-        assert!(db.has_collection("Users"));
+        assert!(db.has_collection("Users").unwrap());
 
         db.delete_collection("Users").await.unwrap();
-        assert!(!db.has_collection("Users"));
+        assert!(!db.has_collection("Users").unwrap());
     }
 
     #[tokio::test]
@@ -544,10 +587,10 @@ mod tests {
         let store = MemoryStore::new();
         let db = DB::new(store);
 
-        assert!(!db.has_collection("Users"));
+        assert!(!db.has_collection("Users").unwrap());
 
         db.create_collection(test_users_schema()).await.unwrap();
-        assert!(db.has_collection("Users"));
+        assert!(db.has_collection("Users").unwrap());
     }
 
     #[tokio::test]
@@ -555,28 +598,25 @@ mod tests {
         let store = MemoryStore::new();
         let db = DB::new(store);
 
-        assert!(db.get_collection("Users").is_none());
+        assert!(db.get_collection("Users").unwrap().is_none());
 
         db.create_collection(test_users_schema()).await.unwrap();
-        let coll = db.get_collection("Users").unwrap();
+        let coll = db.get_collection("Users").unwrap().unwrap();
         assert_eq!(coll.collection_id(), "col-users");
     }
 
     #[tokio::test]
     async fn test_open_loads_existing_collections() {
-        // Create a store and populate it with a collection
         let store = MemoryStore::new();
 
-        // First, create and populate DB
         {
             let db = DB::new(store.clone());
             db.create_collection(test_users_schema()).await.unwrap();
         }
 
-        // Now open the same store with open() and verify collection loaded
         let db = DB::open(store).await.unwrap();
-        assert!(db.has_collection("Users"));
-        let coll = db.get_collection("Users").unwrap();
+        assert!(db.has_collection("Users").unwrap());
+        let coll = db.get_collection("Users").unwrap().unwrap();
         assert_eq!(coll.name(), "Users");
     }
 
@@ -587,8 +627,62 @@ mod tests {
 
         db.create_collection(test_users_schema()).await.unwrap();
 
-        let snapshot = db.collections_snapshot();
+        let snapshot = db.collections_snapshot().unwrap();
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot.contains_key("Users"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_create_same_collection() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        let schema = test_users_schema();
+
+        let db1 = db.clone();
+        let schema1 = schema.clone();
+        let handle1 = tokio::spawn(async move { db1.create_collection(schema1).await });
+
+        let db2 = db.clone();
+        let schema2 = schema.clone();
+        let handle2 = tokio::spawn(async move { db2.create_collection(schema2).await });
+
+        let (r1, r2) = tokio::join!(handle1, handle2);
+        let results = [r1.unwrap(), r2.unwrap()];
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+
+        assert_eq!(successes, 1, "Exactly one concurrent create should succeed");
+        assert_eq!(failures, 1, "Exactly one concurrent create should fail");
+
+        // Cache should have exactly one collection
+        assert_eq!(db.list_collections().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_delete_same_collection() {
+        let store = MemoryStore::new();
+        let db = Arc::new(DB::new(store));
+
+        db.create_collection(test_users_schema()).await.unwrap();
+
+        let db1 = db.clone();
+        let handle1 = tokio::spawn(async move { db1.delete_collection("Users").await });
+
+        let db2 = db.clone();
+        let handle2 = tokio::spawn(async move { db2.delete_collection("Users").await });
+
+        let (r1, r2) = tokio::join!(handle1, handle2);
+        let results = [r1.unwrap(), r2.unwrap()];
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = results.iter().filter(|r| r.is_err()).count();
+
+        assert_eq!(successes, 1, "Exactly one concurrent delete should succeed");
+        assert_eq!(failures, 1, "Exactly one concurrent delete should fail");
+
+        // Cache should be empty
+        assert!(db.list_collections().unwrap().is_empty());
     }
 }

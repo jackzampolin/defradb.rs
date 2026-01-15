@@ -98,12 +98,12 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 
     /// Get a snapshot of all collections from the DB.
-    pub fn collections(&self) -> HashMap<String, Collection> {
+    pub fn collections(&self) -> Result<HashMap<String, Collection>> {
         self.db.collections_snapshot()
     }
 
     /// Get a collection by name from the DB.
-    pub fn collection(&self, name: &str) -> Option<Collection> {
+    pub fn collection(&self, name: &str) -> Result<Option<Collection>> {
         self.db.get_collection(name)
     }
 
@@ -255,8 +255,11 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .await
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
 
-        // Snapshot collections at transaction start time (matches Go behavior)
-        let collections = Arc::new(self.db.collections_snapshot());
+        // Snapshot collections at transaction start for snapshot isolation -
+        // the transaction sees a consistent view of collections throughout its lifetime
+        let collections = Arc::new(self.db.collections_snapshot().map_err(|e| {
+            TransactionError::execution(format!("failed to snapshot collections: {}", e))
+        })?);
         let fetcher = Arc::new(DbDocFetcher::new(db_txn, collections));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
 
@@ -673,7 +676,7 @@ mod tests {
     async fn test_transaction_sees_committed_data() {
         let db = test_db_with_collections().await;
         let registry = DbTransactionRegistry::new(db.clone());
-        let collection = db.get_collection("Users").unwrap();
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Write data in a separate transaction
         let write_txn = db.new_txn(false).await.unwrap();
@@ -700,7 +703,7 @@ mod tests {
     async fn test_get_by_ids_returns_matching_docs() {
         let db = test_db_with_collections().await;
         let registry = DbTransactionRegistry::new(db.clone());
-        let collection = db.get_collection("Users").unwrap();
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Create two documents
         let write_txn = db.new_txn(false).await.unwrap();
@@ -775,7 +778,7 @@ mod tests {
     #[tokio::test]
     async fn test_rollback_discards_uncommitted_writes() {
         let db = test_db_with_collections().await;
-        let collection = db.get_collection("Users").unwrap();
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Write data in a transaction but rollback instead of commit
         let write_txn = db.new_txn(false).await.unwrap();
@@ -802,7 +805,7 @@ mod tests {
     async fn test_transaction_does_not_see_uncommitted_writes() {
         let db = test_db_with_collections().await;
         let registry = DbTransactionRegistry::new(db.clone());
-        let collection = db.get_collection("Users").unwrap();
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Start a reader transaction FIRST
         let reader_txn_id = registry.begin(true).await.unwrap();
@@ -884,7 +887,7 @@ mod tests {
     async fn test_get_by_ids_with_nonexistent_valid_id() {
         let db = test_db_with_collections().await;
         let registry = DbTransactionRegistry::new(db.clone());
-        let collection = db.get_collection("Users").unwrap();
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Create one document
         let write_txn = db.new_txn(false).await.unwrap();
@@ -1062,7 +1065,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.cleaned, 1, "Should have cleaned up 1 old transaction");
+        assert_eq!(
+            result.cleaned, 1,
+            "Should have cleaned up 1 old transaction"
+        );
         assert!(result.is_complete(), "All cleanups should succeed");
         assert_eq!(
             registry.active_transaction_count().unwrap(),
@@ -1101,7 +1107,7 @@ mod tests {
         // another transaction commits should NOT see the committed data.
         let db = test_db_with_collections().await;
         let registry = DbTransactionRegistry::new(db.clone());
-        let collection = db.get_collection("Users").unwrap();
+        let collection = db.get_collection("Users").unwrap().unwrap();
 
         // Step 1: Start reader transaction A FIRST (gets snapshot at this point)
         let reader_txn_id = registry.begin(true).await.unwrap();
