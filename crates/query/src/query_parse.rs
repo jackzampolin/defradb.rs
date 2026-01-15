@@ -1,6 +1,6 @@
 //! GraphQL query parser
 //!
-//! Parses GraphQL query strings into Select operations for execution.
+//! Parses GraphQL query strings into Select and Mutation operations for execution.
 
 use graphql_parser::query::{
     Definition, Document, Field, OperationDefinition, Selection, SelectionSet, Value,
@@ -11,39 +11,90 @@ use std::collections::{BTreeMap, HashMap};
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{
-    Field as SelectField, Filter, GroupBy, Limit, OrderBy, OrderCondition, OrderDirection,
-    Requestable, Select,
+    parse_mutation_name, Field as SelectField, Filter, GroupBy, Limit, Mutation, MutationType,
+    OrderBy, OrderCondition, OrderDirection, Requestable, Select,
 };
+
+/// Result of parsing a GraphQL request.
+#[derive(Debug)]
+pub enum ParsedOperation {
+    /// Query operations (SELECT)
+    Query(Vec<Select>),
+    /// Mutation operations (CREATE, UPDATE, DELETE)
+    Mutation(Vec<Mutation>),
+}
 
 /// Parse a GraphQL query string into Select operations.
 ///
 /// Returns a vector of Select operations, one for each top-level field in the query.
+/// For mutations, use `parse_request` instead.
 pub fn parse_query(query: &str) -> Result<Vec<Select>> {
+    match parse_request(query)? {
+        ParsedOperation::Query(selects) => Ok(selects),
+        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+            "Expected query but got mutation. Use parse_request() for mutations.",
+        )),
+    }
+}
+
+/// Parse a GraphQL mutation string into Mutation operations.
+///
+/// Returns a vector of Mutation operations, one for each top-level field in the mutation.
+pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
+    match parse_request(query)? {
+        ParsedOperation::Mutation(mutations) => Ok(mutations),
+        ParsedOperation::Query(_) => Err(QueryError::parse("Expected mutation but got query")),
+    }
+}
+
+/// Parse a GraphQL request (query or mutation) into operations.
+///
+/// This is the main entry point for parsing GraphQL requests.
+pub fn parse_request(query: &str) -> Result<ParsedOperation> {
     let doc: Document<'_, String> =
         graphql_parser::parse_query(query).map_err(|e| QueryError::parse(e.to_string()))?;
 
     let mut selects = Vec::new();
+    let mut mutations = Vec::new();
+    let mut has_query = false;
+    let mut has_mutation = false;
 
     for def in doc.definitions {
         match def {
             Definition::Operation(op) => {
-                let selections = match op {
-                    OperationDefinition::Query(q) => q.selection_set.items,
-                    OperationDefinition::SelectionSet(ss) => ss.items,
-                    OperationDefinition::Mutation(_) => {
-                        return Err(QueryError::parse("mutations not yet supported"))
+                match op {
+                    OperationDefinition::Query(q) => {
+                        has_query = true;
+                        for selection in q.selection_set.items {
+                            if let Selection::Field(field) = selection {
+                                let select = parse_field_to_select(&field)?;
+                                selects.push(select);
+                            }
+                        }
+                    }
+                    OperationDefinition::SelectionSet(ss) => {
+                        // Bare selection set is treated as query
+                        has_query = true;
+                        for selection in ss.items {
+                            if let Selection::Field(field) = selection {
+                                let select = parse_field_to_select(&field)?;
+                                selects.push(select);
+                            }
+                        }
+                    }
+                    OperationDefinition::Mutation(m) => {
+                        has_mutation = true;
+                        for selection in m.selection_set.items {
+                            if let Selection::Field(field) = selection {
+                                let mutation = parse_field_to_mutation(&field)?;
+                                mutations.push(mutation);
+                            }
+                        }
                     }
                     OperationDefinition::Subscription(_) => {
                         return Err(QueryError::parse("subscriptions not supported"))
                     }
                 };
-
-                for selection in selections {
-                    if let Selection::Field(field) = selection {
-                        let select = parse_field_to_select(&field)?;
-                        selects.push(select);
-                    }
-                }
             }
             Definition::Fragment(_) => {
                 return Err(QueryError::parse("fragments not yet supported"))
@@ -51,7 +102,18 @@ pub fn parse_query(query: &str) -> Result<Vec<Select>> {
         }
     }
 
-    Ok(selects)
+    // Cannot mix queries and mutations
+    if has_query && has_mutation {
+        return Err(QueryError::parse(
+            "Cannot mix queries and mutations in same request",
+        ));
+    }
+
+    if has_mutation {
+        Ok(ParsedOperation::Mutation(mutations))
+    } else {
+        Ok(ParsedOperation::Query(selects))
+    }
 }
 
 /// Parse a single GraphQL field into a Select operation.
@@ -298,5 +360,397 @@ fn parse_doc_ids_value(value: &Value<'_, String>) -> Result<Vec<String>> {
         }
         Value::String(s) => Ok(vec![s.clone()]),
         _ => Err(QueryError::parse("docIDs must be a string or list")),
+    }
+}
+
+// =============================================================================
+// Mutation Parsing
+// =============================================================================
+
+/// Parse a single GraphQL field into a Mutation operation.
+///
+/// Mutation field names follow the format: `operation_collection`
+/// Examples: `create_Users`, `update_Posts`, `delete_Comments`
+fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
+    let field_name = &field.name;
+
+    // Parse mutation name to get operation type and collection
+    let (mutation_type, collection_name) =
+        parse_mutation_name(field_name).map_err(QueryError::parse)?;
+
+    // Create base mutation
+    let mut mutation = match mutation_type {
+        MutationType::Create => Mutation::create(&collection_name),
+        MutationType::Update => Mutation::update(&collection_name),
+        MutationType::Delete => Mutation::delete(&collection_name),
+    };
+
+    // Parse arguments based on mutation type
+    for (arg_name, arg_value) in &field.arguments {
+        match (mutation_type, arg_name.as_str()) {
+            // CREATE: input is array of documents
+            (MutationType::Create, "input") => {
+                let input = parse_create_input(arg_value)?;
+                mutation.create_input = input;
+            }
+
+            // UPDATE: input is patch object
+            (MutationType::Update, "input") => {
+                let input = parse_update_input(arg_value)?;
+                mutation.update_input = input;
+            }
+
+            // UPDATE/DELETE: docIDs to target
+            (MutationType::Update | MutationType::Delete, "docIDs" | "_docIDs") => {
+                let doc_ids = parse_doc_ids_value(arg_value)?;
+                mutation.doc_ids = Some(doc_ids);
+            }
+
+            // UPDATE/DELETE: filter to find documents
+            (MutationType::Update | MutationType::Delete, "filter") => {
+                let filter = parse_filter_value(arg_value)?;
+                mutation.filter = Some(filter);
+            }
+
+            // Unknown argument
+            _ => {
+                return Err(QueryError::parse(format!(
+                    "Unknown argument '{}' for {} mutation on '{}'",
+                    arg_name,
+                    mutation_type.as_prefix(),
+                    collection_name
+                )));
+            }
+        }
+    }
+
+    // Validate mutation has required arguments
+    match mutation_type {
+        MutationType::Create => {
+            if mutation.create_input.is_empty() {
+                return Err(QueryError::parse(format!(
+                    "create_{} mutation requires 'input' argument with array of documents",
+                    collection_name
+                )));
+            }
+        }
+        MutationType::Update => {
+            if mutation.update_input.is_empty() {
+                return Err(QueryError::parse(format!(
+                    "update_{} mutation requires 'input' argument with fields to update",
+                    collection_name
+                )));
+            }
+            if mutation.doc_ids.is_none() && mutation.filter.is_none() {
+                return Err(QueryError::parse(format!(
+                    "update_{} mutation requires either 'docIDs' or 'filter' argument",
+                    collection_name
+                )));
+            }
+        }
+        MutationType::Delete => {
+            if mutation.doc_ids.is_none() && mutation.filter.is_none() {
+                return Err(QueryError::parse(format!(
+                    "delete_{} mutation requires either 'docIDs' or 'filter' argument",
+                    collection_name
+                )));
+            }
+        }
+    }
+
+    // Parse selection set (fields to return after mutation)
+    let (fields, mapping) = parse_selection_set(&field.selection_set, &collection_name)?;
+    mutation.fields = fields;
+    mutation.document_mapping = mapping;
+
+    Ok(mutation)
+}
+
+/// Parse CREATE mutation input (array of documents).
+fn parse_create_input(value: &Value<'_, String>) -> Result<Vec<HashMap<String, JsonValue>>> {
+    match value {
+        Value::List(items) => {
+            let mut docs = Vec::new();
+            for item in items {
+                match item {
+                    Value::Object(obj) => {
+                        let doc = parse_document_input(obj)?;
+                        docs.push(doc);
+                    }
+                    _ => return Err(QueryError::parse("CREATE input items must be objects")),
+                }
+            }
+            Ok(docs)
+        }
+        Value::Object(obj) => {
+            // Single document (wrap in array)
+            let doc = parse_document_input(obj)?;
+            Ok(vec![doc])
+        }
+        _ => Err(QueryError::parse(
+            "CREATE input must be an array of objects or a single object",
+        )),
+    }
+}
+
+/// Parse UPDATE mutation input (patch object).
+fn parse_update_input(value: &Value<'_, String>) -> Result<HashMap<String, JsonValue>> {
+    match value {
+        Value::Object(obj) => parse_document_input(obj),
+        _ => Err(QueryError::parse("UPDATE input must be an object")),
+    }
+}
+
+/// Parse a document input object into field-value map.
+fn parse_document_input(
+    obj: &BTreeMap<String, Value<'_, String>>,
+) -> Result<HashMap<String, JsonValue>> {
+    let mut fields = HashMap::new();
+    for (key, value) in obj {
+        let json_value = graphql_value_to_json(value)?;
+        fields.insert(key.clone(), json_value);
+    }
+    Ok(fields)
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_create_mutation() {
+        let query = r#"
+            mutation {
+                create_Users(input: [{name: "Alice", age: 30}]) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        assert_eq!(mutations.len(), 1);
+
+        let m = &mutations[0];
+        assert_eq!(m.mutation_type, MutationType::Create);
+        assert_eq!(m.collection_name, "Users");
+        assert_eq!(m.create_input.len(), 1);
+        assert_eq!(
+            m.create_input[0].get("name"),
+            Some(&JsonValue::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_create_multiple_documents() {
+        let query = r#"
+            mutation {
+                create_Users(input: [
+                    {name: "Alice", age: 30},
+                    {name: "Bob", age: 25}
+                ]) {
+                    _docID
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        assert_eq!(mutations[0].create_input.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_update_mutation() {
+        let query = r#"
+            mutation {
+                update_Users(docIDs: ["bae-123"], input: {email: "new@example.com"}) {
+                    _docID
+                    email
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        assert_eq!(mutations.len(), 1);
+
+        let m = &mutations[0];
+        assert_eq!(m.mutation_type, MutationType::Update);
+        assert_eq!(m.collection_name, "Users");
+        assert_eq!(m.doc_ids, Some(vec!["bae-123".to_string()]));
+        assert_eq!(
+            m.update_input.get("email"),
+            Some(&JsonValue::String("new@example.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_update_with_filter() {
+        let query = r#"
+            mutation {
+                update_Users(filter: {name: {_eq: "Alice"}}, input: {active: false}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        let m = &mutations[0];
+        assert!(m.filter.is_some());
+        assert!(m.doc_ids.is_none());
+    }
+
+    #[test]
+    fn test_parse_delete_mutation() {
+        let query = r#"
+            mutation {
+                delete_Users(docIDs: ["bae-123", "bae-456"]) {
+                    _docID
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        assert_eq!(mutations.len(), 1);
+
+        let m = &mutations[0];
+        assert_eq!(m.mutation_type, MutationType::Delete);
+        assert_eq!(m.collection_name, "Users");
+        assert_eq!(
+            m.doc_ids,
+            Some(vec!["bae-123".to_string(), "bae-456".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_delete_with_filter() {
+        let query = r#"
+            mutation {
+                delete_Users(filter: {active: {_eq: false}}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        let m = &mutations[0];
+        assert!(m.filter.is_some());
+    }
+
+    #[test]
+    fn test_parse_multiple_mutations() {
+        let query = r#"
+            mutation {
+                create_Users(input: [{name: "Alice"}]) {
+                    _docID
+                }
+                delete_Posts(docIDs: ["bae-999"]) {
+                    _docID
+                }
+            }
+        "#;
+
+        let mutations = parse_mutations(query).unwrap();
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].mutation_type, MutationType::Create);
+        assert_eq!(mutations[1].mutation_type, MutationType::Delete);
+    }
+
+    #[test]
+    fn test_create_missing_input_error() {
+        let query = r#"
+            mutation {
+                create_Users {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_mutations(query);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires 'input'"));
+    }
+
+    #[test]
+    fn test_update_missing_target_error() {
+        let query = r#"
+            mutation {
+                update_Users(input: {name: "Bob"}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_mutations(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires either 'docIDs' or 'filter'"));
+    }
+
+    #[test]
+    fn test_delete_missing_target_error() {
+        let query = r#"
+            mutation {
+                delete_Users {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_mutations(query);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_mutation_name_error() {
+        let query = r#"
+            mutation {
+                Users(input: [{name: "Alice"}]) {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_mutations(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mutation name"));
+    }
+
+    #[test]
+    fn test_query_still_works() {
+        let query = r#"
+            {
+                Users {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let selects = parse_query(query).unwrap();
+        assert_eq!(selects.len(), 1);
+        assert_eq!(selects[0].collection_name, "Users");
+    }
+
+    #[test]
+    fn test_cannot_mix_query_and_mutation() {
+        // Note: GraphQL parser won't actually allow this syntax,
+        // but we handle it anyway
+        let query = r#"
+            mutation {
+                create_Users(input: [{name: "Alice"}]) { _docID }
+            }
+        "#;
+
+        // This should work as pure mutation
+        let result = parse_mutations(query);
+        assert!(result.is_ok());
+
+        // parse_query should fail on mutation
+        let result = parse_query(query);
+        assert!(result.is_err());
     }
 }

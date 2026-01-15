@@ -272,6 +272,111 @@ impl Collection {
         Ok(docs)
     }
 
+    /// Create a new document using a NamespaceView directly.
+    ///
+    /// This method takes `NamespaceView` instead of `&DbTxn` to allow
+    /// use in async contexts where `Send` futures are required.
+    pub async fn create_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+    ) -> Result<DocID> {
+        // Validate document against schema
+        self.validate_document(doc)?;
+
+        // Require document ID
+        let doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
+
+        // Check if document already exists
+        let key = self.doc_key(&doc_id);
+        if datastore.has(&key).await.map_err(Error::Storage)? {
+            return Err(Error::InvalidDocument(format!(
+                "Document with ID {} already exists",
+                doc_id
+            )));
+        }
+
+        // Serialize document to CBOR
+        let data = doc
+            .to_cbor()
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+
+        // Store document
+        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        Ok(doc_id)
+    }
+
+    /// Update an existing document using a NamespaceView directly.
+    ///
+    /// This method takes `NamespaceView` instead of `&DbTxn` to allow
+    /// use in async contexts where `Send` futures are required.
+    pub async fn update_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+    ) -> Result<()> {
+        // Validate document against schema
+        self.validate_document(doc)?;
+
+        let doc_id = doc
+            .id()
+            .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
+
+        let key = self.doc_key(doc_id);
+
+        // Check document exists
+        if !datastore.has(&key).await.map_err(Error::Storage)? {
+            return Err(Error::DocumentNotFound(doc_id.to_string()));
+        }
+
+        // Serialize and store
+        let data = doc
+            .to_cbor()
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+
+        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        Ok(())
+    }
+
+    /// Delete a document by ID using a NamespaceView directly.
+    ///
+    /// This method takes `NamespaceView` instead of `&DbTxn` to allow
+    /// use in async contexts where `Send` futures are required.
+    pub async fn delete_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<bool> {
+        let key = self.doc_key(doc_id);
+
+        // Check if document exists
+        if !datastore.has(&key).await.map_err(Error::Storage)? {
+            return Ok(false);
+        }
+
+        datastore.delete(&key).await.map_err(Error::Storage)?;
+
+        Ok(true)
+    }
+
+    /// Check if a document exists using a NamespaceView directly.
+    ///
+    /// This method takes `NamespaceView` instead of `&DbTxn` to allow
+    /// use in async contexts where `Send` futures are required.
+    pub async fn exists_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<bool> {
+        let key = self.doc_key(doc_id);
+        datastore.has(&key).await.map_err(Error::Storage)
+    }
+
     /// Generate the storage key for a document.
     fn doc_key(&self, doc_id: &DocID) -> Vec<u8> {
         let mut key = Vec::new();
