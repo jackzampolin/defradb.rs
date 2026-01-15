@@ -141,6 +141,11 @@ impl PlanNode for CountNode {
     fn kind(&self) -> &'static str {
         "countNode"
     }
+
+    fn current_group_docs(&self) -> Option<&[Doc]> {
+        // Pass through from source for stacked aggregates
+        self.source.current_group_docs()
+    }
 }
 
 #[cfg(test)]
