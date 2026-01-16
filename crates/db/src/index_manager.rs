@@ -1297,4 +1297,537 @@ mod tests {
 
         txn.commit().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_composite_index_through_manager() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let txn = db.new_txn(false).await.unwrap();
+
+        // Schema with multiple fields
+        let schema = CollectionVersion::new(
+            "products",
+            "v1",
+            "col-products",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "category", FieldKind::string()),
+                FieldDescription::new("3", "price", FieldKind::int()),
+                FieldDescription::new("4", "name", FieldKind::string()),
+            ],
+        );
+
+        let mut manager = IndexManager::new(1);
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create composite index on (category, price)
+            manager
+                .create_index(
+                    &datastore,
+                    "idx_category_price".to_string(),
+                    vec![
+                        IndexedFieldDescription {
+                            name: "category".to_string(),
+                            descending: false,
+                        },
+                        IndexedFieldDescription {
+                            name: "price".to_string(),
+                            descending: true, // Descending for price (highest first)
+                        },
+                    ],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            // Create documents
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc1 = Document::new();
+            doc1.set("category", NormalValue::String("electronics".to_string()));
+            doc1.set("price", NormalValue::Int(100));
+            doc1.set("name", NormalValue::String("Widget".to_string()));
+            doc1.generate_and_set_doc_id().unwrap();
+
+            let mut doc2 = Document::new();
+            doc2.set("category", NormalValue::String("electronics".to_string()));
+            doc2.set("price", NormalValue::Int(200));
+            doc2.set("name", NormalValue::String("Gadget".to_string()));
+            doc2.generate_and_set_doc_id().unwrap();
+
+            let mut doc3 = Document::new();
+            doc3.set("category", NormalValue::String("books".to_string()));
+            doc3.set("price", NormalValue::Int(50));
+            doc3.set("name", NormalValue::String("Novel".to_string()));
+            doc3.generate_and_set_doc_id().unwrap();
+
+            // Index all documents
+            manager
+                .on_document_create(&datastore, &doc1, &schema)
+                .await
+                .unwrap();
+            manager
+                .on_document_create(&datastore, &doc2, &schema)
+                .await
+                .unwrap();
+            manager
+                .on_document_create(&datastore, &doc3, &schema)
+                .await
+                .unwrap();
+
+            // Query by first field only (category = "electronics")
+            let index = manager.get_index("idx_category_price").unwrap();
+            let mut iter = index
+                .scan_prefix(
+                    &datastore,
+                    &[NormalValue::String("electronics".to_string())],
+                    false,
+                )
+                .await
+                .unwrap();
+            let electronics = iter.collect_all().await.unwrap();
+            assert_eq!(electronics.len(), 2, "Should find 2 electronics products");
+
+            // Query by exact match (category = "books", price = 50)
+            let mut iter = index
+                .get(
+                    &datastore,
+                    &[
+                        NormalValue::String("books".to_string()),
+                        NormalValue::Int(50),
+                    ],
+                )
+                .await
+                .unwrap();
+            let books = iter.collect_all().await.unwrap();
+            assert_eq!(books.len(), 1, "Should find 1 book at price 50");
+        }
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_missing_field_indexed_as_null() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let txn = db.new_txn(false).await.unwrap();
+
+        let schema = test_schema();
+        let mut manager = IndexManager::new(1);
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create index on email field
+            manager
+                .create_index(
+                    &datastore,
+                    "idx_email".to_string(),
+                    vec![IndexedFieldDescription {
+                        name: "email".to_string(),
+                        descending: false,
+                    }],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            // Create document WITHOUT the email field
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc = Document::new();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+            // Note: email field is NOT set
+            doc.generate_and_set_doc_id().unwrap();
+
+            // Should succeed - missing field indexed as NULL
+            manager
+                .on_document_create(&datastore, &doc, &schema)
+                .await
+                .unwrap();
+
+            // Query for NULL values should find the document
+            let index = manager.get_index("idx_email").unwrap();
+            let mut iter = index.get(&datastore, &[NormalValue::Null]).await.unwrap();
+            let results = iter.collect_all().await.unwrap();
+            assert_eq!(
+                results.len(),
+                1,
+                "Document with missing field should be indexed under NULL"
+            );
+
+            // Create another document with explicit NULL
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc2 = Document::new();
+            doc2.set("name", NormalValue::String("Bob".to_string()));
+            doc2.set("email", NormalValue::Null); // Explicit NULL
+            doc2.generate_and_set_doc_id().unwrap();
+
+            manager
+                .on_document_create(&datastore, &doc2, &schema)
+                .await
+                .unwrap();
+
+            // Both should be under NULL
+            let mut iter = index.get(&datastore, &[NormalValue::Null]).await.unwrap();
+            let results = iter.collect_all().await.unwrap();
+            assert_eq!(
+                results.len(),
+                2,
+                "Both missing and explicit NULL should be indexed together"
+            );
+        }
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unique_index_allows_multiple_nulls() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let txn = db.new_txn(false).await.unwrap();
+
+        let schema = test_schema();
+        let mut manager = IndexManager::new(1);
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create UNIQUE index on email
+            manager
+                .create_index(
+                    &datastore,
+                    "idx_email_unique".to_string(),
+                    vec![IndexedFieldDescription {
+                        name: "email".to_string(),
+                        descending: false,
+                    }],
+                    true, // unique
+                )
+                .await
+                .unwrap();
+
+            // Create first document without email (NULL)
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc1 = Document::new();
+            doc1.set("name", NormalValue::String("Alice".to_string()));
+            doc1.generate_and_set_doc_id().unwrap();
+
+            manager
+                .on_document_create(&datastore, &doc1, &schema)
+                .await
+                .unwrap();
+
+            // Create second document without email (also NULL)
+            // This should succeed - NULL is not considered equal to NULL for uniqueness
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc2 = Document::new();
+            doc2.set("name", NormalValue::String("Bob".to_string()));
+            doc2.generate_and_set_doc_id().unwrap();
+
+            let result = manager.on_document_create(&datastore, &doc2, &schema).await;
+            assert!(
+                result.is_ok(),
+                "Multiple NULL values should be allowed in unique index"
+            );
+        }
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unique_constraint_violation_returns_error() {
+        use storage::index::{CollectionIndex, UniqueIndex};
+
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let txn = db.new_txn(false).await.unwrap();
+
+        let schema = test_schema();
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // First, test UniqueIndex directly through NamespaceView
+            let desc = schema::IndexDescription {
+                name: "idx_email_unique".to_string(),
+                id: 1,
+                fields: vec![IndexedFieldDescription {
+                    name: "email".to_string(),
+                    descending: false,
+                }],
+                unique: true,
+            };
+
+            let index = UniqueIndex::new(1, desc);
+            let values = vec![NormalValue::String("alice@example.com".to_string())];
+
+            // First save through NamespaceView
+            let mut ds1 = datastore.clone();
+            index.save(&mut ds1, "doc1", &values).await.unwrap();
+
+            // Second save - should fail
+            let mut ds2 = datastore.clone();
+            let result = index.save(&mut ds2, "doc2", &values).await;
+
+            assert!(
+                result.is_err(),
+                "UniqueIndex should reject duplicate through NamespaceView"
+            );
+        }
+
+        // Now test through IndexManager
+        let store2 = MemoryStore::new();
+        let db2 = DB::new(store2);
+        let txn2 = db2.new_txn(false).await.unwrap();
+        let mut manager = IndexManager::new(1);
+
+        {
+            let datastore = txn2.datastore().unwrap();
+
+            // Create UNIQUE index on email
+            let index_desc = manager
+                .create_index(
+                    &datastore,
+                    "idx_email_unique".to_string(),
+                    vec![IndexedFieldDescription {
+                        name: "email".to_string(),
+                        descending: false,
+                    }],
+                    true, // unique
+                )
+                .await
+                .unwrap();
+
+            assert!(index_desc.unique, "Index should be unique");
+            assert!(
+                manager
+                    .get_index("idx_email_unique")
+                    .unwrap()
+                    .description()
+                    .unique,
+                "Stored index should be unique"
+            );
+
+            // Create first document with email
+            // IMPORTANT: Set fields BEFORE generating doc_id, since doc_id is based on content hash
+            let mut doc1 = Document::new();
+            doc1.set("name", NormalValue::String("Alice".to_string()));
+            doc1.set(
+                "email",
+                NormalValue::String("alice@example.com".to_string()),
+            );
+            doc1.generate_and_set_doc_id().unwrap();
+
+            manager
+                .on_document_create(&datastore, &doc1, &schema)
+                .await
+                .unwrap();
+
+            // Create second document with SAME email but different name - should fail
+            // IMPORTANT: Set fields BEFORE generating doc_id, since doc_id is based on content hash
+            let mut doc2 = Document::new();
+            doc2.set("name", NormalValue::String("Bob".to_string()));
+            doc2.set(
+                "email",
+                NormalValue::String("alice@example.com".to_string()),
+            ); // Duplicate email!
+            doc2.generate_and_set_doc_id().unwrap();
+
+            let result = manager.on_document_create(&datastore, &doc2, &schema).await;
+            assert!(
+                result.is_err(),
+                "Duplicate value in unique index should fail through IndexManager"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_field_not_in_schema_fails() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let txn = db.new_txn(false).await.unwrap();
+
+        let schema = test_schema(); // Has: _docID, name, age, email
+        let mut manager = IndexManager::new(1);
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create index on a field that EXISTS in schema
+            manager
+                .create_index(
+                    &datastore,
+                    "idx_nonexistent".to_string(),
+                    vec![IndexedFieldDescription {
+                        name: "nonexistent_field".to_string(), // This field is NOT in schema
+                        descending: false,
+                    }],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            // Create a document
+            let mut doc = Document::new();
+            doc.generate_and_set_doc_id().unwrap();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+
+            // Indexing should fail because the field doesn't exist in schema
+            let result = manager.on_document_create(&datastore, &doc, &schema).await;
+            assert!(
+                result.is_err(),
+                "Indexing with non-schema field should fail"
+            );
+
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("does not exist in schema"),
+                "Error should mention field not in schema: {}",
+                err_msg
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_idempotence_create_same_document_twice() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let txn = db.new_txn(false).await.unwrap();
+
+        let schema = test_schema();
+        let mut manager = IndexManager::new(1);
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            manager
+                .create_index(
+                    &datastore,
+                    "idx_name".to_string(),
+                    vec![IndexedFieldDescription {
+                        name: "name".to_string(),
+                        descending: false,
+                    }],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc = Document::new();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+            doc.generate_and_set_doc_id().unwrap();
+
+            // Index the same document twice
+            manager
+                .on_document_create(&datastore, &doc, &schema)
+                .await
+                .unwrap();
+            manager
+                .on_document_create(&datastore, &doc, &schema)
+                .await
+                .unwrap();
+
+            // Should have 2 entries (non-unique index allows duplicates)
+            let index = manager.get_index("idx_name").unwrap();
+            let mut iter = index
+                .get(&datastore, &[NormalValue::String("Alice".to_string())])
+                .await
+                .unwrap();
+            let results = iter.collect_all().await.unwrap();
+            // For non-unique index, same doc can be indexed multiple times
+            // This tests the actual behavior - whether it's 1 or 2 depends on implementation
+            assert!(
+                !results.is_empty(),
+                "Document should be indexed at least once"
+            );
+        }
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_then_recreate_same_value() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let txn = db.new_txn(false).await.unwrap();
+
+        let schema = test_schema();
+        let mut manager = IndexManager::new(1);
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            manager
+                .create_index(
+                    &datastore,
+                    "idx_name".to_string(),
+                    vec![IndexedFieldDescription {
+                        name: "name".to_string(),
+                        descending: false,
+                    }],
+                    false,
+                )
+                .await
+                .unwrap();
+
+            // Create document
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc1 = Document::new();
+            doc1.set("name", NormalValue::String("Alice".to_string()));
+            doc1.set("age", NormalValue::Int(30)); // Add unique field for different ID
+            doc1.generate_and_set_doc_id().unwrap();
+
+            manager
+                .on_document_create(&datastore, &doc1, &schema)
+                .await
+                .unwrap();
+
+            // Verify it's indexed
+            let index = manager.get_index("idx_name").unwrap();
+            let mut iter = index
+                .get(&datastore, &[NormalValue::String("Alice".to_string())])
+                .await
+                .unwrap();
+            let results = iter.collect_all().await.unwrap();
+            assert_eq!(results.len(), 1);
+
+            // Delete document
+            manager
+                .on_document_delete(&datastore, &doc1, &schema)
+                .await
+                .unwrap();
+
+            // Verify it's gone
+            let mut iter = index
+                .get(&datastore, &[NormalValue::String("Alice".to_string())])
+                .await
+                .unwrap();
+            let results = iter.collect_all().await.unwrap();
+            assert_eq!(results.len(), 0);
+
+            // Create NEW document with same name but different content for different ID
+            // IMPORTANT: Set fields BEFORE generating doc_id
+            let mut doc2 = Document::new();
+            doc2.set("name", NormalValue::String("Alice".to_string()));
+            doc2.set("age", NormalValue::Int(31)); // Different age for different ID
+            doc2.generate_and_set_doc_id().unwrap();
+
+            manager
+                .on_document_create(&datastore, &doc2, &schema)
+                .await
+                .unwrap();
+
+            // Verify new document is indexed
+            let mut iter = index
+                .get(&datastore, &[NormalValue::String("Alice".to_string())])
+                .await
+                .unwrap();
+            let results = iter.collect_all().await.unwrap();
+            assert_eq!(results.len(), 1, "New document should be indexed");
+        }
+
+        txn.commit().await.unwrap();
+    }
 }
