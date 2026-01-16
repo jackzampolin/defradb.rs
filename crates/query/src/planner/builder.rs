@@ -135,15 +135,120 @@ impl Planner {
                     None
                 };
 
-                // Get child relation field index (if it exists)
-                let child_relation_index = target_relation_field
-                    .and_then(|f| {
-                        target_collection
-                            .fields
-                            .iter()
-                            .position(|tf| tf.name == f.name)
-                    })
-                    .unwrap_or(0);
+                // Get child relation field index and field
+                // For one-to-many and inverted one-to-one joins, we need the child's FK field
+                let (child_relation_index, child_relation_field) = if let Some(f) =
+                    target_relation_field
+                {
+                    let idx = target_collection
+                        .fields
+                        .iter()
+                        .position(|tf| tf.name == f.name)
+                        .ok_or_else(|| {
+                            QueryError::internal(format!(
+                                "relation field '{}' not found in collection '{}'",
+                                f.name, target_collection.name
+                            ))
+                        })?;
+                    (idx, f.clone())
+                } else {
+                    // No target relation field found - this can happen for:
+                    // 1. Unidirectional relations (no inverse defined)
+                    // 2. Self-referential relations without inverse
+                    //
+                    // For one-to-many joins (parent has array), we MUST find the FK field
+                    // on the child side. Look for a field with matching relation_name that
+                    // is the primary (FK-holding) side.
+                    if relation_field.kind.is_array() {
+                        // One-to-many: child must have FK field
+                        let child_field = if let Some(rel_name) = &relation_field.relation_name {
+                            // Find the primary (non-array) relation field in target collection
+                            target_collection
+                                .fields
+                                .iter()
+                                .find(|f| {
+                                    f.relation_name.as_deref() == Some(rel_name)
+                                        && f.kind.is_relation()
+                                        && !f.kind.is_array()
+                                })
+                        } else {
+                            None
+                        };
+
+                        match child_field {
+                            Some(f) => {
+                                let idx = target_collection
+                                    .fields
+                                    .iter()
+                                    .position(|tf| tf.name == f.name)
+                                    .unwrap(); // Safe: we just found it above
+                                (idx, f.clone())
+                            }
+                            None => {
+                                return Err(QueryError::internal(format!(
+                                    "cannot resolve FK field for one-to-many relation '{}' \
+                                     on collection '{}': no matching relation field found \
+                                     in target collection '{}'",
+                                    relation_field_name,
+                                    parent_collection.name,
+                                    target_collection.name
+                                )));
+                            }
+                        }
+                    } else {
+                        // One-to-one from secondary side (inverted): need child's FK
+                        // The parent doesn't have FK, so child must have it
+                        let parent_has_fk = {
+                            let id_field_name =
+                                CollectionVersion::relation_id_field_name(relation_field_name);
+                            parent_collection
+                                .fields
+                                .iter()
+                                .any(|f| f.name == id_field_name)
+                        };
+
+                        if !parent_has_fk {
+                            // Inverted join - child must have FK
+                            let child_field =
+                                if let Some(rel_name) = &relation_field.relation_name {
+                                    target_collection
+                                        .fields
+                                        .iter()
+                                        .find(|f| {
+                                            f.relation_name.as_deref() == Some(rel_name)
+                                                && f.kind.is_relation()
+                                                && !f.kind.is_array()
+                                        })
+                                } else {
+                                    None
+                                };
+
+                            match child_field {
+                                Some(f) => {
+                                    let idx = target_collection
+                                        .fields
+                                        .iter()
+                                        .position(|tf| tf.name == f.name)
+                                        .unwrap();
+                                    (idx, f.clone())
+                                }
+                                None => {
+                                    return Err(QueryError::internal(format!(
+                                        "cannot resolve FK field for inverted one-to-one relation \
+                                         '{}' on collection '{}': no matching relation field \
+                                         found in target collection '{}'",
+                                        relation_field_name,
+                                        parent_collection.name,
+                                        target_collection.name
+                                    )));
+                                }
+                            }
+                        } else {
+                            // Primary side - use index 0 as placeholder (won't be used for FK lookup)
+                            (0, relation_field.clone())
+                        }
+                    }
+                };
 
                 // Create join sides
                 let parent_side = JoinSide::new(
@@ -155,9 +260,7 @@ impl Planner {
 
                 let child_side = JoinSide::new(
                     (*target_collection).clone(),
-                    target_relation_field
-                        .cloned()
-                        .unwrap_or_else(|| relation_field.clone()),
+                    child_relation_field,
                     child_relation_index,
                 );
 
