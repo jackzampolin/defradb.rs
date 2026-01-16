@@ -34,6 +34,7 @@ pub trait Keyring: Send + Sync {
 
     /// Returns a list of all key names in the keyring.
     ///
-    /// Note: Some backends (like OS keyring) may not support listing keys.
+    /// Returns `Error::SystemKeyringListNotSupported` if the backend does not
+    /// support listing keys (e.g., OS system keyring).
     fn list(&self) -> Result<Vec<String>>;
 }

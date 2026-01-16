@@ -50,11 +50,11 @@ impl Keyring for SystemKeyring {
 
         let entry = self
             .entry(name)
-            .map_err(|e| Error::Encryption(format!("failed to create entry: {}", e)))?;
+            .map_err(|e| Error::SystemKeyring(format!("failed to create entry: {}", e)))?;
 
         entry
             .set_password(&encoded)
-            .map_err(|e| Error::Encryption(format!("failed to store key: {}", e)))
+            .map_err(|e| Error::SystemKeyring(format!("failed to store key: {}", e)))
     }
 
     fn get(&self, name: &str) -> Result<Vec<u8>> {
@@ -62,11 +62,11 @@ impl Keyring for SystemKeyring {
 
         let entry = self
             .entry(name)
-            .map_err(|e| Error::Decryption(format!("failed to create entry: {}", e)))?;
+            .map_err(|e| Error::SystemKeyring(format!("failed to create entry: {}", e)))?;
 
         let encoded = entry.get_password().map_err(|e| match e {
             keyring_crate::Error::NoEntry => Error::NotFound(name.to_string()),
-            _ => Error::Decryption(format!("failed to retrieve key: {}", e)),
+            _ => Error::SystemKeyring(format!("failed to retrieve key: {}", e)),
         })?;
 
         base64::engine::general_purpose::STANDARD
@@ -77,14 +77,11 @@ impl Keyring for SystemKeyring {
     fn delete(&self, name: &str) -> Result<()> {
         let entry = self
             .entry(name)
-            .map_err(|e| Error::Encryption(format!("failed to create entry: {}", e)))?;
+            .map_err(|e| Error::SystemKeyring(format!("failed to create entry: {}", e)))?;
 
         entry.delete_credential().map_err(|e| match e {
             keyring_crate::Error::NoEntry => Error::NotFound(name.to_string()),
-            _ => Error::Io(std::io::Error::other(format!(
-                "failed to delete key: {}",
-                e
-            ))),
+            _ => Error::SystemKeyring(format!("failed to delete key: {}", e)),
         })
     }
 

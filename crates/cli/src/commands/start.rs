@@ -483,18 +483,25 @@ impl Node {
             let registry = db::DbTransactionRegistry::new(database.clone());
 
             // Get collection schemas for the query runner
-            let collections: Vec<schema::CollectionVersion> = database
+            let collection_names = database
                 .list_collections()
-                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?
-                .iter()
-                .filter_map(|name| {
-                    database
-                        .get_collection(name)
-                        .ok()
-                        .flatten()
-                        .map(|c| c.schema().clone())
-                })
-                .collect();
+                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
+
+            let mut collections: Vec<schema::CollectionVersion> = Vec::new();
+            for name in &collection_names {
+                match database.get_collection(name) {
+                    Ok(Some(c)) => collections.push(c.schema().clone()),
+                    Ok(None) => {
+                        warn!("Collection '{}' listed but not found", name);
+                    }
+                    Err(e) => {
+                        return Err(Error::Storage(storage::Error::Other(format!(
+                            "failed to load collection '{}': {}",
+                            name, e
+                        ))));
+                    }
+                }
+            }
 
             // Create query runner with transaction and mutation support
             let executor = query::QueryRunner::with_registry(fetcher, collections, registry)

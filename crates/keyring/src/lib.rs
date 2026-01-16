@@ -16,20 +16,24 @@
 
 mod error;
 mod file;
+mod key_name;
 mod keyring;
 mod signer;
 mod system;
 
 pub use error::{Error, Result};
 pub use file::FileKeyring;
+pub use key_name::KeyName;
 pub use keyring::Keyring;
-pub use signer::{KeyType, KeyringSigner};
+#[allow(deprecated)]
+pub use signer::KeyringSigner;
+pub use signer::{KeyHandle, KeyType};
 pub use system::SystemKeyring;
 
 /// Environment variable name for the keyring secret
 pub const KEYRING_SECRET_ENV: &str = "DEFRA_KEYRING_SECRET";
 
-/// Standard key name for peer identity (Ed25519)
+/// Standard key name for peer identity (Ed25519 64-byte full keypair)
 pub const PEER_KEY: &str = "peer-key";
 
 /// Standard key name for data encryption (AES-256)

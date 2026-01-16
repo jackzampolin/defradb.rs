@@ -11,6 +11,7 @@ description = "Keyring and key management for DefraDB"
 [dependencies]
 thiserror.workspace = true
 base64 = "0.22"
+zeroize = "1.8"
 
 # JWE encryption (PBES2-HS512-A256KW) - Go compatible format
 josekit = "0.8"

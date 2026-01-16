@@ -10,7 +10,7 @@
 
 //! Keyring command implementation
 
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
@@ -156,6 +156,7 @@ impl ImportArgs {
 
         // Read from stdin
         let stdin = io::stdin();
+        let is_terminal = stdin.is_terminal();
         let key = if self.hex {
             let mut line = String::new();
             stdin.lock().read_line(&mut line)?;
@@ -163,8 +164,9 @@ impl ImportArgs {
         } else {
             let mut buf = Vec::new();
             stdin.lock().read_to_end(&mut buf)?;
-            // Remove trailing newline if present (from terminal input)
-            if buf.last() == Some(&b'\n') {
+            // Only strip trailing newline for terminal input to avoid corrupting binary keys
+            // that legitimately end with 0x0A when piped from files
+            if is_terminal && buf.last() == Some(&b'\n') {
                 buf.pop();
             }
             buf
