@@ -5,7 +5,8 @@ use crypto::{
     Ed25519PrivateKey, Ed25519PublicKey, KeyType, Secp256k1PrivateKey, Secp256k1PublicKey,
 };
 
-use crate::{FullIdentity, Identity};
+use crate::error::Error;
+use crate::{FullIdentity, Identity, Result};
 
 /// A concrete identity implementation backed by raw key material.
 ///
@@ -29,55 +30,70 @@ enum IdentityInner {
 
 impl RawIdentity {
     /// Creates a new RawIdentity from an Ed25519 private key.
-    pub fn from_ed25519(private_key: Ed25519PrivateKey) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the public key cannot be derived from the private key.
+    pub fn from_ed25519(private_key: Ed25519PrivateKey) -> Result<Self> {
         let public_key_box = private_key.public_key();
         let public_key_raw = public_key_box.raw();
-        let public_key = Ed25519PublicKey::from_bytes(&public_key_raw)
-            .expect("public key derived from valid private key");
+        let public_key = Ed25519PublicKey::from_bytes(&public_key_raw).map_err(|e| {
+            Error::PublicKeyDerivation(format!("Ed25519 public key derivation failed: {}", e))
+        })?;
 
-        Self {
+        Ok(Self {
             inner: IdentityInner::Ed25519 {
                 private_key,
                 public_key,
             },
-        }
+        })
     }
 
     /// Creates a new RawIdentity from a secp256k1 private key.
-    pub fn from_secp256k1(private_key: Secp256k1PrivateKey) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the public key cannot be derived from the private key.
+    pub fn from_secp256k1(private_key: Secp256k1PrivateKey) -> Result<Self> {
         let public_key_box = private_key.public_key();
         let public_key_raw = public_key_box.raw();
-        let public_key = Secp256k1PublicKey::from_bytes(&public_key_raw)
-            .expect("public key derived from valid private key");
+        let public_key = Secp256k1PublicKey::from_bytes(&public_key_raw).map_err(|e| {
+            Error::PublicKeyDerivation(format!("secp256k1 public key derivation failed: {}", e))
+        })?;
 
-        Self {
+        Ok(Self {
             inner: IdentityInner::Secp256k1 {
                 private_key,
                 public_key,
             },
-        }
+        })
     }
 
     /// Creates a new RawIdentity from any PrivateKey implementation.
     ///
     /// This is the primary constructor that automatically handles different key types.
-    pub fn from_private_key<P: PrivateKey + 'static>(private_key: P) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The key type is not supported (secp256r1)
+    /// - The key bytes are invalid
+    /// - The public key cannot be derived
+    pub fn from_private_key<P: PrivateKey + 'static>(private_key: P) -> Result<Self> {
         match private_key.key_type() {
             KeyType::Ed25519 => {
                 let raw_bytes = private_key.raw();
                 let ed25519_key = Ed25519PrivateKey::from_bytes(&raw_bytes)
-                    .expect("valid Ed25519 private key bytes");
+                    .map_err(|e| Error::InvalidKeyBytes(KeyType::Ed25519, e.to_string()))?;
                 Self::from_ed25519(ed25519_key)
             }
             KeyType::Secp256k1 => {
                 let raw_bytes = private_key.raw();
                 let secp256k1_key = Secp256k1PrivateKey::from_bytes(&raw_bytes)
-                    .expect("valid secp256k1 private key bytes");
+                    .map_err(|e| Error::InvalidKeyBytes(KeyType::Secp256k1, e.to_string()))?;
                 Self::from_secp256k1(secp256k1_key)
             }
-            KeyType::Secp256r1 => {
-                panic!("secp256r1 is not supported for identity (no PrivateKey impl)")
-            }
+            KeyType::Secp256r1 => Err(Error::UnsupportedKeyType(KeyType::Secp256r1)),
         }
     }
 
@@ -87,22 +103,25 @@ impl RawIdentity {
     /// * `key_type` - The type of key (Ed25519 or Secp256k1)
     /// * `bytes` - The raw private key bytes
     ///
-    /// # Returns
-    /// * `Ok(RawIdentity)` if the key is valid
-    /// * `Err` if the key bytes are invalid for the specified type
-    pub fn from_bytes(key_type: KeyType, bytes: &[u8]) -> defra_core::Result<Self> {
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The key type is not supported (secp256r1)
+    /// - The key bytes are invalid for the specified type
+    /// - The public key cannot be derived
+    pub fn from_bytes(key_type: KeyType, bytes: &[u8]) -> Result<Self> {
         match key_type {
             KeyType::Ed25519 => {
-                let private_key = Ed25519PrivateKey::from_bytes(bytes)?;
-                Ok(Self::from_ed25519(private_key))
+                let private_key = Ed25519PrivateKey::from_bytes(bytes)
+                    .map_err(|e| Error::InvalidKeyBytes(KeyType::Ed25519, e.to_string()))?;
+                Self::from_ed25519(private_key)
             }
             KeyType::Secp256k1 => {
-                let private_key = Secp256k1PrivateKey::from_bytes(bytes)?;
-                Ok(Self::from_secp256k1(private_key))
+                let private_key = Secp256k1PrivateKey::from_bytes(bytes)
+                    .map_err(|e| Error::InvalidKeyBytes(KeyType::Secp256k1, e.to_string()))?;
+                Self::from_secp256k1(private_key)
             }
-            KeyType::Secp256r1 => Err(defra_core::Error::Crypto(
-                "secp256r1 is not supported for identity".to_string(),
-            )),
+            KeyType::Secp256r1 => Err(Error::UnsupportedKeyType(KeyType::Secp256r1)),
         }
     }
 
@@ -161,9 +180,10 @@ impl FullIdentity for RawIdentity {
 
 impl std::fmt::Debug for RawIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let did_display = self.did().unwrap_or_else(|e| format!("<error: {}>", e));
         f.debug_struct("RawIdentity")
             .field("key_type", &self.key_type())
-            .field("did", &self.did().unwrap_or_else(|_| "<error>".to_string()))
+            .field("did", &did_display)
             .finish_non_exhaustive()
     }
 }
@@ -176,7 +196,7 @@ mod tests {
     #[test]
     fn test_from_ed25519() {
         let key = generate_ed25519().unwrap();
-        let identity = RawIdentity::from_ed25519(key);
+        let identity = RawIdentity::from_ed25519(key).unwrap();
 
         assert_eq!(identity.key_type(), KeyType::Ed25519);
         assert!(identity.did().unwrap().starts_with("did:key:"));
@@ -185,7 +205,7 @@ mod tests {
     #[test]
     fn test_from_secp256k1() {
         let key = generate_secp256k1().unwrap();
-        let identity = RawIdentity::from_secp256k1(key);
+        let identity = RawIdentity::from_secp256k1(key).unwrap();
 
         assert_eq!(identity.key_type(), KeyType::Secp256k1);
         assert!(identity.did().unwrap().starts_with("did:key:"));
@@ -213,21 +233,33 @@ mod tests {
     fn test_from_bytes_invalid() {
         let result = RawIdentity::from_bytes(KeyType::Ed25519, &[0u8; 32]);
         assert!(result.is_err(), "Should fail with invalid Ed25519 key");
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::InvalidKeyBytes(KeyType::Ed25519, _)
+        ));
 
         let result = RawIdentity::from_bytes(KeyType::Secp256k1, &[0u8; 16]);
         assert!(result.is_err(), "Should fail with invalid secp256k1 key");
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::InvalidKeyBytes(KeyType::Secp256k1, _)
+        ));
     }
 
     #[test]
     fn test_from_bytes_secp256r1_unsupported() {
         let result = RawIdentity::from_bytes(KeyType::Secp256r1, &[0u8; 32]);
         assert!(result.is_err(), "secp256r1 should not be supported");
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::UnsupportedKeyType(KeyType::Secp256r1)
+        ));
     }
 
     #[test]
     fn test_public_key_bytes_consistency() {
         let key = generate_ed25519().unwrap();
-        let identity = RawIdentity::from_private_key(key);
+        let identity = RawIdentity::from_private_key(key).unwrap();
 
         let bytes1 = identity.public_key_bytes();
         let bytes2 = identity.pub_key().raw();
@@ -241,7 +273,7 @@ mod tests {
     #[test]
     fn test_private_key_bytes_roundtrip() {
         let key = generate_ed25519().unwrap();
-        let identity1 = RawIdentity::from_private_key(key);
+        let identity1 = RawIdentity::from_private_key(key).unwrap();
 
         let bytes = identity1.private_key_bytes();
         let identity2 = RawIdentity::from_bytes(KeyType::Ed25519, &bytes).unwrap();
@@ -256,7 +288,7 @@ mod tests {
     #[test]
     fn test_debug_impl() {
         let key = generate_ed25519().unwrap();
-        let identity = RawIdentity::from_private_key(key);
+        let identity = RawIdentity::from_private_key(key).unwrap();
 
         let debug_str = format!("{:?}", identity);
         assert!(debug_str.contains("RawIdentity"));
@@ -267,7 +299,7 @@ mod tests {
     #[test]
     fn test_sign_with_ed25519() {
         let key = generate_ed25519().unwrap();
-        let identity = RawIdentity::from_ed25519(key);
+        let identity = RawIdentity::from_ed25519(key).unwrap();
 
         let message = b"test message";
         let signature = identity.sign(message).unwrap();
@@ -281,7 +313,7 @@ mod tests {
     #[test]
     fn test_sign_with_secp256k1() {
         let key = generate_secp256k1().unwrap();
-        let identity = RawIdentity::from_secp256k1(key);
+        let identity = RawIdentity::from_secp256k1(key).unwrap();
 
         let message = b"test message";
         let signature = identity.sign(message).unwrap();
@@ -297,7 +329,7 @@ mod tests {
     fn test_priv_key_trait_method() {
         let key = generate_ed25519().unwrap();
         let expected_bytes = key.raw();
-        let identity = RawIdentity::from_private_key(key);
+        let identity = RawIdentity::from_private_key(key).unwrap();
 
         let priv_key = identity.priv_key();
         assert_eq!(priv_key.key_type(), KeyType::Ed25519);

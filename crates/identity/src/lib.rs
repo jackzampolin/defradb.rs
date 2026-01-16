@@ -4,6 +4,13 @@
 //! - `Identity` trait for public identity operations (DID, public key)
 //! - `FullIdentity` trait for identity operations requiring a private key
 //! - `RawIdentity` concrete implementation supporting secp256k1 and ed25519
+//!
+//! # Supported Key Types
+//!
+//! - **Ed25519**: Fast, secure signing with 64-byte signatures
+//! - **secp256k1**: Bitcoin/Ethereum compatible with DER-encoded signatures
+//!
+//! Note: secp256r1 (P-256) is NOT supported for identity operations.
 
 mod error;
 mod raw;
@@ -52,7 +59,7 @@ mod tests {
     #[test]
     fn test_raw_identity_from_ed25519() {
         let private_key = generate_ed25519().unwrap();
-        let identity = RawIdentity::from_private_key(private_key);
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
 
         let did = identity.did().unwrap();
         assert!(did.starts_with("did:key:"));
@@ -61,7 +68,7 @@ mod tests {
     #[test]
     fn test_raw_identity_from_secp256k1() {
         let private_key = generate_secp256k1().unwrap();
-        let identity = RawIdentity::from_private_key(private_key);
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
 
         let did = identity.did().unwrap();
         assert!(did.starts_with("did:key:"));
@@ -70,7 +77,7 @@ mod tests {
     #[test]
     fn test_raw_identity_sign_verify() {
         let private_key = generate_ed25519().unwrap();
-        let identity = RawIdentity::from_private_key(private_key);
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
 
         let message = b"test message";
         let signature = identity.sign(message).unwrap();
@@ -82,7 +89,7 @@ mod tests {
     #[test]
     fn test_raw_identity_did_deterministic() {
         let private_key = generate_ed25519().unwrap();
-        let identity = RawIdentity::from_private_key(private_key);
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
 
         let did1 = identity.did().unwrap();
         let did2 = identity.did().unwrap();
@@ -92,18 +99,18 @@ mod tests {
     #[test]
     fn test_identity_key_type() {
         let ed25519_key = generate_ed25519().unwrap();
-        let ed25519_identity = RawIdentity::from_private_key(ed25519_key);
+        let ed25519_identity = RawIdentity::from_private_key(ed25519_key).unwrap();
         assert_eq!(ed25519_identity.key_type(), KeyType::Ed25519);
 
         let secp256k1_key = generate_secp256k1().unwrap();
-        let secp256k1_identity = RawIdentity::from_private_key(secp256k1_key);
+        let secp256k1_identity = RawIdentity::from_private_key(secp256k1_key).unwrap();
         assert_eq!(secp256k1_identity.key_type(), KeyType::Secp256k1);
     }
 
     #[test]
     fn test_raw_identity_secp256k1_sign_verify() {
         let private_key = generate_secp256k1().unwrap();
-        let identity = RawIdentity::from_private_key(private_key);
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
 
         let message = b"test message for secp256k1";
         let signature = identity.sign(message).unwrap();
@@ -114,8 +121,8 @@ mod tests {
 
     #[test]
     fn test_different_identities_have_different_dids() {
-        let identity1 = RawIdentity::from_private_key(generate_ed25519().unwrap());
-        let identity2 = RawIdentity::from_private_key(generate_ed25519().unwrap());
+        let identity1 = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
+        let identity2 = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
 
         let did1 = identity1.did().unwrap();
         let did2 = identity2.did().unwrap();
@@ -125,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_signature_not_reusable() {
-        let identity = RawIdentity::from_private_key(generate_ed25519().unwrap());
+        let identity = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
 
         let message1 = b"first message";
         let message2 = b"second message";
@@ -147,8 +154,8 @@ mod tests {
 
     #[test]
     fn test_wrong_key_verification_fails() {
-        let identity1 = RawIdentity::from_private_key(generate_ed25519().unwrap());
-        let identity2 = RawIdentity::from_private_key(generate_ed25519().unwrap());
+        let identity1 = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
+        let identity2 = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
 
         let message = b"test message";
         let signature = identity1.sign(message).unwrap();
