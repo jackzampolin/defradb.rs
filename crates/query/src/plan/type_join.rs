@@ -12,8 +12,12 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::planner::{Doc, PlanNode};
 
-/// Represents one side of a join operation
-#[derive(Clone)]
+/// Represents one side of a join operation.
+///
+/// Encapsulates the collection schema, relation field, and field indexes needed
+/// for join operations. Automatically derives the FK field index from the
+/// relation field name for non-array relations.
+#[derive(Clone, Debug)]
 pub struct JoinSide {
     /// The collection schema for this side
     collection: CollectionVersion,
@@ -21,20 +25,25 @@ pub struct JoinSide {
     relation_field: FieldDescription,
     /// Index of the relation field in the document
     relation_field_index: usize,
-    /// Index of the `_id` field (e.g., author_id) if this side has the FK
+    /// Index of the FK field (e.g., `author_id` for an "author" relation) if this side holds the foreign key.
+    /// For array relations (one-to-many from this side), this is None since the FK lives on the other side.
     relation_id_field_index: Option<usize>,
-    /// Whether this is the parent (outer) side of the join
-    is_parent: bool,
 }
 
 impl JoinSide {
-    /// Create a new join side
+    /// Create a new join side.
+    ///
+    /// Automatically derives the FK field index for non-array relations by looking
+    /// up the `{relation_field_name}_id` field in the collection schema.
+    ///
+    /// The `relation_field_index` is the position in the output document mapping
+    /// where the joined data will be stored, not an index into `collection.fields`.
     pub fn new(
         collection: CollectionVersion,
         relation_field: FieldDescription,
         relation_field_index: usize,
-    ) -> Self {
-        // Find the _id field index for non-array relations
+    ) -> Result<Self> {
+        // Auto-derive the FK field index for non-array relations
         let relation_id_field_index = if !relation_field.kind.is_array() {
             let id_field_name = CollectionVersion::relation_id_field_name(&relation_field.name);
             collection
@@ -45,58 +54,44 @@ impl JoinSide {
             None
         };
 
-        Self {
+        Ok(Self {
             collection,
             relation_field,
             relation_field_index,
             relation_id_field_index,
-            is_parent: false,
-        }
+        })
     }
 
-    /// Mark this side as the parent (outer) side
-    pub fn as_parent(mut self) -> Self {
-        self.is_parent = true;
-        self
-    }
-
-    /// Get the collection for this side
     pub fn collection(&self) -> &CollectionVersion {
         &self.collection
     }
 
-    /// Get the relation field for this side
     pub fn relation_field(&self) -> &FieldDescription {
         &self.relation_field
     }
 
-    /// Get the relation field index
     pub fn relation_field_index(&self) -> usize {
         self.relation_field_index
     }
 
-    /// Get the FK field index (e.g., author_id) if this side holds the FK
+    /// Get the FK field index (e.g., `author_id`) if this side holds the FK.
+    /// Returns None for array relations since the FK lives on the "many" side.
     pub fn relation_id_field_index(&self) -> Option<usize> {
         self.relation_id_field_index
-    }
-
-    /// Check if this is the parent side of the join
-    pub fn is_parent(&self) -> bool {
-        self.is_parent
     }
 }
 
 /// TypeJoinOne implements one-to-one relation joins.
 ///
-/// The join flow for the primary side:
-/// 1. Parent plan yields a document (e.g., Book with author_id: "bae-123")
-/// 2. Extract the FK from the `_id` field (author_id)
-/// 3. Perform a point-lookup on the child collection where _docID == FK
+/// **Primary side join flow** (when parent has the FK, e.g., `Book.author`):
+/// 1. Parent plan yields a document (e.g., Book with `author_id: "bae-123"`)
+/// 2. Extract the FK value from the relation's ID field (e.g., `author_id`)
+/// 3. Scan child collection for document where `_docID` matches the FK value
 /// 4. Merge the child document into the parent under the relation field key
 ///
-/// For the secondary side (no FK on this side):
-/// 1. Parent plan yields a document (e.g., Author)
-/// 2. Scan child collection looking for docs where their FK matches parent's _docID
+/// **Secondary/inverted side join flow** (when parent lacks FK, e.g., `Author.book`):
+/// 1. Parent plan yields a document (e.g., Author with `_docID: "bae-123"`)
+/// 2. Scan child collection for docs where their FK matches parent's `_docID`
 /// 3. Merge the first matching child document
 pub struct TypeJoinOne {
     /// Parent side of the join (outer loop)
@@ -105,27 +100,23 @@ pub struct TypeJoinOne {
     child_side: JoinSide,
     /// The parent plan node
     parent_plan: Box<dyn PlanNode>,
-    /// The child plan node (for lookups)
+    /// The child plan node (re-initialized for each lookup)
     child_plan: Box<dyn PlanNode>,
     /// Document mapping for this join
     document_mapping: DocumentMapping,
     /// Current document (merged parent + child)
     current_doc: Doc,
-    /// Whether this join is inverted (secondary side is parent)
+    /// Whether this is an inverted join. Inverted joins occur when querying from the
+    /// secondary side of a relation (the side without the FK). This changes lookup
+    /// direction: instead of looking up child by FK value, we scan children to find
+    /// those pointing to parent's `_docID`.
     is_inverted: bool,
     /// Whether initialized
     initialized: bool,
 }
 
 impl TypeJoinOne {
-    /// Create a new TypeJoinOne node
-    ///
-    /// # Arguments
-    /// * `parent_plan` - The outer plan that yields parent documents
-    /// * `child_plan` - The inner plan used for lookups
-    /// * `parent_side` - Configuration for the parent side
-    /// * `child_side` - Configuration for the child side
-    /// * `document_mapping` - The output document mapping
+    /// Create a new TypeJoinOne node.
     pub fn new(
         parent_plan: Box<dyn PlanNode>,
         child_plan: Box<dyn PlanNode>,
@@ -133,7 +124,7 @@ impl TypeJoinOne {
         child_side: JoinSide,
         document_mapping: DocumentMapping,
     ) -> Self {
-        // Determine if inverted: inverted when parent side doesn't have the FK
+        // Inverted when parent side doesn't have the FK (secondary side query)
         let is_inverted = parent_side.relation_id_field_index().is_none();
 
         Self {
@@ -146,12 +137,6 @@ impl TypeJoinOne {
             is_inverted,
             initialized: false,
         }
-    }
-
-    /// Set the child plan (for re-initialization during scanning)
-    pub fn with_child_plan(mut self, child_plan: Box<dyn PlanNode>) -> Self {
-        self.child_plan = child_plan;
-        self
     }
 
     /// Extract the foreign key value from the parent document
@@ -198,11 +183,13 @@ impl TypeJoinOne {
         Ok(None)
     }
 
-    /// Merge child document into parent at the relation field index
+    /// Merge child document into parent at the relation field index.
     fn merge_child(&self, parent_doc: &mut Doc, child_doc: Option<Doc>) {
         let child_value = match child_doc {
             Some(doc) => {
-                // Convert child doc fields to a JSON object
+                // Get child mapping. Falls back to child plan's mapping if not explicitly
+                // set in parent mapping - this happens for simple queries where child
+                // mapping was not pre-configured during planning.
                 let child_mapping = self
                     .document_mapping
                     .child_at(self.parent_side.relation_field_index())
@@ -310,11 +297,23 @@ pub struct TypeJoinMany {
     initialized: bool,
 }
 
+impl std::fmt::Debug for TypeJoinMany {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypeJoinMany")
+            .field("parent_side", &self.parent_side)
+            .field("child_side", &self.child_side)
+            .field("parent_plan", &format_args!("<PlanNode: {}>", self.parent_plan.kind()))
+            .field("child_plan", &format_args!("<PlanNode: {}>", self.child_plan.kind()))
+            .field("initialized", &self.initialized)
+            .finish()
+    }
+}
+
 impl TypeJoinMany {
-    /// Create a new TypeJoinMany node
+    /// Create a new TypeJoinMany node.
     ///
-    /// # Panics
-    /// Panics if `child_side` does not have a relation_id_field_index (FK field).
+    /// # Errors
+    /// Returns an error if `child_side` does not have a `relation_id_field_index` (FK field).
     /// One-to-many joins require the child to have an FK field pointing to the parent.
     pub fn new(
         parent_plan: Box<dyn PlanNode>,
@@ -322,17 +321,18 @@ impl TypeJoinMany {
         parent_side: JoinSide,
         child_side: JoinSide,
         document_mapping: DocumentMapping,
-    ) -> Self {
+    ) -> Result<Self> {
         // Validate that child side has FK field - required for one-to-many joins
-        assert!(
-            child_side.relation_id_field_index().is_some(),
-            "TypeJoinMany requires child side to have FK field (relation_id_field_index). \
-             Child collection '{}' relation field '{}' has no FK field.",
-            child_side.collection().name,
-            child_side.relation_field().name
-        );
+        if child_side.relation_id_field_index().is_none() {
+            return Err(QueryError::internal(format!(
+                "TypeJoinMany requires child side to have FK field. \
+                 Child collection '{}' relation field '{}' has no FK field.",
+                child_side.collection().name,
+                child_side.relation_field().name
+            )));
+        }
 
-        Self {
+        Ok(Self {
             parent_side,
             child_side,
             parent_plan,
@@ -340,19 +340,22 @@ impl TypeJoinMany {
             document_mapping,
             current_doc: Doc::default(),
             initialized: false,
-        }
+        })
     }
 
-    /// Find all child documents that match the parent's _docID
+    /// Find all child documents that match the parent's _docID.
     async fn find_child_docs(&mut self, parent_doc_id: &str) -> Result<Vec<Doc>> {
         let mut children = Vec::new();
 
-        // Re-initialize the child plan
+        // Re-initialize the child plan for this lookup
         self.child_plan.init().await?;
         self.child_plan.start().await?;
 
-        // child_fk_idx is guaranteed to be Some by the constructor assertion
-        let child_fk_idx = self.child_side.relation_id_field_index().unwrap();
+        // Safe: constructor validates that child_side has FK field index
+        let child_fk_idx = self
+            .child_side
+            .relation_id_field_index()
+            .expect("TypeJoinMany child_side FK index validated in constructor");
 
         while self.child_plan.next().await? {
             let child_doc = self.child_plan.value();
@@ -368,8 +371,11 @@ impl TypeJoinMany {
         Ok(children)
     }
 
-    /// Merge child documents into parent as an array
+    /// Merge child documents into parent as an array.
     fn merge_children(&self, parent_doc: &mut Doc, children: Vec<Doc>) {
+        // Get child mapping. Falls back to child plan's mapping if not explicitly
+        // set in parent mapping - this happens for simple queries where child
+        // mapping was not pre-configured during planning.
         let child_mapping = self
             .document_mapping
             .child_at(self.parent_side.relation_field_index())
@@ -572,11 +578,10 @@ mod tests {
         let posts = make_posts_collection();
         let relation_field = posts.field_by_name("author").unwrap().clone();
 
-        let side = JoinSide::new(posts, relation_field, 2);
+        let side = JoinSide::new(posts, relation_field, 2).unwrap();
 
         // Should find the author_id field at index 3
         assert_eq!(side.relation_id_field_index(), Some(3));
-        assert!(!side.is_parent());
     }
 
     #[test]
@@ -584,7 +589,7 @@ mod tests {
         let users = make_users_collection();
         let relation_field = users.field_by_name("posts").unwrap().clone();
 
-        let side = JoinSide::new(users, relation_field, 2);
+        let side = JoinSide::new(users, relation_field, 2).unwrap();
 
         // Array relations don't have an _id field
         assert_eq!(side.relation_id_field_index(), None);
@@ -614,18 +619,9 @@ mod tests {
         let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
         let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-        let parent_side = JoinSide::new(
-            posts_collection,
-            parent_relation,
-            2, // author field index
-        )
-        .as_parent();
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
 
-        let child_side = JoinSide::new(
-            users_collection,
-            child_relation,
-            2, // posts field index
-        );
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
 
         // Build output mapping with child mapping for nested object
         let mut output_mapping = posts_mapping.clone();
@@ -698,18 +694,9 @@ mod tests {
         let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
         let child_relation = posts_collection.field_by_name("author").unwrap().clone();
 
-        let parent_side = JoinSide::new(
-            users_collection,
-            parent_relation,
-            2, // posts field index
-        )
-        .as_parent();
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
 
-        let child_side = JoinSide::new(
-            posts_collection,
-            child_relation,
-            2, // author field index
-        );
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
 
         // Build output mapping with child mapping for nested array
         let mut output_mapping = users_mapping.clone();
@@ -722,7 +709,8 @@ mod tests {
             parent_side,
             child_side,
             output_mapping,
-        );
+        )
+        .unwrap();
 
         join.init().await.unwrap();
         join.start().await.unwrap();
@@ -788,8 +776,8 @@ mod tests {
         let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
         let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(users_collection, child_relation, 2);
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
 
         let mut output_mapping = posts_mapping.clone();
         let mut author_child_mapping = DocumentMapping::new();
@@ -845,8 +833,8 @@ mod tests {
         let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
         let child_relation = posts_collection.field_by_name("author").unwrap().clone();
 
-        let parent_side = JoinSide::new(users_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(posts_collection, child_relation, 2);
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
 
         let mut output_mapping = users_mapping.clone();
         let posts_child_mapping = make_posts_child_mapping();
@@ -858,7 +846,8 @@ mod tests {
             parent_side,
             child_side,
             output_mapping,
-        );
+        )
+        .unwrap();
 
         join.init().await.unwrap();
         join.start().await.unwrap();
@@ -890,8 +879,8 @@ mod tests {
         let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
         let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(users_collection, child_relation, 2);
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
 
         let mut join = TypeJoinOne::new(
             Box::new(parent_scan),
@@ -909,10 +898,6 @@ mod tests {
             .to_string()
             .contains("called before init"));
     }
-
-    // ========================================================================
-    // Additional Tests for Edge Cases
-    // ========================================================================
 
     // Helper for inverted one-to-one test - Authors collection (secondary side, no FK)
     fn make_authors_collection() -> CollectionVersion {
@@ -1029,13 +1014,14 @@ mod tests {
             parent_relation,
             2, // book field index
         )
-        .as_parent();
+        .unwrap();
 
         let child_side = JoinSide::new(
             books_collection,
             child_relation,
             2, // author field index
-        );
+        )
+        .unwrap();
 
         // Verify this is an inverted join (parent has no FK)
         assert!(parent_side.relation_id_field_index().is_none());
@@ -1106,8 +1092,8 @@ mod tests {
         let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
         let child_relation = posts_collection.field_by_name("author").unwrap().clone();
 
-        let parent_side = JoinSide::new(users_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(posts_collection, child_relation, 2);
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
 
         let mut join = TypeJoinMany::new(
             Box::new(parent_scan),
@@ -1115,7 +1101,8 @@ mod tests {
             parent_side,
             child_side,
             users_mapping,
-        );
+        )
+        .unwrap();
 
         // Call next without init
         let result = join.next().await;
@@ -1154,8 +1141,8 @@ mod tests {
         let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
         let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(users_collection, child_relation, 2);
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
 
         let mut output_mapping = posts_mapping.clone();
         let mut author_child_mapping = DocumentMapping::new();
@@ -1263,14 +1250,15 @@ mod tests {
             manager_relation.clone(),
             2, // manager field index
         )
-        .as_parent();
+        .unwrap();
 
         // For self-referential, child side uses the same relation
         let child_side = JoinSide::new(
             employees_collection,
             manager_relation,
             2, // manager field index
-        );
+        )
+        .unwrap();
 
         // Build output mapping
         let mut output_mapping = employees_mapping.clone();
@@ -1323,10 +1311,6 @@ mod tests {
         join.close().await.unwrap();
     }
 
-    // ========================================================================
-    // Lifecycle Tests
-    // ========================================================================
-
     #[tokio::test]
     async fn test_type_join_one_close_without_init() {
         // Test that close() works even if init() was never called
@@ -1345,8 +1329,8 @@ mod tests {
         let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
         let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(users_collection, child_relation, 2);
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
 
         let mut join = TypeJoinOne::new(
             Box::new(parent_scan),
@@ -1378,8 +1362,8 @@ mod tests {
         let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
         let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(users_collection, child_relation, 2);
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
 
         let mut join = TypeJoinOne::new(
             Box::new(parent_scan),
@@ -1415,8 +1399,8 @@ mod tests {
         let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
         let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(users_collection, child_relation, 2);
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
 
         let mut join = TypeJoinOne::new(
             Box::new(parent_scan),
@@ -1457,8 +1441,8 @@ mod tests {
         let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
         let child_relation = posts_collection.field_by_name("author").unwrap().clone();
 
-        let parent_side = JoinSide::new(users_collection, parent_relation, 2).as_parent();
-        let child_side = JoinSide::new(posts_collection, child_relation, 2);
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
 
         let mut join = TypeJoinMany::new(
             Box::new(parent_scan),
@@ -1466,9 +1450,174 @@ mod tests {
             parent_side,
             child_side,
             users_mapping,
-        );
+        )
+        .unwrap();
 
         // close() without init() should not panic
+        join.close().await.unwrap();
+    }
+
+    #[test]
+    fn test_type_join_many_requires_child_fk() {
+        // Test that TypeJoinMany returns error when child side has no FK field
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        let parent_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(vec![]);
+        let child_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(vec![]);
+
+        // Parent side: users.posts (array relation)
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        // Child side: users.posts (array relation - no FK field)
+        // Using the array relation from users, which has no FK field
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection.clone(), parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        // This should fail because child_side has no FK field
+        let result = TypeJoinMany::new(
+            Box::new(parent_scan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            users_mapping,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires child side to have FK field"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_child_null_fk() {
+        // Test that children with null FK values are correctly skipped
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        // User to query
+        let user_docs = vec![Doc::with_fields(vec![
+            Some(json!("user-1")),
+            Some(json!("Alice")),
+            None,
+        ])];
+
+        // Posts - one with valid FK, one with null FK
+        let post_docs = vec![
+            Doc::with_fields(vec![
+                Some(json!("post-1")),
+                Some(json!("Valid Post")),
+                None,
+                Some(json!("user-1")), // Valid FK
+            ]),
+            Doc::with_fields(vec![
+                Some(json!("post-2")),
+                Some(json!("Orphan Post")),
+                None,
+                Some(JsonValue::Null), // Null FK - should be skipped
+            ]),
+        ];
+
+        let parent_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(user_docs);
+        let child_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(post_docs);
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut output_mapping = users_mapping.clone();
+        let posts_child_mapping = make_posts_child_mapping();
+        output_mapping.set_child_at(2, posts_child_mapping);
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_scan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            output_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+
+        assert!(join.next().await.unwrap());
+        let doc = join.value();
+
+        // Should only have 1 post (the one with valid FK)
+        let posts = doc.get(2).unwrap().as_array().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].get("title"), Some(&json!("Valid Post")));
+
+        join.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_parent_without_doc_id() {
+        // Test that parent without _docID returns empty children array
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        // User without _docID (malformed data)
+        let user_docs = vec![Doc::with_fields(vec![
+            Some(JsonValue::Null), // Null _docID
+            Some(json!("Ghost User")),
+            None,
+        ])];
+
+        let post_docs = make_post_docs();
+
+        let parent_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(user_docs);
+        let child_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(post_docs);
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut output_mapping = users_mapping.clone();
+        let posts_child_mapping = make_posts_child_mapping();
+        output_mapping.set_child_at(2, posts_child_mapping);
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_scan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            output_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+
+        assert!(join.next().await.unwrap());
+        let doc = join.value();
+
+        // Should have empty posts array (parent has no _docID to match against)
+        let posts = doc.get(2).unwrap().as_array().unwrap();
+        assert_eq!(posts.len(), 0);
+
         join.close().await.unwrap();
     }
 }

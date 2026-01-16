@@ -181,7 +181,7 @@ impl Planner {
                                     .fields
                                     .iter()
                                     .position(|tf| tf.name == f.name)
-                                    .unwrap(); // Safe: we just found it above
+                                    .expect("field must exist: just found by find()");
                                 (idx, f.clone())
                             }
                             None => {
@@ -229,7 +229,7 @@ impl Planner {
                                         .fields
                                         .iter()
                                         .position(|tf| tf.name == f.name)
-                                        .unwrap();
+                                        .expect("field must exist: just found by find()");
                                     (idx, f.clone())
                                 }
                                 None => {
@@ -244,7 +244,12 @@ impl Planner {
                                 }
                             }
                         } else {
-                            // Primary side - use index 0 as placeholder (won't be used for FK lookup)
+                            // Primary side of one-to-one join: parent has the FK field.
+                            // The child_relation_index won't be used for FK lookup since the
+                            // parent side performs the lookup using its own FK. We pass 0 as
+                            // a placeholder index - validation in JoinSide::new() is relaxed
+                            // for this case since the field-at-index check only matters when
+                            // the index will actually be used.
                             (0, relation_field.clone())
                         }
                     }
@@ -255,14 +260,13 @@ impl Planner {
                     parent_collection.clone(),
                     relation_field.clone(),
                     relation_field_index,
-                )
-                .as_parent();
+                )?;
 
                 let child_side = JoinSide::new(
                     (*target_collection).clone(),
                     child_relation_field,
                     child_relation_index,
-                );
+                )?;
 
                 // Create the appropriate join node
                 if relation_field.kind.is_array() {
@@ -273,7 +277,7 @@ impl Planner {
                         parent_side,
                         child_side,
                         mapping.clone(),
-                    ));
+                    )?);
                 } else {
                     // One-to-one: TypeJoinOne
                     plan = Box::new(TypeJoinOne::new(
@@ -488,10 +492,6 @@ mod tests {
         assert_eq!(mapping.render_keys.len(), 1);
         assert_eq!(mapping.render_keys[0].key, "userName");
     }
-
-    // ========================================================================
-    // Join Planning Tests
-    // ========================================================================
 
     #[tokio::test]
     async fn test_plan_with_one_to_one_relation() {
