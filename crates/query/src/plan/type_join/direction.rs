@@ -1,0 +1,21 @@
+//! Join direction types for type joins
+
+/// Represents the direction of a join operation.
+///
+/// Join direction is determined by which side holds the foreign key (FK):
+/// - **Primary**: The parent side holds the FK. Lookup is done by extracting the FK
+///   value from the parent document and finding the child with matching `_docID`.
+/// - **Inverted**: The child side holds the FK. Lookup is done by scanning children
+///   to find those whose FK matches the parent's `_docID`.
+#[derive(Clone, Debug)]
+pub enum JoinDirection {
+    /// Primary join: parent has FK field at the given index.
+    /// Lookup: child._docID == parent.FK_field
+    Primary {
+        /// Index of the FK field in the parent document (e.g., `author_id`)
+        parent_fk_index: usize,
+    },
+    /// Inverted join: child has FK field, parent does not.
+    /// Lookup: child.FK_field == parent._docID
+    Inverted,
+}

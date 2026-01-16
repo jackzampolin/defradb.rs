@@ -13,6 +13,7 @@ mod orderby;
 mod scan;
 mod select;
 mod sum;
+mod type_join;
 
 pub use alldocs::AllDocsNode;
 pub use average::AverageNode;
@@ -30,3 +31,4 @@ pub use orderby::OrderByNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
 pub use sum::SumNode;
+pub use type_join::{JoinDirection, JoinSide, TypeJoinMany, TypeJoinOne};

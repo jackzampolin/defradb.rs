@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
-use crate::plan::{IndexScanNode, LimitNode, ScanNode, SelectNode};
+use crate::plan::{IndexScanNode, JoinSide, LimitNode, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne};
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
 
@@ -70,7 +70,7 @@ impl Planner {
         let index_scan = self.try_select_index(select, &collection);
 
         // Build the plan tree bottom-up:
-        // ScanNode/IndexScanNode -> SelectNode -> LimitNode
+        // ScanNode/IndexScanNode -> SelectNode -> JoinNodes -> LimitNode
 
         // 1. Choose between IndexScanNode and ScanNode based on index availability
         let mut plan: Box<dyn PlanNode> = if let Some(ref params) = index_scan {
@@ -100,7 +100,10 @@ impl Planner {
             plan = Box::new(select_node);
         }
 
-        // 3. Apply limit/offset if present
+        // 3. Apply join nodes for relation fields
+        plan = self.apply_joins(plan, select, &collection, mapping.clone())?;
+
+        // 4. Apply limit/offset if present
         if let Some(ref limit) = select.limit {
             plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
         }
@@ -131,6 +134,124 @@ impl Planner {
         filter_to_index_scan(filter, best_index)
     }
 
+    /// Apply join nodes for nested selects (relation fields)
+    fn apply_joins(
+        &self,
+        mut plan: Box<dyn PlanNode>,
+        select: &Select,
+        parent_collection: &CollectionVersion,
+        mut mapping: DocumentMapping,
+    ) -> Result<Box<dyn PlanNode>> {
+        for requestable in &select.fields {
+            if let Requestable::Select(nested_select) = requestable {
+                let relation_field_name = &nested_select.field.name;
+
+                // Find the relation field in the parent collection
+                let relation_field = parent_collection
+                    .field_by_name(relation_field_name)
+                    .ok_or_else(|| QueryError::unknown_field(relation_field_name))?;
+
+                // Verify it's a relation field
+                if !relation_field.kind.is_relation() {
+                    return Err(QueryError::execution(format!(
+                        "field '{}' is not a relation",
+                        relation_field_name
+                    )));
+                }
+
+                // Get the target collection
+                let target_collection_name = relation_field
+                    .kind
+                    .relation_collection_id()
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "relation field '{}' has no target collection",
+                            relation_field_name
+                        ))
+                    })?;
+
+                let target_collection = self
+                    .collections
+                    .get(target_collection_name)
+                    .ok_or_else(|| QueryError::collection_not_found(target_collection_name))?
+                    .clone();
+
+                // Build the child mapping for the nested select
+                let child_mapping = self.build_mapping(nested_select, &target_collection)?;
+
+                // Get the relation field index in the parent mapping
+                let relation_field_index = mapping
+                    .first_index_of_name(relation_field_name)
+                    .ok_or_else(|| QueryError::internal("relation field not in mapping"))?;
+
+                // Set up child mapping in parent
+                mapping.set_child_at(relation_field_index, child_mapping.clone());
+
+                // Create the child scan plan
+                let child_scan = ScanNode::new((*target_collection).clone(), child_mapping.clone());
+
+                // Find the other side of the relation
+                let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
+                    target_collection.field_by_relation(
+                        rel_name,
+                        &parent_collection.name,
+                        relation_field_name,
+                    )
+                } else {
+                    None
+                };
+
+                // Get child relation field index (if it exists)
+                let child_relation_index = target_relation_field
+                    .and_then(|f| {
+                        target_collection
+                            .fields
+                            .iter()
+                            .position(|tf| tf.name == f.name)
+                    })
+                    .unwrap_or(0);
+
+                // Create join sides
+                let parent_side = JoinSide::new(
+                    parent_collection.clone(),
+                    relation_field.clone(),
+                    relation_field_index,
+                )?;
+
+                let child_side = JoinSide::new(
+                    (*target_collection).clone(),
+                    target_relation_field
+                        .cloned()
+                        .unwrap_or_else(|| relation_field.clone()),
+                    child_relation_index,
+                )?;
+
+                // Create the appropriate join node
+                if relation_field.kind.is_array() {
+                    // One-to-many: TypeJoinMany
+                    plan = Box::new(TypeJoinMany::new(
+                        plan,
+                        Box::new(child_scan),
+                        parent_side,
+                        child_side,
+                        mapping.clone(),
+                    )?);
+                } else {
+                    // One-to-one: TypeJoinOne
+                    plan = Box::new(TypeJoinOne::new(
+                        plan,
+                        Box::new(child_scan),
+                        parent_side,
+                        child_side,
+                        mapping.clone(),
+                    ));
+                }
+            }
+        }
+
+        Ok(plan)
+    }
+
     /// Build the document mapping for a Select operation.
     fn build_mapping(
         &self,
@@ -153,7 +274,8 @@ impl Planner {
                     mapping.add_render_key(index, field.output_name());
                 }
                 Requestable::Select(nested_select) => {
-                    // Nested select (relation)
+                    // Nested select (relation) - add the field but don't recurse here
+                    // Child mapping will be built when applying joins
                     let index = mapping.next_index();
                     mapping.add(index, &nested_select.field.name);
                     mapping.add_render_key(index, nested_select.field.output_name());
@@ -233,6 +355,41 @@ mod tests {
                 descending: false,
             }],
         })
+    }
+
+    fn make_users_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "users",
+            "v1",
+            "coll-users",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                // One-to-many relation to posts (array)
+                FieldDescription::new("3", "posts", FieldKind::relation("posts", true))
+                    .with_relation_name("author_posts"),
+            ],
+        )
+    }
+
+    fn make_posts_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "posts",
+            "v1",
+            "coll-posts",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "title", FieldKind::string()),
+                // Many-to-one relation to users (singular)
+                FieldDescription::new("3", "author", FieldKind::relation("users", false))
+                    .with_relation_name("author_posts")
+                    .as_primary(),
+                // Auto-generated FK field
+                FieldDescription::new("4", "author_id", FieldKind::doc_id())
+                    .with_relation_name("author_posts")
+                    .as_primary(),
+            ],
+        )
     }
 
     #[test]
@@ -488,5 +645,90 @@ mod tests {
         let select_no_filter = Select::new("Users").with_field(Field::new("name"));
         let result_no_filter = planner.plan_with_index_info(&select_no_filter).unwrap();
         assert!(!result_no_filter.uses_index());
+    }
+
+    // ========================================================================
+    // Join Planning Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_plan_with_one_to_one_relation() {
+        // Query: posts { title, author { name } }
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Build nested select for author - field name is "author" (relation field), collection is "users"
+        let author_select = Select::new("users")
+            .with_field_name("author")
+            .with_field(Field::new("name"));
+
+        let select = Select::new("posts")
+            .with_field(Field::new("title"))
+            .with_select(author_select);
+
+        let plan = planner.plan(&select).unwrap();
+
+        // The plan should be a TypeJoinOne (for one-to-one)
+        assert_eq!(plan.kind(), "typeJoinOne");
+    }
+
+    #[tokio::test]
+    async fn test_plan_with_one_to_many_relation() {
+        // Query: users { name, posts { title } }
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Build nested select for posts - field name is "posts" (relation field), collection is "posts"
+        let posts_select = Select::new("posts")
+            .with_field_name("posts")
+            .with_field(Field::new("title"));
+
+        let select = Select::new("users")
+            .with_field(Field::new("name"))
+            .with_select(posts_select);
+
+        let plan = planner.plan(&select).unwrap();
+
+        // The plan should be a TypeJoinMany (for one-to-many)
+        assert_eq!(plan.kind(), "typeJoinMany");
+    }
+
+    #[tokio::test]
+    async fn test_plan_relation_unknown_field() {
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Try to select a non-existent relation field
+        let nested = Select::new("users")
+            .with_field_name("nonexistent")
+            .with_field(Field::new("name"));
+
+        let select = Select::new("posts")
+            .with_field(Field::new("title"))
+            .with_select(nested);
+
+        let result = planner.plan(&select);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_plan_relation_with_limit() {
+        // Query: users { name, posts { title } } limit 5
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        let posts_select = Select::new("posts")
+            .with_field_name("posts")
+            .with_field(Field::new("title"));
+
+        let select = Select::new("users")
+            .with_field(Field::new("name"))
+            .with_select(posts_select)
+            .with_limit(5);
+
+        let plan = planner.plan(&select).unwrap();
+
+        // The outermost node should be a LimitNode wrapping the join
+        assert_eq!(plan.kind(), "limitNode");
+
+        // The source should be the join
+        let source = plan.source().unwrap();
+        assert_eq!(source.kind(), "typeJoinMany");
     }
 }

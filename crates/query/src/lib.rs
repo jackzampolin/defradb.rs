@@ -41,8 +41,8 @@ pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseErro
 pub use mapper::{Filter, Mutation, MutationType, Select};
 pub use mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 pub use plan::{
-    CreateInput, CreateNode, DeleteNode, LimitNode, ScanNode, SelectNode, UpdateInput, UpdateNode,
-    UpsertAction, UpsertInput, UpsertNode,
+    CreateInput, CreateNode, DeleteNode, JoinDirection, JoinSide, LimitNode, ScanNode, SelectNode,
+    TypeJoinMany, TypeJoinOne, UpdateInput, UpdateNode, UpsertAction, UpsertInput, UpsertNode,
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};

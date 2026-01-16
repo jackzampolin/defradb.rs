@@ -2,6 +2,10 @@
 
 use std::collections::HashMap;
 
+use serde_json::Value as JsonValue;
+
+use crate::planner::Doc;
+
 /// Index of the DocID field in a document (always first)
 pub const DOC_ID_FIELD_INDEX: usize = 0;
 
@@ -149,6 +153,20 @@ impl DocumentMapping {
         self.child_mappings
             .get(index)
             .and_then(|opt| opt.as_ref().map(|b| b.as_ref()))
+    }
+
+    /// Render a document to a JSON object using this mapping's render keys.
+    ///
+    /// Iterates over render_keys and extracts the corresponding values from the document
+    /// to build a JSON object suitable for output.
+    pub fn render_doc_to_json(&self, doc: &Doc) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+        for render_key in &self.render_keys {
+            if let Some(value) = doc.get(render_key.index) {
+                obj.insert(render_key.key.clone(), value.clone());
+            }
+        }
+        JsonValue::Object(obj)
     }
 
     /// Clone without render keys (for subqueries)
