@@ -29,6 +29,33 @@ pub enum Error {
     #[error("invalid {0:?} key bytes: {1}")]
     InvalidKeyBytes(KeyType, String),
 
+    /// JWT token encoding failed
+    #[error("token encoding failed: {0}")]
+    TokenEncoding(String),
+
+    /// JWT token decoding failed
+    #[error("token decoding failed: {0}")]
+    TokenDecoding(String),
+
+    /// Token has expired
+    #[error("token has expired")]
+    TokenExpired,
+
+    /// Token audience mismatch
+    #[error("token audience mismatch: expected {expected}, got {actual:?}")]
+    AudienceMismatch {
+        expected: String,
+        actual: Vec<String>,
+    },
+
+    /// Missing claim in token
+    #[error("missing required claim: {0}")]
+    MissingClaim(String),
+
+    /// Invalid claim value in token
+    #[error("invalid claim value for {claim}: {reason}")]
+    InvalidClaimValue { claim: String, reason: String },
+
     /// Underlying crypto error
     #[error("crypto error: {0}")]
     Crypto(#[from] defra_core::Error),
