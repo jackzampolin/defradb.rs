@@ -311,12 +311,22 @@ impl Node {
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
 
+        // Initialize peer keypair from keyring (if P2P enabled and keyring not disabled)
+        let peer_keypair = if !config.net.p2p_disabled && !config.keyring.disabled {
+            Some(Self::init_peer_key(&config)?)
+        } else if !config.net.p2p_disabled {
+            info!("Keyring disabled, using ephemeral peer identity");
+            None
+        } else {
+            None
+        };
+
         // Initialize storage, database, and set up P2P and HTTP server
         let (p2p_handle, http_server) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
-                Self::init_store_and_server(store, &config).await?
+                Self::init_store_and_server(store, &config, peer_keypair).await?
             }
             DatastoreType::Badger => {
                 info!(
@@ -324,7 +334,7 @@ impl Node {
                     config.data_path().display()
                 );
                 let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
-                Self::init_store_and_server(store, &config).await?
+                Self::init_store_and_server(store, &config, peer_keypair).await?
             }
         };
 
@@ -339,6 +349,79 @@ impl Node {
         })
     }
 
+    /// Initialize or load the peer key from keyring.
+    ///
+    /// If a peer key exists in the keyring, it is loaded and converted to a libp2p Keypair.
+    /// If no peer key exists, a new Ed25519 key is generated and stored in the keyring.
+    fn init_peer_key(config: &Config) -> Result<p2p::Keypair> {
+        use crate::config::KeyringBackend;
+        use keyring::{FileKeyring, Keyring, SystemKeyring, PEER_KEY};
+
+        let kr: Box<dyn Keyring> = match config.keyring.backend {
+            KeyringBackend::File => {
+                let path = if config.keyring.path.starts_with('/') {
+                    std::path::PathBuf::from(&config.keyring.path)
+                } else {
+                    config.rootdir.join(&config.keyring.path)
+                };
+                let secret =
+                    keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
+                Box::new(
+                    FileKeyring::open(&path, secret).map_err(|e| Error::Keyring(e.to_string()))?,
+                )
+            }
+            KeyringBackend::System => Box::new(SystemKeyring::open(&config.keyring.namespace)),
+        };
+
+        // Try to load existing peer key
+        match kr.get(PEER_KEY) {
+            Ok(key_bytes) => {
+                info!("Loaded existing peer key from keyring");
+                Self::keypair_from_ed25519_bytes(&key_bytes)
+            }
+            Err(keyring::Error::NotFound(_)) => {
+                info!("Generating new peer key");
+                use crypto::Key;
+                let private_key = crypto::generate_ed25519()
+                    .map_err(|e| Error::Keyring(format!("failed to generate peer key: {}", e)))?;
+                let key_bytes = private_key.raw();
+
+                // Store in keyring
+                kr.set(PEER_KEY, &key_bytes)
+                    .map_err(|e| Error::Keyring(e.to_string()))?;
+
+                Self::keypair_from_ed25519_bytes(&key_bytes)
+            }
+            Err(e) => Err(Error::Keyring(e.to_string())),
+        }
+    }
+
+    /// Convert Ed25519 key bytes to libp2p Keypair.
+    ///
+    /// Ed25519 keys are stored as 64 bytes: 32-byte seed + 32-byte public key.
+    /// libp2p expects the 32-byte seed to derive the keypair.
+    fn keypair_from_ed25519_bytes(key_bytes: &[u8]) -> Result<p2p::Keypair> {
+        use libp2p::identity::ed25519;
+
+        if key_bytes.len() != 64 {
+            return Err(Error::Keyring(format!(
+                "invalid peer key length: expected 64 bytes, got {}",
+                key_bytes.len()
+            )));
+        }
+
+        // Ed25519 key format: 32-byte seed + 32-byte public key
+        // libp2p needs the seed (first 32 bytes) to derive the keypair
+        let seed: [u8; 32] = key_bytes[..32]
+            .try_into()
+            .map_err(|_| Error::Keyring("invalid key format".to_string()))?;
+
+        let secret_key = ed25519::SecretKey::try_from_bytes(seed)
+            .map_err(|e| Error::Keyring(format!("invalid Ed25519 key: {}", e)))?;
+
+        Ok(p2p::Keypair::from(ed25519::Keypair::from(secret_key)))
+    }
+
     /// Initialize store, database, P2P, and HTTP server.
     ///
     /// This function creates the database, loads collections, sets up the query
@@ -346,6 +429,7 @@ impl Node {
     async fn init_store_and_server<S>(
         store: Arc<S>,
         config: &Config,
+        peer_keypair: Option<p2p::Keypair>,
     ) -> Result<(Option<p2p::P2PHostHandle>, defra_http::Server)>
     where
         S: storage::corekv::Store + 'static,
@@ -370,7 +454,7 @@ impl Node {
             info!("Initializing P2P network");
             let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
             let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            Some(Self::start_p2p(config, bitswap_store).await?)
+            Some(Self::start_p2p(config, bitswap_store, peer_keypair).await?)
         };
 
         // Create HTTP server with database-backed query runner
@@ -424,12 +508,19 @@ impl Node {
         Ok((p2p, http_server))
     }
 
-    /// Start P2P networking with the given bitswap store
+    /// Start P2P networking with the given bitswap store and optional keypair.
+    ///
+    /// If a keypair is provided, it will be used for the P2P identity.
+    /// Otherwise, an ephemeral keypair will be generated.
     async fn start_p2p<S: p2p::BitswapStore<Params = libipld::DefaultParams>>(
         config: &Config,
         bitswap_store: S,
+        keypair: Option<p2p::Keypair>,
     ) -> Result<p2p::P2PHostHandle> {
-        let (host, handle, mut events) = p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?;
+        let (host, handle, mut events) = match keypair {
+            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).map_err(Error::P2P)?,
+            None => p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?,
+        };
 
         // Start listening on configured addresses
         for addr_str in &config.net.p2p_addresses {

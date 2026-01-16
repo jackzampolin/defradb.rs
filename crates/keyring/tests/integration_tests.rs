@@ -26,9 +26,15 @@ fn test_file_keyring_full_lifecycle() {
     assert!(keys.is_empty());
 
     // Create multiple keys
-    keyring.set("peer_key", b"peer-key-data-32-bytes-exactly!").unwrap();
-    keyring.set("node_key", b"node-key-data-32-bytes-exactly!").unwrap();
-    keyring.set("encryption_key", b"enc-key-data-32-bytes-exactly!!").unwrap();
+    keyring
+        .set("peer_key", b"peer-key-data-32-bytes-exactly!")
+        .unwrap();
+    keyring
+        .set("node_key", b"node-key-data-32-bytes-exactly!")
+        .unwrap();
+    keyring
+        .set("encryption_key", b"enc-key-data-32-bytes-exactly!!")
+        .unwrap();
 
     // Verify list
     let mut keys = keyring.list().unwrap();
@@ -36,8 +42,14 @@ fn test_file_keyring_full_lifecycle() {
     assert_eq!(keys, vec!["encryption_key", "node_key", "peer_key"]);
 
     // Verify retrieval
-    assert_eq!(keyring.get("peer_key").unwrap(), b"peer-key-data-32-bytes-exactly!");
-    assert_eq!(keyring.get("node_key").unwrap(), b"node-key-data-32-bytes-exactly!");
+    assert_eq!(
+        keyring.get("peer_key").unwrap(),
+        b"peer-key-data-32-bytes-exactly!"
+    );
+    assert_eq!(
+        keyring.get("node_key").unwrap(),
+        b"node-key-data-32-bytes-exactly!"
+    );
 
     // Delete one key
     keyring.delete("node_key").unwrap();
@@ -60,7 +72,9 @@ fn test_file_keyring_persistence() {
     // Create keyring and store key
     {
         let keyring = FileKeyring::open(temp_dir.path(), password).unwrap();
-        keyring.set("persistent_key", b"this-data-should-persist!!!!").unwrap();
+        keyring
+            .set("persistent_key", b"this-data-should-persist!!!!")
+            .unwrap();
     }
 
     // Reopen keyring and verify key exists
@@ -81,7 +95,9 @@ fn test_file_keyring_concurrent_access() {
     // Pre-create some keys
     let keyring = FileKeyring::open(&path, password).unwrap();
     for i in 0..10 {
-        keyring.set(&format!("key_{}", i), format!("data_{}", i).as_bytes()).unwrap();
+        keyring
+            .set(&format!("key_{}", i), format!("data_{}", i).as_bytes())
+            .unwrap();
     }
     drop(keyring);
 

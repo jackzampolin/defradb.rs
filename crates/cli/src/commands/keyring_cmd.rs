@@ -10,7 +10,7 @@
 
 //! Keyring command implementation
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
@@ -56,31 +56,55 @@ impl KeyringArgs {
     }
 }
 
-/// Generate a new random key
+/// Generate a new cryptographic key
 #[derive(Args, Debug)]
 pub struct GenerateArgs {
     /// Name of the key to generate
     pub name: String,
 
-    /// Number of bytes for the key (default: 32)
-    #[arg(short, long, default_value = "32")]
-    pub bytes: usize,
+    /// Key type to generate (ed25519, secp256k1, aes256)
+    #[arg(short = 't', long, default_value = "ed25519")]
+    pub key_type: String,
 }
 
 impl GenerateArgs {
     pub fn execute(self, config: Config) -> Result<()> {
+        use crypto::Key;
+
         let keyring = open_keyring(&config)?;
 
-        // Generate random bytes
-        let mut key = vec![0u8; self.bytes];
-        getrandom::getrandom(&mut key)
-            .map_err(|e| Error::Keyring(format!("failed to generate random bytes: {}", e)))?;
+        let (key, description) = match self.key_type.to_lowercase().as_str() {
+            "ed25519" => {
+                let private_key = crypto::generate_ed25519().map_err(|e| {
+                    Error::Keyring(format!("failed to generate Ed25519 key: {}", e))
+                })?;
+                (private_key.raw().to_vec(), "64-byte Ed25519")
+            }
+            "secp256k1" => {
+                let private_key = crypto::generate_secp256k1().map_err(|e| {
+                    Error::Keyring(format!("failed to generate secp256k1 key: {}", e))
+                })?;
+                (private_key.raw().to_vec(), "32-byte secp256k1")
+            }
+            "aes256" | "aes" => {
+                let key = crypto::generate_aes256().map_err(|e| {
+                    Error::Keyring(format!("failed to generate AES-256 key: {}", e))
+                })?;
+                (key, "32-byte AES-256")
+            }
+            _ => {
+                return Err(Error::Keyring(format!(
+                    "unknown key type: '{}'. Valid types: ed25519, secp256k1, aes256",
+                    self.key_type
+                )));
+            }
+        };
 
         keyring
             .set(&self.name, &key)
             .map_err(|e| Error::Keyring(e.to_string()))?;
 
-        println!("Generated {} byte key: {}", self.bytes, self.name);
+        println!("Generated {} key: {}", description, self.name);
         Ok(())
     }
 }
@@ -138,8 +162,8 @@ impl ImportArgs {
             hex_decode(line.trim()).map_err(|e| Error::Keyring(format!("invalid hex: {}", e)))?
         } else {
             let mut buf = Vec::new();
-            stdin.lock().read_until(b'\n', &mut buf)?;
-            // Remove trailing newline if present
+            stdin.lock().read_to_end(&mut buf)?;
+            // Remove trailing newline if present (from terminal input)
             if buf.last() == Some(&b'\n') {
                 buf.pop();
             }
@@ -235,9 +259,9 @@ fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, std::num::ParseIntError> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect()
+fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err(format!("hex string has odd length: {}", s.len()));
+    }
+    hex::decode(s).map_err(|e| e.to_string())
 }

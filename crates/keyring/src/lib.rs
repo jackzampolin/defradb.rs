@@ -29,6 +29,15 @@ pub use system::SystemKeyring;
 /// Environment variable name for the keyring secret
 pub const KEYRING_SECRET_ENV: &str = "DEFRA_KEYRING_SECRET";
 
+/// Standard key name for peer identity (Ed25519)
+pub const PEER_KEY: &str = "peer-key";
+
+/// Standard key name for data encryption (AES-256)
+pub const ENCRYPTION_KEY: &str = "encryption-key";
+
+/// Standard key name for searchable encryption
+pub const SEARCHABLE_ENCRYPTION_KEY: &str = "searchable-encryption-key";
+
 /// Loads the keyring secret from the DEFRA_KEYRING_SECRET environment variable.
 ///
 /// Returns `Error::SecretNotSet` if the environment variable is not set.
