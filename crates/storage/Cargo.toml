@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 defra-core = { path = "../defra-core" }
+document = { path = "../document" }
+schema = { path = "../schema" }
+chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime
 tokio.workspace = true

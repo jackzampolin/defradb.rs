@@ -134,68 +134,151 @@ impl Key for PrimaryDataStoreKey {
     }
 }
 
+/// An indexed field with value and sort direction.
+///
+/// Matches Go's keys.IndexedField
+#[derive(Debug, Clone)]
+pub struct IndexedField {
+    /// The field value
+    pub value: document::NormalValue,
+    /// Whether this field is indexed in descending order
+    pub descending: bool,
+}
+
+impl IndexedField {
+    /// Create a new indexed field
+    pub fn new(value: document::NormalValue, descending: bool) -> Self {
+        Self { value, descending }
+    }
+
+    /// Create an ascending indexed field
+    pub fn ascending(value: document::NormalValue) -> Self {
+        Self {
+            value,
+            descending: false,
+        }
+    }
+
+    /// Create a descending indexed field
+    pub fn descending(value: document::NormalValue) -> Self {
+        Self {
+            value,
+            descending: true,
+        }
+    }
+}
+
+impl PartialEq for IndexedField {
+    fn eq(&self, other: &Self) -> bool {
+        self.descending == other.descending && self.value == other.value
+    }
+}
+
 /// IndexDataStoreKey: Stores indexed field values for secondary indexes
 ///
-/// Structure: /[CollectionID]/[IndexID]/[FieldValue1](/[FieldValue2]...)
-/// Example: /1/2/valueA/valueB
-#[derive(Debug, Clone, PartialEq)]
+/// Structure: /[CollectionShortID]/[IndexID]/[EncodedFieldValue1][EncodedFieldValue2]...
+/// Example: /1/2/<encoded value A><encoded value B>
+///
+/// Note: Field values are encoded using order-preserving encoding that
+/// maintains sort order when compared as byte sequences.
+#[derive(Debug, Clone)]
 pub struct IndexDataStoreKey {
-    /// Collection short ID (varint-encoded)
-    pub collection_id: u32,
-    /// Index ID (varint-encoded)
+    /// Collection short ID (varint-encoded in key bytes)
+    pub collection_short_id: u32,
+    /// Index ID (varint-encoded in key bytes)
     pub index_id: u32,
-    /// Indexed field values (variable length)
-    pub field_values: Vec<Vec<u8>>,
+    /// Indexed fields with values and sort direction
+    pub fields: Vec<IndexedField>,
+}
+
+impl PartialEq for IndexDataStoreKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.collection_short_id == other.collection_short_id
+            && self.index_id == other.index_id
+            && self.fields == other.fields
+    }
 }
 
 impl IndexDataStoreKey {
     /// Create a new IndexDataStoreKey
-    pub fn new(collection_id: u32, index_id: u32, field_values: Vec<Vec<u8>>) -> Self {
+    pub fn new(collection_short_id: u32, index_id: u32, fields: Vec<IndexedField>) -> Self {
         Self {
-            collection_id,
+            collection_short_id,
             index_id,
-            field_values,
+            fields,
         }
     }
 
     /// Create a prefix for all entries in an index
-    pub fn index_prefix(collection_id: u32, index_id: u32) -> Vec<u8> {
+    pub fn index_prefix(collection_short_id: u32, index_id: u32) -> Vec<u8> {
         let mut buf = vec![SEPARATOR];
-        buf = encode_uvarint_ascending(buf, collection_id as u64);
+        buf = encode_uvarint_ascending(buf, collection_short_id as u64);
         buf.push(SEPARATOR);
         buf = encode_uvarint_ascending(buf, index_id as u64);
         buf.push(SEPARATOR);
         buf
     }
-}
 
-impl Key for IndexDataStoreKey {
-    fn bytes(&self) -> Vec<u8> {
+    /// Create a prefix for all entries in a collection's indexes
+    pub fn collection_prefix(collection_short_id: u32) -> Vec<u8> {
         let mut buf = vec![SEPARATOR];
-        buf = encode_uvarint_ascending(buf, self.collection_id as u64);
+        buf = encode_uvarint_ascending(buf, collection_short_id as u64);
+        buf.push(SEPARATOR);
+        buf
+    }
+
+    /// Convert the key to bytes, returning an error if encoding fails.
+    ///
+    /// Use this method when you need to handle encoding errors (e.g., unsupported
+    /// field types or timestamp overflow).
+    pub fn try_bytes(&self) -> crate::corekv::Result<Vec<u8>> {
+        let mut buf = vec![SEPARATOR];
+        buf = encode_uvarint_ascending(buf, self.collection_short_id as u64);
         buf.push(SEPARATOR);
         buf = encode_uvarint_ascending(buf, self.index_id as u64);
         buf.push(SEPARATOR);
 
-        // Append field values (already encoded)
-        for (i, value) in self.field_values.iter().enumerate() {
-            if i > 0 {
-                buf.push(SEPARATOR);
-            }
-            buf.extend_from_slice(value);
+        for field in &self.fields {
+            buf = crate::field_value::encode_field_value(buf, &field.value, field.descending)?;
         }
 
-        buf
+        Ok(buf)
+    }
+}
+
+impl Key for IndexDataStoreKey {
+    fn bytes(&self) -> Vec<u8> {
+        // Note: Prefer try_bytes() for proper error handling. This implementation
+        // panics on encoding errors (e.g., unsupported field types, timestamp overflow).
+        match self.try_bytes() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                panic!(
+                    "IndexDataStoreKey encoding failed for collection={}, index={}: {}. \
+                     Use try_bytes() for proper error handling.",
+                    self.collection_short_id, self.index_id, e
+                )
+            }
+        }
     }
 
     fn to_string(&self) -> String {
         let values_str = self
-            .field_values
+            .fields
             .iter()
-            .map(hex::encode)
+            .map(|f| {
+                format!(
+                    "{:?}({})",
+                    f.value,
+                    if f.descending { "desc" } else { "asc" }
+                )
+            })
             .collect::<Vec<_>>()
             .join("/");
-        format!("/{}/{}/{}", self.collection_id, self.index_id, values_str)
+        format!(
+            "/{}/{}/{}",
+            self.collection_short_id, self.index_id, values_str
+        )
     }
 }
 
@@ -346,11 +429,96 @@ mod tests {
 
     #[test]
     fn test_index_datastore_key() {
-        let key = IndexDataStoreKey::new(1, 2, vec![b"valueA".to_vec(), b"valueB".to_vec()]);
+        use document::NormalValue;
+
+        let key = IndexDataStoreKey::new(
+            1,
+            2,
+            vec![
+                IndexedField::ascending(NormalValue::String("valueA".to_string())),
+                IndexedField::ascending(NormalValue::String("valueB".to_string())),
+            ],
+        );
 
         let bytes = key.bytes();
         assert!(!bytes.is_empty());
         assert!(bytes[0] == SEPARATOR);
+
+        let string = key.to_string();
+        assert!(string.contains("/1/2/"));
+    }
+
+    #[test]
+    fn test_index_datastore_key_sort_order() {
+        use document::NormalValue;
+
+        // Test that keys with different values maintain sort order
+        let key1 = IndexDataStoreKey::new(1, 1, vec![IndexedField::ascending(NormalValue::Int(1))]);
+        let key2 = IndexDataStoreKey::new(1, 1, vec![IndexedField::ascending(NormalValue::Int(2))]);
+        let key3 = IndexDataStoreKey::new(1, 1, vec![IndexedField::ascending(NormalValue::Int(3))]);
+
+        let bytes1 = key1.bytes();
+        let bytes2 = key2.bytes();
+        let bytes3 = key3.bytes();
+
+        assert!(bytes1 < bytes2, "key1 should be < key2");
+        assert!(bytes2 < bytes3, "key2 should be < key3");
+    }
+
+    #[test]
+    fn test_index_datastore_key_descending() {
+        use document::NormalValue;
+
+        // Test that descending order reverses sort
+        let key1 =
+            IndexDataStoreKey::new(1, 1, vec![IndexedField::descending(NormalValue::Int(1))]);
+        let key2 =
+            IndexDataStoreKey::new(1, 1, vec![IndexedField::descending(NormalValue::Int(2))]);
+
+        let bytes1 = key1.bytes();
+        let bytes2 = key2.bytes();
+
+        // In descending order, larger value should have smaller key bytes
+        assert!(bytes1 > bytes2, "descending: key1 should be > key2");
+    }
+
+    #[test]
+    fn test_index_datastore_key_composite() {
+        use document::NormalValue;
+
+        // Test composite index (multiple fields)
+        let key = IndexDataStoreKey::new(
+            1,
+            1,
+            vec![
+                IndexedField::ascending(NormalValue::String("alice".to_string())),
+                IndexedField::descending(NormalValue::Int(25)),
+            ],
+        );
+
+        let bytes = key.bytes();
+        assert!(!bytes.is_empty());
+
+        // Same first field, different second field
+        let key_a = IndexDataStoreKey::new(
+            1,
+            1,
+            vec![
+                IndexedField::ascending(NormalValue::String("alice".to_string())),
+                IndexedField::descending(NormalValue::Int(30)),
+            ],
+        );
+        let key_b = IndexDataStoreKey::new(
+            1,
+            1,
+            vec![
+                IndexedField::ascending(NormalValue::String("alice".to_string())),
+                IndexedField::descending(NormalValue::Int(20)),
+            ],
+        );
+
+        // With descending second field: 30 should come before 20 in sort order
+        assert!(key_a.bytes() < key_b.bytes());
     }
 
     #[test]
