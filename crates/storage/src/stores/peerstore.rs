@@ -7,6 +7,7 @@ use crate::keys::peerstore::ReplicatorKey;
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
 use std::sync::Arc;
+use tracing;
 
 /// Peerstore provides storage for peer and replication metadata
 pub struct Peerstore<S: Store> {
@@ -51,7 +52,8 @@ impl<S: Store> Peerstore<S> {
 
     /// Get all stored replicator configurations.
     ///
-    /// Returns a list of (peer_id, data) pairs.
+    /// Returns a list of (peer_id, data) pairs. Keys that don't match the
+    /// expected format are logged and skipped.
     pub async fn get_all_replicators(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let prefix = ReplicatorKey::replicator_prefix();
         let txn = self.store.new_txn(true).await?;
@@ -60,10 +62,15 @@ impl<S: Store> Peerstore<S> {
 
         let mut results = Vec::new();
         while let Some(pair) = iter.next().await? {
-            // Extract peer_id from key: /rep/id/{peer_id}
-            let key_str = String::from_utf8_lossy(&pair.key);
-            if let Some(peer_id) = key_str.strip_prefix("/rep/id/") {
-                results.push((peer_id.to_string(), pair.value));
+            // Parse the key using ReplicatorKey::from_bytes for safe extraction
+            if let Some(key) = ReplicatorKey::from_bytes(&pair.key) {
+                results.push((key.replicator_id().to_string(), pair.value));
+            } else {
+                let key_str = String::from_utf8_lossy(&pair.key);
+                tracing::warn!(
+                    key = %key_str,
+                    "Skipping replicator entry with unexpected key format"
+                );
             }
         }
 

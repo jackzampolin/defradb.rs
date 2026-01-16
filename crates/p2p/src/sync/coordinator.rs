@@ -73,6 +73,40 @@ use crate::host::{HostEvent, P2PHostHandle};
 use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::replicator::ReplicatorInfo;
 
+/// Result of setting a replicator with auto-subscribe.
+#[derive(Debug, Clone)]
+pub struct SetReplicatorResult {
+    /// Collections that were successfully subscribed.
+    pub subscribed: Vec<String>,
+    /// Collections that failed to subscribe (with error messages).
+    pub failed_subscriptions: Vec<(String, String)>,
+}
+
+impl SetReplicatorResult {
+    /// Returns true if all subscriptions succeeded.
+    pub fn all_subscribed(&self) -> bool {
+        self.failed_subscriptions.is_empty()
+    }
+
+    /// Returns true if any subscription failed.
+    pub fn has_failures(&self) -> bool {
+        !self.failed_subscriptions.is_empty()
+    }
+}
+
+/// Result of loading multiple replicators.
+#[derive(Debug, Clone, Default)]
+pub struct LoadReplicatorsResult {
+    /// Number of replicators successfully loaded.
+    pub loaded: usize,
+    /// Peer IDs that were skipped due to invalid format.
+    pub skipped_invalid_ids: Vec<String>,
+    /// Peer IDs that failed to load with error messages.
+    pub failed: Vec<(String, String)>,
+    /// Collections that failed to subscribe (across all replicators).
+    pub failed_subscriptions: Vec<(String, String)>,
+}
+
 use super::broadcaster::Broadcaster;
 use super::manager::{SyncConfig, SyncEvent, SyncManager};
 use super::peer_state::PeerStateTracker;
@@ -368,7 +402,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
     /// Set (add/update) a replicator for the specified collections.
     ///
-    /// This adds the peer to the replicator registry and auto-subscribes
+    /// This adds the peer to the replicator registry and optionally auto-subscribes
     /// to the collection topics so we can sync with them.
     ///
     /// # Arguments
@@ -379,38 +413,61 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` on success.
+    /// Returns `Ok(SetReplicatorResult)` with details about subscription status.
+    /// The replicator is registered even if some subscriptions fail.
     pub async fn set_replicator(
         &self,
         peer_id: PeerId,
         collections: Vec<String>,
         auto_subscribe: bool,
-    ) -> Result<()> {
+    ) -> Result<SetReplicatorResult> {
         // Update the registry via host command
         self.host
             .set_replicator(peer_id, collections.clone())
             .await?;
 
+        let mut result = SetReplicatorResult {
+            subscribed: Vec::new(),
+            failed_subscriptions: Vec::new(),
+        };
+
         // Auto-subscribe to collection topics so we receive updates
         if auto_subscribe {
             for collection_id in &collections {
-                if let Err(e) = self.subscribe_collection(collection_id).await {
-                    tracing::warn!(
-                        collection_id = %collection_id,
-                        error = %e,
-                        "Failed to auto-subscribe to collection for replicator"
-                    );
+                match self.subscribe_collection(collection_id).await {
+                    Ok(_) => {
+                        result.subscribed.push(collection_id.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            collection_id = %collection_id,
+                            error = %e,
+                            "Failed to auto-subscribe to collection for replicator"
+                        );
+                        result
+                            .failed_subscriptions
+                            .push((collection_id.clone(), e.to_string()));
+                    }
                 }
             }
         }
 
-        tracing::info!(
-            peer_id = %peer_id,
-            collections = ?collections,
-            "Set replicator"
-        );
+        if result.has_failures() {
+            tracing::warn!(
+                peer_id = %peer_id,
+                subscribed = ?result.subscribed,
+                failed = ?result.failed_subscriptions,
+                "Set replicator with subscription failures"
+            );
+        } else {
+            tracing::info!(
+                peer_id = %peer_id,
+                collections = ?collections,
+                "Set replicator"
+            );
+        }
 
-        Ok(())
+        Ok(result)
     }
 
     /// Delete a replicator.
@@ -447,34 +504,67 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ///
     /// # Returns
     ///
-    /// Returns the number of replicators loaded.
+    /// Returns a `LoadReplicatorsResult` with details about what was loaded
+    /// and any failures that occurred. Unlike individual `set_replicator` calls,
+    /// this method continues loading remaining replicators even if some fail.
     pub async fn load_replicators(
         &self,
         infos: &[ReplicatorInfo],
         auto_subscribe: bool,
-    ) -> Result<usize> {
-        let mut count = 0;
+    ) -> LoadReplicatorsResult {
+        let mut result = LoadReplicatorsResult::default();
 
         for info in infos {
             if let Some(peer_id) = info.peer_id() {
-                self.set_replicator(peer_id, info.collections.clone(), auto_subscribe)
-                    .await?;
-                count += 1;
+                match self
+                    .set_replicator(peer_id, info.collections.clone(), auto_subscribe)
+                    .await
+                {
+                    Ok(set_result) => {
+                        result.loaded += 1;
+                        // Collect any subscription failures
+                        result
+                            .failed_subscriptions
+                            .extend(set_result.failed_subscriptions);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            peer_id = %peer_id,
+                            error = %e,
+                            "Failed to load replicator"
+                        );
+                        result.failed.push((peer_id.to_string(), e.to_string()));
+                    }
+                }
             } else {
                 tracing::warn!(
-                    peer_id_str = %info.peer_id,
+                    peer_id_str = %info.peer_id_str(),
                     "Skipping replicator with invalid peer ID"
                 );
+                result
+                    .skipped_invalid_ids
+                    .push(info.peer_id_str().to_string());
             }
         }
 
-        tracing::info!(
-            count = count,
-            auto_subscribe = auto_subscribe,
-            "Loaded replicators from storage"
-        );
+        if result.failed.is_empty() && result.skipped_invalid_ids.is_empty() {
+            tracing::info!(
+                loaded = result.loaded,
+                auto_subscribe = auto_subscribe,
+                "Loaded replicators from storage"
+            );
+        } else {
+            tracing::warn!(
+                loaded = result.loaded,
+                skipped = result.skipped_invalid_ids.len(),
+                failed = result.failed.len(),
+                failed_subscriptions = result.failed_subscriptions.len(),
+                auto_subscribe = auto_subscribe,
+                "Loaded replicators from storage with some failures"
+            );
+        }
 
-        Ok(count)
+        result
     }
 }
 

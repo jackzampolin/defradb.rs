@@ -53,7 +53,7 @@ mod queue;
 mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};
-pub use coordinator::SyncCoordinator;
+pub use coordinator::{LoadReplicatorsResult, SetReplicatorResult, SyncCoordinator};
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, SyncPlan};
 pub use manager::{SyncConfig, SyncEvent, SyncManager};
 pub use merge::{BlockMetadata, MergeHandler, MergeOutcome};

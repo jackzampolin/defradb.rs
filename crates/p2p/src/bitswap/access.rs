@@ -158,9 +158,15 @@ impl ReplicatorRegistry {
     ///
     /// This is used for persistence - loading state from storage on startup.
     /// Existing state is cleared before loading.
-    pub fn load_from_infos(&self, infos: &[ReplicatorInfo]) {
+    ///
+    /// Returns a tuple of (loaded_count, skipped_count) where skipped_count
+    /// is the number of entries with invalid peer IDs.
+    pub fn load_from_infos(&self, infos: &[ReplicatorInfo]) -> (usize, usize) {
         let mut replicators = self.replicators.write();
         replicators.clear();
+
+        let mut loaded = 0;
+        let mut skipped = 0;
 
         for info in infos {
             if let Some(peer_id) = info.peer_id() {
@@ -170,8 +176,18 @@ impl ReplicatorRegistry {
                         .or_default()
                         .insert(peer_id);
                 }
+                loaded += 1;
+            } else {
+                tracing::warn!(
+                    peer_id_str = %info.peer_id_str(),
+                    collections = ?info.collections,
+                    "Skipping replicator with invalid peer ID during load"
+                );
+                skipped += 1;
             }
         }
+
+        (loaded, skipped)
     }
 
     /// Get replicator info for a specific peer.
@@ -543,7 +559,9 @@ mod tests {
         ];
 
         // Load from infos
-        registry.load_from_infos(&infos);
+        let (loaded, skipped) = registry.load_from_infos(&infos);
+        assert_eq!(loaded, 2);
+        assert_eq!(skipped, 0);
 
         // Verify loaded state
         assert!(registry.is_replicator("users", &peer1));
@@ -566,7 +584,9 @@ mod tests {
 
         // Load new data (should clear existing)
         let infos = vec![ReplicatorInfo::new(peer2, vec!["comments".to_string()])];
-        registry.load_from_infos(&infos);
+        let (loaded, skipped) = registry.load_from_infos(&infos);
+        assert_eq!(loaded, 1);
+        assert_eq!(skipped, 0);
 
         // Old data should be gone
         assert!(!registry.is_replicator("users", &peer1));
@@ -616,6 +636,47 @@ mod tests {
     }
 
     #[test]
+    fn test_replicator_registry_load_skips_invalid_peer_ids() {
+        let registry = ReplicatorRegistry::new();
+        let valid_peer = PeerId::random();
+
+        // Create a mix of valid and invalid ReplicatorInfo records
+        let infos = vec![
+            ReplicatorInfo::new(valid_peer, vec!["users".to_string()]),
+            ReplicatorInfo::from_raw(
+                "invalid-peer-id".to_string(),
+                vec!["posts".to_string()],
+                vec![],
+            ),
+        ];
+
+        let (loaded, skipped) = registry.load_from_infos(&infos);
+        assert_eq!(loaded, 1);
+        assert_eq!(skipped, 1);
+
+        // Only valid peer should be loaded
+        assert!(registry.is_replicator("users", &valid_peer));
+        assert_eq!(registry.get_all_peer_ids().len(), 1);
+    }
+
+    #[test]
+    fn test_replicator_registry_load_empty_collections() {
+        let registry = ReplicatorRegistry::new();
+        let peer = PeerId::random();
+
+        // Peer with empty collections
+        let infos = vec![ReplicatorInfo::new(peer, vec![])];
+
+        let (loaded, skipped) = registry.load_from_infos(&infos);
+        assert_eq!(loaded, 1); // Still counted as loaded
+        assert_eq!(skipped, 0);
+
+        // Peer is not a replicator for any collection
+        assert!(!registry.is_any_replicator(&peer));
+        assert!(registry.get_all_peer_ids().is_empty());
+    }
+
+    #[test]
     fn test_replicator_registry_roundtrip() {
         // Test that export -> load preserves state
         let registry1 = ReplicatorRegistry::new();
@@ -632,7 +693,9 @@ mod tests {
 
         // Load into new registry
         let registry2 = ReplicatorRegistry::new();
-        registry2.load_from_infos(&infos);
+        let (loaded, skipped) = registry2.load_from_infos(&infos);
+        assert_eq!(loaded, 2);
+        assert_eq!(skipped, 0);
 
         // Verify same state
         assert_eq!(
