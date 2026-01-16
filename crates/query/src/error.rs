@@ -96,6 +96,10 @@ pub enum QueryError {
     #[error("invalid filter: {0}")]
     InvalidFilter(String),
 
+    /// Filter references a field not in the select list
+    #[error("filter field '{field}' must be included in the select list for '{collection}'")]
+    FilterFieldNotSelected { field: String, collection: String },
+
     /// Unknown field referenced in query
     #[error("unknown field: {0}")]
     UnknownField(String),
@@ -154,6 +158,17 @@ impl QueryError {
     /// Create an invalid filter error
     pub fn invalid_filter(msg: impl Into<String>) -> Self {
         Self::InvalidFilter(msg.into())
+    }
+
+    /// Create a filter field not selected error
+    pub fn filter_field_not_selected(
+        field: impl Into<String>,
+        collection: impl Into<String>,
+    ) -> Self {
+        Self::FilterFieldNotSelected {
+            field: field.into(),
+            collection: collection.into(),
+        }
     }
 
     /// Create an unknown field error

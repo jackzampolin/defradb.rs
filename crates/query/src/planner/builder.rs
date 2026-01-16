@@ -194,6 +194,16 @@ impl Planner {
 
                 // Wrap in SelectNode if there's a filter on the nested select
                 let child_plan: Box<dyn PlanNode> = if let Some(ref filter) = nested_select.filter {
+                    // Validate that all filter-referenced fields exist in the child mapping
+                    for field in filter.referenced_fields() {
+                        if !child_mapping.has_field(&field) {
+                            return Err(QueryError::filter_field_not_selected(
+                                &field,
+                                &target_collection.name,
+                            ));
+                        }
+                    }
+
                     Box::new(
                         SelectNode::new(Box::new(child_scan), child_mapping.clone())
                             .with_filter(filter.clone()),
@@ -848,5 +858,49 @@ mod tests {
         // The parent source should be selectNode (with parent filter)
         let source = plan.source().unwrap();
         assert_eq!(source.kind(), "selectNode");
+    }
+
+    #[tokio::test]
+    async fn test_plan_nested_filter_references_unselected_field_fails_at_planning() {
+        // Query: users { posts(filter: { author_id: { _eq: "user-1" } }) { title } }
+        // The filter references "author_id" but the select only includes "title"
+        // This should fail at planning time with a clear error message
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Filter references "author_id" which is NOT in the select list
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author_id".to_string(),
+            serde_json::json!({"_eq": "user-1"}),
+        )]));
+
+        let posts_select = Select::new("posts")
+            .with_field_name("posts")
+            .with_field(Field::new("title")) // Only selecting "title", not "author_id"
+            .with_filter(filter);
+
+        let select = Select::new("users")
+            .with_field(Field::new("name"))
+            .with_select(posts_select);
+
+        let result = planner.plan(&select);
+
+        // Should fail at planning time
+        let err = match result {
+            Ok(_) => panic!("Expected error but got Ok"),
+            Err(e) => e,
+        };
+
+        // Error message should indicate the filter field is not in the select list
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("author_id"),
+            "Error should mention the field name: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("select list") || err_msg.contains("posts"),
+            "Error should mention select list or collection: {}",
+            err_msg
+        );
     }
 }
