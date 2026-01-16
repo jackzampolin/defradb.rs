@@ -11,6 +11,7 @@ use serde_json::Value as JsonValue;
 
 use query::executor::{QueryRequest, QueryResponse};
 
+use crate::identity_extractor::ExtractIdentity;
 use crate::router::AppState;
 
 /// Health check response.
@@ -36,10 +37,19 @@ pub async fn version() -> Json<VersionResponse> {
 /// GraphQL POST request handler.
 ///
 /// Accepts JSON body: { query, operationName?, variables? }
+///
+/// If an `Authorization: Bearer <JWT>` header is present, the identity
+/// is extracted and passed to the query executor for ACP permission checks.
 pub async fn graphql(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
+    // Log identity if present for debugging
+    if let Some(did) = identity.did() {
+        tracing::debug!(did = %did, "GraphQL POST request with identity");
+    }
+
     let response = state.executor.execute(request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
@@ -59,10 +69,19 @@ pub struct GraphqlQueryParams {
 /// GraphQL GET request handler.
 ///
 /// Accepts query parameters: ?query=...&operationName=...&variables=...
+///
+/// If an `Authorization: Bearer <JWT>` header is present, the identity
+/// is extracted and passed to the query executor for ACP permission checks.
 pub async fn graphql_get(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Query(params): Query<GraphqlQueryParams>,
 ) -> Json<QueryResponse> {
+    // Log identity if present for debugging
+    if let Some(did) = identity.did() {
+        tracing::debug!(did = %did, "GraphQL GET request with identity");
+    }
+
     let variables: Option<JsonValue> = match params.variables {
         Some(v) => match serde_json::from_str(&v) {
             Ok(parsed) => Some(parsed),
@@ -300,10 +319,19 @@ pub struct TransactionalQueryRequest {
 ///
 /// If txn_id is provided, executes within the specified transaction.
 /// Otherwise, executes with auto-commit semantics.
+///
+/// If an `Authorization: Bearer <JWT>` header is present, the identity
+/// is extracted and passed to the query executor for ACP permission checks.
 pub async fn graphql_transactional(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<TransactionalQueryRequest>,
 ) -> Json<QueryResponse> {
+    // Log identity if present for debugging
+    if let Some(did) = identity.did() {
+        tracing::debug!(did = %did, "GraphQL transactional request with identity");
+    }
+
     let query_request = QueryRequest {
         query: request.query,
         operation_name: request.operation_name,
@@ -361,7 +389,7 @@ mod tests {
         };
         let request = QueryRequest::new("{ users { name } }");
 
-        let response = graphql(State(state), Json(request)).await;
+        let response = graphql(State(state), ExtractIdentity(None), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -377,7 +405,7 @@ mod tests {
             variables: None,
         };
 
-        let response = graphql_get(State(state), Query(params)).await;
+        let response = graphql_get(State(state), ExtractIdentity(None), Query(params)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -393,7 +421,7 @@ mod tests {
             variables: Some(json!({"limit": 10}).to_string()),
         };
 
-        let response = graphql_get(State(state), Query(params)).await;
+        let response = graphql_get(State(state), ExtractIdentity(None), Query(params)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -409,7 +437,7 @@ mod tests {
             variables: Some("{invalid json".to_string()),
         };
 
-        let response = graphql_get(State(state), Query(params)).await;
+        let response = graphql_get(State(state), ExtractIdentity(None), Query(params)).await;
         assert!(response.has_errors());
         assert!(response.data.is_none());
         assert!(response.errors[0].message.contains("invalid JSON"));
@@ -532,7 +560,7 @@ mod tests {
             txn_id: None,
         };
 
-        let response = graphql_transactional(State(state), Json(request)).await;
+        let response = graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -549,7 +577,7 @@ mod tests {
             txn_id: Some("mock-txn-001".to_string()),
         };
 
-        let response = graphql_transactional(State(state), Json(request)).await;
+        let response = graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -566,7 +594,7 @@ mod tests {
             txn_id: Some("".to_string()), // Empty string is invalid
         };
 
-        let response = graphql_transactional(State(state), Json(request)).await;
+        let response = graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
         assert!(response.has_errors());
         assert!(response.errors[0]
             .message

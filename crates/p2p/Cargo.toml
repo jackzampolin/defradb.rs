@@ -15,6 +15,8 @@ crypto = { path = "../crypto" }
 blockstore = { path = "../blockstore" }
 crdt = { path = "../crdt" }
 storage = { path = "../storage" }
+identity = { path = "../identity" }
+acp = { path = "../acp" }
 
 # P2P
 libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio", "gossipsub", "kad"] }

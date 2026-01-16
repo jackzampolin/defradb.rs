@@ -26,6 +26,7 @@
 
 pub mod error;
 pub mod handlers;
+pub mod identity_extractor;
 pub mod router;
 pub mod server;
 
@@ -33,6 +34,7 @@ pub mod server;
 pub mod mock;
 
 pub use error::{HttpError, Result};
+pub use identity_extractor::{ExtractIdentity, ExtractTokenIdentity, IdentityExtractionError};
 pub use router::{create_router, AppState};
 pub use server::{Server, ServerConfig};
 

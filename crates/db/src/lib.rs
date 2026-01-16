@@ -45,6 +45,7 @@
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod collection;
+pub mod collection_acp;
 pub mod collection_cache;
 pub(crate) mod collection_loader;
 pub mod collection_name;
@@ -63,6 +64,9 @@ pub mod txn_registry;
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
 pub use collection::Collection;
+pub use collection_acp::{
+    check_doc_permission, register_doc_if_needed, unregister_doc_if_needed, AcpContext,
+};
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;
 pub use collection_snapshot::CollectionSnapshot;
