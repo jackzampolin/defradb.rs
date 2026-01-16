@@ -19,7 +19,8 @@ use crate::error::ErrorResponse;
 ///
 /// Parses `Authorization: Bearer <JWT>` header and extracts the identity.
 /// If no Authorization header is present, the identity is None (anonymous).
-/// If the token is invalid, returns a 401 Unauthorized error.
+/// If the token is invalid or malformed, returns a 403 Forbidden error
+/// (matching Go DefraDB behavior).
 #[derive(Debug, Clone)]
 pub struct ExtractIdentity(pub Option<Did>);
 
@@ -34,14 +35,16 @@ impl ExtractIdentity {
 #[derive(Debug)]
 pub enum IdentityExtractionError {
     /// Invalid token format or signature.
+    /// Returns 403 Forbidden to match Go DefraDB behavior.
     InvalidToken(String),
 }
 
 impl IntoResponse for IdentityExtractionError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            // Go DefraDB returns 403 Forbidden for invalid tokens, not 401 Unauthorized
             IdentityExtractionError::InvalidToken(msg) => {
-                (StatusCode::UNAUTHORIZED, format!("Invalid token: {}", msg))
+                (StatusCode::FORBIDDEN, format!("Invalid token: {}", msg))
             }
         };
 
@@ -50,6 +53,12 @@ impl IntoResponse for IdentityExtractionError {
 }
 
 /// Extract identity from Authorization header value.
+///
+/// Behavior matches Go DefraDB:
+/// - No Authorization header → anonymous
+/// - "Bearer " with empty token → anonymous
+/// - "Bearer <token>" → parse token, 403 on failure
+/// - Non-Bearer auth → 403 Forbidden (treated as invalid token)
 fn extract_identity_from_auth_header(
     auth_value: Option<&str>,
 ) -> Result<Option<Did>, IdentityExtractionError> {
@@ -58,15 +67,18 @@ fn extract_identity_from_auth_header(
         return Ok(None);
     };
 
-    // Check for Bearer prefix
+    // Check for Bearer prefix (case-insensitive for "Bearer" only)
     let token = if let Some(token) = auth_value.strip_prefix("Bearer ") {
         token.trim()
     } else if let Some(token) = auth_value.strip_prefix("bearer ") {
         token.trim()
     } else {
-        // Authorization header without Bearer prefix = anonymous
-        // This allows other auth schemes to pass through
-        return Ok(None);
+        // Go DefraDB behavior: Non-Bearer auth is treated as an invalid token.
+        // strings.TrimPrefix doesn't strip if prefix doesn't match, so the
+        // whole header becomes the "token" and fails to parse → 403 Forbidden.
+        return Err(IdentityExtractionError::InvalidToken(
+            "unsupported authorization scheme (expected Bearer)".to_string(),
+        ));
     };
 
     // Empty token after stripping prefix = anonymous
@@ -141,6 +153,9 @@ impl ExtractTokenIdentity {
 }
 
 /// Extract full token identity from Authorization header value.
+///
+/// Same behavior as `extract_identity_from_auth_header` but returns
+/// the full `TokenIdentity` instead of just the DID.
 fn extract_token_identity_from_auth_header(
     auth_value: Option<&str>,
 ) -> Result<Option<TokenIdentity>, IdentityExtractionError> {
@@ -148,13 +163,16 @@ fn extract_token_identity_from_auth_header(
         return Ok(None);
     };
 
-    // Check for Bearer prefix
+    // Check for Bearer prefix (case-insensitive for "Bearer" only)
     let token = if let Some(token) = auth_value.strip_prefix("Bearer ") {
         token.trim()
     } else if let Some(token) = auth_value.strip_prefix("bearer ") {
         token.trim()
     } else {
-        return Ok(None);
+        // Go DefraDB behavior: Non-Bearer auth is treated as an invalid token → 403
+        return Err(IdentityExtractionError::InvalidToken(
+            "unsupported authorization scheme (expected Bearer)".to_string(),
+        ));
     };
 
     if token.is_empty() {
@@ -248,10 +266,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_non_bearer_auth_returns_anonymous() {
+    async fn test_non_bearer_auth_returns_error() {
+        // Go DefraDB behavior: non-Bearer auth returns 403 Forbidden
         let result = extract_from_request(Some("Basic dXNlcjpwYXNz")).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().0.is_none());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            IdentityExtractionError::InvalidToken(_)
+        ));
     }
 
     #[tokio::test]

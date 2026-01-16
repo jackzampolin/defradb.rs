@@ -70,8 +70,10 @@ impl PermissionFilterNode {
     }
 
     /// Check if the identity has read permission for a document.
+    ///
+    /// Fail-closed: returns false on any error to prevent security bypass.
     async fn has_read_permission(&self, doc_id: &str) -> Result<bool> {
-        match self
+        Ok(self
             .acp
             .check_doc_access(
                 self.identity.as_ref(),
@@ -81,10 +83,17 @@ impl PermissionFilterNode {
                 doc_id,
             )
             .await
-        {
-            Ok(allowed) => Ok(allowed),
-            Err(_) => Ok(false), // Deny on error
-        }
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    doc_id = %doc_id,
+                    policy_id = %self.policy_id,
+                    resource_name = %self.resource_name,
+                    identity = ?self.identity,
+                    error = %e,
+                    "Permission check failed, denying access to document"
+                );
+                false
+            }))
     }
 }
 

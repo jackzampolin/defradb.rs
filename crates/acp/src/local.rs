@@ -259,7 +259,7 @@ impl AcpStore for MemoryAcpStore {
             .read()
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, v)| v.subject.clone())
+            .map(|(_, v)| v.subject().clone())
             .collect();
         Ok(subjects)
     }
@@ -275,8 +275,8 @@ impl AcpStore for MemoryAcpStore {
             .tuples
             .read()
             .iter()
-            .filter(|(k, v)| k.starts_with(&prefix) && &v.subject == subject)
-            .map(|(_, v)| v.relation.clone())
+            .filter(|(k, v)| k.starts_with(&prefix) && v.subject() == subject)
+            .map(|(_, v)| v.relation().to_string())
             .collect();
         Ok(relations)
     }
@@ -691,5 +691,216 @@ mod tests {
             .await
             .unwrap();
         assert!(!deleted);
+    }
+
+    // Deleter relation tests
+
+    #[tokio::test]
+    async fn test_add_deleter_grants_read_and_delete() {
+        let acp = create_acp();
+        let owner = test_did();
+        let deleter = test_did2();
+
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        acp.add_actor_relationship(&owner, &deleter, "users", "doc1", DELETER_RELATION)
+            .await
+            .unwrap();
+
+        // Deleter can read (implied by deleter relation)
+        assert!(
+            acp.check_doc_access(
+                Some(&deleter),
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "deleter should have implied read permission"
+        );
+
+        // Deleter can delete
+        assert!(
+            acp.check_doc_access(
+                Some(&deleter),
+                DocumentPermission::Delete,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "deleter should have delete permission"
+        );
+
+        // Deleter CANNOT update
+        assert!(
+            !acp.check_doc_access(
+                Some(&deleter),
+                DocumentPermission::Update,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "deleter should NOT have update permission"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_deleter_relationship_revokes_access() {
+        let acp = create_acp();
+        let owner = test_did();
+        let deleter = test_did2();
+
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        acp.add_actor_relationship(&owner, &deleter, "users", "doc1", DELETER_RELATION)
+            .await
+            .unwrap();
+
+        // Verify deleter has access
+        assert!(acp
+            .check_doc_access(
+                Some(&deleter),
+                DocumentPermission::Delete,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap());
+
+        // Delete relationship
+        acp.delete_actor_relationship(&owner, &deleter, "users", "doc1", DELETER_RELATION)
+            .await
+            .unwrap();
+
+        // Verify deleter no longer has delete access
+        assert!(!acp
+            .check_doc_access(
+                Some(&deleter),
+                DocumentPermission::Delete,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap());
+
+        // Verify deleter also lost implied read access
+        assert!(!acp
+            .check_doc_access(
+                Some(&deleter),
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap());
+    }
+
+    // Non-owner cannot delete relationship test
+
+    #[tokio::test]
+    async fn test_non_owner_cannot_delete_relationship() {
+        let acp = create_acp();
+        let owner = test_did();
+        let reader = test_did2();
+        let attacker = Did::new("did:key:z6MkattackerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        acp.add_actor_relationship(&owner, &reader, "users", "doc1", READER_RELATION)
+            .await
+            .unwrap();
+
+        // Attacker (non-owner) tries to delete reader relationship
+        let result = acp
+            .delete_actor_relationship(&attacker, &reader, "users", "doc1", READER_RELATION)
+            .await;
+        assert!(
+            matches!(result, Err(Error::NotOwner { .. })),
+            "non-owner should not be able to delete relationships"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cannot_delete_owner_relation() {
+        let acp = create_acp();
+        let owner = test_did();
+
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        // Owner tries to delete their own owner relation
+        let result = acp
+            .delete_actor_relationship(&owner, &owner, "users", "doc1", OWNER_RELATION)
+            .await;
+        assert!(
+            matches!(result, Err(Error::InvalidRelation(_))),
+            "should not be able to delete owner relation"
+        );
+    }
+
+    // Cross-collection isolation test
+
+    #[tokio::test]
+    async fn test_cross_collection_isolation() {
+        let acp = create_acp();
+        let owner = test_did();
+        let reader = test_did2();
+
+        // Register same doc_id in two different collections
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+        acp.register_doc_object(&owner, "policy1", "posts", "doc1")
+            .await
+            .unwrap();
+
+        // Grant reader access to doc1 in "users" collection ONLY
+        acp.add_actor_relationship(&owner, &reader, "users", "doc1", READER_RELATION)
+            .await
+            .unwrap();
+
+        // Reader CAN access users/doc1
+        assert!(
+            acp.check_doc_access(
+                Some(&reader),
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "reader should access users/doc1"
+        );
+
+        // Reader CANNOT access posts/doc1 (different collection, no permission)
+        assert!(
+            !acp.check_doc_access(
+                Some(&reader),
+                DocumentPermission::Read,
+                "policy1",
+                "posts",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "reader should NOT access posts/doc1 (cross-collection isolation)"
+        );
     }
 }

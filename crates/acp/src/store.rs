@@ -114,7 +114,7 @@ mod tests {
                 .read()
                 .iter()
                 .filter(|(k, _)| k.starts_with(&prefix))
-                .map(|(_, v)| v.subject.clone())
+                .map(|(_, v)| v.subject().clone())
                 .collect();
             Ok(subjects)
         }
@@ -130,8 +130,8 @@ mod tests {
                 .tuples
                 .read()
                 .iter()
-                .filter(|(k, v)| k.starts_with(&prefix) && &v.subject == subject)
-                .map(|(_, v)| v.relation.clone())
+                .filter(|(k, v)| k.starts_with(&prefix) && v.subject() == subject)
+                .map(|(_, v)| v.relation().to_string())
                 .collect();
             Ok(relations)
         }

@@ -6,6 +6,8 @@
 use identity::Did;
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
+
 /// The required relation that represents document ownership.
 /// Every document MUST have an owner relation as per DPI rules.
 pub const OWNER_RELATION: &str = "owner";
@@ -23,23 +25,69 @@ pub const DELETER_RELATION: &str = "deleter";
 ///
 /// The object is identified by collection_id and doc_id.
 /// Relations are policy-defined strings like "owner", "reader", etc.
+///
+/// All path components are validated to prevent path traversal attacks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RelationTuple {
     /// The subject (identity) that has the relation
-    pub subject: Did,
+    subject: Did,
 
     /// The relation name (e.g., "owner", "reader", "updater")
-    pub relation: String,
+    relation: String,
 
     /// The collection ID (resource type)
-    pub collection_id: String,
+    collection_id: String,
 
     /// The document ID within the collection
-    pub doc_id: String,
+    doc_id: String,
+}
+
+/// Validate a path component for storage key safety.
+/// Rejects empty strings and strings containing path separators.
+fn validate_path_component(value: &str, field_name: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::InvalidPolicy(format!("{} cannot be empty", field_name)));
+    }
+    if value.contains('/') || value.contains('\\') {
+        return Err(Error::InvalidPolicy(format!(
+            "{} cannot contain path separators: {}",
+            field_name, value
+        )));
+    }
+    Ok(())
 }
 
 impl RelationTuple {
-    /// Create a new relation tuple.
+    /// Create a new relation tuple with validation.
+    ///
+    /// Returns an error if any path component (relation, collection_id, doc_id)
+    /// contains path separators or is empty.
+    pub fn try_new(
+        subject: Did,
+        relation: impl Into<String>,
+        collection_id: impl Into<String>,
+        doc_id: impl Into<String>,
+    ) -> Result<Self> {
+        let relation = relation.into();
+        let collection_id = collection_id.into();
+        let doc_id = doc_id.into();
+
+        validate_path_component(&relation, "relation")?;
+        validate_path_component(&collection_id, "collection_id")?;
+        validate_path_component(&doc_id, "doc_id")?;
+
+        Ok(Self {
+            subject,
+            relation,
+            collection_id,
+            doc_id,
+        })
+    }
+
+    /// Create a new relation tuple without validation.
+    ///
+    /// Use `try_new` when working with untrusted input.
+    /// This method is for internal use where inputs are already validated.
     pub fn new(
         subject: Did,
         relation: impl Into<String>,
@@ -52,6 +100,26 @@ impl RelationTuple {
             collection_id: collection_id.into(),
             doc_id: doc_id.into(),
         }
+    }
+
+    /// Get the subject DID.
+    pub fn subject(&self) -> &Did {
+        &self.subject
+    }
+
+    /// Get the relation name.
+    pub fn relation(&self) -> &str {
+        &self.relation
+    }
+
+    /// Get the collection ID.
+    pub fn collection_id(&self) -> &str {
+        &self.collection_id
+    }
+
+    /// Get the document ID.
+    pub fn doc_id(&self) -> &str {
+        &self.doc_id
     }
 
     /// Create an owner relation tuple.
@@ -72,6 +140,25 @@ impl RelationTuple {
             "/acp/{}/{}/{}/{}",
             self.collection_id, self.doc_id, self.relation, self.subject
         )
+    }
+
+    /// Validate a storage key prefix.
+    ///
+    /// Returns an error if any component contains path separators.
+    pub fn validate_prefix(collection_id: &str, doc_id: &str) -> Result<()> {
+        validate_path_component(collection_id, "collection_id")?;
+        validate_path_component(doc_id, "doc_id")?;
+        Ok(())
+    }
+
+    /// Validate a relation prefix.
+    ///
+    /// Returns an error if any component contains path separators.
+    pub fn validate_relation_prefix(collection_id: &str, doc_id: &str, relation: &str) -> Result<()> {
+        validate_path_component(collection_id, "collection_id")?;
+        validate_path_component(doc_id, "doc_id")?;
+        validate_path_component(relation, "relation")?;
+        Ok(())
     }
 
     /// Get the prefix for scanning all relations of a document.
@@ -112,10 +199,10 @@ mod tests {
         let did = test_did();
         let tuple = RelationTuple::new(did.clone(), "reader", "users", "doc123");
 
-        assert_eq!(tuple.subject, did);
-        assert_eq!(tuple.relation, "reader");
-        assert_eq!(tuple.collection_id, "users");
-        assert_eq!(tuple.doc_id, "doc123");
+        assert_eq!(tuple.subject(), &did);
+        assert_eq!(tuple.relation(), "reader");
+        assert_eq!(tuple.collection_id(), "users");
+        assert_eq!(tuple.doc_id(), "doc123");
     }
 
     #[test]
@@ -123,8 +210,37 @@ mod tests {
         let did = test_did();
         let tuple = RelationTuple::owner(did.clone(), "users", "doc123");
 
-        assert_eq!(tuple.relation, OWNER_RELATION);
+        assert_eq!(tuple.relation(), OWNER_RELATION);
         assert!(tuple.is_owner());
+    }
+
+    #[test]
+    fn test_try_new_validates_path_components() {
+        let did = test_did();
+
+        // Valid components should work
+        assert!(RelationTuple::try_new(did.clone(), "reader", "users", "doc123").is_ok());
+
+        // Relation with slash should fail
+        assert!(RelationTuple::try_new(did.clone(), "reader/admin", "users", "doc123").is_err());
+
+        // Collection ID with slash should fail
+        assert!(RelationTuple::try_new(did.clone(), "reader", "users/internal", "doc123").is_err());
+
+        // Doc ID with slash should fail
+        assert!(RelationTuple::try_new(did.clone(), "reader", "users", "doc/123").is_err());
+
+        // Backslash should also fail
+        assert!(RelationTuple::try_new(did.clone(), "reader\\admin", "users", "doc123").is_err());
+
+        // Empty relation should fail
+        assert!(RelationTuple::try_new(did.clone(), "", "users", "doc123").is_err());
+
+        // Empty collection_id should fail
+        assert!(RelationTuple::try_new(did.clone(), "reader", "", "doc123").is_err());
+
+        // Empty doc_id should fail
+        assert!(RelationTuple::try_new(did.clone(), "reader", "users", "").is_err());
     }
 
     #[test]

@@ -425,13 +425,20 @@ impl BlockAccessController {
         let did = self.peer_identities.get_did(peer_id);
 
         // Check document-level ACP permissions
-        match acp
-            .check_doc_access(did.as_ref(), permission, policy_id, resource_name, doc_id)
+        // Fail-closed: deny access on any error to prevent security bypass
+        acp.check_doc_access(did.as_ref(), permission, policy_id, resource_name, doc_id)
             .await
-        {
-            Ok(allowed) => allowed,
-            Err(_) => false, // Deny on error
-        }
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    peer_id = %peer_id,
+                    doc_id = %doc_id,
+                    resource_name = %resource_name,
+                    permission = %permission,
+                    error = %e,
+                    "ACP check failed, denying access"
+                );
+                false
+            })
     }
 
     /// Create a closure that can be used as a BlockAccessFn.
@@ -1117,6 +1124,98 @@ mod tests {
                     "unregistered_doc"
                 )
                 .await
+        );
+    }
+
+    // Fail-closed behavior tests
+
+    /// Mock ACP that always returns an error for check_doc_access
+    struct FailingAcp;
+
+    #[async_trait::async_trait]
+    impl acp::DocumentACP for FailingAcp {
+        async fn register_doc_object(
+            &self,
+            _identity: &Did,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn is_doc_registered(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn check_doc_access(
+            &self,
+            _identity: Option<&Did>,
+            _permission: DocumentPermission,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn add_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target_actor: &Did,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn delete_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target_actor: &Did,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_access_controller_acp_denies_on_error() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let failing_acp = Arc::new(FailingAcp);
+
+        let peer = PeerId::random();
+        let did = test_did();
+        peer_identities.register(peer, did);
+
+        let controller = BlockAccessController::with_acp(
+            replicators,
+            peer_identities,
+            failing_acp,
+            AccessMode::Controlled,
+        );
+
+        // When ACP check fails with an error, access should be DENIED (fail-closed)
+        assert!(
+            !controller
+                .has_access_acp(
+                    &peer,
+                    DocumentPermission::Read,
+                    "policy1",
+                    "users",
+                    "doc1"
+                )
+                .await,
+            "fail-closed: ACP error should result in access denied"
         );
     }
 }
