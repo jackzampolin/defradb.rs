@@ -267,7 +267,8 @@ mod duplicate_fields {
 
         // The add_relation_id_fields should skip since author_id already exists
         let mut coll = collections.remove("posts").unwrap();
-        coll.add_relation_id_fields(|| "gen-999".to_string());
+        coll.add_relation_id_fields(|| "gen-999".to_string())
+            .unwrap();
         collections.insert("posts".to_string(), coll);
 
         // No duplicate should be created
@@ -451,7 +452,8 @@ mod go_error_compat {
         let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", posts_fields);
 
         // add_relation_id_fields should NOT create a duplicate
-        coll.add_relation_id_fields(|| "gen-999".to_string());
+        coll.add_relation_id_fields(|| "gen-999".to_string())
+            .unwrap();
 
         // Should still have only one author_id
         let count = coll.fields.iter().filter(|f| f.name == "author_id").count();

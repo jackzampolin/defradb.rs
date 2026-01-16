@@ -428,7 +428,8 @@ proptest! {
         coll.add_relation_id_fields(|| {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         let expected_id_name = format!("{}_id", field_name);
         let id_field = coll.field_by_name(&expected_id_name);
@@ -449,7 +450,7 @@ proptest! {
         ];
         let mut coll = CollectionVersion::new(&collection_name, "v1", "coll-test", fields);
 
-        coll.add_relation_id_fields(|| "gen-999".to_string());
+        coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
         let expected_id_name = format!("{}_id", field_name);
         let id_field = coll.field_by_name(&expected_id_name);
@@ -474,7 +475,7 @@ proptest! {
         ];
         let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
 
-        coll.add_relation_id_fields(|| "gen-999".to_string());
+        coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
         let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
         prop_assert_eq!(id_field.is_primary, is_primary, "is_primary should be inherited");
@@ -490,7 +491,7 @@ proptest! {
         ];
         let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
 
-        coll.add_relation_id_fields(|| "gen-999".to_string());
+        coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
         let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
         prop_assert_eq!(id_field.crdt_type, CType::LwwRegister);
@@ -510,13 +511,15 @@ proptest! {
         coll.add_relation_id_fields(|| {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
         let field_count_after_first = coll.fields.len();
 
         coll.add_relation_id_fields(|| {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
         let field_count_after_second = coll.fields.len();
 
         prop_assert_eq!(
@@ -538,7 +541,7 @@ proptest! {
         ];
         let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
 
-        coll.add_relation_id_fields(|| "gen-999".to_string());
+        coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
         let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
         prop_assert_eq!(

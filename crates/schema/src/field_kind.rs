@@ -294,10 +294,18 @@ impl FieldKind {
         self.is_relation()
     }
 
-    /// Get the referenced collection ID if this is a relation
+    /// Get the referenced collection ID/name if this is a relation
+    ///
+    /// Returns the target collection identifier for relation types:
+    /// - `Relation`: Returns the `collection_id`
+    /// - `SelfRef`: Returns the `relative_id` (typically the same collection)
+    /// - `Named`: Returns the `name` (unresolved collection reference)
+    /// - Other types: Returns `None`
     pub fn relation_collection_id(&self) -> Option<&str> {
         match self {
             FieldKind::Relation { collection_id, .. } => Some(collection_id),
+            FieldKind::SelfRef { relative_id, .. } => Some(relative_id),
+            FieldKind::Named { name, .. } => Some(name),
             _ => None,
         }
     }

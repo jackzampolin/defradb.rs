@@ -209,10 +209,14 @@ impl<S: Store> DB<S> {
     }
 
     /// Load all collections from the SystemStore into the in-memory cache.
+    ///
+    /// This also finalizes relations by:
+    /// - Auto-generating `_id` fields for non-array relation fields
+    /// - Auto-determining primary sides for one-to-many relations
     pub async fn load_collections(&self) -> Result<()> {
         let txn = self.new_txn(true).await?;
         let prefix = CollectionNameKey::name_prefix();
-        let mut collections = HashMap::new();
+        let mut schemas: HashMap<String, CollectionVersion> = HashMap::new();
 
         // Block ensures systemstore reference is dropped before discard
         {
@@ -275,7 +279,7 @@ impl<S: Store> DB<S> {
                         ))
                     })?;
 
-                collections.insert(name, Collection::new(schema));
+                schemas.insert(name, schema);
             }
 
             iter.close().await.map_err(|e| {
@@ -294,6 +298,31 @@ impl<S: Store> DB<S> {
                 discard_err
             )));
         }
+
+        // Finalize relations: auto-generate _id fields and set primary sides
+        // Create a field ID generator that starts after the max existing field ID
+        let max_field_id = schemas
+            .values()
+            .flat_map(|s| s.fields.iter())
+            .filter_map(|f| f.id.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        let mut field_id_counter = max_field_id + 1000; // Start well above existing IDs
+
+        CollectionVersion::finalize_relations_hashmap(&mut schemas, || {
+            field_id_counter += 1;
+            format!("gen-{}", field_id_counter)
+        })
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to finalize relations during collection load");
+            Error::Other(format!("failed to finalize relations: {}", e))
+        })?;
+
+        // Wrap schemas in Collection and store in cache
+        let collections: HashMap<String, Collection> = schemas
+            .into_iter()
+            .map(|(name, schema)| (name, Collection::new(schema)))
+            .collect();
 
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(error = ?e, "Collection cache lock poisoned during load");

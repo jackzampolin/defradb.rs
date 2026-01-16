@@ -43,6 +43,9 @@ pub enum SchemaError {
 
     #[error("CID generation failed: {0}")]
     CidGeneration(String),
+
+    #[error("duplicate field ID: {0}")]
+    DuplicateFieldId(String),
 }
 
 impl From<serde_json::Error> for SchemaError {

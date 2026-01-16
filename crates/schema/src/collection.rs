@@ -6,7 +6,7 @@ use crate::{
     VectorEmbeddingDescription,
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Helper to deserialize `null` as an empty Vec (Go serializes empty slices as null).
 fn deserialize_null_as_empty_vec<'de, D, T>(
@@ -211,6 +211,16 @@ impl CollectionVersion {
     /// * `relation_name` - The name of the relation
     /// * `other_collection_name` - The name of the other collection (to exclude self-matches)
     /// * `other_field_name` - The name of the other field (to exclude self-matches)
+    ///
+    /// # Returns
+    /// Returns `None` in any of these cases:
+    /// - No field exists with the given `relation_name`
+    /// - All matching fields were excluded by the `other_collection_name`/`other_field_name` filter
+    /// - All matching fields are `DocID` scalars (auto-generated `_id` fields are excluded)
+    ///
+    /// This means callers cannot distinguish "relation doesn't exist" from
+    /// "relation exists but was filtered out". Use `field_by_relation_name()` for
+    /// simple lookups when you don't need the exclusion filter.
     pub fn field_by_relation(
         &self,
         relation_name: &str,
@@ -251,9 +261,19 @@ impl CollectionVersion {
     /// with the same relation_name and is_primary status.
     ///
     /// The `next_field_id` function is called to generate unique field IDs.
-    pub fn add_relation_id_fields(&mut self, mut next_field_id: impl FnMut() -> String) {
+    ///
+    /// # Errors
+    /// Returns `SchemaError::DuplicateFieldId` if the generated field ID already exists.
+    pub fn add_relation_id_fields(
+        &mut self,
+        mut next_field_id: impl FnMut() -> String,
+    ) -> Result<()> {
+        // Collect existing field IDs for uniqueness validation
+        let existing_ids: HashSet<&str> = self.fields.iter().map(|f| f.id.as_str()).collect();
+
         // Collect info about relation fields that need _id fields
         let mut fields_to_add = Vec::new();
+        let mut new_ids = HashSet::new();
 
         for field in &self.fields {
             // Only process non-array relation fields
@@ -268,10 +288,16 @@ impl CollectionVersion {
                 continue;
             }
 
+            // Generate new field ID and validate uniqueness
+            let new_id = next_field_id();
+            if existing_ids.contains(new_id.as_str()) || new_ids.contains(&new_id) {
+                return Err(SchemaError::DuplicateFieldId(new_id));
+            }
+            new_ids.insert(new_id.clone());
+
             // Create the _id field with same relation_name and is_primary
-            let id_field =
-                FieldDescription::new(next_field_id(), id_field_name, FieldKind::doc_id())
-                    .with_crdt_type(crate::CType::LwwRegister);
+            let id_field = FieldDescription::new(new_id, id_field_name, FieldKind::doc_id())
+                .with_crdt_type(crate::CType::LwwRegister);
 
             let id_field = if let Some(rel_name) = &field.relation_name {
                 id_field.with_relation_name(rel_name.clone())
@@ -290,14 +316,15 @@ impl CollectionVersion {
 
         // Insert each _id field immediately after its corresponding relation field
         for (relation_field_name, id_field) in fields_to_add {
-            if let Some(pos) = self
+            let pos = self
                 .fields
                 .iter()
                 .position(|f| f.name == relation_field_name)
-            {
-                self.fields.insert(pos + 1, id_field);
-            }
+                .expect("relation field must exist - collected from same fields list");
+            self.fields.insert(pos + 1, id_field);
         }
+
+        Ok(())
     }
 
     /// Finalize relation fields for a set of collections
@@ -306,16 +333,22 @@ impl CollectionVersion {
     /// 1. Auto-generate missing `_id` fields for non-array relations
     /// 2. Auto-determine which side is primary for one-to-many relations
     ///
+    /// Uses `BTreeMap` for deterministic processing order.
     /// Matches Go's `finalizeRelations()` function.
+    ///
+    /// # Errors
+    /// Returns an error if field ID generation produces duplicates.
     pub fn finalize_relations(
-        collections: &mut HashMap<String, CollectionVersion>,
+        collections: &mut BTreeMap<String, CollectionVersion>,
         mut next_field_id: impl FnMut() -> String,
-    ) {
-        // First pass: add missing _id fields and auto-set primary for one-to-many
+    ) -> Result<()> {
+        // BTreeMap provides deterministic iteration order (sorted by key)
         let collection_names: Vec<String> = collections.keys().cloned().collect();
 
         for name in collection_names {
-            let mut collection = collections.remove(&name).unwrap();
+            let mut collection = collections
+                .remove(&name)
+                .ok_or_else(|| SchemaError::CollectionNotFound(name.clone()))?;
 
             // Find fields that need _id and/or auto-primary
             let mut updates = Vec::new();
@@ -356,10 +389,29 @@ impl CollectionVersion {
             }
 
             // Add missing _id fields
-            collection.add_relation_id_fields(&mut next_field_id);
+            collection.add_relation_id_fields(&mut next_field_id)?;
 
             collections.insert(name, collection);
         }
+
+        Ok(())
+    }
+
+    /// Finalize relation fields using a HashMap (convenience wrapper)
+    ///
+    /// Converts the HashMap to a BTreeMap for deterministic processing,
+    /// then converts back. Use `finalize_relations` directly with BTreeMap
+    /// for better performance with large schemas.
+    pub fn finalize_relations_hashmap(
+        collections: &mut HashMap<String, CollectionVersion>,
+        next_field_id: impl FnMut() -> String,
+    ) -> Result<()> {
+        // Convert to BTreeMap for deterministic processing
+        let mut btree: BTreeMap<String, CollectionVersion> = collections.drain().collect();
+        Self::finalize_relations(&mut btree, next_field_id)?;
+        // Convert back to HashMap
+        collections.extend(btree);
+        Ok(())
     }
 
     /// Validate the collection schema
@@ -675,7 +727,8 @@ mod tests {
         coll.add_relation_id_fields(|| {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         assert_eq!(coll.fields.len(), 3);
 
@@ -707,7 +760,7 @@ mod tests {
         ];
         let mut coll = CollectionVersion::new("users", "v1", "coll-users", fields);
 
-        coll.add_relation_id_fields(|| "999".to_string());
+        coll.add_relation_id_fields(|| "999".to_string()).unwrap();
 
         // No _id field should be added for array relations
         assert_eq!(coll.fields.len(), 2);
@@ -726,7 +779,7 @@ mod tests {
         ];
         let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
 
-        coll.add_relation_id_fields(|| "999".to_string());
+        coll.add_relation_id_fields(|| "999".to_string()).unwrap();
 
         // No new _id field should be added
         assert_eq!(coll.fields.len(), 3);
@@ -764,7 +817,7 @@ mod tests {
                 .with_relation_name("user_posts"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "users".to_string(),
             CollectionVersion::new("users", "v1", "coll-users", users_fields),
@@ -778,7 +831,8 @@ mod tests {
         CollectionVersion::finalize_relations(&mut collections, || {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         let users = collections.get("users").unwrap();
         let posts = collections.get("posts").unwrap();
@@ -809,7 +863,7 @@ mod tests {
                 .with_relation_name("user_posts"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "users".to_string(),
             CollectionVersion::new("users", "v1", "coll-users", users_fields),
@@ -823,7 +877,8 @@ mod tests {
         CollectionVersion::finalize_relations(&mut collections, || {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         let users = collections.get("users").unwrap();
         let posts = collections.get("posts").unwrap();
@@ -864,7 +919,8 @@ mod tests {
         coll.add_relation_id_fields(|| {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         // Both relations should get _id fields
         let author_id = coll.field_by_name("author_id");
@@ -907,7 +963,8 @@ mod tests {
         coll.add_relation_id_fields(|| {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         // parent should get parent_id
         let parent_id = coll.field_by_name("parent_id");
@@ -936,7 +993,7 @@ mod tests {
                 .with_relation_name("user_posts"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "posts".to_string(),
             CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
@@ -947,7 +1004,8 @@ mod tests {
         CollectionVersion::finalize_relations(&mut collections, || {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         let posts = collections.get("posts").unwrap();
 
@@ -971,7 +1029,7 @@ mod tests {
         ];
         let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
 
-        coll.add_relation_id_fields(|| "99".to_string());
+        coll.add_relation_id_fields(|| "99".to_string()).unwrap();
 
         // Find positions
         let author_idx = coll.fields.iter().position(|f| f.name == "author").unwrap();
@@ -1006,7 +1064,7 @@ mod tests {
                 .with_relation_name("user_posts"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "users".to_string(),
             CollectionVersion::new("users", "v1", "coll-users", users_fields),
@@ -1022,7 +1080,8 @@ mod tests {
         CollectionVersion::finalize_relations(&mut collections, || {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         let posts_after_first = collections.get("posts").unwrap().clone();
         let first_field_count = posts_after_first.fields.len();
@@ -1031,7 +1090,8 @@ mod tests {
         CollectionVersion::finalize_relations(&mut collections, || {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         let posts_after_second = collections.get("posts").unwrap();
 
@@ -1073,7 +1133,7 @@ mod tests {
                 .with_relation_name("book_author"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "books".to_string(),
             CollectionVersion::new("books", "v1", "coll-books", books_fields),
@@ -1087,7 +1147,8 @@ mod tests {
         CollectionVersion::finalize_relations(&mut collections, || {
             counter += 1;
             counter.to_string()
-        });
+        })
+        .unwrap();
 
         let books = collections.get("books").unwrap();
         let authors = collections.get("authors").unwrap();

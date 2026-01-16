@@ -8,7 +8,7 @@
 //! - Circular relations
 
 use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Helper to create a field ID generator
 fn field_id_generator() -> impl FnMut() -> String {
@@ -44,7 +44,7 @@ mod one_to_one {
                 .with_relation_name("book_author"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "books".to_string(),
             CollectionVersion::new("books", "v1", "coll-books", books_fields),
@@ -54,7 +54,7 @@ mod one_to_one {
             CollectionVersion::new("authors", "v1", "coll-authors", authors_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let books = collections.get("books").unwrap();
         let authors = collections.get("authors").unwrap();
@@ -98,7 +98,7 @@ mod one_to_one {
                 .with_relation_name("authors_books"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "books".to_string(),
             CollectionVersion::new("books", "v1", "coll-books", books_fields),
@@ -108,7 +108,7 @@ mod one_to_one {
             CollectionVersion::new("authors", "v1", "coll-authors", authors_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         // Both sides should have _id fields in one-to-one
         assert!(collections
@@ -132,14 +132,14 @@ mod one_to_one {
                 .with_relation_name("book_author"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "books".to_string(),
             CollectionVersion::new("books", "v1", "coll-books", books_fields),
         );
         // Note: authors collection NOT added
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let books = collections.get("books").unwrap();
 
@@ -173,7 +173,7 @@ mod one_to_many {
                 .with_relation_name("author_posts"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "authors".to_string(),
             CollectionVersion::new("authors", "v1", "coll-authors", authors_fields),
@@ -183,7 +183,7 @@ mod one_to_many {
             CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let authors = collections.get("authors").unwrap();
         let posts = collections.get("posts").unwrap();
@@ -219,7 +219,7 @@ mod one_to_many {
                 .with_relation_name("author_posts"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "authors".to_string(),
             CollectionVersion::new("authors", "v1", "coll-authors", authors_fields),
@@ -229,7 +229,7 @@ mod one_to_many {
             CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         // Explicit primary should be preserved even on array side
         assert!(
@@ -251,14 +251,14 @@ mod one_to_many {
                 .with_relation_name("author_posts"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "posts".to_string(),
             CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
         );
         // Note: authors collection NOT added
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let posts = collections.get("posts").unwrap();
 
@@ -288,13 +288,13 @@ mod self_referential {
                 .with_relation_name("node_tree"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "nodes".to_string(),
             CollectionVersion::new("nodes", "v1", "coll-nodes", node_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let nodes = collections.get("nodes").unwrap();
 
@@ -324,13 +324,13 @@ mod self_referential {
                 .as_primary(),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "nodes".to_string(),
             CollectionVersion::new("nodes", "v1", "coll-nodes", node_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let nodes = collections.get("nodes").unwrap();
 
@@ -351,13 +351,13 @@ mod self_referential {
                 .with_relation_name("employee_hierarchy"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "employees".to_string(),
             CollectionVersion::new("employees", "v1", "coll-employees", employee_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let employees = collections.get("employees").unwrap();
 
@@ -393,7 +393,7 @@ mod multiple_relations {
             FieldDescription::new("2", "name", FieldKind::string()),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "posts".to_string(),
             CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
@@ -403,7 +403,7 @@ mod multiple_relations {
             CollectionVersion::new("users", "v1", "coll-users", users_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let posts = collections.get("posts").unwrap();
 
@@ -442,7 +442,7 @@ mod multiple_relations {
                 .with_relation_name("post_category"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "posts".to_string(),
             CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
@@ -456,7 +456,7 @@ mod multiple_relations {
             CollectionVersion::new("categories", "v1", "coll-categories", categories_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let posts = collections.get("posts").unwrap();
 
@@ -501,7 +501,7 @@ mod circular {
                 .as_primary(),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "books".to_string(),
             CollectionVersion::new("books", "v1", "coll-books", books_fields),
@@ -511,7 +511,7 @@ mod circular {
             CollectionVersion::new("authors", "v1", "coll-authors", authors_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         // Both relations are independent and should both work
         assert!(collections
@@ -550,13 +550,13 @@ mod field_ordering {
             FieldDescription::new("6", "tags", FieldKind::string_array()),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "posts".to_string(),
             CollectionVersion::new("posts", "v1", "coll-posts", posts_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let posts = collections.get("posts").unwrap();
         let field_names: Vec<&str> = posts.fields.iter().map(|f| f.name.as_str()).collect();
@@ -622,7 +622,7 @@ mod go_compatibility {
                 .with_relation_name("author_book"),
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "authors".to_string(),
             CollectionVersion::new("Author", "v1", "coll-authors", authors_fields),
@@ -632,7 +632,7 @@ mod go_compatibility {
             CollectionVersion::new("Book", "v1", "coll-books", books_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let authors = collections.get("authors").unwrap();
         let books = collections.get("books").unwrap();
@@ -670,7 +670,7 @@ mod go_compatibility {
                 .as_primary(), // @primary in Go SDL
         ];
 
-        let mut collections = HashMap::new();
+        let mut collections = BTreeMap::new();
         collections.insert(
             "books".to_string(),
             CollectionVersion::new("Book", "v1", "coll-books", books_fields),
@@ -680,7 +680,7 @@ mod go_compatibility {
             CollectionVersion::new("Author", "v1", "coll-authors", authors_fields),
         );
 
-        CollectionVersion::finalize_relations(&mut collections, field_id_generator());
+        CollectionVersion::finalize_relations(&mut collections, field_id_generator()).unwrap();
 
         let books = collections.get("books").unwrap();
         let authors = collections.get("authors").unwrap();
