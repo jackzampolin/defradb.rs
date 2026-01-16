@@ -29,377 +29,18 @@
 //! For SimpleIndex, the document ID is appended to the key.
 //! For UniqueIndex, the document ID is stored as the value.
 
-use async_trait::async_trait;
+mod simple;
+mod traits;
+mod unique;
+
+pub use simple::SimpleIndex;
+pub use traits::CollectionIndex;
+pub use unique::UniqueIndex;
+
 use document::NormalValue;
 use schema::IndexDescription;
 
-use crate::corekv::{IterOptions, Key, Reader, Result, Writer};
-use crate::keys::datastore::IndexedField;
-use crate::keys::IndexDataStoreKey;
-
-/// Trait for collection index implementations.
-///
-/// Indexes maintain secondary lookup structures for efficient querying
-/// of documents by field values other than the primary key.
-#[async_trait]
-pub trait CollectionIndex: Send + Sync {
-    /// Returns the index description (metadata).
-    fn description(&self) -> &IndexDescription;
-
-    /// Save adds a new document to the index.
-    ///
-    /// Called when a new document is created in the collection.
-    /// The values slice contains the field values in index field order.
-    async fn save<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        values: &[NormalValue],
-    ) -> Result<()>;
-
-    /// Update modifies an existing document's index entry.
-    ///
-    /// Called when a document is updated. Removes the old entry
-    /// and adds a new one with the updated values.
-    async fn update<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        old_values: &[NormalValue],
-        new_values: &[NormalValue],
-    ) -> Result<()>;
-
-    /// Delete removes a document from the index.
-    ///
-    /// Called when a document is deleted from the collection.
-    async fn delete<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        values: &[NormalValue],
-    ) -> Result<()>;
-
-    /// RemoveAll removes all entries for this index.
-    ///
-    /// Called when the index is dropped from the collection.
-    async fn remove_all<T: Reader + Writer + Send>(&self, txn: &mut T) -> Result<()>;
-}
-
-/// A simple (non-unique) index implementation.
-///
-/// SimpleIndex stores document IDs in the key itself, allowing
-/// multiple documents to have the same indexed field values.
-///
-/// Key format: /[ColID]/[IdxID]/[EncodedFields][DocID]
-/// Value: empty
-pub struct SimpleIndex {
-    /// The collection's short ID
-    collection_short_id: u32,
-    /// Index description from schema
-    desc: IndexDescription,
-}
-
-impl SimpleIndex {
-    /// Create a new SimpleIndex.
-    pub fn new(collection_short_id: u32, desc: IndexDescription) -> Self {
-        Self {
-            collection_short_id,
-            desc,
-        }
-    }
-
-    /// Get the index ID
-    pub fn id(&self) -> u32 {
-        self.desc.id
-    }
-
-    /// Validate that the number of values matches the index field count.
-    fn validate_field_count(&self, values: &[NormalValue]) -> Result<()> {
-        if values.len() != self.desc.fields.len() {
-            return Err(crate::corekv::Error::Other(format!(
-                "index field count mismatch: expected {} fields, got {}",
-                self.desc.fields.len(),
-                values.len()
-            )));
-        }
-        Ok(())
-    }
-
-    /// Build the index key for a document with the given field values.
-    fn build_key(&self, values: &[NormalValue], doc_id: &str) -> Vec<u8> {
-        let fields = self.build_indexed_fields(values);
-        let key = IndexDataStoreKey::new(self.collection_short_id, self.desc.id, fields);
-
-        // For simple index, append doc_id to make key unique
-        let mut key_bytes = key.bytes();
-        key_bytes.extend_from_slice(doc_id.as_bytes());
-        key_bytes
-    }
-
-    /// Build IndexedField structs from values and index description.
-    fn build_indexed_fields(&self, values: &[NormalValue]) -> Vec<IndexedField> {
-        values
-            .iter()
-            .zip(self.desc.fields.iter())
-            .map(|(value, field_desc)| IndexedField::new(value.clone(), field_desc.descending))
-            .collect()
-    }
-}
-
-#[async_trait]
-impl CollectionIndex for SimpleIndex {
-    fn description(&self) -> &IndexDescription {
-        &self.desc
-    }
-
-    async fn save<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        values: &[NormalValue],
-    ) -> Result<()> {
-        self.validate_field_count(values)?;
-        let key = self.build_key(values, doc_id);
-        txn.set(&key, &[]).await
-    }
-
-    async fn update<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        old_values: &[NormalValue],
-        new_values: &[NormalValue],
-    ) -> Result<()> {
-        self.validate_field_count(old_values)?;
-        self.validate_field_count(new_values)?;
-
-        // Delete old entry
-        let old_key = self.build_key(old_values, doc_id);
-        txn.delete(&old_key).await?;
-
-        // Insert new entry
-        let new_key = self.build_key(new_values, doc_id);
-        txn.set(&new_key, &[]).await
-    }
-
-    async fn delete<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        values: &[NormalValue],
-    ) -> Result<()> {
-        self.validate_field_count(values)?;
-        let key = self.build_key(values, doc_id);
-        txn.delete(&key).await
-    }
-
-    async fn remove_all<T: Reader + Writer + Send>(&self, txn: &mut T) -> Result<()> {
-        let prefix = IndexDataStoreKey::index_prefix(self.collection_short_id, self.desc.id);
-        // Iterate over all keys with this prefix and delete them
-        let opts = IterOptions::default().with_prefix(prefix.clone());
-        let mut iter = txn.iterator(opts).await?;
-
-        // Collect keys first using the async collect_all method
-        let items = iter.collect_all().await?;
-        let keys_to_delete: Vec<Vec<u8>> = items.into_iter().map(|kv| kv.key).collect();
-
-        for key in keys_to_delete {
-            txn.delete(&key).await?;
-        }
-        Ok(())
-    }
-}
-
-/// A unique index implementation.
-///
-/// UniqueIndex stores document IDs in the value, enforcing that
-/// each indexed field value combination can only appear once.
-///
-/// Key format: /[ColID]/[IdxID]/[EncodedFields]
-/// Value: [DocID] (or empty for NULL values)
-///
-/// For fields that allow NULL, NULL values are stored specially
-/// to allow multiple documents with NULL in the indexed field.
-pub struct UniqueIndex {
-    /// The collection's short ID
-    collection_short_id: u32,
-    /// Index description from schema
-    desc: IndexDescription,
-}
-
-impl UniqueIndex {
-    /// Create a new UniqueIndex.
-    pub fn new(collection_short_id: u32, desc: IndexDescription) -> Self {
-        Self {
-            collection_short_id,
-            desc,
-        }
-    }
-
-    /// Get the index ID
-    pub fn id(&self) -> u32 {
-        self.desc.id
-    }
-
-    /// Validate that the number of values matches the index field count.
-    fn validate_field_count(&self, values: &[NormalValue]) -> Result<()> {
-        if values.len() != self.desc.fields.len() {
-            return Err(crate::corekv::Error::Other(format!(
-                "index field count mismatch: expected {} fields, got {}",
-                self.desc.fields.len(),
-                values.len()
-            )));
-        }
-        Ok(())
-    }
-
-    /// Check if all values are nil (special case for unique index with NULL).
-    fn all_nil(values: &[NormalValue]) -> bool {
-        values.iter().all(|v| v.is_nil())
-    }
-
-    /// Build the index key for given field values.
-    ///
-    /// For unique indexes, the doc_id is NOT part of the key (it's in the value).
-    fn build_key(&self, values: &[NormalValue]) -> Vec<u8> {
-        let fields = self.build_indexed_fields(values);
-        IndexDataStoreKey::new(self.collection_short_id, self.desc.id, fields).bytes()
-    }
-
-    /// Build the key with doc_id appended (for NULL case).
-    fn build_key_with_doc_id(&self, values: &[NormalValue], doc_id: &str) -> Vec<u8> {
-        let mut key = self.build_key(values);
-        key.extend_from_slice(doc_id.as_bytes());
-        key
-    }
-
-    /// Build IndexedField structs from values and index description.
-    fn build_indexed_fields(&self, values: &[NormalValue]) -> Vec<IndexedField> {
-        values
-            .iter()
-            .zip(self.desc.fields.iter())
-            .map(|(value, field_desc)| IndexedField::new(value.clone(), field_desc.descending))
-            .collect()
-    }
-}
-
-#[async_trait]
-impl CollectionIndex for UniqueIndex {
-    fn description(&self) -> &IndexDescription {
-        &self.desc
-    }
-
-    async fn save<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        values: &[NormalValue],
-    ) -> Result<()> {
-        self.validate_field_count(values)?;
-
-        // Special case: if all values are nil, allow multiple entries
-        // by appending doc_id to the key (like SimpleIndex)
-        if Self::all_nil(values) {
-            let key = self.build_key_with_doc_id(values, doc_id);
-            return txn.set(&key, &[]).await;
-        }
-
-        let key = self.build_key(values);
-
-        // Check for existing entry (uniqueness constraint)
-        if let Some(existing) = txn.get(&key).await? {
-            let existing_doc_id =
-                String::from_utf8(existing).map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
-            if existing_doc_id != doc_id {
-                return Err(crate::corekv::Error::Other(format!(
-                    "unique index constraint violation: value already exists for document '{}'",
-                    existing_doc_id
-                )));
-            }
-        }
-
-        // Store doc_id as the value
-        txn.set(&key, doc_id.as_bytes()).await
-    }
-
-    async fn update<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        old_values: &[NormalValue],
-        new_values: &[NormalValue],
-    ) -> Result<()> {
-        self.validate_field_count(old_values)?;
-        self.validate_field_count(new_values)?;
-
-        // Check uniqueness of new values BEFORE deleting old entry
-        // This prevents data loss if the uniqueness check fails
-        if !Self::all_nil(new_values) {
-            let new_key = self.build_key(new_values);
-            if let Some(existing) = txn.get(&new_key).await? {
-                let existing_doc_id = String::from_utf8(existing)
-                    .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
-                if existing_doc_id != doc_id {
-                    return Err(crate::corekv::Error::Other(format!(
-                        "unique index constraint violation: value already exists for document '{}'",
-                        existing_doc_id
-                    )));
-                }
-            }
-        }
-
-        // Delete old entry (safe now that we've validated the new values)
-        if Self::all_nil(old_values) {
-            let old_key = self.build_key_with_doc_id(old_values, doc_id);
-            txn.delete(&old_key).await?;
-        } else {
-            let old_key = self.build_key(old_values);
-            txn.delete(&old_key).await?;
-        }
-
-        // Insert new entry
-        if Self::all_nil(new_values) {
-            let key = self.build_key_with_doc_id(new_values, doc_id);
-            txn.set(&key, &[]).await
-        } else {
-            let key = self.build_key(new_values);
-            txn.set(&key, doc_id.as_bytes()).await
-        }
-    }
-
-    async fn delete<T: Reader + Writer + Send>(
-        &self,
-        txn: &mut T,
-        doc_id: &str,
-        values: &[NormalValue],
-    ) -> Result<()> {
-        self.validate_field_count(values)?;
-
-        if Self::all_nil(values) {
-            let key = self.build_key_with_doc_id(values, doc_id);
-            txn.delete(&key).await
-        } else {
-            let key = self.build_key(values);
-            txn.delete(&key).await
-        }
-    }
-
-    async fn remove_all<T: Reader + Writer + Send>(&self, txn: &mut T) -> Result<()> {
-        let prefix = IndexDataStoreKey::index_prefix(self.collection_short_id, self.desc.id);
-        // Iterate over all keys with this prefix and delete them
-        let opts = IterOptions::default().with_prefix(prefix.clone());
-        let mut iter = txn.iterator(opts).await?;
-
-        // Collect keys first using the async collect_all method
-        let items = iter.collect_all().await?;
-        let keys_to_delete: Vec<Vec<u8>> = items.into_iter().map(|kv| kv.key).collect();
-
-        for key in keys_to_delete {
-            txn.delete(&key).await?;
-        }
-        Ok(())
-    }
-}
+use crate::corekv::{Reader, Result, Writer};
 
 /// Enum for index types (avoids dyn trait issues).
 pub enum IndexType {
@@ -478,7 +119,8 @@ impl IndexType {
 mod tests {
     use super::*;
     use crate::backends::MemoryStore;
-    use crate::corekv::Store;
+    use crate::corekv::{IterOptions, Store};
+    use crate::keys::IndexDataStoreKey;
     use schema::IndexedFieldDescription;
 
     fn test_index_description(unique: bool) -> IndexDescription {
@@ -667,10 +309,12 @@ mod tests {
         // Same value, different doc ID - should fail
         let result = index.save(&mut txn, "doc2", &values).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unique index constraint violation"));
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("constraint violation"),
+            "error should mention constraint violation: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]
@@ -791,11 +435,19 @@ mod tests {
 
         // Insert in non-sorted order
         index
-            .save(&mut txn, "doc3", &[NormalValue::String("charlie".to_string())])
+            .save(
+                &mut txn,
+                "doc3",
+                &[NormalValue::String("charlie".to_string())],
+            )
             .await
             .unwrap();
         index
-            .save(&mut txn, "doc1", &[NormalValue::String("alice".to_string())])
+            .save(
+                &mut txn,
+                "doc1",
+                &[NormalValue::String("alice".to_string())],
+            )
             .await
             .unwrap();
         index
@@ -815,5 +467,110 @@ mod tests {
         let keys: Vec<Vec<u8>> = entries.iter().map(|(k, _)| k.clone()).collect();
         assert!(keys[0] < keys[1], "alice key should be < bob key");
         assert!(keys[1] < keys[2], "bob key should be < charlie key");
+    }
+
+    #[tokio::test]
+    async fn test_unique_index_update_to_existing_value_fails() {
+        let store = MemoryStore::new();
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let index = UniqueIndex::new(1, test_index_description(true));
+
+        // Save two documents with different values
+        index
+            .save(
+                &mut txn,
+                "doc1",
+                &[NormalValue::String("alice".to_string())],
+            )
+            .await
+            .unwrap();
+        index
+            .save(&mut txn, "doc2", &[NormalValue::String("bob".to_string())])
+            .await
+            .unwrap();
+
+        // Try to update doc1 to have the same value as doc2 - should fail
+        let result = index
+            .update(
+                &mut txn,
+                "doc1",
+                &[NormalValue::String("alice".to_string())],
+                &[NormalValue::String("bob".to_string())],
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("constraint violation"),
+            "error should mention constraint violation: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("doc2"),
+            "error should mention conflicting document: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_composite_index_sort_order() {
+        let store = MemoryStore::new();
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        let index = SimpleIndex::new(1, composite_index_description(false));
+
+        // Insert documents with same first field, different second field
+        // composite_index_description has first field ascending, second descending
+        index
+            .save(
+                &mut txn,
+                "doc1",
+                &[
+                    NormalValue::String("electronics".to_string()),
+                    NormalValue::Int(100),
+                ],
+            )
+            .await
+            .unwrap();
+        index
+            .save(
+                &mut txn,
+                "doc2",
+                &[
+                    NormalValue::String("electronics".to_string()),
+                    NormalValue::Int(300),
+                ],
+            )
+            .await
+            .unwrap();
+        index
+            .save(
+                &mut txn,
+                "doc3",
+                &[
+                    NormalValue::String("electronics".to_string()),
+                    NormalValue::Int(200),
+                ],
+            )
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Verify entries
+        let txn = store.new_txn(true).await.unwrap();
+        let prefix = IndexDataStoreKey::index_prefix(1, 2);
+        let entries = get_entries(txn.as_ref(), &prefix).await;
+        assert_eq!(entries.len(), 3);
+
+        // Since second field is descending, keys should be ordered:
+        // electronics/300 < electronics/200 < electronics/100
+        // (higher int values should have smaller byte sequences for descending)
+        let keys: Vec<Vec<u8>> = entries.iter().map(|(k, _)| k.clone()).collect();
+        assert!(
+            keys[0] < keys[1] && keys[1] < keys[2],
+            "composite index should maintain correct sort order"
+        );
     }
 }

@@ -226,29 +226,42 @@ impl IndexDataStoreKey {
         buf.push(SEPARATOR);
         buf
     }
-}
 
-impl Key for IndexDataStoreKey {
-    fn bytes(&self) -> Vec<u8> {
+    /// Convert the key to bytes, returning an error if encoding fails.
+    ///
+    /// Use this method when you need to handle encoding errors (e.g., unsupported
+    /// field types or timestamp overflow).
+    pub fn try_bytes(&self) -> crate::corekv::Result<Vec<u8>> {
         let mut buf = vec![SEPARATOR];
         buf = encode_uvarint_ascending(buf, self.collection_short_id as u64);
         buf.push(SEPARATOR);
         buf = encode_uvarint_ascending(buf, self.index_id as u64);
         buf.push(SEPARATOR);
 
-        // Encode field values using order-preserving encoding
         for field in &self.fields {
-            buf = crate::field_value::encode_field_value(buf, &field.value, field.descending);
+            buf = crate::field_value::encode_field_value(buf, &field.value, field.descending)?;
         }
 
-        buf
+        Ok(buf)
+    }
+}
+
+impl Key for IndexDataStoreKey {
+    fn bytes(&self) -> Vec<u8> {
+        self.try_bytes().expect("IndexDataStoreKey encoding failed")
     }
 
     fn to_string(&self) -> String {
         let values_str = self
             .fields
             .iter()
-            .map(|f| format!("{:?}({})", f.value, if f.descending { "desc" } else { "asc" }))
+            .map(|f| {
+                format!(
+                    "{:?}({})",
+                    f.value,
+                    if f.descending { "desc" } else { "asc" }
+                )
+            })
             .collect::<Vec<_>>()
             .join("/");
         format!(
@@ -429,21 +442,9 @@ mod tests {
         use document::NormalValue;
 
         // Test that keys with different values maintain sort order
-        let key1 = IndexDataStoreKey::new(
-            1,
-            1,
-            vec![IndexedField::ascending(NormalValue::Int(1))],
-        );
-        let key2 = IndexDataStoreKey::new(
-            1,
-            1,
-            vec![IndexedField::ascending(NormalValue::Int(2))],
-        );
-        let key3 = IndexDataStoreKey::new(
-            1,
-            1,
-            vec![IndexedField::ascending(NormalValue::Int(3))],
-        );
+        let key1 = IndexDataStoreKey::new(1, 1, vec![IndexedField::ascending(NormalValue::Int(1))]);
+        let key2 = IndexDataStoreKey::new(1, 1, vec![IndexedField::ascending(NormalValue::Int(2))]);
+        let key3 = IndexDataStoreKey::new(1, 1, vec![IndexedField::ascending(NormalValue::Int(3))]);
 
         let bytes1 = key1.bytes();
         let bytes2 = key2.bytes();
@@ -458,16 +459,10 @@ mod tests {
         use document::NormalValue;
 
         // Test that descending order reverses sort
-        let key1 = IndexDataStoreKey::new(
-            1,
-            1,
-            vec![IndexedField::descending(NormalValue::Int(1))],
-        );
-        let key2 = IndexDataStoreKey::new(
-            1,
-            1,
-            vec![IndexedField::descending(NormalValue::Int(2))],
-        );
+        let key1 =
+            IndexDataStoreKey::new(1, 1, vec![IndexedField::descending(NormalValue::Int(1))]);
+        let key2 =
+            IndexDataStoreKey::new(1, 1, vec![IndexedField::descending(NormalValue::Int(2))]);
 
         let bytes1 = key1.bytes();
         let bytes2 = key2.bytes();
