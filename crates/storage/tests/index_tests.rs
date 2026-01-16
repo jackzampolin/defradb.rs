@@ -511,7 +511,10 @@ async fn test_composite_unique_partial_null_second_field() {
     let index = UniqueIndex::new(1, composite_index_description(true));
 
     // First field non-NULL, second field NULL
-    let values1 = vec![NormalValue::String("category".to_string()), NormalValue::Null];
+    let values1 = vec![
+        NormalValue::String("category".to_string()),
+        NormalValue::Null,
+    ];
     let values2 = vec![
         NormalValue::String("category".to_string()),
         NormalValue::Null,
