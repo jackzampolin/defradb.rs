@@ -377,6 +377,7 @@ impl Node {
         match kr.get(PEER_KEY) {
             Ok(key_bytes) => {
                 info!("Loaded existing peer key from keyring");
+                Self::derive_and_log_identity_did(&key_bytes)?;
                 Self::keypair_from_ed25519_bytes(&key_bytes)
             }
             Err(keyring::Error::NotFound(_)) => {
@@ -390,10 +391,30 @@ impl Node {
                 kr.set(PEER_KEY, &key_bytes)
                     .map_err(|e| Error::Keyring(e.to_string()))?;
 
+                Self::derive_and_log_identity_did(&key_bytes)?;
                 Self::keypair_from_ed25519_bytes(&key_bytes)
             }
             Err(e) => Err(Error::Keyring(e.to_string())),
         }
+    }
+
+    /// Derive and log the node's DID from peer key bytes.
+    ///
+    /// Creates a RawIdentity from the key bytes, derives its DID, and logs it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if identity creation or DID derivation fails, which
+    /// indicates corrupted key material or a crypto library failure.
+    fn derive_and_log_identity_did(key_bytes: &[u8]) -> Result<()> {
+        use identity::{Identity, IdentityKeyType, RawIdentity};
+
+        let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, key_bytes)?;
+        let did = identity
+            .did()
+            .map_err(|e| Error::Keyring(format!("failed to derive DID: {}", e)))?;
+        info!("Node identity DID: {}", did);
+        Ok(())
     }
 
     /// Convert Ed25519 key bytes to libp2p Keypair.
