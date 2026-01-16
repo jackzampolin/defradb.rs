@@ -96,4 +96,7 @@ pub enum Error {
         "incomplete TLS configuration: both pubkey_path and privkey_path must be set, or neither"
     )]
     IncompleteTlsConfig,
+
+    #[error("keyring error: {0}")]
+    Keyring(String),
 }

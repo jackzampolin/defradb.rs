@@ -107,7 +107,7 @@ pub use bitswap::{
 pub use libp2p_bitswap_next::{BitswapStore, QueryId};
 
 // Re-export commonly used libp2p types
-pub use libp2p::{gossipsub, Multiaddr, PeerId};
+pub use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};
 
 #[cfg(test)]
 mod tests {

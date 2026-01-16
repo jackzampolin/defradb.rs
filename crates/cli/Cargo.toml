@@ -23,6 +23,7 @@ query = { path = "../query" }
 db = { path = "../db" }
 schema = { path = "../schema" }
 document = { path = "../document" }
+keyring = { path = "../keyring" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -48,8 +49,17 @@ anyhow = { workspace = true }
 # File system
 dirs = "5.0"
 
+# Random number generation
+getrandom = "0.2"
+
+# Hex encoding/decoding
+hex = "0.4"
+
 # IPLD (for Bitswap type parameters)
 libipld = { workspace = true }
+
+# libp2p (for P2P keypair types)
+libp2p = { workspace = true }
 
 [dev-dependencies]
 # HTTP client for integration tests

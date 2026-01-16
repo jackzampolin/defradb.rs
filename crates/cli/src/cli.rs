@@ -12,7 +12,7 @@
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::{StartArgs, VersionArgs};
+use crate::commands::{KeyringArgs, StartArgs, VersionArgs};
 use crate::config::Config;
 use crate::error::Result;
 
@@ -97,6 +97,9 @@ pub enum Command {
 
     /// Display the version information of DefraDB and its components
     Version(VersionArgs),
+
+    /// Manage keys in the keyring
+    Keyring(KeyringArgs),
 }
 
 impl Cli {
@@ -105,6 +108,7 @@ impl Cli {
         match self.command {
             Command::Start(args) => args.execute(config).await,
             Command::Version(args) => args.execute(),
+            Command::Keyring(args) => args.execute(config),
         }
     }
 }

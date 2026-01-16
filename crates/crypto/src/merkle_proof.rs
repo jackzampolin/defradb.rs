@@ -406,8 +406,7 @@ pub async fn extract_proof<B: ProofBlockstore>(
                     // Check if we reached the root
                     if *parent_cid == root_cid {
                         // Reconstruct path from root back to leaf
-                        let path =
-                            reconstruct_path(&parent_map, &block_cache, leaf_cid, root_cid)?;
+                        let path = reconstruct_path(&parent_map, &block_cache, leaf_cid, root_cid)?;
                         return Ok(Some(MerkleProof::new(leaf_cid, root_cid, path)));
                     }
                 }
@@ -960,9 +959,15 @@ mod tests {
         blockstore.put(b2_cid, b2.to_dag_cbor().unwrap()).await;
 
         // Create merge block pointing to both branches
-        let merge = Block::new(create_test_delta("doc1", "merge"), vec![b1_cid, b2_cid], vec![]);
+        let merge = Block::new(
+            create_test_delta("doc1", "merge"),
+            vec![b1_cid, b2_cid],
+            vec![],
+        );
         let merge_cid = merge.generate_cid().unwrap();
-        blockstore.put(merge_cid, merge.to_dag_cbor().unwrap()).await;
+        blockstore
+            .put(merge_cid, merge.to_dag_cbor().unwrap())
+            .await;
 
         // Extract proof from merge to root - should find one of the paths
         let proof = extract_proof(&blockstore, merge_cid, root_cid)
@@ -1128,7 +1133,10 @@ mod tests {
         signed.signature.header.identity = vec![0xFF, 0xFE, 0x00, 0x01];
 
         let result = signed.verify_with_embedded_key();
-        assert!(result.is_err(), "Invalid UTF-8 identity should return error");
+        assert!(
+            result.is_err(),
+            "Invalid UTF-8 identity should return error"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Invalid identity encoding"),
@@ -1187,7 +1195,10 @@ mod tests {
 
         // Attempt to extract proof with non-existent leaf
         let result = extract_proof(&blockstore, fake_leaf_cid, root_cid).await;
-        assert!(result.is_err(), "Should return error for missing leaf block");
+        assert!(
+            result.is_err(),
+            "Should return error for missing leaf block"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Leaf block not found"),
