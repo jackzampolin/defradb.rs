@@ -38,8 +38,12 @@ pub enum Error {
     TokenDecoding(String),
 
     /// Token has expired
-    #[error("token has expired")]
-    TokenExpired,
+    #[error("token has expired (expired at {exp}, current time {now})")]
+    TokenExpired { exp: u64, now: u64 },
+
+    /// Token is not yet valid (nbf claim is in the future)
+    #[error("token not yet valid (valid from {nbf}, current time {now})")]
+    TokenNotYetValid { nbf: u64, now: u64 },
 
     /// Token audience mismatch
     #[error("token audience mismatch: expected {expected}, got {actual:?}")]

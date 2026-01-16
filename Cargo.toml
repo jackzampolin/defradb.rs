@@ -54,7 +54,6 @@ uuid = { version = "1.0", features = ["v4"] }
 k256 = { version = "0.13", features = ["ecdsa", "serde"] }
 sha2 = "0.10"
 aes-gcm = "0.10"
-jsonwebtoken = "9.2"
 hex = "0.4"
 base64 = "0.22"
 

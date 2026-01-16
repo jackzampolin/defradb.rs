@@ -175,6 +175,7 @@ pub fn new_token<I: FullIdentity>(
 ///
 /// # Errors
 /// Returns an error if:
+/// * The token is not yet valid (nbf is in the future)
 /// * The token has expired
 /// * The audience doesn't match
 pub fn verify_auth_token(identity: &TokenIdentity, expected_audience: &str) -> Result<()> {
@@ -183,8 +184,19 @@ pub fn verify_auth_token(identity: &TokenIdentity, expected_audience: &str) -> R
         .map_err(|e| Error::TokenDecoding(format!("system time error: {}", e)))?
         .as_secs();
 
+    // Check not-before claim
+    if identity.claims.nbf > now {
+        return Err(Error::TokenNotYetValid {
+            nbf: identity.claims.nbf,
+            now,
+        });
+    }
+
     if identity.claims.exp < now {
-        return Err(Error::TokenExpired);
+        return Err(Error::TokenExpired {
+            exp: identity.claims.exp,
+            now,
+        });
     }
 
     if let Some(ref audiences) = identity.claims.aud {
@@ -214,10 +226,13 @@ pub fn verify_auth_token(identity: &TokenIdentity, expected_audience: &str) -> R
 ///
 /// # Errors
 /// Returns an error if:
-/// * The token cannot be decoded
-/// * Required claims are missing
+/// * The token cannot be decoded (invalid base64 or UTF-8)
+/// * The claims cannot be deserialized (malformed JSON or missing fields)
+/// * The signature verification fails
+/// * The header algorithm doesn't match the key_type claim
+/// * The issuer claim doesn't match the DID derived from the public key
 /// * The key type is unsupported
-/// * The public key cannot be reconstructed
+/// * The public key cannot be reconstructed from the sub claim
 pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
     let token_str = std::str::from_utf8(data)
         .map_err(|e| Error::TokenDecoding(format!("invalid UTF-8: {}", e)))?;
@@ -238,6 +253,18 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
 
     let key_type: IdentityKeyType = claims.key_type.parse()?;
 
+    // Validate algorithm/key-type consistency
+    let expected_alg = match key_type {
+        IdentityKeyType::Ed25519 => EDDSA_ALG,
+        IdentityKeyType::Secp256k1 => ES256K_ALG,
+    };
+    if header_alg != expected_alg {
+        return Err(Error::TokenDecoding(format!(
+            "algorithm mismatch: header specifies '{}' but key_type claim is '{}' (expected '{}')",
+            header_alg, claims.key_type, expected_alg
+        )));
+    }
+
     let public_key = public_key_from_bytes(
         key_type.to_crypto_key_type(),
         &hex::decode(&claims.sub).map_err(|e| Error::InvalidClaimValue {
@@ -255,6 +282,18 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
         reason: format!("failed to derive DID: {}", e),
     })?;
     let did = Did::new_unchecked(did_string);
+
+    // Validate issuer matches derived DID
+    let did_str = did.to_string();
+    if claims.iss != did_str {
+        return Err(Error::InvalidClaimValue {
+            claim: "iss".to_string(),
+            reason: format!(
+                "issuer '{}' does not match DID derived from public key '{}'",
+                claims.iss, did_str
+            ),
+        });
+    }
 
     Ok(TokenIdentity {
         public_key,
@@ -444,16 +483,30 @@ fn parse_jwt_algorithm(token: &str) -> Result<String> {
 /// Convert DER-encoded ECDSA signature to raw R||S format (64 bytes).
 fn der_signature_to_raw(der: &[u8]) -> Result<Vec<u8>> {
     // DER format: 0x30 <len> 0x02 <r_len> <r> 0x02 <s_len> <s>
-    if der.len() < 8 || der[0] != 0x30 {
-        return Err(Error::TokenEncoding("invalid DER signature".to_string()));
+    if der.len() < 8 {
+        return Err(Error::TokenEncoding("DER signature too short".to_string()));
+    }
+    if der[0] != 0x30 {
+        return Err(Error::TokenEncoding(
+            "invalid DER signature: expected SEQUENCE tag".to_string(),
+        ));
     }
 
-    let mut pos = 2; // Skip 0x30 and length byte
+    let mut pos: usize = 2; // Skip 0x30 and length byte
 
     // Handle multi-byte length
     if der[1] & 0x80 != 0 {
         let len_bytes = (der[1] & 0x7f) as usize;
-        pos += len_bytes;
+        pos = pos
+            .checked_add(len_bytes)
+            .ok_or_else(|| Error::TokenEncoding("DER length field overflow".to_string()))?;
+    }
+
+    // Bounds check before parsing R tag
+    if pos >= der.len() {
+        return Err(Error::TokenEncoding(
+            "DER signature truncated: R tag position out of bounds".to_string(),
+        ));
     }
 
     // Parse R
@@ -463,12 +516,35 @@ fn der_signature_to_raw(der: &[u8]) -> Result<Vec<u8>> {
         ));
     }
     pos += 1;
+
+    if pos >= der.len() {
+        return Err(Error::TokenEncoding(
+            "DER signature truncated: R length position out of bounds".to_string(),
+        ));
+    }
     let r_len = der[pos] as usize;
     pos += 1;
 
     let r_start = pos;
-    let r_end = r_start + r_len;
+    let r_end = r_start
+        .checked_add(r_len)
+        .ok_or_else(|| Error::TokenEncoding("DER R length overflow".to_string()))?;
+
+    if r_end > der.len() {
+        return Err(Error::TokenEncoding(format!(
+            "DER signature truncated: R component extends beyond data (need {} bytes, have {})",
+            r_end,
+            der.len()
+        )));
+    }
     pos = r_end;
+
+    // Bounds check before parsing S tag
+    if pos >= der.len() {
+        return Err(Error::TokenEncoding(
+            "DER signature truncated: S tag position out of bounds".to_string(),
+        ));
+    }
 
     // Parse S
     if der[pos] != 0x02 {
@@ -477,11 +553,27 @@ fn der_signature_to_raw(der: &[u8]) -> Result<Vec<u8>> {
         ));
     }
     pos += 1;
+
+    if pos >= der.len() {
+        return Err(Error::TokenEncoding(
+            "DER signature truncated: S length position out of bounds".to_string(),
+        ));
+    }
     let s_len = der[pos] as usize;
     pos += 1;
 
     let s_start = pos;
-    let s_end = s_start + s_len;
+    let s_end = s_start
+        .checked_add(s_len)
+        .ok_or_else(|| Error::TokenEncoding("DER S length overflow".to_string()))?;
+
+    if s_end > der.len() {
+        return Err(Error::TokenEncoding(format!(
+            "DER signature truncated: S component extends beyond data (need {} bytes, have {})",
+            s_end,
+            der.len()
+        )));
+    }
 
     // Extract R and S, removing leading zeros
     let mut r = &der[r_start..r_end];
@@ -722,7 +814,7 @@ mod tests {
         let result = verify_auth_token(&token_identity, "audience");
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::TokenExpired));
+        assert!(matches!(result.unwrap_err(), Error::TokenExpired { .. }));
     }
 
     #[test]
@@ -822,5 +914,230 @@ mod tests {
         assert!(debug_str.contains("TokenIdentity"));
         assert!(debug_str.contains("did:key:"));
         assert!(debug_str.contains("Ed25519"));
+    }
+
+    // Security tests
+
+    #[test]
+    fn test_tampered_signature_rejected_ed25519() {
+        let private_key = generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
+        let token_str = String::from_utf8(token).unwrap();
+
+        // Tamper with the signature (modify a few bytes)
+        let parts: Vec<&str> = token_str.split('.').collect();
+        let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        let mut tampered_sig = sig_bytes.clone();
+        // Flip some bits in the signature
+        tampered_sig[0] ^= 0xFF;
+        tampered_sig[10] ^= 0xFF;
+        let tampered_sig_b64 = URL_SAFE_NO_PAD.encode(&tampered_sig);
+        let tampered_token = format!("{}.{}.{}", parts[0], parts[1], tampered_sig_b64);
+
+        let result = from_token(tampered_token.as_bytes());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::TokenDecoding(ref msg) if msg.contains("signature verification failed")),
+            "Expected signature verification failure, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_tampered_signature_rejected_secp256k1() {
+        let private_key = generate_secp256k1().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
+        let token_str = String::from_utf8(token).unwrap();
+
+        // Tamper with the signature
+        let parts: Vec<&str> = token_str.split('.').collect();
+        let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        let mut tampered_sig = sig_bytes.clone();
+        tampered_sig[0] ^= 0xFF;
+        tampered_sig[10] ^= 0xFF;
+        let tampered_sig_b64 = URL_SAFE_NO_PAD.encode(&tampered_sig);
+        let tampered_token = format!("{}.{}.{}", parts[0], parts[1], tampered_sig_b64);
+
+        let result = from_token(tampered_token.as_bytes());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tampered_payload_rejected() {
+        let private_key = generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let token = new_token(
+            &identity,
+            Duration::from_secs(3600),
+            Some("original-audience".to_string()),
+            None,
+        )
+        .unwrap();
+        let token_str = String::from_utf8(token).unwrap();
+
+        // Tamper with the payload (change audience)
+        let parts: Vec<&str> = token_str.split('.').collect();
+        let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let mut claims: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        claims["aud"] = serde_json::json!(["tampered-audience"]);
+        let tampered_payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).unwrap());
+        let tampered_token = format!("{}.{}.{}", parts[0], tampered_payload, parts[2]);
+
+        let result = from_token(tampered_token.as_bytes());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::TokenDecoding(ref msg) if msg.contains("signature verification failed")),
+            "Expected signature verification failure, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_wrong_signer_rejected() {
+        // Create two different identities
+        let attacker_key = generate_ed25519().unwrap();
+        let attacker_identity = RawIdentity::from_private_key(attacker_key).unwrap();
+
+        let victim_key = generate_ed25519().unwrap();
+        let victim_identity = RawIdentity::from_private_key(victim_key).unwrap();
+
+        // Create a valid token from attacker
+        let attacker_token =
+            new_token(&attacker_identity, Duration::from_secs(3600), None, None).unwrap();
+        let attacker_token_str = String::from_utf8(attacker_token).unwrap();
+        let parts: Vec<&str> = attacker_token_str.split('.').collect();
+
+        // Create claims with victim's public key but attacker's signature
+        let victim_pub_key_hex = victim_identity.pub_key().to_hex_string();
+        let victim_did = victim_identity.did().unwrap();
+
+        let fake_claims = IdentityClaims {
+            sub: victim_pub_key_hex,
+            iss: victim_did.to_string(),
+            exp: 9999999999,
+            nbf: 0,
+            iat: 0,
+            aud: None,
+            authorized_account: None,
+            key_type: "ed25519".to_string(),
+        };
+        let fake_payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&fake_claims).unwrap());
+
+        // Use attacker's signature with victim's claims
+        let forged_token = format!("{}.{}.{}", parts[0], fake_payload, parts[2]);
+
+        let result = from_token(forged_token.as_bytes());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::TokenDecoding(ref msg) if msg.contains("signature verification failed")),
+            "Expected signature verification failure, got: {:?}",
+            err
+        );
+    }
+
+    // DER signature parsing edge case tests
+
+    #[test]
+    fn test_der_signature_empty_input() {
+        let result = der_signature_to_raw(&[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("too short")));
+    }
+
+    #[test]
+    fn test_der_signature_wrong_tag() {
+        // Wrong tag (0x31 instead of 0x30)
+        let result = der_signature_to_raw(&[0x31, 0x40, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("SEQUENCE tag")));
+    }
+
+    #[test]
+    fn test_der_signature_truncated_r() {
+        // Valid header but R component extends beyond data
+        let result = der_signature_to_raw(&[0x30, 0x44, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("truncated")));
+    }
+
+    #[test]
+    fn test_der_signature_missing_s_tag() {
+        // R component present but S tag missing
+        let mut der = vec![0x30, 0x26]; // SEQUENCE
+        der.push(0x02); // INTEGER tag for R
+        der.push(0x20); // R length = 32
+        der.extend_from_slice(&[0x00; 32]); // R value
+                                            // Missing S component
+
+        let result = der_signature_to_raw(&der);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::TokenEncoding(ref msg) if msg.contains("out of bounds") || msg.contains("truncated"))
+        );
+    }
+
+    #[test]
+    fn test_der_signature_wrong_r_tag() {
+        // Wrong tag for R (0x03 instead of 0x02)
+        let result = der_signature_to_raw(&[0x30, 0x44, 0x03, 0x20, 0x00, 0x00, 0x00, 0x00]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("INTEGER tag for R")));
+    }
+
+    #[test]
+    fn test_raw_signature_wrong_length() {
+        let result = raw_signature_to_der(&[0u8; 63]); // 63 instead of 64
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::TokenDecoding(ref msg) if msg.contains("expected 64")));
+    }
+
+    #[test]
+    fn test_unsupported_algorithm() {
+        // Create a token with RS256 algorithm header
+        let header = serde_json::json!({
+            "alg": "RS256",
+            "typ": "JWT"
+        });
+        let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
+        let sig_b64 = URL_SAFE_NO_PAD.encode(&[0u8; 64]);
+        let token = format!("{}.{}.{}", header_b64, payload_b64, sig_b64);
+
+        let result = from_token(token.as_bytes());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::TokenDecoding(ref msg) if msg.contains("unsupported algorithm"))
+        );
+    }
+
+    #[test]
+    fn test_invalid_utf8_token() {
+        let result = from_token(&[0xFF, 0xFE, 0x00, 0x01]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::TokenDecoding(ref msg) if msg.contains("invalid UTF-8")));
+    }
+
+    #[test]
+    fn test_invalid_base64_header() {
+        let result = from_token(b"!!!invalid-base64!!!.payload.signature");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::TokenDecoding(ref msg) if msg.contains("base64")));
     }
 }
