@@ -684,7 +684,7 @@ mod tests {
         });
         let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
         let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
-        let sig_b64 = URL_SAFE_NO_PAD.encode(&[0u8; 64]);
+        let sig_b64 = URL_SAFE_NO_PAD.encode([0u8; 64]);
         let token = format!("{}.{}.{}", header_b64, payload_b64, sig_b64);
 
         let result = from_token(token.as_bytes());
