@@ -22,6 +22,7 @@ mod did;
 mod error;
 mod key_type;
 mod raw;
+mod token;
 
 pub use context::IdentityContext;
 pub use crypto::KeyType;
@@ -29,6 +30,7 @@ pub use did::{Did, DID_KEY_PREFIX};
 pub use error::{Error, Result};
 pub use key_type::IdentityKeyType;
 pub use raw::RawIdentity;
+pub use token::{from_token, new_token, verify_auth_token, IdentityClaims, TokenIdentity};
 
 use crypto::keys::{PrivateKey, PublicKey};
 
