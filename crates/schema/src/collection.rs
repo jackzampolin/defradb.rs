@@ -231,6 +231,8 @@ impl CollectionVersion {
         self.fields.iter().find(|f| {
             f.relation_name.as_deref() == Some(relation_name)
                 && !(self.name == other_collection_name && f.name == other_field_name)
+                // Filter out _id backing fields (e.g., author_id) to return only actual
+                // relation fields, not their auto-generated foreign key scalars
                 && !matches!(f.kind, FieldKind::Scalar(crate::ScalarKind::DocID))
         })
     }

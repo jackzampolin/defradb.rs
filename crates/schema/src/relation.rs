@@ -129,37 +129,33 @@ impl CollectionVersion {
                 // Non-array relations are the "one" side (or one-to-one primary)
                 // Array relations are the "many" side
                 if !field.kind.is_array() {
-                    // Check if the other side exists and is an array
-                    let Some(rel_name) = &field.relation_name else {
-                        tracing::debug!(
-                            collection = %collection.name,
-                            field = %field.name,
-                            "Skipping auto-primary: relation field has no relation_name"
-                        );
-                        continue;
+                    // Relation fields must have a relation_name
+                    let rel_name = field.relation_name.as_ref().ok_or_else(|| {
+                        SchemaError::MissingRequiredField(format!(
+                            "relation field '{}.{}' missing required relation_name",
+                            collection.name, field.name
+                        ))
+                    })?;
+
+                    // Invariant: is_relation() implies relation_collection_id() returns Some
+                    let other_col_id = field.kind.relation_collection_id().ok_or_else(|| {
+                        SchemaError::InternalError(format!(
+                            "invariant violation: relation field '{}.{}' has is_relation()=true but no collection_id",
+                            collection.name, field.name
+                        ))
+                    })?;
+
+                    // Handle self-referential relations: current collection was removed from map
+                    let other_col_opt = if other_col_id == collection.name {
+                        Some(&collection)
+                    } else {
+                        collections.get(other_col_id)
                     };
 
-                    let Some(other_col_id) = field.kind.relation_collection_id() else {
-                        tracing::debug!(
-                            collection = %collection.name,
-                            field = %field.name,
-                            "Skipping auto-primary: relation field has no collection_id"
-                        );
-                        continue;
-                    };
-
-                    let Some(other_col) = collections.get(other_col_id) else {
-                        tracing::debug!(
-                            collection = %collection.name,
-                            field = %field.name,
-                            target_collection = %other_col_id,
-                            "Skipping auto-primary: target collection not found (may be processed later)"
-                        );
-                        continue;
-                    };
-
-                    let other_field =
-                        other_col.field_by_relation(rel_name, &collection.name, &field.name);
+                    // Look up the other side of the relation
+                    let other_field = other_col_opt.and_then(|col| {
+                        col.field_by_relation(rel_name, &collection.name, &field.name)
+                    });
 
                     // If other side doesn't exist or is an array, this side is primary
                     if other_field.is_none()
