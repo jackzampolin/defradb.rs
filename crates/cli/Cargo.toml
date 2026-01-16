@@ -17,6 +17,7 @@ defra-core = { path = "../defra-core" }
 storage = { path = "../storage" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
+identity = { path = "../identity" }
 p2p = { path = "../p2p" }
 defra-http = { path = "../http" }
 query = { path = "../query" }
