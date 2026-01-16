@@ -56,6 +56,21 @@ use schema::IndexDescription;
 
 use crate::corekv::{Reader, Result, Writer};
 
+/// Validate that a document ID is valid for use in index keys.
+///
+/// Checks that the doc_id is:
+/// - Not empty
+/// - Valid UTF-8 (guaranteed by &str type parameter)
+pub(crate) fn validate_doc_id(doc_id: &str, index_name: &str) -> Result<()> {
+    if doc_id.is_empty() {
+        return Err(crate::corekv::Error::Other(format!(
+            "index '{}': doc_id cannot be empty",
+            index_name
+        )));
+    }
+    Ok(())
+}
+
 /// Enum for index types (avoids dyn trait issues).
 pub enum IndexType {
     Simple(SimpleIndex),

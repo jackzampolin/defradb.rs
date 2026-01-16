@@ -19,6 +19,7 @@
 use async_trait::async_trait;
 use document::NormalValue;
 use schema::{FieldKind, IndexDescription};
+use tracing::trace;
 
 use super::iterator::{Bound, IndexEntry, IndexIterator};
 use crate::corekv::{IterOptions, Iterator, Reader, Result};
@@ -391,17 +392,35 @@ impl IndexIterator for RangeIterator {
                         // Check if we've passed the boundary
                         if let Some(ref upper) = self.upper_bound_key {
                             if !self.reverse && kv.key.as_slice() >= upper.as_slice() {
+                                trace!(
+                                    index_id = self.desc.id,
+                                    index_name = %self.desc.name,
+                                    key_len = kv.key.len(),
+                                    "range iterator exhausted: passed upper bound"
+                                );
                                 self.exhausted = true;
                                 return Ok(None);
                             }
                         }
                         if let Some(ref lower) = self.lower_bound_key {
                             if self.reverse && kv.key.as_slice() < lower.as_slice() {
+                                trace!(
+                                    index_id = self.desc.id,
+                                    index_name = %self.desc.name,
+                                    key_len = kv.key.len(),
+                                    "range iterator exhausted: passed lower bound (reverse)"
+                                );
                                 self.exhausted = true;
                                 return Ok(None);
                             }
                         }
-                        continue; // Skip this entry
+                        trace!(
+                            index_id = self.desc.id,
+                            index_name = %self.desc.name,
+                            key_len = kv.key.len(),
+                            "skipping entry outside bounds"
+                        );
+                        continue;
                     }
 
                     let entry = self.extract_entry(&kv.key, &kv.value)?;

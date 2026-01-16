@@ -17,6 +17,7 @@ use schema::IndexDescription;
 use super::eq_iterator::ExactMatchIterator;
 use super::iterator::Bound;
 use super::range_iterator::RangeIterator;
+use super::validate_doc_id;
 use super::CollectionIndex;
 use crate::corekv::{IterOptions, Reader, Result, Writer};
 use crate::keys::datastore::IndexedField;
@@ -186,6 +187,7 @@ impl CollectionIndex for SimpleIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        validate_doc_id(doc_id, &self.desc.name)?;
         self.validate_field_count(values, doc_id)?;
         let key = self.build_key(values, doc_id)?;
         txn.set(&key, &[]).await
@@ -198,6 +200,7 @@ impl CollectionIndex for SimpleIndex {
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()> {
+        validate_doc_id(doc_id, &self.desc.name)?;
         self.validate_field_count(old_values, doc_id)?;
         self.validate_field_count(new_values, doc_id)?;
 
@@ -216,6 +219,7 @@ impl CollectionIndex for SimpleIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        validate_doc_id(doc_id, &self.desc.name)?;
         self.validate_field_count(values, doc_id)?;
         let key = self.build_key(values, doc_id)?;
         txn.delete(&key).await
