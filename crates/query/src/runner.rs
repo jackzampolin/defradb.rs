@@ -14,12 +14,12 @@ use document::Document;
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::document::DocumentMapping;
+use crate::document::{document_to_plan_doc, documents_to_plan_docs, DocumentMapping};
 use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-use crate::json_convert::normal_value_to_json;
 use crate::mapper::{AggregateType, Mutation, MutationType, Requestable, Select};
 use crate::mutator::DocMutator;
 use crate::plan::{
@@ -215,7 +215,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = self.build_mapping(select, collection)?;
 
         // Convert storage documents to plan docs
-        let plan_docs = self.convert_documents(&docs, &mapping)?;
+        let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
 
         // Build and execute the plan
         let mut plan = self.build_plan(select, plan_docs, mapping.clone())?;
@@ -402,7 +402,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let mut matching_ids = Vec::new();
         for doc in &all_docs {
             // Convert Document to fields array for filter matching
-            let plan_doc = self.document_to_plan_doc(doc, &mapping)?;
+            let plan_doc = document_to_plan_doc(doc, &mapping)?;
             let fields = plan_doc.fields();
 
             if filter.matches(fields, &mapping)? {
@@ -595,43 +595,6 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(mapping)
-    }
-
-    /// Convert storage Documents to plan Docs.
-    fn convert_documents(&self, docs: &[Document], mapping: &DocumentMapping) -> Result<Vec<Doc>> {
-        let mut result = Vec::with_capacity(docs.len());
-
-        for doc in docs {
-            let plan_doc = self.document_to_plan_doc(doc, mapping)?;
-            result.push(plan_doc);
-        }
-
-        Ok(result)
-    }
-
-    /// Convert a single storage Document to a plan Doc.
-    fn document_to_plan_doc(&self, doc: &Document, mapping: &DocumentMapping) -> Result<Doc> {
-        let num_fields = mapping.next_index();
-        let mut fields: Vec<Option<JsonValue>> = vec![None; num_fields];
-
-        // Set _docID if present in mapping
-        if let Some(index) = mapping.first_index_of_name("_docID") {
-            if let Some(doc_id) = doc.id() {
-                fields[index] = Some(JsonValue::String(doc_id.to_string()));
-            }
-        }
-
-        // Set other fields
-        for field_name in doc.field_names() {
-            if let Some(index) = mapping.first_index_of_name(field_name) {
-                if let Some(value) = doc.get(field_name) {
-                    let json = normal_value_to_json(value)?;
-                    fields[index] = Some(json);
-                }
-            }
-        }
-
-        Ok(Doc::with_fields(fields))
     }
 
     /// Build a plan tree from a Select operation and documents.
@@ -935,23 +898,43 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
 /// `Arc<dyn DocFetcher>`. The wrapper is only valid for the duration of the
 /// query execution.
 ///
-/// SAFETY: This is safe because the wrapper is only used within a single
-/// async function call, and the original fetcher reference outlives the wrapper.
+/// # Safety Invariants
+///
+/// 1. **Lifetime**: The original `&dyn DocFetcher` reference MUST outlive all uses
+///    of this wrapper. The caller is responsible for ensuring this - currently
+///    enforced by only creating and using the wrapper within `execute_nested_select_with_planner`.
+///
+/// 2. **Thread Safety**: The `Send + Sync` implementations are safe because
+///    `DocFetcher: Send + Sync` (see fetcher.rs:65), meaning the underlying data
+///    can be safely accessed from any thread. The wrapper merely holds a pointer
+///    to data that is already thread-safe.
+///
+/// 3. **Fat Pointer Layout**: The transmute relies on the standard fat pointer layout
+///    `(data_ptr, vtable)` for trait objects, which is stable in practice but not
+///    formally guaranteed. Consider using `std::ptr::metadata` when it stabilizes
+///    for a safer alternative.
 struct FetcherWrapper {
     // Store data pointer and vtable separately to avoid lifetime issues with fat pointers
     data_ptr: *const (),
     vtable: *const (),
+    // PhantomData to express the logical lifetime relationship, even though
+    // we can't enforce it at compile time due to the pointer erasure
+    _phantom: PhantomData<*const dyn DocFetcher>,
 }
 
 impl FetcherWrapper {
     fn new(fetcher: &dyn DocFetcher) -> Self {
-        // Split the fat pointer into data and vtable components
-        // This avoids the lifetime issue with *const dyn Trait
+        // Split the fat pointer into data and vtable components.
+        // This avoids the lifetime issue with *const dyn Trait.
         let ptr = fetcher as *const dyn DocFetcher;
         let (data_ptr, vtable) = unsafe {
             std::mem::transmute::<*const dyn DocFetcher, (*const (), *const ())>(ptr)
         };
-        Self { data_ptr, vtable }
+        Self {
+            data_ptr,
+            vtable,
+            _phantom: PhantomData,
+        }
     }
 
     fn get_fetcher(&self) -> &dyn DocFetcher {
@@ -962,19 +945,30 @@ impl FetcherWrapper {
                 self.vtable,
             ))
         };
+        // SAFETY: The caller guarantees the original reference outlives this wrapper
         unsafe { &*ptr }
     }
 }
 
-// SAFETY: The raw pointer is only dereferenced within the same thread context
-// where the original reference was created, and within the same async task.
+// SAFETY: These implementations are safe because:
+// 1. DocFetcher: Send + Sync (the underlying data is thread-safe)
+// 2. The wrapper only holds a pointer to already-thread-safe data
+// 3. The lifetime invariant (original ref outlives wrapper) is maintained by the caller
 unsafe impl Send for FetcherWrapper {}
 unsafe impl Sync for FetcherWrapper {}
 
 #[async_trait]
 impl DocFetcher for FetcherWrapper {
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
-        self.get_fetcher().get_all(collection_name).await
+        self.get_fetcher()
+            .get_all(collection_name)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}': {}",
+                    collection_name, e
+                ))
+            })
     }
 
     async fn get_by_ids(
@@ -985,6 +979,14 @@ impl DocFetcher for FetcherWrapper {
         self.get_fetcher()
             .get_by_ids(collection_name, doc_ids)
             .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (fetching {} doc IDs): {}",
+                    collection_name,
+                    doc_ids.len(),
+                    e
+                ))
+            })
     }
 }
 

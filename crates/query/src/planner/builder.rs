@@ -87,8 +87,17 @@ impl Planner {
         // Build the document mapping for this query
         let mapping = self.build_mapping(select, &collection)?;
 
-        // Check if an index can be used for the filter
-        let index_scan = self.try_select_index(select, &collection);
+        // Check if an index can be used for the filter.
+        // Note: Index selection is disabled when a fetcher is attached because:
+        // 1. IndexScanNode expects pre-loaded documents from index lookups
+        // 2. The DocFetcher trait doesn't support index-aware fetching
+        // 3. The Runner handles index lookups for simple queries; the Planner path
+        //    (with fetcher) is used for nested selections where ScanNode suffices
+        let index_scan = if self.fetcher.is_some() {
+            None // Skip index selection when using fetcher-based data loading
+        } else {
+            self.try_select_index(select, &collection)
+        };
 
         // Build the plan tree bottom-up:
         // ScanNode/IndexScanNode -> SelectNode -> JoinNodes -> LimitNode
@@ -249,7 +258,12 @@ impl Planner {
                     None
                 };
 
-                // Get child relation field index (if it exists)
+                // Get child relation field index (if it exists).
+                // For bidirectional relations, this is the index of the back-reference field
+                // (e.g., `author` field on posts when joining from users.posts).
+                // For unidirectional relations (no back-reference), we default to index 0.
+                // This is safe because TypeJoin nodes use the relation_id_field_index()
+                // (derived from the FK field) for actual join matching, not this index.
                 let child_relation_index = target_relation_field
                     .and_then(|f| {
                         target_collection

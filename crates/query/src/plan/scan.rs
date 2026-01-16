@@ -1,16 +1,14 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
-use serde_json::Value as JsonValue;
 use std::sync::Arc;
+use tracing::warn;
 
-use document::Document;
 use schema::CollectionVersion;
 
-use crate::document::DocumentMapping;
+use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::Result;
 use crate::fetcher::DocFetcher;
-use crate::json_convert::normal_value_to_json;
 use crate::mapper::Filter;
 use crate::planner::{Doc, PlanNode};
 
@@ -100,40 +98,6 @@ impl ScanNode {
     pub fn collection_name(&self) -> &str {
         &self.collection.name
     }
-
-    /// Convert storage Documents to plan Docs using the document mapping.
-    fn convert_documents(&self, docs: &[Document]) -> Result<Vec<Doc>> {
-        let mut result = Vec::with_capacity(docs.len());
-        for doc in docs {
-            result.push(self.document_to_plan_doc(doc)?);
-        }
-        Ok(result)
-    }
-
-    /// Convert a single storage Document to a plan Doc.
-    fn document_to_plan_doc(&self, doc: &Document) -> Result<Doc> {
-        let num_fields = self.document_mapping.next_index();
-        let mut fields: Vec<Option<JsonValue>> = vec![None; num_fields];
-
-        // Set _docID if present in mapping
-        if let Some(index) = self.document_mapping.first_index_of_name("_docID") {
-            if let Some(doc_id) = doc.id() {
-                fields[index] = Some(JsonValue::String(doc_id.to_string()));
-            }
-        }
-
-        // Set other fields
-        for field_name in doc.field_names() {
-            if let Some(index) = self.document_mapping.first_index_of_name(field_name) {
-                if let Some(value) = doc.get(field_name) {
-                    let json = normal_value_to_json(value)?;
-                    fields[index] = Some(json);
-                }
-            }
-        }
-
-        Ok(Doc::with_fields(fields))
-    }
 }
 
 #[async_trait]
@@ -145,7 +109,14 @@ impl PlanNode for ScanNode {
         if self.docs.is_empty() {
             if let Some(ref fetcher) = self.fetcher {
                 let storage_docs = fetcher.get_all(&self.collection.name).await?;
-                self.docs = self.convert_documents(&storage_docs)?;
+                self.docs = documents_to_plan_docs(&storage_docs, &self.document_mapping)?;
+            } else {
+                // No docs and no fetcher - this is likely a misconfiguration.
+                // The query will return empty results, which may not be intended.
+                warn!(
+                    collection = %self.collection.name,
+                    "ScanNode initialized with no documents and no fetcher - query will yield no results"
+                );
             }
         }
 
