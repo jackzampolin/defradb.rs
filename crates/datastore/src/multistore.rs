@@ -5,7 +5,7 @@
 /// This matches Go DefraDB's internal/datastore/multi.go pattern.
 use async_trait::async_trait;
 use std::sync::Arc;
-use storage::corekv::{Error, IterOptions, Iterator, Result, Txn};
+use storage::corekv::{Error, IterOptions, Iterator, Reader, Result, Txn, Writer};
 use storage::namespace::Namespace;
 use tokio::sync::RwLock;
 
@@ -141,6 +141,50 @@ impl NamespaceView {
     /// Create an iterator.
     pub async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         self.txn.iterator(self.namespace, opts).await
+    }
+}
+
+impl Clone for NamespaceView {
+    fn clone(&self) -> Self {
+        Self {
+            txn: self.txn.clone(),
+            namespace: self.namespace,
+        }
+    }
+}
+
+/// Implement Reader trait for NamespaceView to enable index operations.
+#[async_trait]
+impl Reader for NamespaceView {
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.txn.get(self.namespace, key).await
+    }
+
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.txn.has(self.namespace, key).await
+    }
+
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        self.txn.get_size(self.namespace, key).await
+    }
+
+    async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
+        self.txn.iterator(self.namespace, opts).await
+    }
+}
+
+/// Implement Writer trait for NamespaceView to enable index operations.
+///
+/// The `&mut self` signature is required by the trait, but NamespaceView uses
+/// interior mutability (Arc<RwLock>) so actual mutation is handled internally.
+#[async_trait]
+impl Writer for NamespaceView {
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.txn.set(self.namespace, key, value).await
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.txn.delete(self.namespace, key).await
     }
 }
 

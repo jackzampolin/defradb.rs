@@ -3,10 +3,11 @@
 /// A Collection represents a set of documents that share the same schema.
 /// It provides CRUD operations for documents.
 use crate::error::{Error, Result};
+use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
 use datastore::NamespaceView;
 use document::{DocID, Document, NormalValue};
-use schema::{CollectionVersion, FieldKind, ScalarArrayKind, ScalarKind};
+use schema::{CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind, ScalarKind};
 use storage::corekv::{IterOptions, Store};
 
 /// Key prefix for document data in datastore.
@@ -39,6 +40,153 @@ impl Collection {
     pub fn schema(&self) -> &CollectionVersion {
         &self.def
     }
+
+    // =========================================================================
+    // Index Methods
+    // =========================================================================
+
+    /// Get all indexes defined on this collection.
+    pub fn get_indexes(&self) -> &[IndexDescription] {
+        &self.def.indexes
+    }
+
+    /// Check if an index exists on this collection.
+    pub fn has_index(&self, name: &str) -> bool {
+        self.def.indexes.iter().any(|idx| idx.name == name)
+    }
+
+    /// Get an index by name.
+    pub fn get_index(&self, name: &str) -> Option<&IndexDescription> {
+        self.def.indexes.iter().find(|idx| idx.name == name)
+    }
+
+    // =========================================================================
+    // Document Methods with Index Maintenance
+    // =========================================================================
+
+    /// Create a new document and update all indexes.
+    ///
+    /// This method wraps the standard create operation with index maintenance.
+    pub async fn create_with_indexes(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        index_manager: &IndexManager,
+    ) -> Result<DocID> {
+        // Validate document against schema
+        self.validate_document(doc)?;
+
+        // Generate document ID if not present
+        let doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
+
+        // Check if document already exists
+        let key = self.doc_key(&doc_id);
+        if datastore.has(&key).await.map_err(Error::Storage)? {
+            return Err(Error::InvalidDocument(format!(
+                "Document with ID {} already exists",
+                doc_id
+            )));
+        }
+
+        // Serialize document to CBOR
+        let data = doc
+            .to_cbor()
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+
+        // Store document
+        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        // Update indexes
+        index_manager
+            .on_document_create(datastore, doc, &self.def)
+            .await?;
+
+        Ok(doc_id)
+    }
+
+    /// Update an existing document and maintain all indexes.
+    ///
+    /// This method wraps the standard update operation with index maintenance.
+    pub async fn update_with_indexes(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        index_manager: &IndexManager,
+    ) -> Result<()> {
+        // Validate document against schema
+        self.validate_document(doc)?;
+
+        let doc_id = doc
+            .id()
+            .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
+
+        let key = self.doc_key(doc_id);
+
+        // Get old document for index update
+        let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
+            Some(bytes) => {
+                let mut d =
+                    Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                d.set_id(doc_id.clone());
+                d
+            }
+            None => return Err(Error::DocumentNotFound(doc_id.to_string())),
+        };
+
+        // Serialize and store
+        let data = doc
+            .to_cbor()
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+
+        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        // Update indexes
+        index_manager
+            .on_document_update(datastore, &old_doc, doc, &self.def)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Delete a document and update all indexes.
+    ///
+    /// This method wraps the standard delete operation with index maintenance.
+    pub async fn delete_with_indexes(
+        &self,
+        datastore: &NamespaceView,
+        doc_id: &DocID,
+        index_manager: &IndexManager,
+    ) -> Result<bool> {
+        let key = self.doc_key(doc_id);
+
+        // Get the document for index cleanup
+        let doc = match datastore.get(&key).await.map_err(Error::Storage)? {
+            Some(bytes) => {
+                let mut d =
+                    Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                d.set_id(doc_id.clone());
+                d
+            }
+            None => return Ok(false),
+        };
+
+        // Delete document
+        datastore.delete(&key).await.map_err(Error::Storage)?;
+
+        // Update indexes
+        index_manager
+            .on_document_delete(datastore, &doc, &self.def)
+            .await?;
+
+        Ok(true)
+    }
+
+    // =========================================================================
+    // Standard Document Methods (without index maintenance)
+    // =========================================================================
 
     /// Create a new document in this collection.
     ///
@@ -1022,5 +1170,239 @@ mod tests {
 
         let result = col.create(&txn, &doc).await;
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Index Tests
+    // =========================================================================
+
+    use schema::IndexedFieldDescription;
+
+    fn collection_with_indexes() -> Collection {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "age", FieldKind::int()),
+            FieldDescription::new("4", "email", FieldKind::string()),
+        ];
+        let mut cv = CollectionVersion::new("users_indexed", "v1", "col-indexed", fields);
+        cv.indexes = vec![
+            IndexDescription {
+                name: "idx_name".to_string(),
+                id: 1,
+                fields: vec![IndexedFieldDescription {
+                    name: "name".to_string(),
+                    descending: false,
+                }],
+                unique: false,
+            },
+            IndexDescription {
+                name: "idx_email".to_string(),
+                id: 2,
+                fields: vec![IndexedFieldDescription {
+                    name: "email".to_string(),
+                    descending: false,
+                }],
+                unique: true,
+            },
+        ];
+        Collection::new(cv)
+    }
+
+    #[tokio::test]
+    async fn test_collection_get_indexes() {
+        let col = collection_with_indexes();
+        let indexes = col.get_indexes();
+        assert_eq!(indexes.len(), 2);
+        assert_eq!(indexes[0].name, "idx_name");
+        assert_eq!(indexes[1].name, "idx_email");
+    }
+
+    #[tokio::test]
+    async fn test_collection_has_index() {
+        let col = collection_with_indexes();
+        assert!(col.has_index("idx_name"));
+        assert!(col.has_index("idx_email"));
+        assert!(!col.has_index("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_collection_get_index() {
+        let col = collection_with_indexes();
+
+        let idx = col.get_index("idx_name").unwrap();
+        assert_eq!(idx.name, "idx_name");
+        assert!(!idx.unique);
+
+        let idx = col.get_index("idx_email").unwrap();
+        assert_eq!(idx.name, "idx_email");
+        assert!(idx.unique);
+
+        assert!(col.get_index("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_with_indexes() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = collection_with_indexes();
+        let txn = db.new_txn(false).await.unwrap();
+
+        // Create an IndexManager from the collection
+        let index_manager = IndexManager::from_collection(1, col.schema());
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create a document with index maintenance
+            let mut doc = Document::new();
+            doc.generate_and_set_doc_id().unwrap();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+            doc.set("age", NormalValue::Int(30));
+            doc.set(
+                "email",
+                NormalValue::String("alice@example.com".to_string()),
+            );
+
+            let doc_id = col
+                .create_with_indexes(&datastore, &doc, &index_manager)
+                .await
+                .unwrap();
+
+            // Verify document was created
+            let retrieved = col.get_with_datastore(&datastore, &doc_id).await.unwrap();
+            assert!(retrieved.is_some());
+        }
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_with_indexes() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = collection_with_indexes();
+        let txn = db.new_txn(false).await.unwrap();
+
+        let index_manager = IndexManager::from_collection(1, col.schema());
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create a document
+            let mut doc = Document::new();
+            doc.generate_and_set_doc_id().unwrap();
+            let doc_id = doc.id().unwrap().clone();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+            doc.set("age", NormalValue::Int(30));
+            doc.set(
+                "email",
+                NormalValue::String("alice@example.com".to_string()),
+            );
+
+            col.create_with_indexes(&datastore, &doc, &index_manager)
+                .await
+                .unwrap();
+
+            // Update the document
+            let mut updated_doc = Document::with_id(doc_id.clone());
+            updated_doc.set("name", NormalValue::String("Alice Smith".to_string()));
+            updated_doc.set("age", NormalValue::Int(31));
+            updated_doc.set(
+                "email",
+                NormalValue::String("alice.smith@example.com".to_string()),
+            );
+
+            col.update_with_indexes(&datastore, &updated_doc, &index_manager)
+                .await
+                .unwrap();
+
+            // Verify update
+            let retrieved = col.get_with_datastore(&datastore, &doc_id).await.unwrap();
+            let retrieved_doc = retrieved.unwrap();
+            assert_eq!(
+                retrieved_doc.get("name").and_then(|v| v.as_str()),
+                Some("Alice Smith")
+            );
+        }
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_indexes() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = collection_with_indexes();
+        let txn = db.new_txn(false).await.unwrap();
+
+        let index_manager = IndexManager::from_collection(1, col.schema());
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create a document
+            let mut doc = Document::new();
+            doc.generate_and_set_doc_id().unwrap();
+            let doc_id = doc.id().unwrap().clone();
+            doc.set("name", NormalValue::String("Alice".to_string()));
+            doc.set("age", NormalValue::Int(30));
+            doc.set(
+                "email",
+                NormalValue::String("alice@example.com".to_string()),
+            );
+
+            col.create_with_indexes(&datastore, &doc, &index_manager)
+                .await
+                .unwrap();
+
+            // Verify exists
+            assert!(col
+                .exists_with_datastore(&datastore, &doc_id)
+                .await
+                .unwrap());
+
+            // Delete with index cleanup
+            let deleted = col
+                .delete_with_indexes(&datastore, &doc_id, &index_manager)
+                .await
+                .unwrap();
+            assert!(deleted);
+
+            // Verify deleted
+            assert!(!col
+                .exists_with_datastore(&datastore, &doc_id)
+                .await
+                .unwrap());
+        }
+
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_indexes_nonexistent() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+        let col = collection_with_indexes();
+        let txn = db.new_txn(false).await.unwrap();
+
+        let index_manager = IndexManager::from_collection(1, col.schema());
+
+        {
+            let datastore = txn.datastore().unwrap();
+
+            // Create a document just to get a valid doc ID
+            let mut doc = Document::new();
+            doc.generate_and_set_doc_id().unwrap();
+            let doc_id = doc.id().unwrap().clone();
+            // Don't actually create the document
+
+            // Delete should return false for non-existent
+            let deleted = col
+                .delete_with_indexes(&datastore, &doc_id, &index_manager)
+                .await
+                .unwrap();
+            assert!(!deleted);
+        }
     }
 }
