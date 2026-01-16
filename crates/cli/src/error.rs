@@ -102,4 +102,7 @@ pub enum Error {
 
     #[error("identity error: {0}")]
     Identity(#[from] identity::Error),
+
+    #[error("invalid identity: {0}")]
+    InvalidIdentity(String),
 }

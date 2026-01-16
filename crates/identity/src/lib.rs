@@ -6,6 +6,7 @@
 //! - `RawIdentity` concrete implementation supporting secp256k1 and ed25519
 //! - `IdentityKeyType` enum for compile-time key type safety
 //! - `Did` newtype for validated DID strings
+//! - `IdentityContext` for propagating identity through request handling
 //!
 //! # Supported Key Types
 //!
@@ -16,11 +17,13 @@
 //! Use `IdentityKeyType` instead of `crypto::KeyType` to ensure compile-time
 //! safety when working with identity operations.
 
+mod context;
 mod did;
 mod error;
 mod key_type;
 mod raw;
 
+pub use context::IdentityContext;
 pub use crypto::KeyType;
 pub use did::{Did, DID_KEY_PREFIX};
 pub use error::{Error, Result};

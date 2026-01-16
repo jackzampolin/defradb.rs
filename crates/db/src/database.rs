@@ -9,6 +9,7 @@ use crate::collection_snapshot::CollectionSnapshot;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
 use datastore::BasicTxn;
+use identity::{Identity, RawIdentity};
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,12 +18,67 @@ use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::CollectionNameKey;
 
 /// Database options.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct DbOptions {
     /// Maximum number of transaction retries.
     pub max_txn_retries: Option<u32>,
     /// Chunk size for large values in the blockstore.
     pub chunk_size: Option<usize>,
+    /// Node identity for this database instance.
+    ///
+    /// The node identity is used for:
+    /// - Signing documents and blocks
+    /// - Authenticating with the ACP (Access Control Policy) system
+    /// - Identifying this node in P2P interactions
+    pub node_identity: Option<Arc<RawIdentity>>,
+}
+
+impl std::fmt::Debug for DbOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbOptions")
+            .field("max_txn_retries", &self.max_txn_retries)
+            .field("chunk_size", &self.chunk_size)
+            .field(
+                "node_identity",
+                &self.node_identity.as_ref().map(|id| {
+                    id.did()
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|_| "<invalid>".to_string())
+                }),
+            )
+            .finish()
+    }
+}
+
+impl DbOptions {
+    /// Creates new database options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the node identity for this database.
+    pub fn with_node_identity(mut self, identity: RawIdentity) -> Self {
+        self.node_identity = Some(Arc::new(identity));
+        self
+    }
+
+    /// Sets the node identity from an Arc for this database.
+    pub fn with_node_identity_arc(mut self, identity: Arc<RawIdentity>) -> Self {
+        self.node_identity = Some(identity);
+        self
+    }
+
+    /// Sets the maximum number of transaction retries.
+    pub fn with_max_txn_retries(mut self, retries: u32) -> Self {
+        self.max_txn_retries = Some(retries);
+        self
+    }
+
+    /// Sets the chunk size for large values.
+    pub fn with_chunk_size(mut self, size: usize) -> Self {
+        self.chunk_size = Some(size);
+        self
+    }
 }
 
 /// The main DefraDB database struct.
@@ -201,6 +257,21 @@ impl<S: Store> DB<S> {
     /// Get the database options.
     pub fn options(&self) -> &DbOptions {
         &self.options
+    }
+
+    /// Returns the node identity, if one was configured.
+    ///
+    /// The node identity is used for:
+    /// - Signing documents and blocks
+    /// - Authenticating with the ACP (Access Control Policy) system
+    /// - Identifying this node in P2P interactions
+    pub fn node_identity(&self) -> Option<Arc<RawIdentity>> {
+        self.options.node_identity.clone()
+    }
+
+    /// Returns true if this database has a configured node identity.
+    pub fn has_node_identity(&self) -> bool {
+        self.options.node_identity.is_some()
     }
 
     /// Get the current transaction ID counter value.
@@ -782,11 +853,10 @@ mod tests {
     #[tokio::test]
     async fn test_db_options() {
         let store = MemoryStore::new();
-        let options = DbOptions {
-            max_txn_retries: Some(5),
-            chunk_size: Some(1024 * 1024),
-        };
-        let db = DB::with_options(store, options.clone());
+        let options = DbOptions::new()
+            .with_max_txn_retries(5)
+            .with_chunk_size(1024 * 1024);
+        let db = DB::with_options(store, options);
 
         assert_eq!(db.options().max_txn_retries, Some(5));
         assert_eq!(db.options().chunk_size, Some(1024 * 1024));
@@ -1017,10 +1087,9 @@ mod tests {
         }
 
         // Use open_with_options with custom options
-        let opts = DbOptions {
-            max_txn_retries: Some(10),
-            chunk_size: Some(1024),
-        };
+        let opts = DbOptions::new()
+            .with_max_txn_retries(10)
+            .with_chunk_size(1024);
         let db = DB::open_with_options(store, opts).await.unwrap();
 
         // Verify collections loaded correctly
@@ -1508,10 +1577,9 @@ mod tests {
     #[tokio::test]
     async fn test_db_from_arc_with_options() {
         let store = Arc::new(MemoryStore::new());
-        let options = DbOptions {
-            max_txn_retries: Some(10),
-            chunk_size: Some(2048),
-        };
+        let options = DbOptions::new()
+            .with_max_txn_retries(10)
+            .with_chunk_size(2048);
         let db = DB::from_arc_with_options(store, options);
 
         assert_eq!(db.options().max_txn_retries, Some(10));
@@ -1696,5 +1764,134 @@ mod tests {
         // Try to extract proof between unrelated blocks
         let result = db.extract_proof(&cid1, &cid2).await.unwrap();
         assert!(result.is_none(), "Should return None for unrelated blocks");
+    }
+
+    // =========================================================================
+    // Node Identity Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_db_without_node_identity() {
+        let store = MemoryStore::new();
+        let db = DB::new(store);
+
+        assert!(!db.has_node_identity());
+        assert!(db.node_identity().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_db_with_node_identity() {
+        use identity::{Identity, RawIdentity};
+
+        let store = MemoryStore::new();
+        let private_key = crypto::generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+        let expected_did = identity.did().unwrap();
+
+        let options = DbOptions::new().with_node_identity(identity);
+        let db = DB::with_options(store, options);
+
+        assert!(db.has_node_identity());
+        let node_id = db.node_identity().expect("should have identity");
+        assert_eq!(node_id.did().unwrap(), expected_did);
+    }
+
+    #[tokio::test]
+    async fn test_db_options_builder_pattern() {
+        use identity::RawIdentity;
+
+        let private_key = crypto::generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let options = DbOptions::new()
+            .with_max_txn_retries(10)
+            .with_chunk_size(1024)
+            .with_node_identity(identity);
+
+        assert_eq!(options.max_txn_retries, Some(10));
+        assert_eq!(options.chunk_size, Some(1024));
+        assert!(options.node_identity.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_db_options_with_arc_identity() {
+        use identity::RawIdentity;
+
+        let private_key = crypto::generate_ed25519().unwrap();
+        let identity = Arc::new(RawIdentity::from_private_key(private_key).unwrap());
+        let arc_clone = identity.clone();
+
+        let options = DbOptions::new().with_node_identity_arc(identity);
+
+        // Verify the Arc is shared
+        let stored_arc = options.node_identity.unwrap();
+        assert!(Arc::ptr_eq(&stored_arc, &arc_clone));
+    }
+
+    #[tokio::test]
+    async fn test_db_open_with_node_identity() {
+        use identity::{Identity, RawIdentity};
+
+        let store = MemoryStore::new();
+        let private_key = crypto::generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+        let expected_did = identity.did().unwrap();
+
+        let options = DbOptions::new().with_node_identity(identity);
+        let db = DB::open_with_options(store, options).await.unwrap();
+
+        assert!(db.has_node_identity());
+        let node_id = db.node_identity().expect("should have identity");
+        assert_eq!(node_id.did().unwrap(), expected_did);
+    }
+
+    #[tokio::test]
+    async fn test_db_from_arc_with_node_identity() {
+        use identity::{Identity, RawIdentity};
+
+        let store = Arc::new(MemoryStore::new());
+        let private_key = crypto::generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+        let expected_did = identity.did().unwrap();
+
+        let options = DbOptions::new().with_node_identity(identity);
+        let db = DB::from_arc_with_options(store, options);
+
+        assert!(db.has_node_identity());
+        let node_id = db.node_identity().expect("should have identity");
+        assert_eq!(node_id.did().unwrap(), expected_did);
+    }
+
+    #[tokio::test]
+    async fn test_db_node_identity_can_sign() {
+        use identity::{FullIdentity, Identity, RawIdentity};
+
+        let store = MemoryStore::new();
+        let private_key = crypto::generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let options = DbOptions::new().with_node_identity(identity);
+        let db = DB::with_options(store, options);
+
+        let node_id = db.node_identity().expect("should have identity");
+        let message = b"test message";
+        let signature = node_id.sign(message).unwrap();
+
+        // Verify signature using the public key
+        let verified = node_id.pub_key().verify(message, &signature).unwrap();
+        assert!(verified, "Signature should verify");
+    }
+
+    #[tokio::test]
+    async fn test_db_options_debug_shows_did() {
+        use identity::RawIdentity;
+
+        let private_key = crypto::generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let options = DbOptions::new().with_node_identity(identity);
+        let debug_str = format!("{:?}", options);
+
+        assert!(debug_str.contains("did:key:"), "Debug should show DID");
     }
 }
