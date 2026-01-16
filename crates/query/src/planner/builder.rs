@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::fetcher::DocFetcher;
 use crate::mapper::{Requestable, Select};
 use crate::plan::{
     IndexScanNode, JoinSide, LimitNode, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
@@ -31,9 +32,15 @@ impl PlanResult {
 }
 
 /// Query planner that builds execution plans from Select operations.
+///
+/// The planner can optionally be configured with a `DocFetcher` to enable
+/// ScanNodes to load their own data during execution. Without a fetcher,
+/// ScanNodes must have their data pre-loaded via `with_docs()`.
 pub struct Planner {
     /// Available collection schemas by name
     collections: HashMap<String, Arc<CollectionVersion>>,
+    /// Optional fetcher for ScanNodes to load data on-demand
+    fetcher: Option<Arc<dyn DocFetcher>>,
 }
 
 impl Planner {
@@ -43,7 +50,19 @@ impl Planner {
             .into_iter()
             .map(|c| (c.name.clone(), Arc::new(c)))
             .collect();
-        Self { collections }
+        Self {
+            collections,
+            fetcher: None,
+        }
+    }
+
+    /// Set a document fetcher for on-demand data loading.
+    ///
+    /// When set, ScanNodes created by this planner will use the fetcher
+    /// to load documents during initialization if no docs are pre-loaded.
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
+        self.fetcher = Some(fetcher);
+        self
     }
 
     /// Build an execution plan from a Select operation.
@@ -81,10 +100,13 @@ impl Planner {
                     .with_show_deleted(select.show_deleted),
             )
         } else {
-            Box::new(
-                ScanNode::new((*collection).clone(), mapping.clone())
-                    .with_show_deleted(select.show_deleted),
-            )
+            let mut scan = ScanNode::new((*collection).clone(), mapping.clone())
+                .with_show_deleted(select.show_deleted);
+            // Attach fetcher if available for on-demand data loading
+            if let Some(ref fetcher) = self.fetcher {
+                scan = scan.with_fetcher(fetcher.clone());
+            }
+            Box::new(scan)
         };
 
         // 2. Apply filter if present (for ScanNode) or residual filter (for IndexScanNode)
@@ -189,8 +211,12 @@ impl Planner {
                 // Set up child mapping in parent
                 mapping.set_child_at(relation_field_index, child_mapping.clone());
 
-                // Create the child scan plan
-                let child_scan = ScanNode::new((*target_collection).clone(), child_mapping.clone());
+                // Create the child scan plan with fetcher for on-demand loading
+                let mut child_scan =
+                    ScanNode::new((*target_collection).clone(), child_mapping.clone());
+                if let Some(ref fetcher) = self.fetcher {
+                    child_scan = child_scan.with_fetcher(fetcher.clone());
+                }
 
                 // Wrap in SelectNode if there's a filter on the nested select
                 let child_plan: Box<dyn PlanNode> = if let Some(ref filter) = nested_select.filter {

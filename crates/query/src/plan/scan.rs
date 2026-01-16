@@ -1,11 +1,16 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
+use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
+use document::Document;
 use schema::CollectionVersion;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
+use crate::fetcher::DocFetcher;
+use crate::json_convert::normal_value_to_json;
 use crate::mapper::Filter;
 use crate::planner::{Doc, PlanNode};
 
@@ -13,6 +18,15 @@ use crate::planner::{Doc, PlanNode};
 ///
 /// This is the primary data source node in query plans.
 /// It reads documents from storage and yields them to parent nodes.
+///
+/// # Data Loading
+///
+/// ScanNode can obtain documents in two ways:
+/// 1. Pre-loaded via `with_docs()` - for testing or when data is already available
+/// 2. On-demand via a `DocFetcher` - fetches during `init()` if docs are empty
+///
+/// When a fetcher is provided and no docs are pre-loaded, the node will
+/// automatically fetch all documents from the collection during initialization.
 pub struct ScanNode {
     /// Collection schema
     collection: CollectionVersion,
@@ -30,6 +44,8 @@ pub struct ScanNode {
     position: usize,
     /// Whether the node has been initialized
     initialized: bool,
+    /// Optional fetcher for loading documents on-demand
+    fetcher: Option<Arc<dyn DocFetcher>>,
 }
 
 impl ScanNode {
@@ -44,6 +60,7 @@ impl ScanNode {
             docs: Vec::new(),
             position: 0,
             initialized: false,
+            fetcher: None,
         }
     }
 
@@ -65,9 +82,57 @@ impl ScanNode {
         self
     }
 
+    /// Set a document fetcher for on-demand data loading.
+    ///
+    /// When set, the node will fetch documents from storage during `init()`
+    /// if no documents were pre-loaded via `with_docs()`.
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
+        self.fetcher = Some(fetcher);
+        self
+    }
+
     /// Get the collection
     pub fn collection(&self) -> &CollectionVersion {
         &self.collection
+    }
+
+    /// Get the collection name
+    pub fn collection_name(&self) -> &str {
+        &self.collection.name
+    }
+
+    /// Convert storage Documents to plan Docs using the document mapping.
+    fn convert_documents(&self, docs: &[Document]) -> Result<Vec<Doc>> {
+        let mut result = Vec::with_capacity(docs.len());
+        for doc in docs {
+            result.push(self.document_to_plan_doc(doc)?);
+        }
+        Ok(result)
+    }
+
+    /// Convert a single storage Document to a plan Doc.
+    fn document_to_plan_doc(&self, doc: &Document) -> Result<Doc> {
+        let num_fields = self.document_mapping.next_index();
+        let mut fields: Vec<Option<JsonValue>> = vec![None; num_fields];
+
+        // Set _docID if present in mapping
+        if let Some(index) = self.document_mapping.first_index_of_name("_docID") {
+            if let Some(doc_id) = doc.id() {
+                fields[index] = Some(JsonValue::String(doc_id.to_string()));
+            }
+        }
+
+        // Set other fields
+        for field_name in doc.field_names() {
+            if let Some(index) = self.document_mapping.first_index_of_name(field_name) {
+                if let Some(value) = doc.get(field_name) {
+                    let json = normal_value_to_json(value)?;
+                    fields[index] = Some(json);
+                }
+            }
+        }
+
+        Ok(Doc::with_fields(fields))
     }
 }
 
@@ -75,6 +140,15 @@ impl ScanNode {
 impl PlanNode for ScanNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
+
+        // If docs are empty and we have a fetcher, load documents from storage
+        if self.docs.is_empty() {
+            if let Some(ref fetcher) = self.fetcher {
+                let storage_docs = fetcher.get_all(&self.collection.name).await?;
+                self.docs = self.convert_documents(&storage_docs)?;
+            }
+        }
+
         self.initialized = true;
         Ok(())
     }

@@ -27,7 +27,7 @@ use crate::plan::{
     LimitNode, MaxNode, MinNode, OrderByNode, ScanNode, SelectNode, SumNode, UpdateInput,
     UpdateNode, UpsertInput, UpsertNode,
 };
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, PlanNode, Planner};
 use crate::query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
 use crate::txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry,
@@ -133,6 +133,76 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         // Validate unsupported features and field references
         self.validate_select(select, collection)?;
 
+        // Check if this query has nested selections (relations)
+        let has_nested = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
+
+        if has_nested {
+            // Use the Planner for queries with nested selections (joins)
+            self.execute_nested_select_with_planner(select, fetcher)
+                .await
+        } else {
+            // Use the optimized path for simple queries
+            self.execute_simple_select(select, fetcher, collection)
+                .await
+        }
+    }
+
+    /// Execute a query with nested selections using the Planner.
+    ///
+    /// The Planner builds a proper join plan with TypeJoinOne/TypeJoinMany nodes.
+    /// ScanNodes fetch their own data via the attached fetcher.
+    async fn execute_nested_select_with_planner(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+    ) -> Result<JsonValue> {
+        // Create a fetcher wrapper that can be shared across plan nodes
+        // We need to wrap the reference in an Arc-compatible struct
+        let fetcher_arc = FetcherWrapper::new(fetcher);
+
+        // Build the plan using the Planner with fetcher support
+        let collections: Vec<CollectionVersion> = self
+            .collections
+            .values()
+            .map(|c| (**c).clone())
+            .collect();
+
+        let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        let plan_result = planner.plan_with_index_info(select)?;
+        let mut plan = plan_result.plan;
+
+        // Get the mapping from the plan
+        let mapping = plan.document_map().clone();
+
+        // Execute the plan and collect results
+        plan.init().await?;
+        plan.start().await?;
+
+        let mut results = Vec::new();
+
+        while plan.next().await? {
+            let doc = plan.value();
+            let json = self.doc_to_json(doc, &mapping)?;
+            results.push(json);
+        }
+
+        plan.close().await?;
+
+        Ok(JsonValue::Array(results))
+    }
+
+    /// Execute a simple query without nested selections.
+    ///
+    /// This is the optimized path that supports aggregations and grouping.
+    async fn execute_simple_select(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+        collection: &Arc<CollectionVersion>,
+    ) -> Result<JsonValue> {
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
             let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
@@ -411,16 +481,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             ));
         }
 
-        // Check for nested selections
-        for field in &select.fields {
-            if let Requestable::Select(nested) = field {
-                return Err(QueryError::execution(format!(
-                    "nested selections (relations) are not yet implemented; \
-                     remove the nested '{}' selection",
-                    nested.collection_name
-                )));
-            }
-        }
+        // Note: Nested selections (relations) are now supported via the Planner
 
         // Helper to check if a field exists in the collection schema
         let field_exists = |name: &str| -> bool {
@@ -865,6 +926,65 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
             schema_str.push_str("}\n\n");
         }
         Ok(schema_str)
+    }
+}
+
+/// Wrapper to convert a `&dyn DocFetcher` reference into an owned `DocFetcher`.
+///
+/// This allows passing a fetcher reference to the Planner, which requires
+/// `Arc<dyn DocFetcher>`. The wrapper is only valid for the duration of the
+/// query execution.
+///
+/// SAFETY: This is safe because the wrapper is only used within a single
+/// async function call, and the original fetcher reference outlives the wrapper.
+struct FetcherWrapper {
+    // Store data pointer and vtable separately to avoid lifetime issues with fat pointers
+    data_ptr: *const (),
+    vtable: *const (),
+}
+
+impl FetcherWrapper {
+    fn new(fetcher: &dyn DocFetcher) -> Self {
+        // Split the fat pointer into data and vtable components
+        // This avoids the lifetime issue with *const dyn Trait
+        let ptr = fetcher as *const dyn DocFetcher;
+        let (data_ptr, vtable) = unsafe {
+            std::mem::transmute::<*const dyn DocFetcher, (*const (), *const ())>(ptr)
+        };
+        Self { data_ptr, vtable }
+    }
+
+    fn get_fetcher(&self) -> &dyn DocFetcher {
+        // Reconstruct the fat pointer from data and vtable
+        let ptr = unsafe {
+            std::mem::transmute::<(*const (), *const ()), *const dyn DocFetcher>((
+                self.data_ptr,
+                self.vtable,
+            ))
+        };
+        unsafe { &*ptr }
+    }
+}
+
+// SAFETY: The raw pointer is only dereferenced within the same thread context
+// where the original reference was created, and within the same async task.
+unsafe impl Send for FetcherWrapper {}
+unsafe impl Sync for FetcherWrapper {}
+
+#[async_trait]
+impl DocFetcher for FetcherWrapper {
+    async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
+        self.get_fetcher().get_all(collection_name).await
+    }
+
+    async fn get_by_ids(
+        &self,
+        collection_name: &str,
+        doc_ids: &[String],
+    ) -> Result<FetchByIdsResult> {
+        self.get_fetcher()
+            .get_by_ids(collection_name, doc_ids)
+            .await
     }
 }
 
@@ -1399,7 +1519,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nested_selection_returns_error() {
+    async fn test_nested_selection_with_missing_relation_field() {
+        // Nested selections are now supported via the Planner.
+        // This test verifies that a query with nested selections fails gracefully
+        // when the relation field doesn't exist in the schema.
         let fetcher = MockFetcher::new();
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
@@ -1407,11 +1530,14 @@ mod tests {
             .execute_query("{ Users { name posts { title } } }")
             .await;
 
+        // Should fail because 'posts' is not a field in the Users collection
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("nested selections (relations) are not yet implemented"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("not found"),
+            "Expected field-not-found error, got: {}",
+            err
+        );
     }
 
     #[tokio::test]
