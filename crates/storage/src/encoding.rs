@@ -75,9 +75,9 @@ pub fn peek_type(buf: &[u8]) -> EncodedType {
         ENCODED_NULL | ENCODED_NULL_DESC => EncodedType::Null,
         BYTES_MARKER => EncodedType::Bytes,
         BYTES_DESC_MARKER => EncodedType::BytesDesc,
-        m if m >= INT_MIN && m <= INT_MAX => EncodedType::Int,
-        m if m >= FLOAT32_NAN && m <= FLOAT32_NAN_DESC => EncodedType::Float32,
-        m if m >= FLOAT64_NAN && m <= FLOAT64_NAN_DESC => EncodedType::Float64,
+        m if (INT_MIN..=INT_MAX).contains(&m) => EncodedType::Int,
+        m if (FLOAT32_NAN..=FLOAT32_NAN_DESC).contains(&m) => EncodedType::Float32,
+        m if (FLOAT64_NAN..=FLOAT64_NAN_DESC).contains(&m) => EncodedType::Float64,
         TIME_MARKER => EncodedType::Time,
         FALSE_MARKER | TRUE_MARKER => EncodedType::Bool,
         JSON_MARKER => EncodedType::Json,
@@ -451,7 +451,7 @@ pub fn decode_uvarint_descending(buf: &[u8]) -> Result<(&[u8], u64)> {
     let length = INT_ZERO as i16 - buf[0] as i16;
     let rest = &buf[1..];
 
-    if length < 0 || length > 8 {
+    if !(0..=8).contains(&length) {
         return Err(Error::Other(format!("invalid uvarint length: {}", length)));
     }
     if rest.len() < length as usize {

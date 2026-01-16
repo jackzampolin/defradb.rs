@@ -20,37 +20,8 @@ use schema::FieldKind;
 use crate::corekv::Result;
 use crate::encoding::{self, EncodedType};
 
-/// An indexed field with value and sort direction.
-#[derive(Debug, Clone)]
-pub struct IndexedField {
-    /// The field value
-    pub value: NormalValue,
-    /// Whether this field is indexed in descending order
-    pub descending: bool,
-}
-
-impl IndexedField {
-    /// Create a new indexed field
-    pub fn new(value: NormalValue, descending: bool) -> Self {
-        Self { value, descending }
-    }
-
-    /// Create an ascending indexed field
-    pub fn ascending(value: NormalValue) -> Self {
-        Self {
-            value,
-            descending: false,
-        }
-    }
-
-    /// Create a descending indexed field
-    pub fn descending(value: NormalValue) -> Self {
-        Self {
-            value,
-            descending: true,
-        }
-    }
-}
+// Re-export IndexedField from its canonical location
+pub use crate::keys::datastore::IndexedField;
 
 /// Encode a NormalValue to bytes using order-preserving encoding.
 ///

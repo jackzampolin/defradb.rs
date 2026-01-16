@@ -113,6 +113,18 @@ impl SimpleIndex {
         self.desc.id
     }
 
+    /// Validate that the number of values matches the index field count.
+    fn validate_field_count(&self, values: &[NormalValue]) -> Result<()> {
+        if values.len() != self.desc.fields.len() {
+            return Err(crate::corekv::Error::Other(format!(
+                "index field count mismatch: expected {} fields, got {}",
+                self.desc.fields.len(),
+                values.len()
+            )));
+        }
+        Ok(())
+    }
+
     /// Build the index key for a document with the given field values.
     fn build_key(&self, values: &[NormalValue], doc_id: &str) -> Vec<u8> {
         let fields = self.build_indexed_fields(values);
@@ -146,6 +158,7 @@ impl CollectionIndex for SimpleIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        self.validate_field_count(values)?;
         let key = self.build_key(values, doc_id);
         txn.set(&key, &[]).await
     }
@@ -157,6 +170,9 @@ impl CollectionIndex for SimpleIndex {
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()> {
+        self.validate_field_count(old_values)?;
+        self.validate_field_count(new_values)?;
+
         // Delete old entry
         let old_key = self.build_key(old_values, doc_id);
         txn.delete(&old_key).await?;
@@ -172,6 +188,7 @@ impl CollectionIndex for SimpleIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        self.validate_field_count(values)?;
         let key = self.build_key(values, doc_id);
         txn.delete(&key).await
     }
@@ -224,6 +241,18 @@ impl UniqueIndex {
         self.desc.id
     }
 
+    /// Validate that the number of values matches the index field count.
+    fn validate_field_count(&self, values: &[NormalValue]) -> Result<()> {
+        if values.len() != self.desc.fields.len() {
+            return Err(crate::corekv::Error::Other(format!(
+                "index field count mismatch: expected {} fields, got {}",
+                self.desc.fields.len(),
+                values.len()
+            )));
+        }
+        Ok(())
+    }
+
     /// Check if all values are nil (special case for unique index with NULL).
     fn all_nil(values: &[NormalValue]) -> bool {
         values.iter().all(|v| v.is_nil())
@@ -266,6 +295,8 @@ impl CollectionIndex for UniqueIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        self.validate_field_count(values)?;
+
         // Special case: if all values are nil, allow multiple entries
         // by appending doc_id to the key (like SimpleIndex)
         if Self::all_nil(values) {
@@ -298,7 +329,26 @@ impl CollectionIndex for UniqueIndex {
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()> {
-        // Delete old entry
+        self.validate_field_count(old_values)?;
+        self.validate_field_count(new_values)?;
+
+        // Check uniqueness of new values BEFORE deleting old entry
+        // This prevents data loss if the uniqueness check fails
+        if !Self::all_nil(new_values) {
+            let new_key = self.build_key(new_values);
+            if let Some(existing) = txn.get(&new_key).await? {
+                let existing_doc_id = String::from_utf8(existing)
+                    .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
+                if existing_doc_id != doc_id {
+                    return Err(crate::corekv::Error::Other(format!(
+                        "unique index constraint violation: value already exists for document '{}'",
+                        existing_doc_id
+                    )));
+                }
+            }
+        }
+
+        // Delete old entry (safe now that we've validated the new values)
         if Self::all_nil(old_values) {
             let old_key = self.build_key_with_doc_id(old_values, doc_id);
             txn.delete(&old_key).await?;
@@ -307,8 +357,14 @@ impl CollectionIndex for UniqueIndex {
             txn.delete(&old_key).await?;
         }
 
-        // Insert new entry (with uniqueness check)
-        self.save(txn, doc_id, new_values).await
+        // Insert new entry
+        if Self::all_nil(new_values) {
+            let key = self.build_key_with_doc_id(new_values, doc_id);
+            txn.set(&key, &[]).await
+        } else {
+            let key = self.build_key(new_values);
+            txn.set(&key, doc_id.as_bytes()).await
+        }
     }
 
     async fn delete<T: Reader + Writer + Send>(
@@ -317,6 +373,8 @@ impl CollectionIndex for UniqueIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        self.validate_field_count(values)?;
+
         if Self::all_nil(values) {
             let key = self.build_key_with_doc_id(values, doc_id);
             txn.delete(&key).await
