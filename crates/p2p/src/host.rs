@@ -14,6 +14,7 @@
 //! handles peer connections, and coordinates CRDT synchronization.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cid::Cid;
@@ -28,8 +29,10 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::behaviour::{DefraBehaviour, DefraEvent};
+use crate::bitswap::ReplicatorRegistry;
 use crate::error::{Error, Result};
 use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
+use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
 
 /// Default idle connection timeout.
@@ -117,6 +120,35 @@ pub enum HostCommand {
     BitswapCancel {
         query_id: QueryId,
         response: oneshot::Sender<bool>,
+    },
+
+    /// Set (add/update) a replicator.
+    ///
+    /// Adds the peer as a replicator for the specified collections.
+    /// If the peer is already a replicator, updates their collections.
+    SetReplicator {
+        peer_id: PeerId,
+        collections: Vec<String>,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Delete a replicator.
+    ///
+    /// Removes the peer from all collections they were replicating.
+    DeleteReplicator {
+        peer_id: PeerId,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Get all registered replicators.
+    GetAllReplicators {
+        response: oneshot::Sender<Vec<ReplicatorInfo>>,
+    },
+
+    /// Get replicator info for a specific peer.
+    GetReplicator {
+        peer_id: PeerId,
+        response: oneshot::Sender<Option<ReplicatorInfo>>,
     },
 }
 
@@ -406,6 +438,65 @@ impl P2PHostHandle {
             .map_err(|_| Error::ChannelSend)?;
         response_rx.await.map_err(|_| Error::ChannelReceive)
     }
+
+    /// Set (add/update) a replicator.
+    ///
+    /// Adds the peer as a replicator for the specified collections.
+    /// If the peer is already a replicator, updates their collections.
+    pub async fn set_replicator(&self, peer_id: PeerId, collections: Vec<String>) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SetReplicator {
+                peer_id,
+                collections,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Delete a replicator.
+    ///
+    /// Removes the peer from all collections they were replicating.
+    pub async fn delete_replicator(&self, peer_id: PeerId) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::DeleteReplicator {
+                peer_id,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Get all registered replicators.
+    pub async fn get_all_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::GetAllReplicators {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
+    }
+
+    /// Get replicator info for a specific peer.
+    ///
+    /// Returns None if the peer is not a replicator.
+    pub async fn get_replicator(&self, peer_id: PeerId) -> Result<Option<ReplicatorInfo>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::GetReplicator {
+                peer_id,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
+    }
 }
 
 /// P2P Host that manages the libp2p swarm.
@@ -416,6 +507,8 @@ pub struct P2PHost {
     event_tx: mpsc::Sender<HostEvent>,
     pending_requests:
         HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<PushLogReply>>>,
+    /// Replicator registry for access control
+    replicators: Arc<ReplicatorRegistry>,
 }
 
 impl P2PHost {
@@ -424,9 +517,19 @@ impl P2PHost {
     /// # Arguments
     ///
     /// * `bitswap_store` - The blockstore for Bitswap block exchange
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (P2PHost, P2PHostHandle, HostEvent receiver, ReplicatorRegistry).
+    /// The ReplicatorRegistry is shared and can be used for access control decisions.
     pub fn new<S: BitswapStore<Params = DefaultParams>>(
         bitswap_store: S,
-    ) -> Result<(Self, P2PHostHandle, mpsc::Receiver<HostEvent>)> {
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
         let keypair = Keypair::generate_ed25519();
         Self::with_keypair(keypair, bitswap_store)
     }
@@ -438,6 +541,11 @@ impl P2PHost {
     /// * `keypair` - The identity keypair for this node
     /// * `bitswap_store` - The blockstore for Bitswap block exchange
     ///
+    /// # Returns
+    ///
+    /// A tuple of (P2PHost, P2PHostHandle, HostEvent receiver, ReplicatorRegistry).
+    /// The ReplicatorRegistry is shared and can be used for access control decisions.
+    ///
     /// # Note
     ///
     /// This must be called within a tokio runtime context as Bitswap spawns
@@ -445,7 +553,12 @@ impl P2PHost {
     pub fn with_keypair<S: BitswapStore<Params = DefaultParams>>(
         keypair: Keypair,
         bitswap_store: S,
-    ) -> Result<(Self, P2PHostHandle, mpsc::Receiver<HostEvent>)> {
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
         let local_peer_id = keypair.public().to_peer_id();
         let local_public_key = keypair.public();
 
@@ -478,15 +591,19 @@ impl P2PHost {
 
         let handle = P2PHostHandle { command_tx };
 
+        // Create the replicator registry for access control
+        let replicators = Arc::new(ReplicatorRegistry::new());
+
         let host = Self {
             swarm,
             keypair,
             command_rx,
             event_tx,
             pending_requests: HashMap::new(),
+            replicators: Arc::clone(&replicators),
         };
 
-        Ok((host, handle, event_rx))
+        Ok((host, handle, event_rx, replicators))
     }
 
     /// Get the local peer ID.
@@ -688,6 +805,45 @@ impl P2PHost {
                 let cancelled = self.swarm.behaviour_mut().bitswap_cancel(query_id);
                 if response.send(cancelled).is_err() {
                     debug!(query_id = ?query_id, "BitswapCancel command response dropped - caller cancelled");
+                }
+            }
+
+            HostCommand::SetReplicator {
+                peer_id,
+                collections,
+                response,
+            } => {
+                debug!(peer_id = %peer_id, collections = ?collections, "Setting replicator");
+                // First remove peer from all existing collections
+                self.replicators.remove_peer(&peer_id);
+                // Then add to the new collections
+                for collection_id in &collections {
+                    self.replicators.add_replicator(collection_id, peer_id);
+                }
+                if response.send(Ok(())).is_err() {
+                    debug!(peer_id = %peer_id, "SetReplicator command response dropped - caller cancelled");
+                }
+            }
+
+            HostCommand::DeleteReplicator { peer_id, response } => {
+                debug!(peer_id = %peer_id, "Deleting replicator");
+                self.replicators.remove_peer(&peer_id);
+                if response.send(Ok(())).is_err() {
+                    debug!(peer_id = %peer_id, "DeleteReplicator command response dropped - caller cancelled");
+                }
+            }
+
+            HostCommand::GetAllReplicators { response } => {
+                let infos = self.replicators.get_all_replicator_info();
+                if response.send(infos).is_err() {
+                    debug!("GetAllReplicators command response dropped - caller cancelled");
+                }
+            }
+
+            HostCommand::GetReplicator { peer_id, response } => {
+                let info = self.replicators.get_replicator_info(&peer_id);
+                if response.send(info).is_err() {
+                    debug!(peer_id = %peer_id, "GetReplicator command response dropped - caller cancelled");
                 }
             }
         }
@@ -1161,9 +1317,54 @@ mod tests {
         let result = P2PHost::new(store);
         assert!(result.is_ok());
 
-        let (host, handle, _events) = result.unwrap();
+        let (host, handle, _events, _replicators) = result.unwrap();
         let peer_id = host.local_peer_id();
         assert_ne!(peer_id.to_string(), "");
+
+        // Shutdown
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_replicator_management() {
+        let store = MockBitswapStore::new();
+        let (host, handle, _events, replicators) = P2PHost::new(store).unwrap();
+
+        // Spawn the host
+        tokio::spawn(host.run());
+
+        let peer_id = PeerId::random();
+        let collections = vec!["users".to_string(), "posts".to_string()];
+
+        // Set replicator
+        handle
+            .set_replicator(peer_id, collections.clone())
+            .await
+            .unwrap();
+
+        // Get replicator
+        let info = handle.get_replicator(peer_id).await.unwrap();
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.peer_id(), Some(peer_id));
+        assert_eq!(info.collections.len(), 2);
+
+        // Verify in registry
+        assert!(replicators.is_replicator("users", &peer_id));
+        assert!(replicators.is_replicator("posts", &peer_id));
+
+        // Get all replicators
+        let all = handle.get_all_replicators().await.unwrap();
+        assert_eq!(all.len(), 1);
+
+        // Delete replicator
+        handle.delete_replicator(peer_id).await.unwrap();
+
+        // Verify deleted
+        let info = handle.get_replicator(peer_id).await.unwrap();
+        assert!(info.is_none());
+
+        assert!(!replicators.is_replicator("users", &peer_id));
 
         // Shutdown
         handle.shutdown().await.unwrap();

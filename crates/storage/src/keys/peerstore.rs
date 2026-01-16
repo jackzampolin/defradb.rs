@@ -12,21 +12,58 @@ use crate::corekv::Key;
 /// Example: /rep/id/replicator_user_collection_peer1
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicatorKey {
-    /// Unique replicator identifier
-    pub replicator_id: String,
+    /// Unique replicator identifier (private to prevent construction of invalid keys)
+    replicator_id: String,
 }
 
+/// The prefix used for all replicator keys.
+const REPLICATOR_PREFIX: &str = "/rep/id/";
+
 impl ReplicatorKey {
-    /// Create a new ReplicatorKey
+    /// Create a new ReplicatorKey.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `replicator_id` is empty. Use `try_new` for fallible construction.
     pub fn new(replicator_id: impl Into<String>) -> Self {
-        Self {
-            replicator_id: replicator_id.into(),
+        let id = replicator_id.into();
+        assert!(!id.is_empty(), "replicator_id cannot be empty");
+        Self { replicator_id: id }
+    }
+
+    /// Try to create a new ReplicatorKey, returning None if the ID is empty.
+    pub fn try_new(replicator_id: impl Into<String>) -> Option<Self> {
+        let id = replicator_id.into();
+        if id.is_empty() {
+            None
+        } else {
+            Some(Self { replicator_id: id })
         }
+    }
+
+    /// Parse a ReplicatorKey from its byte representation.
+    ///
+    /// Returns None if the bytes don't represent a valid replicator key.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let s = std::str::from_utf8(bytes).ok()?;
+        let id = s.strip_prefix(REPLICATOR_PREFIX)?;
+        if id.is_empty() {
+            None
+        } else {
+            Some(Self {
+                replicator_id: id.to_string(),
+            })
+        }
+    }
+
+    /// Get the replicator ID.
+    pub fn replicator_id(&self) -> &str {
+        &self.replicator_id
     }
 
     /// Create a prefix for all replicators
     pub fn replicator_prefix() -> Vec<u8> {
-        b"/rep/id/".to_vec()
+        REPLICATOR_PREFIX.as_bytes().to_vec()
     }
 }
 
@@ -193,9 +230,62 @@ mod tests {
         let key = ReplicatorKey::new("replicator_user_collection_peer1");
         assert_eq!(key.to_string(), "/rep/id/replicator_user_collection_peer1");
         assert_eq!(key.bytes(), key.to_string().as_bytes());
+        assert_eq!(key.replicator_id(), "replicator_user_collection_peer1");
 
         let prefix = ReplicatorKey::replicator_prefix();
         assert_eq!(prefix, b"/rep/id/");
+    }
+
+    #[test]
+    fn test_replicator_key_try_new() {
+        // Valid ID
+        let key = ReplicatorKey::try_new("valid_id");
+        assert!(key.is_some());
+        assert_eq!(key.unwrap().replicator_id(), "valid_id");
+
+        // Empty ID should fail
+        let key = ReplicatorKey::try_new("");
+        assert!(key.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "replicator_id cannot be empty")]
+    fn test_replicator_key_new_empty_panics() {
+        let _ = ReplicatorKey::new("");
+    }
+
+    #[test]
+    fn test_replicator_key_from_bytes() {
+        // Valid key bytes
+        let key_bytes = b"/rep/id/peer123";
+        let key = ReplicatorKey::from_bytes(key_bytes);
+        assert!(key.is_some());
+        assert_eq!(key.unwrap().replicator_id(), "peer123");
+
+        // Missing prefix
+        let key = ReplicatorKey::from_bytes(b"peer123");
+        assert!(key.is_none());
+
+        // Empty ID after prefix
+        let key = ReplicatorKey::from_bytes(b"/rep/id/");
+        assert!(key.is_none());
+
+        // Invalid UTF-8
+        let key = ReplicatorKey::from_bytes(&[0xFF, 0xFE]);
+        assert!(key.is_none());
+
+        // Wrong prefix
+        let key = ReplicatorKey::from_bytes(b"/other/prefix/peer123");
+        assert!(key.is_none());
+    }
+
+    #[test]
+    fn test_replicator_key_roundtrip() {
+        let original = ReplicatorKey::new("my_peer_id");
+        let bytes = original.bytes();
+        let restored = ReplicatorKey::from_bytes(&bytes);
+        assert!(restored.is_some());
+        assert_eq!(restored.unwrap(), original);
     }
 
     #[test]

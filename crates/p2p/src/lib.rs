@@ -69,6 +69,7 @@ pub mod error;
 pub mod host;
 pub mod message;
 pub mod protocol;
+pub mod replicator;
 pub mod signing;
 pub mod sync;
 #[cfg(any(test, feature = "test-utils"))]
@@ -96,8 +97,8 @@ pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
 
 // Re-export sync types
 pub use sync::{
-    Broadcaster, DagSync, DagSyncConfig, DagSyncState, ProcessQueue, SyncConfig, SyncCoordinator,
-    SyncEvent, SyncManager, SyncPlan,
+    Broadcaster, DagSync, DagSyncConfig, DagSyncState, LoadReplicatorsResult, ProcessQueue,
+    SetReplicatorResult, SyncConfig, SyncCoordinator, SyncEvent, SyncManager, SyncPlan,
 };
 
 // Re-export bitswap types
@@ -105,6 +106,9 @@ pub use bitswap::{
     AccessMode, BitswapStoreAdapter, BlockAccessController, BlockAccessFn, ReplicatorRegistry,
 };
 pub use libp2p_bitswap_next::{BitswapStore, QueryId};
+
+// Re-export replicator types
+pub use replicator::ReplicatorInfo;
 
 // Re-export commonly used libp2p types
 pub use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};
