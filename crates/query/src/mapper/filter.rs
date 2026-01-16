@@ -124,6 +124,11 @@ impl Filter {
         self.conditions.is_empty()
     }
 
+    /// Get a reference to the conditions map
+    pub fn conditions(&self) -> &HashMap<String, JsonValue> {
+        &self.conditions
+    }
+
     /// Get all field names referenced by this filter
     pub fn referenced_fields(&self) -> Vec<String> {
         let mut fields = Vec::new();

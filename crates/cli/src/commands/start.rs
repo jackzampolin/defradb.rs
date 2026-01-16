@@ -20,6 +20,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{Config, DatastoreType};
 use crate::error::{Error, Result};
+use identity::Identity;
 
 const DEV_MODE_BANNER: &str = r#"
 ******************************************
@@ -94,9 +95,19 @@ pub struct StartArgs {
     #[arg(long)]
     pub no_searchable_encryption: Option<bool>,
 
-    /// Hex formatted private key used to authenticate with ACP
+    /// Hex formatted private key used to authenticate with ACP.
+    ///
+    /// The key should be a 64-byte hex string (128 hex characters) for Ed25519,
+    /// or a 32-byte hex string (64 hex characters) for secp256k1.
+    ///
+    /// Example: defra start --identity 0x<hex-encoded-private-key>
     #[arg(short = 'i', long)]
     pub identity: Option<String>,
+
+    /// Key type for the identity (ed25519 or secp256k1).
+    /// Only used if --identity is provided.
+    #[arg(long, default_value = "ed25519")]
+    pub identity_key_type: Option<String>,
 
     /// Retry intervals for the replicator (comma-separated seconds)
     #[arg(long, value_delimiter = ',')]
@@ -117,9 +128,50 @@ impl StartArgs {
             eprintln!("{}", DEV_MODE_BANNER);
         }
 
+        // Parse user identity from --identity flag if provided
+        let user_identity = self.parse_user_identity()?;
+
         // Start the node
-        let node = Node::new(config).await?;
+        let node = Node::new(config, user_identity).await?;
         node.run().await
+    }
+
+    /// Parse the user identity from the --identity flag.
+    ///
+    /// The identity flag should contain a hex-encoded private key.
+    /// Supported formats:
+    /// - Ed25519: 64-byte key (128 hex chars) or 32-byte seed (64 hex chars)
+    /// - secp256k1: 32-byte key (64 hex chars)
+    fn parse_user_identity(&self) -> Result<Option<std::sync::Arc<identity::RawIdentity>>> {
+        let hex_key = match &self.identity {
+            Some(key) => key,
+            None => return Ok(None),
+        };
+
+        // Remove 0x prefix if present
+        let hex_str = hex_key.strip_prefix("0x").unwrap_or(hex_key);
+
+        // Decode hex to bytes
+        let key_bytes = hex::decode(hex_str).map_err(|e| {
+            Error::InvalidIdentity(format!("invalid hex in --identity flag: {}", e))
+        })?;
+
+        // Determine key type
+        let key_type_str = self.identity_key_type.as_deref().unwrap_or("ed25519");
+        let key_type: identity::IdentityKeyType = key_type_str.parse().map_err(|_| {
+            Error::InvalidIdentity(format!(
+                "invalid --identity-key-type '{}': expected 'ed25519' or 'secp256k1'",
+                key_type_str
+            ))
+        })?;
+
+        // Create identity from bytes
+        let raw_identity = identity::RawIdentity::from_identity_key_type(key_type, &key_bytes)?;
+
+        let did = raw_identity.did()?;
+        info!("User identity DID: {}", did);
+
+        Ok(Some(std::sync::Arc::new(raw_identity)))
     }
 
     /// Apply start command flags to config
@@ -201,6 +253,7 @@ mod tests {
             default_key_type: None,
             no_searchable_encryption: None,
             identity: None,
+            identity_key_type: None,
             replicator_retry_intervals: None,
         }
     }
@@ -269,7 +322,8 @@ mod tests {
             no_signing: Some(true),
             default_key_type: Some("ed25519".to_string()),
             no_searchable_encryption: Some(true),
-            identity: None, // not yet implemented, see issue #23
+            identity: None, // identity is handled in Node::new, not apply_to_config
+            identity_key_type: None,
             replicator_retry_intervals: Some(vec![10, 20, 30]),
         };
 
@@ -302,11 +356,18 @@ struct Node {
     http_server: Option<defra_http::Server>,
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: mpsc::Receiver<()>,
+    /// User identity from --identity flag (for ACP authentication).
+    /// Stored for future use in request context injection.
+    #[allow(dead_code)]
+    user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
 }
 
 impl Node {
     /// Create a new node
-    async fn new(config: Config) -> Result<Self> {
+    async fn new(
+        config: Config,
+        user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
+    ) -> Result<Self> {
         info!("Initializing DefraDB node");
         info!("Root directory: {}", config.rootdir.display());
         info!("Data directory: {}", config.data_path().display());
@@ -326,7 +387,8 @@ impl Node {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
-                Self::init_store_and_server(store, &config, peer_keypair).await?
+                Self::init_store_and_server(store, &config, peer_keypair, user_identity.clone())
+                    .await?
             }
             DatastoreType::Badger => {
                 info!(
@@ -334,7 +396,8 @@ impl Node {
                     config.data_path().display()
                 );
                 let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
-                Self::init_store_and_server(store, &config, peer_keypair).await?
+                Self::init_store_and_server(store, &config, peer_keypair, user_identity.clone())
+                    .await?
             }
         };
 
@@ -346,6 +409,7 @@ impl Node {
             http_server: Some(http_server),
             shutdown_tx,
             shutdown_rx,
+            user_identity,
         })
     }
 
@@ -377,6 +441,7 @@ impl Node {
         match kr.get(PEER_KEY) {
             Ok(key_bytes) => {
                 info!("Loaded existing peer key from keyring");
+                Self::derive_and_log_identity_did(&key_bytes)?;
                 Self::keypair_from_ed25519_bytes(&key_bytes)
             }
             Err(keyring::Error::NotFound(_)) => {
@@ -390,10 +455,30 @@ impl Node {
                 kr.set(PEER_KEY, &key_bytes)
                     .map_err(|e| Error::Keyring(e.to_string()))?;
 
+                Self::derive_and_log_identity_did(&key_bytes)?;
                 Self::keypair_from_ed25519_bytes(&key_bytes)
             }
             Err(e) => Err(Error::Keyring(e.to_string())),
         }
+    }
+
+    /// Derive and log the node's DID from peer key bytes.
+    ///
+    /// Creates a RawIdentity from the key bytes, derives its DID, and logs it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if identity creation or DID derivation fails, which
+    /// indicates corrupted key material or a crypto library failure.
+    fn derive_and_log_identity_did(key_bytes: &[u8]) -> Result<()> {
+        use identity::{Identity, IdentityKeyType, RawIdentity};
+
+        let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, key_bytes)?;
+        let did = identity
+            .did()
+            .map_err(|e| Error::Keyring(format!("failed to derive DID: {}", e)))?;
+        info!("Node identity DID: {}", did);
+        Ok(())
     }
 
     /// Convert Ed25519 key bytes to libp2p Keypair.
@@ -430,13 +515,21 @@ impl Node {
         store: Arc<S>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
+        user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
     ) -> Result<(Option<p2p::P2PHostHandle>, defra_http::Server)>
     where
         S: storage::corekv::Store + 'static,
     {
+        // Build database options with optional user identity
+        let mut db_options = db::DbOptions::new();
+        if let Some(identity) = user_identity {
+            db_options = db_options.with_node_identity_arc(identity);
+            info!("Database configured with user identity");
+        }
+
         // Open database and load collections from storage
         let database = Arc::new(
-            db::DB::open_from_arc(store.clone())
+            db::DB::open_from_arc_with_options(store.clone(), db_options)
                 .await
                 .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?,
         );
@@ -790,7 +883,7 @@ mod http_integration_tests {
         let api_url = format!("http://127.0.0.1:{}", port);
 
         // Create node
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
 
         // Get shutdown sender before moving node
         let shutdown_tx = node.shutdown_tx.clone();
@@ -830,7 +923,7 @@ mod http_integration_tests {
         let config = test_config(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
 
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -869,7 +962,7 @@ mod http_integration_tests {
         let config = test_config(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
 
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -908,7 +1001,7 @@ mod http_integration_tests {
         let config = test_config(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
 
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -975,7 +1068,7 @@ mod http_integration_tests {
         let api_url = format!("http://127.0.0.1:{}", port);
 
         // Create node with RocksDB backend
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1093,7 +1186,7 @@ mod http_integration_tests {
         };
 
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1170,7 +1263,7 @@ mod http_integration_tests {
         // Phase 2: Start server and create document via mutation
         let config = test_config_rocksdb(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1281,7 +1374,7 @@ mod http_integration_tests {
         // Phase 2: Start server and update the document
         let config = test_config_rocksdb(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1393,7 +1486,7 @@ mod http_integration_tests {
         // Phase 2: Start server and delete one document
         let config = test_config_rocksdb(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1469,7 +1562,7 @@ mod http_integration_tests {
 
         let config = test_config_rocksdb(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1556,7 +1649,7 @@ mod http_integration_tests {
 
         let config = test_config_rocksdb(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1644,7 +1737,7 @@ mod http_integration_tests {
 
         let config = test_config_rocksdb(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });
@@ -1704,7 +1797,7 @@ mod http_integration_tests {
 
         let config = test_config(port, temp_dir.path());
         let api_url = format!("http://127.0.0.1:{}", port);
-        let node = Node::new(config).await.unwrap();
+        let node = Node::new(config, None).await.unwrap();
         let shutdown_tx = node.shutdown_tx.clone();
 
         let node_handle = tokio::spawn(async move { node.run().await });

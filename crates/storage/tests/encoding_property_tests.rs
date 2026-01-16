@@ -433,7 +433,18 @@ fn test_varint_boundary_values() {
 
 #[test]
 fn test_uvarint_boundary_values() {
-    let boundary_values = vec![0u64, 1, 127, 128, 255, 256, 65535, 65536, u64::MAX - 1, u64::MAX];
+    let boundary_values = vec![
+        0u64,
+        1,
+        127,
+        128,
+        255,
+        256,
+        65535,
+        65536,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
 
     for v in boundary_values {
         let encoded = encoding::encode_uvarint_ascending(vec![], v);

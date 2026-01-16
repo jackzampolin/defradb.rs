@@ -28,11 +28,32 @@
 //!
 //! For SimpleIndex, the document ID is appended to the key.
 //! For UniqueIndex, the document ID is stored as the value.
+//!
+//! # Query Execution
+//!
+//! Index iterators support:
+//! - Exact match (`get`): Find entries with exact field values
+//! - Prefix scan (`scan_prefix`): Find entries matching first N fields
+//! - Range scan (`scan_range`): Find entries within a range of values
+//! - Full scan (`scan`): Iterate all index entries
 
+mod eq_iterator;
+mod in_iterator;
+mod iterator;
+mod matcher;
+mod range_iterator;
 mod simple;
 mod traits;
 mod unique;
 
+pub use eq_iterator::ExactMatchIterator;
+pub use in_iterator::InIterator;
+pub use iterator::{Bound, IndexEntry, IndexIterator};
+pub use matcher::{
+    EqMatcher, GtMatcher, InMatcher, IndexMatcher, LikeMatcher, LtMatcher, NeMatcher, NinMatcher,
+    NlikeMatcher,
+};
+pub use range_iterator::RangeIterator;
 pub use simple::SimpleIndex;
 pub use traits::CollectionIndex;
 pub use unique::UniqueIndex;
@@ -41,6 +62,21 @@ use document::NormalValue;
 use schema::IndexDescription;
 
 use crate::corekv::{Reader, Result, Writer};
+
+/// Validate that a document ID is valid for use in index keys.
+///
+/// Checks that the doc_id is:
+/// - Not empty
+/// - Valid UTF-8 (guaranteed by &str type parameter)
+pub(crate) fn validate_doc_id(doc_id: &str, index_name: &str) -> Result<()> {
+    if doc_id.is_empty() {
+        return Err(crate::corekv::Error::Other(format!(
+            "index '{}': doc_id cannot be empty",
+            index_name
+        )));
+    }
+    Ok(())
+}
 
 /// Enum for index types (avoids dyn trait issues).
 pub enum IndexType {
@@ -111,6 +147,60 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.remove_all(txn).await,
             IndexType::Unique(idx) => idx.remove_all(txn).await,
+        }
+    }
+
+    /// Get all entries with exact field values.
+    pub async fn get<R: Reader + Send>(
+        &self,
+        txn: &R,
+        values: &[NormalValue],
+    ) -> Result<ExactMatchIterator> {
+        match self {
+            IndexType::Simple(idx) => idx.get(txn, values).await,
+            IndexType::Unique(idx) => idx.get(txn, values).await,
+        }
+    }
+
+    /// Scan all entries in the index.
+    pub async fn scan<R: Reader + Send>(&self, txn: &R, reverse: bool) -> Result<RangeIterator> {
+        match self {
+            IndexType::Simple(idx) => idx.scan(txn, reverse).await,
+            IndexType::Unique(idx) => idx.scan(txn, reverse).await,
+        }
+    }
+
+    /// Scan entries with a prefix match on the first N fields.
+    pub async fn scan_prefix<R: Reader + Send>(
+        &self,
+        txn: &R,
+        prefix_values: &[NormalValue],
+        reverse: bool,
+    ) -> Result<RangeIterator> {
+        match self {
+            IndexType::Simple(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
+            IndexType::Unique(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
+        }
+    }
+
+    /// Scan entries within a range on a field.
+    pub async fn scan_range<R: Reader + Send>(
+        &self,
+        txn: &R,
+        prefix_values: &[NormalValue],
+        lower: Bound,
+        upper: Bound,
+        reverse: bool,
+    ) -> Result<RangeIterator> {
+        match self {
+            IndexType::Simple(idx) => {
+                idx.scan_range(txn, prefix_values, lower, upper, reverse)
+                    .await
+            }
+            IndexType::Unique(idx) => {
+                idx.scan_range(txn, prefix_values, lower, upper, reverse)
+                    .await
+            }
         }
     }
 }

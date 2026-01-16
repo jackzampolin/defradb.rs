@@ -99,4 +99,10 @@ pub enum Error {
 
     #[error("keyring error: {0}")]
     Keyring(String),
+
+    #[error("identity error: {0}")]
+    Identity(#[from] identity::Error),
+
+    #[error("invalid identity: {0}")]
+    InvalidIdentity(String),
 }

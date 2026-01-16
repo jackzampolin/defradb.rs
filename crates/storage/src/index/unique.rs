@@ -14,6 +14,10 @@ use async_trait::async_trait;
 use document::NormalValue;
 use schema::IndexDescription;
 
+use super::eq_iterator::ExactMatchIterator;
+use super::iterator::Bound;
+use super::range_iterator::RangeIterator;
+use super::validate_doc_id;
 use super::CollectionIndex;
 use crate::corekv::{IterOptions, Reader, Result, Writer};
 use crate::keys::datastore::IndexedField;
@@ -120,6 +124,71 @@ impl UniqueIndex {
             .map(|(value, field_desc)| IndexedField::new(value.clone(), field_desc.descending))
             .collect()
     }
+
+    /// Get the entry with exact field values.
+    ///
+    /// Returns an iterator that yields at most one document (uniqueness constraint).
+    /// For NULL values, multiple documents may be returned (NULL is not unique).
+    pub async fn get<R: Reader + Send>(
+        &self,
+        txn: &R,
+        values: &[NormalValue],
+    ) -> Result<ExactMatchIterator> {
+        ExactMatchIterator::new_unique(txn, self.collection_short_id, &self.desc, values).await
+    }
+
+    /// Scan all entries in the index.
+    ///
+    /// Returns an iterator over all index entries in order (or reverse order).
+    pub async fn scan<R: Reader + Send>(&self, txn: &R, reverse: bool) -> Result<RangeIterator> {
+        RangeIterator::new_scan(txn, self.collection_short_id, &self.desc, true, reverse).await
+    }
+
+    /// Scan entries with a prefix match on the first N fields.
+    ///
+    /// Returns entries where the first `prefix_values.len()` fields match exactly.
+    /// Useful for composite indexes.
+    pub async fn scan_prefix<R: Reader + Send>(
+        &self,
+        txn: &R,
+        prefix_values: &[NormalValue],
+        reverse: bool,
+    ) -> Result<RangeIterator> {
+        RangeIterator::new_prefix(
+            txn,
+            self.collection_short_id,
+            &self.desc,
+            true,
+            prefix_values,
+            reverse,
+        )
+        .await
+    }
+
+    /// Scan entries within a range on a field.
+    ///
+    /// Optionally match first `prefix_values.len()` fields exactly,
+    /// then apply bounds on the next field.
+    pub async fn scan_range<R: Reader + Send>(
+        &self,
+        txn: &R,
+        prefix_values: &[NormalValue],
+        lower: Bound,
+        upper: Bound,
+        reverse: bool,
+    ) -> Result<RangeIterator> {
+        RangeIterator::new_range(
+            txn,
+            self.collection_short_id,
+            &self.desc,
+            true,
+            prefix_values,
+            lower,
+            upper,
+            reverse,
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -134,6 +203,7 @@ impl CollectionIndex for UniqueIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        validate_doc_id(doc_id, &self.desc.name)?;
         self.validate_field_count(values, doc_id)?;
 
         // Special case: if all values are nil, allow multiple entries
@@ -169,6 +239,7 @@ impl CollectionIndex for UniqueIndex {
         old_values: &[NormalValue],
         new_values: &[NormalValue],
     ) -> Result<()> {
+        validate_doc_id(doc_id, &self.desc.name)?;
         self.validate_field_count(old_values, doc_id)?;
         self.validate_field_count(new_values, doc_id)?;
 
@@ -214,6 +285,7 @@ impl CollectionIndex for UniqueIndex {
         doc_id: &str,
         values: &[NormalValue],
     ) -> Result<()> {
+        validate_doc_id(doc_id, &self.desc.name)?;
         self.validate_field_count(values, doc_id)?;
 
         if Self::has_nil_field(values) {
