@@ -181,7 +181,13 @@ impl Planner {
                                     .fields
                                     .iter()
                                     .position(|tf| tf.name == f.name)
-                                    .expect("field must exist: just found by find()");
+                                    .ok_or_else(|| {
+                                        QueryError::internal(format!(
+                                            "field '{}' found by find() but not by position() - \
+                                             possible concurrent modification in collection '{}'",
+                                            f.name, target_collection.name
+                                        ))
+                                    })?;
                                 (idx, f.clone())
                             }
                             None => {
@@ -229,7 +235,13 @@ impl Planner {
                                         .fields
                                         .iter()
                                         .position(|tf| tf.name == f.name)
-                                        .expect("field must exist: just found by find()");
+                                        .ok_or_else(|| {
+                                            QueryError::internal(format!(
+                                                "field '{}' found by find() but not by position() - \
+                                                 possible concurrent modification in collection '{}'",
+                                                f.name, target_collection.name
+                                            ))
+                                        })?;
                                     (idx, f.clone())
                                 }
                                 None => {

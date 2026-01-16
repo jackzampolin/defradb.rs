@@ -29,4 +29,4 @@ pub use orderby::OrderByNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
 pub use sum::SumNode;
-pub use type_join::{JoinSide, TypeJoinMany, TypeJoinOne};
+pub use type_join::{JoinDirection, JoinSide, TypeJoinMany, TypeJoinOne};
