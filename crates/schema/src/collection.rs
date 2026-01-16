@@ -193,11 +193,48 @@ impl CollectionVersion {
         self.fields.iter().find(|f| f.id == id)
     }
 
-    /// Get a field by relation name (matches Go's GetFieldByRelation)
-    pub fn field_by_relation(&self, relation_name: &str) -> Option<&FieldDescription> {
+    /// Get a field by relation name (simple lookup)
+    pub fn field_by_relation_name(&self, relation_name: &str) -> Option<&FieldDescription> {
         self.fields
             .iter()
             .find(|f| f.relation_name.as_deref() == Some(relation_name))
+    }
+
+    /// Get a field by relation (matches Go's GetFieldByRelation)
+    ///
+    /// Returns the field on this collection that is part of the given relation,
+    /// excluding the field that matches the "other" collection/field pair.
+    /// This is needed to find the "other side" of a relation when both sides
+    /// have the same relation_name.
+    ///
+    /// # Arguments
+    /// * `relation_name` - The name of the relation
+    /// * `other_collection_name` - The name of the other collection (to exclude self-matches)
+    /// * `other_field_name` - The name of the other field (to exclude self-matches)
+    ///
+    /// # Returns
+    /// Returns `None` in any of these cases:
+    /// - No field exists with the given `relation_name`
+    /// - All matching fields were excluded by the `other_collection_name`/`other_field_name` filter
+    /// - All matching fields are `DocID` scalars (foreign key `_id` fields like `author_id`
+    ///   are filtered out to return only actual relation fields, not their backing scalars)
+    ///
+    /// This means callers cannot distinguish "relation doesn't exist" from
+    /// "relation exists but was filtered out". Use `field_by_relation_name()` for
+    /// simple lookups when you don't need the exclusion filter.
+    pub fn field_by_relation(
+        &self,
+        relation_name: &str,
+        other_collection_name: &str,
+        other_field_name: &str,
+    ) -> Option<&FieldDescription> {
+        self.fields.iter().find(|f| {
+            f.relation_name.as_deref() == Some(relation_name)
+                && !(self.name == other_collection_name && f.name == other_field_name)
+                // Filter out _id backing fields (e.g., author_id) to return only actual
+                // relation fields, not their auto-generated foreign key scalars
+                && !matches!(f.kind, FieldKind::Scalar(crate::ScalarKind::DocID))
+        })
     }
 
     /// Get all relation fields
@@ -346,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn test_field_by_relation() {
+    fn test_field_by_relation_name() {
         let fields = vec![
             FieldDescription::new("1", "_docID", FieldKind::doc_id()),
             FieldDescription::new("2", "author", FieldKind::relation("users", false))
@@ -354,9 +391,47 @@ mod tests {
         ];
         let coll = CollectionVersion::new("posts", "v1", "coll-1", fields);
 
-        let field = coll.field_by_relation("post_author").unwrap();
+        let field = coll.field_by_relation_name("post_author").unwrap();
         assert_eq!(field.name, "author");
-        assert!(coll.field_by_relation("nonexistent").is_none());
+        assert!(coll.field_by_relation_name("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_field_by_relation() {
+        // Create posts collection with author field
+        let posts_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("author_posts"),
+        ];
+        let posts = CollectionVersion::new("posts", "v1", "coll-posts", posts_fields);
+
+        // Create users collection with posts field
+        let users_fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+                .with_relation_name("author_posts"),
+        ];
+        let users = CollectionVersion::new("users", "v1", "coll-users", users_fields);
+
+        // From posts collection, find the field in users that is part of "author_posts"
+        // but not the "author" field from "posts"
+        let field = users
+            .field_by_relation("author_posts", "posts", "author")
+            .unwrap();
+        assert_eq!(field.name, "posts");
+
+        // From users collection, find the field in posts that is part of "author_posts"
+        // but not the "posts" field from "users"
+        let field = posts
+            .field_by_relation("author_posts", "users", "posts")
+            .unwrap();
+        assert_eq!(field.name, "author");
+
+        // Nonexistent relation should return None
+        assert!(posts
+            .field_by_relation("nonexistent", "users", "posts")
+            .is_none());
     }
 
     #[test]
