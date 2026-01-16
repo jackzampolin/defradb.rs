@@ -2,6 +2,14 @@
 ///
 /// A Collection represents a set of documents that share the same schema.
 /// It provides CRUD operations for documents.
+///
+/// # Transaction Semantics
+///
+/// Methods that perform both document storage and index updates (e.g., `create_with_indexes`,
+/// `update_with_indexes`, `delete_with_indexes`) are NOT atomic within a single operation.
+/// If the document write succeeds but the index update fails, the caller MUST discard the
+/// transaction (do not commit) to maintain consistency. The underlying transaction will
+/// roll back both operations when discarded.
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
@@ -1249,7 +1257,7 @@ mod tests {
         let txn = db.new_txn(false).await.unwrap();
 
         // Create an IndexManager from the collection
-        let index_manager = IndexManager::from_collection(1, col.schema());
+        let index_manager = IndexManager::from_collection(1, col.schema()).unwrap();
 
         {
             let datastore = txn.datastore().unwrap();
@@ -1284,7 +1292,7 @@ mod tests {
         let col = collection_with_indexes();
         let txn = db.new_txn(false).await.unwrap();
 
-        let index_manager = IndexManager::from_collection(1, col.schema());
+        let index_manager = IndexManager::from_collection(1, col.schema()).unwrap();
 
         {
             let datastore = txn.datastore().unwrap();
@@ -1336,7 +1344,7 @@ mod tests {
         let col = collection_with_indexes();
         let txn = db.new_txn(false).await.unwrap();
 
-        let index_manager = IndexManager::from_collection(1, col.schema());
+        let index_manager = IndexManager::from_collection(1, col.schema()).unwrap();
 
         {
             let datastore = txn.datastore().unwrap();
@@ -1386,7 +1394,7 @@ mod tests {
         let col = collection_with_indexes();
         let txn = db.new_txn(false).await.unwrap();
 
-        let index_manager = IndexManager::from_collection(1, col.schema());
+        let index_manager = IndexManager::from_collection(1, col.schema()).unwrap();
 
         {
             let datastore = txn.datastore().unwrap();

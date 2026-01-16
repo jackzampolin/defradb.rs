@@ -70,7 +70,7 @@ pub use database::{DbOptions, DB};
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};
-pub use index_manager::IndexManager;
+pub use index_manager::{BulkIndexResult, IndexManager};
 pub use schema_loader::load_active_collections;
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
