@@ -24,6 +24,22 @@ use crate::encoding::{self, EncodedType};
 pub use crate::keys::datastore::IndexedField;
 
 /// Encode a NormalValue to bytes using order-preserving encoding.
+///
+/// # Supported Types
+///
+/// - Bool, NillableBool
+/// - Int, NillableInt
+/// - Float32, NillableFloat32
+/// - Float64, NillableFloat64
+/// - String, NillableString
+/// - Bytes, NillableBytes
+/// - Time, NillableTime
+/// - Null (and Nillable*None variants)
+///
+/// # Unsupported Types
+///
+/// Arrays, nested objects, and other complex types are not supported for indexing.
+/// These will return an error with details about the unsupported type.
 pub fn encode_field_value(buf: Vec<u8>, val: &NormalValue, descending: bool) -> Result<Vec<u8>> {
     if val.is_nil() {
         return Ok(if descending {
@@ -121,9 +137,11 @@ pub fn encode_field_value(buf: Vec<u8>, val: &NormalValue, descending: bool) -> 
             })
         }
         // Nillable None variants are handled by is_nil() check above
-        // Unsupported types return an error
+        // Unsupported types return an error with helpful context
         _ => Err(crate::corekv::Error::Other(format!(
-            "unsupported field type for indexing: {:?}",
+            "unsupported field type for indexing: {:?}. Supported types: Bool, Int, Float32, \
+             Float64, String, Bytes, Time (and their Nillable variants). Arrays and nested \
+             objects cannot be indexed.",
             val
         ))),
     }

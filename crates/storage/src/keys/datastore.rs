@@ -248,7 +248,18 @@ impl IndexDataStoreKey {
 
 impl Key for IndexDataStoreKey {
     fn bytes(&self) -> Vec<u8> {
-        self.try_bytes().expect("IndexDataStoreKey encoding failed")
+        // Note: Prefer try_bytes() for proper error handling. This implementation
+        // panics on encoding errors (e.g., unsupported field types, timestamp overflow).
+        match self.try_bytes() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                panic!(
+                    "IndexDataStoreKey encoding failed for collection={}, index={}: {}. \
+                     Use try_bytes() for proper error handling.",
+                    self.collection_short_id, self.index_id, e
+                )
+            }
+        }
     }
 
     fn to_string(&self) -> String {

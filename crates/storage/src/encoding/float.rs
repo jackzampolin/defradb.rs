@@ -82,6 +82,10 @@ pub fn decode_float32_ascending(buf: &[u8]) -> Result<(&[u8], f32)> {
 /// Decode a 32-bit float from descending encoding
 pub fn decode_float32_descending(buf: &[u8]) -> Result<(&[u8], f32)> {
     let (rest, r) = decode_float32_ascending(buf)?;
+    // Handle special cases to avoid -0.0 and preserve NaN without negation
+    if r == 0.0 || r.is_nan() {
+        return Ok((rest, r));
+    }
     Ok((rest, -r))
 }
 
@@ -154,6 +158,10 @@ pub fn decode_float64_ascending(buf: &[u8]) -> Result<(&[u8], f64)> {
 /// Decode a 64-bit float from descending encoding
 pub fn decode_float64_descending(buf: &[u8]) -> Result<(&[u8], f64)> {
     let (rest, r) = decode_float64_ascending(buf)?;
+    // Handle special cases to avoid -0.0 and preserve NaN without negation
+    if r == 0.0 || r.is_nan() {
+        return Ok((rest, r));
+    }
     Ok((rest, -r))
 }
 

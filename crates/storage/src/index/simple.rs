@@ -35,11 +35,35 @@ pub struct SimpleIndex {
 
 impl SimpleIndex {
     /// Create a new SimpleIndex.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index description has `unique = true`. Use `UniqueIndex`
+    /// for unique indexes.
     pub fn new(collection_short_id: u32, desc: IndexDescription) -> Self {
+        assert!(
+            !desc.unique,
+            "SimpleIndex requires non-unique index, got unique=true for index '{}'",
+            desc.name
+        );
         Self {
             collection_short_id,
             desc,
         }
+    }
+
+    /// Create a new SimpleIndex, returning an error if the description is invalid.
+    pub fn try_new(collection_short_id: u32, desc: IndexDescription) -> Result<Self> {
+        if desc.unique {
+            return Err(crate::corekv::Error::Other(format!(
+                "SimpleIndex requires non-unique index, got unique=true for index '{}'",
+                desc.name
+            )));
+        }
+        Ok(Self {
+            collection_short_id,
+            desc,
+        })
     }
 
     /// Get the index ID
