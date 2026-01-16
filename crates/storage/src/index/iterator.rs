@@ -53,11 +53,11 @@ impl IndexEntry {
 /// Bound for range queries on an index field.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Bound {
-    /// Include values equal to or greater than (for forward) or equal to or less than (for reverse)
+    /// Include the bound value in the range (>=, <=)
     Inclusive(NormalValue),
-    /// Exclude values equal to the bound
+    /// Exclude the bound value from the range (>, <)
     Exclusive(NormalValue),
-    /// No bound (unbounded)
+    /// No bound (unbounded in this direction)
     Unbounded,
 }
 

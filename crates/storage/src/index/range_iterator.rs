@@ -15,8 +15,6 @@
 //! - Prefix scanning (match first N fields exactly)
 //! - Range bounds (_gt, _ge, _lt, _le)
 //! - Forward and reverse iteration
-//!
-//! Maps to Go's `indexMatchIterator`.
 
 use async_trait::async_trait;
 use document::NormalValue;
@@ -50,9 +48,6 @@ pub struct RangeIterator {
     lower_inclusive: bool,
     /// Whether upper bound is inclusive
     upper_inclusive: bool,
-    /// Number of prefix fields (reserved for future use in composite field decoding)
-    #[allow(dead_code)]
-    prefix_field_count: usize,
     /// Whether the iterator has been exhausted
     exhausted: bool,
     /// Whether iterating in reverse
@@ -86,7 +81,6 @@ impl RangeIterator {
             upper_bound_key: None,
             lower_inclusive: true,
             upper_inclusive: true,
-            prefix_field_count: 0,
             exhausted: false,
             reverse,
         })
@@ -127,7 +121,6 @@ impl RangeIterator {
             upper_bound_key: None,
             lower_inclusive: true,
             upper_inclusive: true,
-            prefix_field_count: prefix_values.len(),
             exhausted: false,
             reverse,
         })
@@ -222,7 +215,6 @@ impl RangeIterator {
             upper_bound_key,
             lower_inclusive,
             upper_inclusive,
-            prefix_field_count: prefix_values.len(),
             exhausted: false,
             reverse,
         })
@@ -252,8 +244,8 @@ impl RangeIterator {
     fn decode_field_values(&self, key: &[u8]) -> Result<Vec<NormalValue>> {
         // Get the index prefix to know where field values start
         let index_prefix = IndexDataStoreKey::index_prefix(
-            extract_collection_id(&self.key_prefix),
-            extract_index_id(&self.key_prefix),
+            extract_collection_id(&self.key_prefix)?,
+            extract_index_id(&self.key_prefix)?,
         );
 
         let mut buf = &key[index_prefix.len()..];
@@ -263,12 +255,26 @@ impl RangeIterator {
             if buf.is_empty() {
                 break;
             }
-            // Use blob kind as default - the encoder type marker determines actual type
-            // and blob/string decoding works for both (we'll get Bytes for blob, String for string)
+            // Use blob kind as default - the encoded type marker determines the actual type.
+            // Note: String values will be decoded as Bytes since we don't have field type
+            // information at decode time. This is acceptable for index operations where
+            // we primarily need byte-level comparison semantics.
             let kind = FieldKind::blob();
             let (rest, value) = decode_field_value(buf, field_desc.descending, &kind)?;
             values.push(value);
             buf = rest;
+        }
+
+        // Validate that we decoded the expected number of fields
+        if values.len() < self.desc.fields.len() {
+            return Err(crate::corekv::Error::Other(format!(
+                "incomplete field values in index key: expected {} fields, decoded {} \
+                 (key_len={}, remaining_buf_len={})",
+                self.desc.fields.len(),
+                values.len(),
+                key.len(),
+                buf.len()
+            )));
         }
 
         Ok(values)
@@ -278,8 +284,8 @@ impl RangeIterator {
     fn extract_doc_id_from_key(&self, key: &[u8], values: &[NormalValue]) -> Result<String> {
         // Rebuild the key without doc_id to find where doc_id starts
         let index_prefix = IndexDataStoreKey::index_prefix(
-            extract_collection_id(&self.key_prefix),
-            extract_index_id(&self.key_prefix),
+            extract_collection_id(&self.key_prefix)?,
+            extract_index_id(&self.key_prefix)?,
         );
 
         let mut encoded_values = index_prefix;
@@ -307,35 +313,34 @@ impl RangeIterator {
 
     /// Check if a key is within the range bounds using byte comparison.
     ///
-    /// For SimpleIndex keys, the format is: [prefix][encoded_value][doc_id]
-    /// We need to compare just the encoded_value portion, ignoring the doc_id suffix.
+    /// Key format: `[index_prefix][encoded_value][doc_id]`
+    /// Bound format: `[index_prefix][encoded_value]` (no doc_id)
+    ///
+    /// The algorithm compares the key's prefix bytes against the bound. If the key
+    /// starts with exactly the bound bytes, then the encoded value equals the bound
+    /// value. For exclusive bounds, such keys must be excluded.
     fn is_key_within_bounds(&self, key: &[u8]) -> bool {
         // Check lower bound
         if let Some(ref lower) = self.lower_bound_key {
-            // Compare the key prefix (up to the bound length) with the bound
             let cmp_len = lower.len().min(key.len());
             let key_prefix = &key[..cmp_len];
             let lower_prefix = &lower[..cmp_len];
 
             if self.lower_inclusive {
-                // Inclusive: key prefix must be >= lower
                 if key_prefix < lower_prefix {
                     return false;
                 }
             } else {
-                // Exclusive: key prefix must be > lower
-                // If key_prefix equals lower_prefix and key has more bytes (doc_id),
-                // the value itself equals the bound - should be excluded
+                // Exclusive: encoded value must be strictly greater than bound
                 if key_prefix < lower_prefix {
                     return false;
                 }
-                if key_prefix == lower_prefix && key.len() >= lower.len() {
-                    // Key starts with or equals the lower bound - only valid if key is longer
-                    // meaning there's a suffix (doc_id) and the value prefix matches exactly
-                    // This means the encoded value equals the bound, so exclude it
-                    if &key[..lower.len()] == lower.as_slice() {
-                        return false;
-                    }
+                // If key starts with the bound exactly, the encoded value equals the bound
+                if key_prefix == lower_prefix
+                    && key.len() >= lower.len()
+                    && &key[..lower.len()] == lower.as_slice()
+                {
+                    return false;
                 }
             }
         }
@@ -347,17 +352,15 @@ impl RangeIterator {
             let upper_prefix = &upper[..cmp_len];
 
             if self.upper_inclusive {
-                // Inclusive: key prefix must be <= upper
-                // If key is longer, it has a doc_id suffix which is fine
                 if key_prefix > upper_prefix {
                     return false;
                 }
             } else {
-                // Exclusive: key prefix must be < upper
+                // Exclusive: encoded value must be strictly less than bound
                 if key_prefix > upper_prefix {
                     return false;
                 }
-                // If prefixes are equal and key >= upper, exclude
+                // If key starts with the bound exactly, the encoded value equals the bound
                 if key_prefix == upper_prefix
                     && key.len() >= upper.len()
                     && &key[..upper.len()] >= upper.as_slice()
@@ -426,20 +429,36 @@ impl IndexIterator for RangeIterator {
 }
 
 /// Extract collection_short_id from the key prefix.
-fn extract_collection_id(prefix: &[u8]) -> u32 {
+fn extract_collection_id(prefix: &[u8]) -> Result<u32> {
     if prefix.is_empty() {
-        return 0;
+        return Err(crate::corekv::Error::Other(
+            "cannot extract collection_id: prefix is empty".to_string(),
+        ));
+    }
+    if prefix.len() < 2 {
+        return Err(crate::corekv::Error::Other(format!(
+            "cannot extract collection_id: prefix too short ({} bytes)",
+            prefix.len()
+        )));
     }
 
     let pos = 1; // Skip initial separator
     let (val, _) = decode_varint(&prefix[pos..]);
-    val as u32
+    if val > u32::MAX as u64 {
+        return Err(crate::corekv::Error::Other(format!(
+            "collection_id {} exceeds maximum u32 value",
+            val
+        )));
+    }
+    Ok(val as u32)
 }
 
 /// Extract index_id from the key prefix.
-fn extract_index_id(prefix: &[u8]) -> u32 {
+fn extract_index_id(prefix: &[u8]) -> Result<u32> {
     if prefix.is_empty() {
-        return 0;
+        return Err(crate::corekv::Error::Other(
+            "cannot extract index_id: prefix is empty".to_string(),
+        ));
     }
 
     let mut pos = 1; // Skip initial separator
@@ -448,11 +467,21 @@ fn extract_index_id(prefix: &[u8]) -> u32 {
     pos += 1; // Skip separator after col_id
 
     if pos >= prefix.len() {
-        return 0;
+        return Err(crate::corekv::Error::Other(format!(
+            "cannot extract index_id: prefix too short (pos {} >= len {})",
+            pos,
+            prefix.len()
+        )));
     }
 
     let (idx_id, _) = decode_varint(&prefix[pos..]);
-    idx_id as u32
+    if idx_id > u32::MAX as u64 {
+        return Err(crate::corekv::Error::Other(format!(
+            "index_id {} exceeds maximum u32 value",
+            idx_id
+        )));
+    }
+    Ok(idx_id as u32)
 }
 
 /// Decode a varint from bytes.

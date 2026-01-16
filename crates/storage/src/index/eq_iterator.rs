@@ -11,7 +11,7 @@
 //! Exact match iterator for index lookups
 //!
 //! Provides iteration over index entries that exactly match specific field values.
-//! Maps to Go's `eqSingleIndexIterator` and supports both unique and non-unique indexes.
+//! Supports both unique and non-unique indexes.
 
 use async_trait::async_trait;
 use document::NormalValue;
@@ -36,11 +36,10 @@ pub struct ExactMatchIterator {
     key_prefix: Vec<u8>,
     /// The exact field values being matched
     values: Vec<NormalValue>,
-    /// Whether this is a unique index (reserved for future use in value decoding)
-    #[allow(dead_code)]
-    is_unique: bool,
     /// Single result for unique index direct lookup (consumed on first next())
     unique_result: Option<IndexEntry>,
+    /// Cached copy of unique_result for reset() support
+    cached_unique_result: Option<IndexEntry>,
     /// Whether the iterator has been exhausted
     exhausted: bool,
 }
@@ -66,8 +65,8 @@ impl ExactMatchIterator {
             inner: Some(inner),
             key_prefix,
             values: values.to_vec(),
-            is_unique: false,
             unique_result: None,
+            cached_unique_result: None,
             exhausted: false,
         })
     }
@@ -98,8 +97,8 @@ impl ExactMatchIterator {
                 inner: Some(inner),
                 key_prefix,
                 values: values.to_vec(),
-                is_unique: true,
                 unique_result: None,
+                cached_unique_result: None,
                 exhausted: false,
             })
         } else {
@@ -116,7 +115,7 @@ impl ExactMatchIterator {
                 inner: None, // No iterator needed for direct lookup
                 key_prefix,
                 values: values.to_vec(),
-                is_unique: true,
+                cached_unique_result: unique_result.clone(),
                 unique_result,
                 exhausted: false,
             })
@@ -180,6 +179,10 @@ impl IndexIterator for ExactMatchIterator {
     async fn reset(&mut self) -> Result<()> {
         if let Some(ref mut iter) = self.inner {
             iter.reset().await?;
+        }
+        // Restore unique_result from cache for unique index direct lookups
+        if self.cached_unique_result.is_some() && self.unique_result.is_none() {
+            self.unique_result = self.cached_unique_result.clone();
         }
         self.exhausted = false;
         Ok(())
