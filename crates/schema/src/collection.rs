@@ -320,7 +320,12 @@ impl CollectionVersion {
                 .fields
                 .iter()
                 .position(|f| f.name == relation_field_name)
-                .expect("relation field must exist - collected from same fields list");
+                .ok_or_else(|| {
+                    SchemaError::InternalError(format!(
+                        "invariant violation: relation field '{}' disappeared during _id field generation",
+                        relation_field_name
+                    ))
+                })?;
             self.fields.insert(pos + 1, id_field);
         }
 
@@ -362,23 +367,42 @@ impl CollectionVersion {
                 // Array relations are the "many" side
                 if !field.kind.is_array() {
                     // Check if the other side exists and is an array
-                    if let Some(rel_name) = &field.relation_name {
-                        if let Some(other_col_id) = field.kind.relation_collection_id() {
-                            if let Some(other_col) = collections.get(other_col_id) {
-                                let other_field = other_col.field_by_relation(
-                                    rel_name,
-                                    &collection.name,
-                                    &field.name,
-                                );
+                    let Some(rel_name) = &field.relation_name else {
+                        tracing::debug!(
+                            collection = %collection.name,
+                            field = %field.name,
+                            "Skipping auto-primary: relation field has no relation_name"
+                        );
+                        continue;
+                    };
 
-                                // If other side doesn't exist or is an array, this side is primary
-                                if other_field.is_none()
-                                    || other_field.map(|f| f.kind.is_array()).unwrap_or(false)
-                                {
-                                    updates.push((idx, true)); // Mark as primary
-                                }
-                            }
-                        }
+                    let Some(other_col_id) = field.kind.relation_collection_id() else {
+                        tracing::debug!(
+                            collection = %collection.name,
+                            field = %field.name,
+                            "Skipping auto-primary: relation field has no collection_id"
+                        );
+                        continue;
+                    };
+
+                    let Some(other_col) = collections.get(other_col_id) else {
+                        tracing::debug!(
+                            collection = %collection.name,
+                            field = %field.name,
+                            target_collection = %other_col_id,
+                            "Skipping auto-primary: target collection not found (may be processed later)"
+                        );
+                        continue;
+                    };
+
+                    let other_field =
+                        other_col.field_by_relation(rel_name, &collection.name, &field.name);
+
+                    // If other side doesn't exist or is an array, this side is primary
+                    if other_field.is_none()
+                        || other_field.map(|f| f.kind.is_array()).unwrap_or(false)
+                    {
+                        updates.push((idx, true)); // Mark as primary
                     }
                 }
             }
@@ -1168,5 +1192,79 @@ mod tests {
         // Verify is_primary flags preserved
         assert!(books.field_by_name("author").unwrap().is_primary);
         assert!(!authors.field_by_name("published").unwrap().is_primary);
+    }
+
+    #[test]
+    fn test_add_relation_id_fields_rejects_duplicate_id() {
+        let fields = vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                .with_relation_name("user_posts"),
+        ];
+        let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
+
+        // Generator that returns an existing field ID ("1" already exists)
+        let result = coll.add_relation_id_fields(|| "1".to_string());
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SchemaError::DuplicateFieldId(id) if id == "1"
+        ));
+    }
+
+    #[test]
+    fn test_finalize_relations_hashmap() {
+        let mut collections = HashMap::new();
+        collections.insert(
+            "users".to_string(),
+            CollectionVersion::new(
+                "users",
+                "v1",
+                "coll-users",
+                vec![
+                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                    FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+                        .with_relation_name("user_posts"),
+                ],
+            ),
+        );
+        collections.insert(
+            "posts".to_string(),
+            CollectionVersion::new(
+                "posts",
+                "v1",
+                "coll-posts",
+                vec![
+                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                    FieldDescription::new("2", "author", FieldKind::relation("users", false))
+                        .with_relation_name("user_posts"),
+                ],
+            ),
+        );
+
+        let mut counter = 100;
+        CollectionVersion::finalize_relations_hashmap(&mut collections, || {
+            counter += 1;
+            counter.to_string()
+        })
+        .unwrap();
+
+        // Verify HashMap was updated in place
+        let posts = collections.get("posts").unwrap();
+        assert!(
+            posts.field_by_name("author_id").is_some(),
+            "author_id field should be added"
+        );
+
+        // Verify auto-primary was applied (author side is primary since users.posts is array)
+        assert!(
+            posts.field_by_name("author").unwrap().is_primary,
+            "author should be marked as primary"
+        );
+
+        // Verify users collection is also in the HashMap
+        let users = collections.get("users").unwrap();
+        assert!(users.field_by_name("posts").is_some());
     }
 }

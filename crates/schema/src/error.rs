@@ -46,6 +46,9 @@ pub enum SchemaError {
 
     #[error("duplicate field ID: {0}")]
     DuplicateFieldId(String),
+
+    #[error("internal error: {0}")]
+    InternalError(String),
 }
 
 impl From<serde_json::Error> for SchemaError {
