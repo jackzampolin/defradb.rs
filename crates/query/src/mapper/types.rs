@@ -378,6 +378,12 @@ impl Select {
         self
     }
 
+    /// Set the field name (for nested selects where field name differs from collection name)
+    pub fn with_field_name(mut self, name: impl Into<String>) -> Self {
+        self.field.name = name.into();
+        self
+    }
+
     /// Add an aggregate
     pub fn with_aggregate(mut self, aggregate: Aggregate) -> Self {
         self.fields.push(Requestable::Aggregate(aggregate));
