@@ -38,14 +38,21 @@
 //! - Full scan (`scan`): Iterate all index entries
 
 mod eq_iterator;
+mod in_iterator;
 mod iterator;
+mod matcher;
 mod range_iterator;
 mod simple;
 mod traits;
 mod unique;
 
 pub use eq_iterator::ExactMatchIterator;
+pub use in_iterator::InIterator;
 pub use iterator::{Bound, IndexEntry, IndexIterator};
+pub use matcher::{
+    EqMatcher, GtMatcher, InMatcher, IndexMatcher, LikeMatcher, LtMatcher, NeMatcher, NinMatcher,
+    NlikeMatcher,
+};
 pub use range_iterator::RangeIterator;
 pub use simple::SimpleIndex;
 pub use traits::CollectionIndex;
