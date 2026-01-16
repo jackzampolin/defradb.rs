@@ -9,7 +9,9 @@ use std::sync::Arc;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
-use crate::plan::{IndexScanNode, JoinSide, LimitNode, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne};
+use crate::plan::{
+    IndexScanNode, JoinSide, LimitNode, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
+};
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
 
@@ -190,6 +192,26 @@ impl Planner {
                 // Create the child scan plan
                 let child_scan = ScanNode::new((*target_collection).clone(), child_mapping.clone());
 
+                // Wrap in SelectNode if there's a filter on the nested select
+                let child_plan: Box<dyn PlanNode> = if let Some(ref filter) = nested_select.filter {
+                    // Validate that all filter-referenced fields exist in the child mapping
+                    for field in filter.referenced_fields() {
+                        if !child_mapping.has_field(&field) {
+                            return Err(QueryError::filter_field_not_selected(
+                                &field,
+                                &target_collection.name,
+                            ));
+                        }
+                    }
+
+                    Box::new(
+                        SelectNode::new(Box::new(child_scan), child_mapping.clone())
+                            .with_filter(filter.clone()),
+                    )
+                } else {
+                    Box::new(child_scan)
+                };
+
                 // Find the other side of the relation
                 let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
                     target_collection.field_by_relation(
@@ -231,7 +253,7 @@ impl Planner {
                     // One-to-many: TypeJoinMany
                     plan = Box::new(TypeJoinMany::new(
                         plan,
-                        Box::new(child_scan),
+                        child_plan,
                         parent_side,
                         child_side,
                         mapping.clone(),
@@ -240,7 +262,7 @@ impl Planner {
                     // One-to-one: TypeJoinOne
                     plan = Box::new(TypeJoinOne::new(
                         plan,
-                        Box::new(child_scan),
+                        child_plan,
                         parent_side,
                         child_side,
                         mapping.clone(),
@@ -730,5 +752,155 @@ mod tests {
         // The source should be the join
         let source = plan.source().unwrap();
         assert_eq!(source.kind(), "typeJoinMany");
+    }
+
+    // ========================================================================
+    // Nested Relation Filter Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_plan_with_nested_filter_on_type_join_many() {
+        // Query: users { name, posts(filter: { title: { _eq: "Hello" } }) { title } }
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Build nested select with filter
+        let filter = Filter::from_conditions(HashMap::from([(
+            "title".to_string(),
+            serde_json::json!({"_eq": "Hello"}),
+        )]));
+
+        let posts_select = Select::new("posts")
+            .with_field_name("posts")
+            .with_field(Field::new("title"))
+            .with_filter(filter);
+
+        let select = Select::new("users")
+            .with_field(Field::new("name"))
+            .with_select(posts_select);
+
+        let plan = planner.plan(&select).unwrap();
+
+        // The outermost node should be TypeJoinMany
+        assert_eq!(plan.kind(), "typeJoinMany");
+
+        // The child source of the join should be a selectNode (with the filter)
+        // not a raw scanNode
+        let source = plan.source().unwrap();
+        // Parent source is selectNode
+        assert_eq!(source.kind(), "selectNode");
+    }
+
+    #[tokio::test]
+    async fn test_plan_with_nested_filter_on_type_join_one() {
+        // Query: posts { title, author(filter: { name: { _eq: "Alice" } }) { name } }
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Build nested select with filter
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            serde_json::json!({"_eq": "Alice"}),
+        )]));
+
+        let author_select = Select::new("users")
+            .with_field_name("author")
+            .with_field(Field::new("name"))
+            .with_filter(filter);
+
+        let select = Select::new("posts")
+            .with_field(Field::new("title"))
+            .with_select(author_select);
+
+        let plan = planner.plan(&select).unwrap();
+
+        // The outermost node should be TypeJoinOne
+        assert_eq!(plan.kind(), "typeJoinOne");
+
+        // The parent source of the join should be a selectNode
+        let source = plan.source().unwrap();
+        assert_eq!(source.kind(), "selectNode");
+    }
+
+    #[tokio::test]
+    async fn test_plan_nested_filter_with_parent_filter() {
+        // Query: users(filter: { name: { _eq: "Bob" } }) {
+        //   name,
+        //   posts(filter: { title: { _like: "Hello%" } }) { title }
+        // }
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Parent filter
+        let parent_filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            serde_json::json!({"_eq": "Bob"}),
+        )]));
+
+        // Child filter
+        let child_filter = Filter::from_conditions(HashMap::from([(
+            "title".to_string(),
+            serde_json::json!({"_like": "Hello%"}),
+        )]));
+
+        let posts_select = Select::new("posts")
+            .with_field_name("posts")
+            .with_field(Field::new("title"))
+            .with_filter(child_filter);
+
+        let select = Select::new("users")
+            .with_field(Field::new("name"))
+            .with_select(posts_select)
+            .with_filter(parent_filter);
+
+        let plan = planner.plan(&select).unwrap();
+
+        // The outermost node should be TypeJoinMany
+        assert_eq!(plan.kind(), "typeJoinMany");
+
+        // The parent source should be selectNode (with parent filter)
+        let source = plan.source().unwrap();
+        assert_eq!(source.kind(), "selectNode");
+    }
+
+    #[tokio::test]
+    async fn test_plan_nested_filter_references_unselected_field_fails_at_planning() {
+        // Query: users { posts(filter: { author_id: { _eq: "user-1" } }) { title } }
+        // The filter references "author_id" but the select only includes "title"
+        // This should fail at planning time with a clear error message
+        let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
+
+        // Filter references "author_id" which is NOT in the select list
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author_id".to_string(),
+            serde_json::json!({"_eq": "user-1"}),
+        )]));
+
+        let posts_select = Select::new("posts")
+            .with_field_name("posts")
+            .with_field(Field::new("title")) // Only selecting "title", not "author_id"
+            .with_filter(filter);
+
+        let select = Select::new("users")
+            .with_field(Field::new("name"))
+            .with_select(posts_select);
+
+        let result = planner.plan(&select);
+
+        // Should fail at planning time
+        let err = match result {
+            Ok(_) => panic!("Expected error but got Ok"),
+            Err(e) => e,
+        };
+
+        // Error message should indicate the filter field is not in the select list
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("author_id"),
+            "Error should mention the field name: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("select list") || err_msg.contains("posts"),
+            "Error should mention select list or collection: {}",
+            err_msg
+        );
     }
 }

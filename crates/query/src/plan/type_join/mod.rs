@@ -19,11 +19,13 @@ mod tests {
     use super::*;
     use crate::document::DocumentMapping;
     use crate::error::{QueryError, Result};
-    use crate::plan::ScanNode;
+    use crate::mapper::Filter;
+    use crate::plan::{ScanNode, SelectNode};
     use crate::planner::{Doc, PlanNode};
     use async_trait::async_trait;
     use schema::{CollectionVersion, FieldDescription, FieldKind};
     use serde_json::{json, Value as JsonValue};
+    use std::collections::HashMap;
 
     /// Mock PlanNode that can be configured to return errors at different stages
     struct MockErrorPlanNode {
@@ -2048,5 +2050,269 @@ mod tests {
         let result = join.next().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mock next error"));
+    }
+
+    // ========================================================================
+    // Nested Relation Filter Execution Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_type_join_many_with_child_filter_excludes_non_matching() {
+        // Test: users { posts(filter: {title: {_like: "Alice%"}}) { title } }
+        // Alice has 2 posts: "Alice's First Post", "Alice's Second Post"
+        // Bob has 1 post: "Bob's Post"
+        // Filter should exclude Bob's post from Alice's results (it won't match)
+        // and exclude Bob's post from Bob's results (leaving empty array)
+
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+
+        // Parent: Users scan
+        let user_docs = make_user_docs();
+        let parent_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(user_docs);
+
+        // Child: Posts scan wrapped in SelectNode with filter
+        let post_docs = make_post_docs();
+        let posts_child_mapping = make_posts_child_mapping();
+        let child_scan = ScanNode::new(posts_collection.clone(), posts_child_mapping.clone())
+            .with_docs(post_docs);
+
+        // Filter: title starts with "Alice"
+        let filter = Filter::from_conditions(HashMap::from([(
+            "title".to_string(),
+            json!({"_like": "Alice%"}),
+        )]));
+
+        let child_plan =
+            SelectNode::new(Box::new(child_scan), posts_child_mapping.clone()).with_filter(filter);
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        // Build output mapping with child mapping for nested array
+        let mut output_mapping = users_mapping.clone();
+        output_mapping.set_child_at(2, posts_child_mapping);
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            output_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+
+        let mut results = Vec::new();
+        while join.next().await.unwrap() {
+            let doc = join.value();
+            let posts_value = doc.get(2).cloned();
+            results.push((doc.doc_id().map(String::from), posts_value));
+        }
+
+        assert_eq!(results.len(), 2);
+
+        // Alice (user-1) should have 2 posts (both start with "Alice")
+        let (user_id, posts) = &results[0];
+        assert_eq!(user_id.as_deref(), Some("user-1"));
+        let posts_arr = posts.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(posts_arr.len(), 2, "Alice should have 2 matching posts");
+        assert_eq!(
+            posts_arr[0].get("title"),
+            Some(&json!("Alice's First Post"))
+        );
+        assert_eq!(
+            posts_arr[1].get("title"),
+            Some(&json!("Alice's Second Post"))
+        );
+
+        // Bob (user-2) should have 0 posts (filter excludes "Bob's Post")
+        let (user_id, posts) = &results[1];
+        assert_eq!(user_id.as_deref(), Some("user-2"));
+        let posts_arr = posts.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(
+            posts_arr.len(),
+            0,
+            "Bob should have 0 matching posts (filter excludes 'Bob's Post')"
+        );
+
+        join.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_type_join_one_with_child_filter_returns_null_when_no_match() {
+        // Test: posts { author(filter: {name: {_eq: "Charlie"}}) { name } }
+        // Post-1 has author Alice, Post-2 has author Alice, Post-3 has author Bob
+        // Filter for "Charlie" should return null for all posts (no Charlie exists)
+
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+
+        // Parent: Posts scan
+        let post_docs = make_post_docs();
+        let parent_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(post_docs);
+
+        // Child: Users scan wrapped in SelectNode with filter
+        let user_docs = make_user_docs();
+        let mut users_child_mapping = DocumentMapping::new();
+        users_child_mapping.add(0, "_docID");
+        users_child_mapping.add(1, "name");
+        users_child_mapping.add_render_key(0, "_docID");
+        users_child_mapping.add_render_key(1, "name");
+
+        let child_scan = ScanNode::new(users_collection.clone(), users_child_mapping.clone())
+            .with_docs(user_docs);
+
+        // Filter: name equals "Charlie" (doesn't exist)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_eq": "Charlie"}),
+        )]));
+
+        let child_plan =
+            SelectNode::new(Box::new(child_scan), users_child_mapping.clone()).with_filter(filter);
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        // Build output mapping with child mapping for nested object
+        let mut output_mapping = posts_mapping.clone();
+        output_mapping.set_child_at(2, users_child_mapping);
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            output_mapping,
+        );
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+
+        let mut results = Vec::new();
+        while join.next().await.unwrap() {
+            let doc = join.value();
+            let author_value = doc.get(2).cloned();
+            results.push((doc.doc_id().map(String::from), author_value));
+        }
+
+        assert_eq!(results.len(), 3);
+
+        // All posts should have null author (filter excludes Alice and Bob)
+        for (post_id, author) in &results {
+            assert!(
+                author.is_none() || author.as_ref().unwrap().is_null(),
+                "Post {} should have null author when filter matches no one",
+                post_id.as_deref().unwrap_or("unknown")
+            );
+        }
+
+        join.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_type_join_one_with_child_filter_returns_match() {
+        // Test: posts { author(filter: {name: {_eq: "Alice"}}) { name } }
+        // Post-1 and Post-2 have author Alice, Post-3 has author Bob
+        // Filter for "Alice" should return Alice for posts 1&2, null for post 3
+
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+
+        // Parent: Posts scan
+        let post_docs = make_post_docs();
+        let parent_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(post_docs);
+
+        // Child: Users scan wrapped in SelectNode with filter
+        let user_docs = make_user_docs();
+        let mut users_child_mapping = DocumentMapping::new();
+        users_child_mapping.add(0, "_docID");
+        users_child_mapping.add(1, "name");
+        users_child_mapping.add_render_key(0, "_docID");
+        users_child_mapping.add_render_key(1, "name");
+
+        let child_scan = ScanNode::new(users_collection.clone(), users_child_mapping.clone())
+            .with_docs(user_docs);
+
+        // Filter: name equals "Alice"
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_eq": "Alice"}),
+        )]));
+
+        let child_plan =
+            SelectNode::new(Box::new(child_scan), users_child_mapping.clone()).with_filter(filter);
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        // Build output mapping with child mapping for nested object
+        let mut output_mapping = posts_mapping.clone();
+        output_mapping.set_child_at(2, users_child_mapping);
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            output_mapping,
+        );
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+
+        let mut results = Vec::new();
+        while join.next().await.unwrap() {
+            let doc = join.value();
+            let author_value = doc.get(2).cloned();
+            results.push((doc.doc_id().map(String::from), author_value));
+        }
+
+        assert_eq!(results.len(), 3);
+
+        // Post-1 (Alice's post) should have Alice as author
+        let (post_id, author) = &results[0];
+        assert_eq!(post_id.as_deref(), Some("post-1"));
+        assert!(author.is_some());
+        let author_obj = author.as_ref().unwrap();
+        assert_eq!(author_obj.get("name"), Some(&json!("Alice")));
+
+        // Post-2 (Alice's post) should have Alice as author
+        let (post_id, author) = &results[1];
+        assert_eq!(post_id.as_deref(), Some("post-2"));
+        assert!(author.is_some());
+        let author_obj = author.as_ref().unwrap();
+        assert_eq!(author_obj.get("name"), Some(&json!("Alice")));
+
+        // Post-3 (Bob's post) should have null author (filter excludes Bob)
+        let (post_id, author) = &results[2];
+        assert_eq!(post_id.as_deref(), Some("post-3"));
+        assert!(
+            author.is_none() || author.as_ref().unwrap().is_null(),
+            "Post-3 should have null author when filter excludes Bob"
+        );
+
+        join.close().await.unwrap();
     }
 }
