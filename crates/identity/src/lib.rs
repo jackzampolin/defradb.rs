@@ -4,6 +4,7 @@
 //! - `Identity` trait for public identity operations (DID, public key)
 //! - `FullIdentity` trait for identity operations requiring a private key
 //! - `RawIdentity` concrete implementation supporting secp256k1 and ed25519
+//! - `IdentityKeyType` enum for compile-time key type safety
 //!
 //! # Supported Key Types
 //!
@@ -11,12 +12,16 @@
 //! - **secp256k1**: Bitcoin/Ethereum compatible with DER-encoded signatures
 //!
 //! Note: secp256r1 (P-256) is NOT supported for identity operations.
+//! Use `IdentityKeyType` instead of `crypto::KeyType` to ensure compile-time
+//! safety when working with identity operations.
 
 mod error;
+mod key_type;
 mod raw;
 
 pub use crypto::KeyType;
 pub use error::{Error, Result};
+pub use key_type::IdentityKeyType;
 pub use raw::RawIdentity;
 
 use crypto::keys::{PrivateKey, PublicKey};

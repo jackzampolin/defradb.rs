@@ -12,6 +12,9 @@ description = "Identity types for DefraDB"
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -13,6 +13,10 @@ pub enum Error {
     #[error("{0:?} is not supported for identity operations")]
     UnsupportedKeyType(KeyType),
 
+    /// Unknown key type string
+    #[error("unknown key type: {0}")]
+    UnknownKeyType(String),
+
     /// Failed to derive public key from private key
     #[error("failed to derive public key: {0}")]
     PublicKeyDerivation(String),

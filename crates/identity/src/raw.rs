@@ -6,6 +6,7 @@ use crypto::{
 };
 
 use crate::error::Error;
+use crate::key_type::IdentityKeyType;
 use crate::{FullIdentity, Identity, Result};
 
 /// A concrete identity implementation backed by raw key material.
@@ -125,11 +126,51 @@ impl RawIdentity {
         }
     }
 
-    /// Returns the key type of this identity.
+    /// Creates a RawIdentity from raw private key bytes using the type-safe key type.
+    ///
+    /// This is the preferred constructor when you have an `IdentityKeyType`,
+    /// as it provides compile-time safety that the key type is supported.
+    ///
+    /// # Parameters
+    /// * `key_type` - The identity key type (Ed25519 or Secp256k1)
+    /// * `bytes` - The raw private key bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The key bytes are invalid for the specified type
+    /// - The public key cannot be derived
+    pub fn from_identity_key_type(key_type: IdentityKeyType, bytes: &[u8]) -> Result<Self> {
+        match key_type {
+            IdentityKeyType::Ed25519 => {
+                let private_key = Ed25519PrivateKey::from_bytes(bytes)
+                    .map_err(|e| Error::InvalidKeyBytes(KeyType::Ed25519, e.to_string()))?;
+                Self::from_ed25519(private_key)
+            }
+            IdentityKeyType::Secp256k1 => {
+                let private_key = Secp256k1PrivateKey::from_bytes(bytes)
+                    .map_err(|e| Error::InvalidKeyBytes(KeyType::Secp256k1, e.to_string()))?;
+                Self::from_secp256k1(private_key)
+            }
+        }
+    }
+
+    /// Returns the key type of this identity as a `crypto::KeyType`.
     pub fn key_type(&self) -> KeyType {
         match &self.inner {
             IdentityInner::Ed25519 { .. } => KeyType::Ed25519,
             IdentityInner::Secp256k1 { .. } => KeyType::Secp256k1,
+        }
+    }
+
+    /// Returns the key type of this identity as an `IdentityKeyType`.
+    ///
+    /// This is the preferred method when working with identity-specific code,
+    /// as it provides compile-time guarantees that the key type is supported.
+    pub fn identity_key_type(&self) -> IdentityKeyType {
+        match &self.inner {
+            IdentityInner::Ed25519 { .. } => IdentityKeyType::Ed25519,
+            IdentityInner::Secp256k1 { .. } => IdentityKeyType::Secp256k1,
         }
     }
 
@@ -334,5 +375,58 @@ mod tests {
         let priv_key = identity.priv_key();
         assert_eq!(priv_key.key_type(), KeyType::Ed25519);
         assert_eq!(priv_key.raw(), expected_bytes);
+    }
+
+    #[test]
+    fn test_identity_key_type_ed25519() {
+        let key = generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(key).unwrap();
+
+        assert_eq!(identity.identity_key_type(), IdentityKeyType::Ed25519);
+    }
+
+    #[test]
+    fn test_identity_key_type_secp256k1() {
+        let key = generate_secp256k1().unwrap();
+        let identity = RawIdentity::from_private_key(key).unwrap();
+
+        assert_eq!(identity.identity_key_type(), IdentityKeyType::Secp256k1);
+    }
+
+    #[test]
+    fn test_from_identity_key_type_ed25519() {
+        let key = generate_ed25519().unwrap();
+        let bytes = key.raw();
+
+        let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, &bytes).unwrap();
+        assert_eq!(identity.identity_key_type(), IdentityKeyType::Ed25519);
+        assert_eq!(identity.key_type(), KeyType::Ed25519);
+    }
+
+    #[test]
+    fn test_from_identity_key_type_secp256k1() {
+        let key = generate_secp256k1().unwrap();
+        let bytes = key.raw();
+
+        let identity =
+            RawIdentity::from_identity_key_type(IdentityKeyType::Secp256k1, &bytes).unwrap();
+        assert_eq!(identity.identity_key_type(), IdentityKeyType::Secp256k1);
+        assert_eq!(identity.key_type(), KeyType::Secp256k1);
+    }
+
+    #[test]
+    fn test_key_type_and_identity_key_type_consistent() {
+        let ed25519_identity = RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap();
+        assert_eq!(
+            ed25519_identity.key_type(),
+            ed25519_identity.identity_key_type().to_crypto_key_type()
+        );
+
+        let secp256k1_identity =
+            RawIdentity::from_private_key(generate_secp256k1().unwrap()).unwrap();
+        assert_eq!(
+            secp256k1_identity.key_type(),
+            secp256k1_identity.identity_key_type().to_crypto_key_type()
+        );
     }
 }
