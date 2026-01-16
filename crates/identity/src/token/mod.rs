@@ -4,115 +4,28 @@
 //! for identity authentication. Tokens are signed using the identity's private key
 //! with EdDSA (for Ed25519) or ES256K (for secp256k1).
 //!
-//! Note: Both EdDSA and ES256K are implemented manually since the jsonwebtoken crate
-//! requires specific key formats (PKCS#8 DER) that differ from our crypto library's
-//! raw key format.
+//! Both algorithms are implemented manually since the jsonwebtoken crate requires
+//! specific key formats (PKCS#8 DER) that differ from our crypto library's raw format.
+
+mod claims;
+mod decoding;
+mod der;
+mod encoding;
+mod identity;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use serde::{Deserialize, Serialize};
-
-use crypto::keys::PublicKey;
 use crypto::{public_key_from_bytes, KeyType};
 
 use crate::did::Did;
 use crate::error::Error;
 use crate::key_type::IdentityKeyType;
-use crate::{FullIdentity, Identity, Result};
+use crate::{FullIdentity, Result};
 
-/// EdDSA algorithm name for Ed25519.
-const EDDSA_ALG: &str = "EdDSA";
-
-/// ES256K algorithm name for secp256k1.
-const ES256K_ALG: &str = "ES256K";
-
-/// JWT claims structure for identity tokens.
-///
-/// Contains standard JWT claims plus custom claims for identity-specific data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdentityClaims {
-    /// Subject: hex-encoded public key
-    pub sub: String,
-
-    /// Issuer: DID of the identity
-    pub iss: String,
-
-    /// Expiration time (Unix timestamp)
-    pub exp: u64,
-
-    /// Not before time (Unix timestamp)
-    pub nbf: u64,
-
-    /// Issued at time (Unix timestamp)
-    pub iat: u64,
-
-    /// Audience (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aud: Option<Vec<String>>,
-
-    /// Authorized account (optional)
-    #[serde(rename = "authorized_account", skip_serializing_if = "Option::is_none")]
-    pub authorized_account: Option<String>,
-
-    /// Key type (ed25519 or secp256k1)
-    pub key_type: String,
-}
-
-/// An identity extracted from a JWT token.
-///
-/// TokenIdentity only has access to the public key and cannot sign new tokens
-/// since it doesn't have the private key.
-pub struct TokenIdentity {
-    public_key: Box<dyn PublicKey>,
-    did: Did,
-    bearer_token: String,
-    authorized_account: Option<String>,
-    key_type: IdentityKeyType,
-    claims: IdentityClaims,
-}
-
-impl TokenIdentity {
-    /// Returns the bearer token string.
-    pub fn bearer_token(&self) -> &str {
-        &self.bearer_token
-    }
-
-    /// Returns the authorized account if present.
-    pub fn authorized_account(&self) -> Option<&str> {
-        self.authorized_account.as_deref()
-    }
-
-    /// Returns the key type of this identity.
-    pub fn key_type(&self) -> IdentityKeyType {
-        self.key_type
-    }
-
-    /// Returns the claims from the token.
-    pub fn claims(&self) -> &IdentityClaims {
-        &self.claims
-    }
-}
-
-impl Identity for TokenIdentity {
-    fn pub_key(&self) -> &dyn PublicKey {
-        self.public_key.as_ref()
-    }
-
-    fn did(&self) -> Result<Did> {
-        Ok(self.did.clone())
-    }
-}
-
-impl std::fmt::Debug for TokenIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TokenIdentity")
-            .field("did", &self.did)
-            .field("key_type", &self.key_type)
-            .field("authorized_account", &self.authorized_account)
-            .finish_non_exhaustive()
-    }
-}
+pub use claims::IdentityClaims;
+use decoding::{decode_ed25519, decode_secp256k1, parse_algorithm};
+use encoding::{encode_ed25519, encode_secp256k1, EDDSA_ALG, ES256K_ALG};
+pub use identity::TokenIdentity;
 
 /// Generates a new JWT bearer token for the given identity.
 ///
@@ -156,8 +69,8 @@ pub fn new_token<I: FullIdentity>(
     };
 
     let token = match key_type {
-        KeyType::Ed25519 => encode_ed25519_token(&claims, identity)?,
-        KeyType::Secp256k1 => encode_secp256k1_token(&claims, identity)?,
+        KeyType::Ed25519 => encode_ed25519(&claims, identity)?,
+        KeyType::Secp256k1 => encode_secp256k1(&claims, identity)?,
         KeyType::Secp256r1 => return Err(Error::UnsupportedKeyType(KeyType::Secp256r1)),
     };
 
@@ -184,7 +97,6 @@ pub fn verify_auth_token(identity: &TokenIdentity, expected_audience: &str) -> R
         .map_err(|e| Error::TokenDecoding(format!("system time error: {}", e)))?
         .as_secs();
 
-    // Check not-before claim
     if identity.claims.nbf > now {
         return Err(Error::TokenNotYetValid {
             nbf: identity.claims.nbf,
@@ -237,12 +149,12 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
     let token_str = std::str::from_utf8(data)
         .map_err(|e| Error::TokenDecoding(format!("invalid UTF-8: {}", e)))?;
 
-    // Parse the header manually to handle ES256K which isn't in jsonwebtoken's Algorithm enum
-    let header_alg = parse_jwt_algorithm(token_str)?;
+    // ES256K isn't in jsonwebtoken's Algorithm enum, so we parse manually
+    let header_alg = parse_algorithm(token_str)?;
 
     let claims: IdentityClaims = match header_alg.as_str() {
-        "EdDSA" => decode_ed25519_token(token_str)?,
-        "ES256K" => decode_secp256k1_token(token_str)?,
+        "EdDSA" => decode_ed25519(token_str)?,
+        "ES256K" => decode_secp256k1(token_str)?,
         alg => {
             return Err(Error::TokenDecoding(format!(
                 "unsupported algorithm: {}",
@@ -253,7 +165,6 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
 
     let key_type: IdentityKeyType = claims.key_type.parse()?;
 
-    // Validate algorithm/key-type consistency
     let expected_alg = match key_type {
         IdentityKeyType::Ed25519 => EDDSA_ALG,
         IdentityKeyType::Secp256k1 => ES256K_ALG,
@@ -283,7 +194,6 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
     })?;
     let did = Did::new_unchecked(did_string);
 
-    // Validate issuer matches derived DID
     let did_str = did.to_string();
     if claims.iss != did_str {
         return Err(Error::InvalidClaimValue {
@@ -305,350 +215,11 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
     })
 }
 
-fn encode_ed25519_token<I: FullIdentity>(claims: &IdentityClaims, identity: &I) -> Result<String> {
-    // Create header for EdDSA
-    let header = serde_json::json!({
-        "alg": EDDSA_ALG,
-        "typ": "JWT"
-    });
-    let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
-
-    // Encode claims
-    let claims_json = serde_json::to_string(claims)
-        .map_err(|e| Error::TokenEncoding(format!("failed to serialize claims: {}", e)))?;
-    let claims_b64 = URL_SAFE_NO_PAD.encode(claims_json.as_bytes());
-
-    // Create signing input
-    let signing_input = format!("{}.{}", header_b64, claims_b64);
-
-    // Sign with Ed25519 (raw 64-byte signature)
-    let signature = identity
-        .sign(signing_input.as_bytes())
-        .map_err(|e| Error::TokenEncoding(format!("signing failed: {}", e)))?;
-
-    let sig_b64 = URL_SAFE_NO_PAD.encode(&signature);
-
-    Ok(format!("{}.{}", signing_input, sig_b64))
-}
-
-fn encode_secp256k1_token<I: FullIdentity>(
-    claims: &IdentityClaims,
-    identity: &I,
-) -> Result<String> {
-    // Create header for ES256K
-    let header = serde_json::json!({
-        "alg": ES256K_ALG,
-        "typ": "JWT"
-    });
-    let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
-
-    // Encode claims
-    let claims_json = serde_json::to_string(claims)
-        .map_err(|e| Error::TokenEncoding(format!("failed to serialize claims: {}", e)))?;
-    let claims_b64 = URL_SAFE_NO_PAD.encode(claims_json.as_bytes());
-
-    // Create signing input
-    let signing_input = format!("{}.{}", header_b64, claims_b64);
-
-    // Sign with secp256k1
-    let signature = identity
-        .sign(signing_input.as_bytes())
-        .map_err(|e| Error::TokenEncoding(format!("signing failed: {}", e)))?;
-
-    // Convert DER signature to raw R||S format (64 bytes)
-    let raw_sig = der_signature_to_raw(&signature)?;
-
-    let sig_b64 = URL_SAFE_NO_PAD.encode(&raw_sig);
-
-    Ok(format!("{}.{}", signing_input, sig_b64))
-}
-
-fn decode_ed25519_token(token: &str) -> Result<IdentityClaims> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(Error::TokenDecoding("invalid JWT format".to_string()));
-    }
-
-    // Decode claims from payload
-    let claims_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|e| Error::TokenDecoding(format!("invalid payload base64: {}", e)))?;
-
-    let claims: IdentityClaims = serde_json::from_slice(&claims_bytes)
-        .map_err(|e| Error::TokenDecoding(format!("invalid claims JSON: {}", e)))?;
-
-    // Get the public key from claims
-    let pub_key_bytes = hex::decode(&claims.sub).map_err(|e| Error::InvalidClaimValue {
-        claim: "sub".to_string(),
-        reason: format!("invalid hex: {}", e),
-    })?;
-
-    // Decode signature (raw 64-byte Ed25519 signature)
-    let sig_bytes = URL_SAFE_NO_PAD
-        .decode(parts[2])
-        .map_err(|e| Error::TokenDecoding(format!("invalid signature base64: {}", e)))?;
-
-    // Verify signature using the public key
-    let public_key = public_key_from_bytes(KeyType::Ed25519, &pub_key_bytes).map_err(|e| {
-        Error::InvalidClaimValue {
-            claim: "sub".to_string(),
-            reason: format!("invalid public key: {}", e),
-        }
-    })?;
-
-    let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let verified = public_key
-        .verify(signing_input.as_bytes(), &sig_bytes)
-        .map_err(|e| Error::TokenDecoding(format!("verification error: {}", e)))?;
-
-    if !verified {
-        return Err(Error::TokenDecoding(
-            "signature verification failed".to_string(),
-        ));
-    }
-
-    Ok(claims)
-}
-
-fn decode_secp256k1_token(token: &str) -> Result<IdentityClaims> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(Error::TokenDecoding("invalid JWT format".to_string()));
-    }
-
-    // Decode claims from payload
-    let claims_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|e| Error::TokenDecoding(format!("invalid payload base64: {}", e)))?;
-
-    let claims: IdentityClaims = serde_json::from_slice(&claims_bytes)
-        .map_err(|e| Error::TokenDecoding(format!("invalid claims JSON: {}", e)))?;
-
-    // Get the public key from claims
-    let pub_key_bytes = hex::decode(&claims.sub).map_err(|e| Error::InvalidClaimValue {
-        claim: "sub".to_string(),
-        reason: format!("invalid hex: {}", e),
-    })?;
-
-    // Decode signature
-    let sig_bytes = URL_SAFE_NO_PAD
-        .decode(parts[2])
-        .map_err(|e| Error::TokenDecoding(format!("invalid signature base64: {}", e)))?;
-
-    // Convert raw R||S signature back to DER for verification
-    let der_sig = raw_signature_to_der(&sig_bytes)?;
-
-    // Verify signature using the public key
-    let public_key = public_key_from_bytes(KeyType::Secp256k1, &pub_key_bytes).map_err(|e| {
-        Error::InvalidClaimValue {
-            claim: "sub".to_string(),
-            reason: format!("invalid public key: {}", e),
-        }
-    })?;
-
-    let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let verified = public_key
-        .verify(signing_input.as_bytes(), &der_sig)
-        .map_err(|e| Error::TokenDecoding(format!("verification error: {}", e)))?;
-
-    if !verified {
-        return Err(Error::TokenDecoding(
-            "signature verification failed".to_string(),
-        ));
-    }
-
-    Ok(claims)
-}
-
-/// Parse the algorithm from a JWT header.
-fn parse_jwt_algorithm(token: &str) -> Result<String> {
-    let header_part = token
-        .split('.')
-        .next()
-        .ok_or_else(|| Error::TokenDecoding("invalid JWT format".to_string()))?;
-
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(header_part)
-        .map_err(|e| Error::TokenDecoding(format!("invalid header base64: {}", e)))?;
-
-    let header: serde_json::Value = serde_json::from_slice(&header_bytes)
-        .map_err(|e| Error::TokenDecoding(format!("invalid header JSON: {}", e)))?;
-
-    header["alg"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| Error::MissingClaim("alg".to_string()))
-}
-
-/// Convert DER-encoded ECDSA signature to raw R||S format (64 bytes).
-fn der_signature_to_raw(der: &[u8]) -> Result<Vec<u8>> {
-    // DER format: 0x30 <len> 0x02 <r_len> <r> 0x02 <s_len> <s>
-    if der.len() < 8 {
-        return Err(Error::TokenEncoding("DER signature too short".to_string()));
-    }
-    if der[0] != 0x30 {
-        return Err(Error::TokenEncoding(
-            "invalid DER signature: expected SEQUENCE tag".to_string(),
-        ));
-    }
-
-    let mut pos: usize = 2; // Skip 0x30 and length byte
-
-    // Handle multi-byte length
-    if der[1] & 0x80 != 0 {
-        let len_bytes = (der[1] & 0x7f) as usize;
-        pos = pos
-            .checked_add(len_bytes)
-            .ok_or_else(|| Error::TokenEncoding("DER length field overflow".to_string()))?;
-    }
-
-    // Bounds check before parsing R tag
-    if pos >= der.len() {
-        return Err(Error::TokenEncoding(
-            "DER signature truncated: R tag position out of bounds".to_string(),
-        ));
-    }
-
-    // Parse R
-    if der[pos] != 0x02 {
-        return Err(Error::TokenEncoding(
-            "invalid DER signature: expected INTEGER tag for R".to_string(),
-        ));
-    }
-    pos += 1;
-
-    if pos >= der.len() {
-        return Err(Error::TokenEncoding(
-            "DER signature truncated: R length position out of bounds".to_string(),
-        ));
-    }
-    let r_len = der[pos] as usize;
-    pos += 1;
-
-    let r_start = pos;
-    let r_end = r_start
-        .checked_add(r_len)
-        .ok_or_else(|| Error::TokenEncoding("DER R length overflow".to_string()))?;
-
-    if r_end > der.len() {
-        return Err(Error::TokenEncoding(format!(
-            "DER signature truncated: R component extends beyond data (need {} bytes, have {})",
-            r_end,
-            der.len()
-        )));
-    }
-    pos = r_end;
-
-    // Bounds check before parsing S tag
-    if pos >= der.len() {
-        return Err(Error::TokenEncoding(
-            "DER signature truncated: S tag position out of bounds".to_string(),
-        ));
-    }
-
-    // Parse S
-    if der[pos] != 0x02 {
-        return Err(Error::TokenEncoding(
-            "invalid DER signature: expected INTEGER tag for S".to_string(),
-        ));
-    }
-    pos += 1;
-
-    if pos >= der.len() {
-        return Err(Error::TokenEncoding(
-            "DER signature truncated: S length position out of bounds".to_string(),
-        ));
-    }
-    let s_len = der[pos] as usize;
-    pos += 1;
-
-    let s_start = pos;
-    let s_end = s_start
-        .checked_add(s_len)
-        .ok_or_else(|| Error::TokenEncoding("DER S length overflow".to_string()))?;
-
-    if s_end > der.len() {
-        return Err(Error::TokenEncoding(format!(
-            "DER signature truncated: S component extends beyond data (need {} bytes, have {})",
-            s_end,
-            der.len()
-        )));
-    }
-
-    // Extract R and S, removing leading zeros
-    let mut r = &der[r_start..r_end];
-    let mut s = &der[s_start..s_end];
-
-    // Remove leading zeros (DER INTEGER padding)
-    while r.len() > 32 && r[0] == 0 {
-        r = &r[1..];
-    }
-    while s.len() > 32 && s[0] == 0 {
-        s = &s[1..];
-    }
-
-    // Pad to 32 bytes if necessary
-    let mut result = vec![0u8; 64];
-    let r_offset = 32 - r.len().min(32);
-    let s_offset = 32 - s.len().min(32);
-
-    result[r_offset..32].copy_from_slice(&r[..r.len().min(32)]);
-    result[32 + s_offset..64].copy_from_slice(&s[..s.len().min(32)]);
-
-    Ok(result)
-}
-
-/// Convert raw R||S signature (64 bytes) to DER-encoded ECDSA signature.
-fn raw_signature_to_der(raw: &[u8]) -> Result<Vec<u8>> {
-    if raw.len() != 64 {
-        return Err(Error::TokenDecoding(format!(
-            "invalid raw signature length: expected 64, got {}",
-            raw.len()
-        )));
-    }
-
-    let r = &raw[0..32];
-    let s = &raw[32..64];
-
-    // Encode as DER INTEGER, adding leading zero if high bit is set
-    fn encode_der_integer(bytes: &[u8]) -> Vec<u8> {
-        // Skip leading zeros
-        let mut start = 0;
-        while start < bytes.len() - 1 && bytes[start] == 0 {
-            start += 1;
-        }
-        let trimmed = &bytes[start..];
-
-        let mut result = Vec::new();
-        result.push(0x02); // INTEGER tag
-
-        // Add leading zero if high bit is set (to ensure positive number)
-        if trimmed[0] & 0x80 != 0 {
-            result.push((trimmed.len() + 1) as u8);
-            result.push(0x00);
-        } else {
-            result.push(trimmed.len() as u8);
-        }
-        result.extend_from_slice(trimmed);
-        result
-    }
-
-    let r_der = encode_der_integer(r);
-    let s_der = encode_der_integer(s);
-
-    let mut result = Vec::new();
-    result.push(0x30); // SEQUENCE tag
-    result.push((r_der.len() + s_der.len()) as u8);
-    result.extend_from_slice(&r_der);
-    result.extend_from_slice(&s_der);
-
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RawIdentity;
+    use crate::{Identity, RawIdentity};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use crypto::{generate_ed25519, generate_secp256k1};
 
     #[test]
@@ -665,12 +236,8 @@ mod tests {
         .unwrap();
 
         assert!(!token.is_empty());
-
         let token_str = std::str::from_utf8(&token).unwrap();
-        assert!(
-            token_str.contains('.'),
-            "JWT should have header.payload.signature format"
-        );
+        assert!(token_str.contains('.'));
     }
 
     #[test]
@@ -687,7 +254,6 @@ mod tests {
         .unwrap();
 
         assert!(!token.is_empty());
-
         let token_str = std::str::from_utf8(&token).unwrap();
         assert!(token_str.contains('.'));
     }
@@ -798,23 +364,48 @@ mod tests {
         let private_key = generate_ed25519().unwrap();
         let identity = RawIdentity::from_private_key(private_key).unwrap();
 
-        // Create a token that expires immediately (0 duration)
         let token = new_token(
             &identity,
-            Duration::from_secs(0),
+            Duration::from_secs(3600),
             Some("audience".to_string()),
             None,
         )
         .unwrap();
 
-        // Wait a moment to ensure expiration
-        std::thread::sleep(Duration::from_millis(1100));
+        let mut token_identity = from_token(&token).unwrap();
+        // Manipulate claims to simulate expiration without sleeping
+        token_identity.claims.exp = 0;
 
-        let token_identity = from_token(&token).unwrap();
         let result = verify_auth_token(&token_identity, "audience");
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::TokenExpired { .. }));
+    }
+
+    #[test]
+    fn test_token_not_yet_valid() {
+        let private_key = generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let token = new_token(
+            &identity,
+            Duration::from_secs(3600),
+            Some("audience".to_string()),
+            None,
+        )
+        .unwrap();
+
+        let mut token_identity = from_token(&token).unwrap();
+        // Set nbf far in the future
+        token_identity.claims.nbf = u64::MAX;
+
+        let result = verify_auth_token(&token_identity, "audience");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::TokenNotYetValid { .. }
+        ));
     }
 
     #[test]
@@ -833,14 +424,9 @@ mod tests {
 
         let token_identity = from_token(&token).unwrap();
 
-        // Verify public key matches
         assert_eq!(token_identity.pub_key().raw(), original_pub_key);
-
-        // Verify verification succeeds
         let result = verify_auth_token(&token_identity, "roundtrip-test");
         assert!(result.is_ok());
-
-        // Verify claims are preserved
         assert_eq!(token_identity.authorized_account(), Some("test-account"));
     }
 
@@ -860,10 +446,7 @@ mod tests {
 
         let token_identity = from_token(&token).unwrap();
 
-        // Verify public key matches
         assert_eq!(token_identity.pub_key().raw(), original_pub_key);
-
-        // Verify verification succeeds
         let result = verify_auth_token(&token_identity, "roundtrip-test");
         assert!(result.is_ok());
     }
@@ -926,11 +509,9 @@ mod tests {
         let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
         let token_str = String::from_utf8(token).unwrap();
 
-        // Tamper with the signature (modify a few bytes)
         let parts: Vec<&str> = token_str.split('.').collect();
         let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
         let mut tampered_sig = sig_bytes.clone();
-        // Flip some bits in the signature
         tampered_sig[0] ^= 0xFF;
         tampered_sig[10] ^= 0xFF;
         let tampered_sig_b64 = URL_SAFE_NO_PAD.encode(&tampered_sig);
@@ -954,7 +535,6 @@ mod tests {
         let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
         let token_str = String::from_utf8(token).unwrap();
 
-        // Tamper with the signature
         let parts: Vec<&str> = token_str.split('.').collect();
         let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
         let mut tampered_sig = sig_bytes.clone();
@@ -981,7 +561,6 @@ mod tests {
         .unwrap();
         let token_str = String::from_utf8(token).unwrap();
 
-        // Tamper with the payload (change audience)
         let parts: Vec<&str> = token_str.split('.').collect();
         let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
         let mut claims: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
@@ -1001,20 +580,17 @@ mod tests {
 
     #[test]
     fn test_wrong_signer_rejected() {
-        // Create two different identities
         let attacker_key = generate_ed25519().unwrap();
         let attacker_identity = RawIdentity::from_private_key(attacker_key).unwrap();
 
         let victim_key = generate_ed25519().unwrap();
         let victim_identity = RawIdentity::from_private_key(victim_key).unwrap();
 
-        // Create a valid token from attacker
         let attacker_token =
             new_token(&attacker_identity, Duration::from_secs(3600), None, None).unwrap();
         let attacker_token_str = String::from_utf8(attacker_token).unwrap();
         let parts: Vec<&str> = attacker_token_str.split('.').collect();
 
-        // Create claims with victim's public key but attacker's signature
         let victim_pub_key_hex = victim_identity.pub_key().to_hex_string();
         let victim_did = victim_identity.did().unwrap();
 
@@ -1029,8 +605,6 @@ mod tests {
             key_type: "ed25519".to_string(),
         };
         let fake_payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&fake_claims).unwrap());
-
-        // Use attacker's signature with victim's claims
         let forged_token = format!("{}.{}.{}", parts[0], fake_payload, parts[2]);
 
         let result = from_token(forged_token.as_bytes());
@@ -1043,71 +617,67 @@ mod tests {
         );
     }
 
-    // DER signature parsing edge case tests
-
     #[test]
-    fn test_der_signature_empty_input() {
-        let result = der_signature_to_raw(&[]);
+    fn test_algorithm_mismatch_rejected() {
+        let private_key = generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+        let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
+        let token_str = String::from_utf8(token).unwrap();
+
+        let parts: Vec<&str> = token_str.split('.').collect();
+        let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let mut claims: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        // Change key_type to secp256k1 while header says EdDSA
+        claims["key_type"] = serde_json::json!("secp256k1");
+        let modified_payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).unwrap());
+        let modified_token = format!("{}.{}.{}", parts[0], modified_payload, parts[2]);
+
+        let result = from_token(modified_token.as_bytes());
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("too short")));
-    }
-
-    #[test]
-    fn test_der_signature_wrong_tag() {
-        // Wrong tag (0x31 instead of 0x30)
-        let result = der_signature_to_raw(&[0x31, 0x40, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("SEQUENCE tag")));
-    }
-
-    #[test]
-    fn test_der_signature_truncated_r() {
-        // Valid header but R component extends beyond data
-        let result = der_signature_to_raw(&[0x30, 0x44, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("truncated")));
-    }
-
-    #[test]
-    fn test_der_signature_missing_s_tag() {
-        // R component present but S tag missing
-        let mut der = vec![0x30, 0x26]; // SEQUENCE
-        der.push(0x02); // INTEGER tag for R
-        der.push(0x20); // R length = 32
-        der.extend_from_slice(&[0x00; 32]); // R value
-                                            // Missing S component
-
-        let result = der_signature_to_raw(&der);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        // Should fail at signature verification (before algorithm check) or algorithm mismatch
         assert!(
-            matches!(err, Error::TokenEncoding(ref msg) if msg.contains("out of bounds") || msg.contains("truncated"))
+            matches!(err, Error::TokenDecoding(ref msg) if msg.contains("signature") || msg.contains("algorithm mismatch")),
+            "Expected signature or algorithm error, got: {:?}",
+            err
         );
     }
 
     #[test]
-    fn test_der_signature_wrong_r_tag() {
-        // Wrong tag for R (0x03 instead of 0x02)
-        let result = der_signature_to_raw(&[0x30, 0x44, 0x03, 0x20, 0x00, 0x00, 0x00, 0x00]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, Error::TokenEncoding(ref msg) if msg.contains("INTEGER tag for R")));
-    }
+    fn test_issuer_mismatch_rejected() {
+        let private_key = generate_ed25519().unwrap();
+        let identity = RawIdentity::from_private_key(private_key).unwrap();
 
-    #[test]
-    fn test_raw_signature_wrong_length() {
-        let result = raw_signature_to_der(&[0u8; 63]); // 63 instead of 64
+        // Create another identity to get a different DID
+        let other_key = generate_ed25519().unwrap();
+        let other_identity = RawIdentity::from_private_key(other_key).unwrap();
+        let other_did = other_identity.did().unwrap();
+
+        let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
+        let token_str = String::from_utf8(token).unwrap();
+
+        let parts: Vec<&str> = token_str.split('.').collect();
+        let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let mut claims: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        // Change iss to a different DID
+        claims["iss"] = serde_json::json!(other_did.to_string());
+        let modified_payload = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).unwrap());
+        let modified_token = format!("{}.{}.{}", parts[0], modified_payload, parts[2]);
+
+        let result = from_token(modified_token.as_bytes());
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, Error::TokenDecoding(ref msg) if msg.contains("expected 64")));
+        // Should fail at signature verification (payload was modified)
+        assert!(
+            matches!(err, Error::TokenDecoding(ref msg) if msg.contains("signature")),
+            "Expected signature error, got: {:?}",
+            err
+        );
     }
 
     #[test]
     fn test_unsupported_algorithm() {
-        // Create a token with RS256 algorithm header
         let header = serde_json::json!({
             "alg": "RS256",
             "typ": "JWT"
