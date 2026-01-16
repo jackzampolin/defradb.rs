@@ -69,6 +69,7 @@ pub mod error;
 pub mod host;
 pub mod message;
 pub mod protocol;
+pub mod replicator;
 pub mod signing;
 pub mod sync;
 #[cfg(any(test, feature = "test-utils"))]
@@ -105,6 +106,9 @@ pub use bitswap::{
     AccessMode, BitswapStoreAdapter, BlockAccessController, BlockAccessFn, ReplicatorRegistry,
 };
 pub use libp2p_bitswap_next::{BitswapStore, QueryId};
+
+// Re-export replicator types
+pub use replicator::ReplicatorInfo;
 
 // Re-export commonly used libp2p types
 pub use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};

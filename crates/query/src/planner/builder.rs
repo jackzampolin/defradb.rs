@@ -9,7 +9,9 @@ use std::sync::Arc;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
-use crate::plan::{IndexScanNode, JoinSide, LimitNode, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne};
+use crate::plan::{
+    IndexScanNode, JoinSide, LimitNode, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
+};
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
 

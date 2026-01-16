@@ -66,10 +66,12 @@ use tokio::sync::mpsc;
 
 use blockstore::Blockstore;
 use cid::Cid;
+use libp2p::PeerId;
 
 use crate::error::Result;
 use crate::host::{HostEvent, P2PHostHandle};
 use crate::message::{PushLogBroadcast, PushLogReply};
+use crate::replicator::ReplicatorInfo;
 
 use super::broadcaster::Broadcaster;
 use super::manager::{SyncConfig, SyncEvent, SyncManager};
@@ -361,6 +363,119 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     // For block fetching, use the DagSync module with Bitswap:
     //   - DagSync::prepare_sync() to identify missing blocks
     //   - behaviour.bitswap_sync() to fetch via Bitswap protocol
+
+    // === Replicator Management ===
+
+    /// Set (add/update) a replicator for the specified collections.
+    ///
+    /// This adds the peer to the replicator registry and auto-subscribes
+    /// to the collection topics so we can sync with them.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - The peer ID of the replicator
+    /// * `collections` - Collections this peer should replicate
+    /// * `auto_subscribe` - Whether to auto-subscribe to the collection topics
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    pub async fn set_replicator(
+        &self,
+        peer_id: PeerId,
+        collections: Vec<String>,
+        auto_subscribe: bool,
+    ) -> Result<()> {
+        // Update the registry via host command
+        self.host
+            .set_replicator(peer_id, collections.clone())
+            .await?;
+
+        // Auto-subscribe to collection topics so we receive updates
+        if auto_subscribe {
+            for collection_id in &collections {
+                if let Err(e) = self.subscribe_collection(collection_id).await {
+                    tracing::warn!(
+                        collection_id = %collection_id,
+                        error = %e,
+                        "Failed to auto-subscribe to collection for replicator"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            peer_id = %peer_id,
+            collections = ?collections,
+            "Set replicator"
+        );
+
+        Ok(())
+    }
+
+    /// Delete a replicator.
+    ///
+    /// Removes the peer from the replicator registry.
+    /// Does not unsubscribe from collections (other peers may still be replicating).
+    pub async fn delete_replicator(&self, peer_id: PeerId) -> Result<()> {
+        self.host.delete_replicator(peer_id).await?;
+        tracing::info!(peer_id = %peer_id, "Deleted replicator");
+        Ok(())
+    }
+
+    /// Get all registered replicators.
+    pub async fn get_all_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
+        self.host.get_all_replicators().await
+    }
+
+    /// Get replicator info for a specific peer.
+    ///
+    /// Returns None if the peer is not a replicator.
+    pub async fn get_replicator(&self, peer_id: PeerId) -> Result<Option<ReplicatorInfo>> {
+        self.host.get_replicator(peer_id).await
+    }
+
+    /// Load replicators from stored ReplicatorInfo records.
+    ///
+    /// This is typically called during startup to restore replicator state
+    /// from persistent storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `infos` - ReplicatorInfo records loaded from storage
+    /// * `auto_subscribe` - Whether to auto-subscribe to collection topics
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of replicators loaded.
+    pub async fn load_replicators(
+        &self,
+        infos: &[ReplicatorInfo],
+        auto_subscribe: bool,
+    ) -> Result<usize> {
+        let mut count = 0;
+
+        for info in infos {
+            if let Some(peer_id) = info.peer_id() {
+                self.set_replicator(peer_id, info.collections.clone(), auto_subscribe)
+                    .await?;
+                count += 1;
+            } else {
+                tracing::warn!(
+                    peer_id_str = %info.peer_id,
+                    "Skipping replicator with invalid peer ID"
+                );
+            }
+        }
+
+        tracing::info!(
+            count = count,
+            auto_subscribe = auto_subscribe,
+            "Loaded replicators from storage"
+        );
+
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

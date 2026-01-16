@@ -617,7 +617,7 @@ impl Node {
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
     ) -> Result<p2p::P2PHostHandle> {
-        let (host, handle, mut events) = match keypair {
+        let (host, handle, mut events, _replicators) = match keypair {
             Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).map_err(Error::P2P)?,
             None => p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?,
         };
