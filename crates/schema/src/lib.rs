@@ -15,6 +15,7 @@ mod field;
 mod field_kind;
 mod index;
 mod policy;
+mod relation;
 mod source;
 mod validation;
 
