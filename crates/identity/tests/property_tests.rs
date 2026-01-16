@@ -38,7 +38,7 @@ proptest! {
 
 proptest! {
     #[test]
-    fn prop_ed25519_did_is_deterministic(seed in any::<[u8; 32]>()) {
+    fn prop_ed25519_did_is_deterministic(_seed in any::<[u8; 32]>()) {
         // Generate two identities from the same seed
         // Note: Ed25519 private key is 64 bytes (seed + public key)
         // We generate a key and use its bytes to ensure consistency
@@ -161,7 +161,7 @@ proptest! {
         let identity = RawIdentity::from_private_key(key).unwrap();
 
         let did = identity.did().unwrap();
-        prop_assert!(did.starts_with("did:key:"), "DID must start with 'did:key:'");
+        prop_assert!(did.as_str().starts_with("did:key:"), "DID must start with 'did:key:'");
     }
 
     #[test]
@@ -172,7 +172,7 @@ proptest! {
         let did = identity.did().unwrap();
         // Ed25519 DIDs start with "did:key:z6Mk" (z = base58btc, 6Mk = ed25519-pub multicodec)
         prop_assert!(
-            did.starts_with("did:key:z6Mk"),
+            did.as_str().starts_with("did:key:z6Mk"),
             "Ed25519 DID must have correct multibase/multicodec prefix"
         );
     }
@@ -185,7 +185,7 @@ proptest! {
         let did = identity.did().unwrap();
         // secp256k1 DIDs start with "did:key:z7r8" (z = base58btc, uses uncompressed key)
         prop_assert!(
-            did.starts_with("did:key:z7r8"),
+            did.as_str().starts_with("did:key:z7r8"),
             "secp256k1 DID must have correct multibase/multicodec prefix (uncompressed key)"
         );
     }

@@ -63,15 +63,20 @@ async fn test_identity_usable_across_tokio_tasks() {
     let identity_clone = identity.clone();
 
     // Sign in a spawned task
-    let handle = tokio::spawn(async move {
-        identity_clone.sign(b"message from spawned task").unwrap()
-    });
+    let handle =
+        tokio::spawn(async move { identity_clone.sign(b"message from spawned task").unwrap() });
 
     let signature = handle.await.unwrap();
 
     // Verify in the main task
-    let verified = identity.pub_key().verify(b"message from spawned task", &signature).unwrap();
-    assert!(verified, "Signature from spawned task should verify in main task");
+    let verified = identity
+        .pub_key()
+        .verify(b"message from spawned task", &signature)
+        .unwrap();
+    assert!(
+        verified,
+        "Signature from spawned task should verify in main task"
+    );
 }
 
 #[tokio::test]
@@ -98,7 +103,10 @@ async fn test_identity_concurrent_signing() {
 
     // Verify all signatures
     for (message, signature) in results {
-        let verified = identity.pub_key().verify(message.as_bytes(), &signature).unwrap();
+        let verified = identity
+            .pub_key()
+            .verify(message.as_bytes(), &signature)
+            .unwrap();
         assert!(verified, "Signature for '{}' should verify", message);
     }
 }
@@ -124,7 +132,10 @@ async fn test_identity_concurrent_did_generation() {
     // All DIDs should be identical
     let first_did = &dids[0];
     for did in &dids {
-        assert_eq!(did, first_did, "All concurrent DID calls should return the same value");
+        assert_eq!(
+            did, first_did,
+            "All concurrent DID calls should return the same value"
+        );
     }
 }
 
@@ -135,7 +146,9 @@ async fn test_identity_shared_between_tasks_secp256k1() {
 
     // Sign in a spawned task
     let handle = tokio::spawn(async move {
-        identity_clone.sign(b"secp256k1 message from spawned task").unwrap()
+        identity_clone
+            .sign(b"secp256k1 message from spawned task")
+            .unwrap()
     });
 
     let signature = handle.await.unwrap();
@@ -145,7 +158,10 @@ async fn test_identity_shared_between_tasks_secp256k1() {
         .pub_key()
         .verify(b"secp256k1 message from spawned task", &signature)
         .unwrap();
-    assert!(verified, "secp256k1 signature from spawned task should verify");
+    assert!(
+        verified,
+        "secp256k1 signature from spawned task should verify"
+    );
 }
 
 #[tokio::test]
@@ -161,7 +177,7 @@ async fn test_identity_move_between_tasks() {
     .await
     .unwrap();
 
-    assert!(result.0.starts_with("did:key:"));
+    assert!(result.0.as_str().starts_with("did:key:"));
     assert_eq!(result.1.len(), 64); // Ed25519 signature is 64 bytes
 }
 
@@ -177,7 +193,7 @@ fn test_identity_send_to_std_thread() {
     });
 
     let (did, signature) = handle.join().unwrap();
-    assert!(did.starts_with("did:key:"));
+    assert!(did.as_str().starts_with("did:key:"));
     assert_eq!(signature.len(), 64);
 }
 
@@ -222,8 +238,14 @@ async fn test_identity_under_multi_threaded_runtime() {
     // Verify all signatures
     for handle in handles {
         let (message, signature) = handle.await.unwrap();
-        let verified = identity.pub_key().verify(message.as_bytes(), &signature).unwrap();
-        assert!(verified, "Signature should verify under multi-threaded runtime");
+        let verified = identity
+            .pub_key()
+            .verify(message.as_bytes(), &signature)
+            .unwrap();
+        assert!(
+            verified,
+            "Signature should verify under multi-threaded runtime"
+        );
     }
 }
 

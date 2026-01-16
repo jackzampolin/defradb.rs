@@ -377,7 +377,7 @@ impl Node {
         match kr.get(PEER_KEY) {
             Ok(key_bytes) => {
                 info!("Loaded existing peer key from keyring");
-                Self::log_identity_did(&key_bytes);
+                Self::derive_and_log_identity_did(&key_bytes)?;
                 Self::keypair_from_ed25519_bytes(&key_bytes)
             }
             Err(keyring::Error::NotFound(_)) => {
@@ -391,27 +391,30 @@ impl Node {
                 kr.set(PEER_KEY, &key_bytes)
                     .map_err(|e| Error::Keyring(e.to_string()))?;
 
-                Self::log_identity_did(&key_bytes);
+                Self::derive_and_log_identity_did(&key_bytes)?;
                 Self::keypair_from_ed25519_bytes(&key_bytes)
             }
             Err(e) => Err(Error::Keyring(e.to_string())),
         }
     }
 
-    /// Log the node's DID from peer key bytes.
+    /// Derive and log the node's DID from peer key bytes.
     ///
-    /// Creates a RawIdentity from the key bytes and logs its DID.
-    /// If identity creation fails, logs a warning instead of failing startup.
-    fn log_identity_did(key_bytes: &[u8]) {
+    /// Creates a RawIdentity from the key bytes, derives its DID, and logs it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if identity creation or DID derivation fails, which
+    /// indicates corrupted key material or a crypto library failure.
+    fn derive_and_log_identity_did(key_bytes: &[u8]) -> Result<()> {
         use identity::{Identity, IdentityKeyType, RawIdentity};
 
-        match RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, key_bytes) {
-            Ok(identity) => match identity.did() {
-                Ok(did) => info!("Node identity DID: {}", did),
-                Err(e) => warn!("Failed to derive DID from identity: {}", e),
-            },
-            Err(e) => warn!("Failed to create identity from peer key: {}", e),
-        }
+        let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, key_bytes)?;
+        let did = identity
+            .did()
+            .map_err(|e| Error::Keyring(format!("failed to derive DID: {}", e)))?;
+        info!("Node identity DID: {}", did);
+        Ok(())
     }
 
     /// Convert Ed25519 key bytes to libp2p Keypair.

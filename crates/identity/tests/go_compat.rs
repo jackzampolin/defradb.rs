@@ -56,7 +56,8 @@ fn test_ed25519_did_matches_go() {
 
     let did = identity.did().unwrap();
     assert_eq!(
-        did, ED25519_DID,
+        did.as_str(),
+        ED25519_DID,
         "Ed25519 DID must match Go DefraDB output exactly"
     );
 }
@@ -68,7 +69,8 @@ fn test_secp256k1_did_matches_go() {
 
     let did = identity.did().unwrap();
     assert_eq!(
-        did, SECP256K1_DID,
+        did.as_str(),
+        SECP256K1_DID,
         "secp256k1 DID must match Go DefraDB output exactly (uses uncompressed public key)"
     );
 }
@@ -157,7 +159,7 @@ fn test_from_bytes_ed25519_produces_correct_did() {
 
     assert_eq!(identity.key_type(), KeyType::Ed25519);
     assert_eq!(
-        identity.did().unwrap(),
+        identity.did().unwrap().as_str(),
         ED25519_DID,
         "from_bytes should produce same DID as from_ed25519"
     );
@@ -169,7 +171,7 @@ fn test_from_bytes_secp256k1_produces_correct_did() {
 
     assert_eq!(identity.key_type(), KeyType::Secp256k1);
     assert_eq!(
-        identity.did().unwrap(),
+        identity.did().unwrap().as_str(),
         SECP256K1_DID,
         "from_bytes should produce same DID as from_secp256k1"
     );

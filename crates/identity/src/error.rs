@@ -17,6 +17,10 @@ pub enum Error {
     #[error("unknown key type: {0}")]
     UnknownKeyType(String),
 
+    /// Invalid DID format
+    #[error("invalid DID: {0}")]
+    InvalidDid(String),
+
     /// Failed to derive public key from private key
     #[error("failed to derive public key: {0}")]
     PublicKeyDerivation(String),

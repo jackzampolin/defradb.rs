@@ -5,21 +5,24 @@
 //! - `FullIdentity` trait for identity operations requiring a private key
 //! - `RawIdentity` concrete implementation supporting secp256k1 and ed25519
 //! - `IdentityKeyType` enum for compile-time key type safety
+//! - `Did` newtype for validated DID strings
 //!
 //! # Supported Key Types
 //!
 //! - **Ed25519**: Fast, secure signing with 64-byte signatures
-//! - **secp256k1**: Bitcoin/Ethereum compatible with DER-encoded signatures
+//! - **secp256k1**: Bitcoin/Ethereum compatible with DER-encoded signatures (70-73 bytes typical)
 //!
 //! Note: secp256r1 (P-256) is NOT supported for identity operations.
 //! Use `IdentityKeyType` instead of `crypto::KeyType` to ensure compile-time
 //! safety when working with identity operations.
 
+mod did;
 mod error;
 mod key_type;
 mod raw;
 
 pub use crypto::KeyType;
+pub use did::{Did, DID_KEY_PREFIX};
 pub use error::{Error, Result};
 pub use key_type::IdentityKeyType;
 pub use raw::RawIdentity;
@@ -37,7 +40,8 @@ pub trait Identity: Send + Sync {
     /// Returns the DID (Decentralized Identifier) for this identity.
     ///
     /// The DID is derived from the public key using the did:key method.
-    fn did(&self) -> defra_core::Result<String>;
+    /// Returns a validated `Did` type that guarantees proper format.
+    fn did(&self) -> Result<Did>;
 }
 
 /// FullIdentity extends Identity with private key operations.
@@ -53,7 +57,11 @@ pub trait FullIdentity: Identity {
     /// The signature format depends on the key type:
     /// - Ed25519: 64-byte raw signature
     /// - secp256k1: DER-encoded ECDSA signature
-    fn sign(&self, data: &[u8]) -> defra_core::Result<Vec<u8>>;
+    ///
+    /// The default implementation delegates to `self.priv_key().sign(data)`.
+    fn sign(&self, data: &[u8]) -> defra_core::Result<Vec<u8>> {
+        self.priv_key().sign(data)
+    }
 }
 
 #[cfg(test)]
@@ -67,7 +75,7 @@ mod tests {
         let identity = RawIdentity::from_private_key(private_key).unwrap();
 
         let did = identity.did().unwrap();
-        assert!(did.starts_with("did:key:"));
+        assert!(did.as_str().starts_with("did:key:"));
     }
 
     #[test]
@@ -76,7 +84,7 @@ mod tests {
         let identity = RawIdentity::from_private_key(private_key).unwrap();
 
         let did = identity.did().unwrap();
-        assert!(did.starts_with("did:key:"));
+        assert!(did.as_str().starts_with("did:key:"));
     }
 
     #[test]

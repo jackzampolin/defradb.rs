@@ -5,6 +5,7 @@ use crypto::{
     Ed25519PrivateKey, Ed25519PublicKey, KeyType, Secp256k1PrivateKey, Secp256k1PublicKey,
 };
 
+use crate::did::Did;
 use crate::error::Error;
 use crate::key_type::IdentityKeyType;
 use crate::{FullIdentity, Identity, Result};
@@ -201,8 +202,13 @@ impl Identity for RawIdentity {
         }
     }
 
-    fn did(&self) -> defra_core::Result<String> {
-        self.pub_key().did()
+    fn did(&self) -> Result<Did> {
+        let did_string = self
+            .pub_key()
+            .did()
+            .map_err(|e| Error::InvalidDid(format!("failed to derive DID: {}", e)))?;
+        // Use unchecked since pub_key().did() always returns valid did:key format
+        Ok(Did::new_unchecked(did_string))
     }
 }
 
@@ -213,15 +219,15 @@ impl FullIdentity for RawIdentity {
             IdentityInner::Secp256k1 { private_key, .. } => private_key,
         }
     }
-
-    fn sign(&self, data: &[u8]) -> defra_core::Result<Vec<u8>> {
-        self.priv_key().sign(data)
-    }
+    // sign() uses default implementation from FullIdentity trait
 }
 
 impl std::fmt::Debug for RawIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let did_display = self.did().unwrap_or_else(|e| format!("<error: {}>", e));
+        let did_display = match self.did() {
+            Ok(did) => did.to_string(),
+            Err(e) => format!("<DID derivation failed: {}>", e),
+        };
         f.debug_struct("RawIdentity")
             .field("key_type", &self.key_type())
             .field("did", &did_display)
@@ -240,7 +246,7 @@ mod tests {
         let identity = RawIdentity::from_ed25519(key).unwrap();
 
         assert_eq!(identity.key_type(), KeyType::Ed25519);
-        assert!(identity.did().unwrap().starts_with("did:key:"));
+        assert!(identity.did().unwrap().as_str().starts_with("did:key:"));
     }
 
     #[test]
@@ -249,7 +255,7 @@ mod tests {
         let identity = RawIdentity::from_secp256k1(key).unwrap();
 
         assert_eq!(identity.key_type(), KeyType::Secp256k1);
-        assert!(identity.did().unwrap().starts_with("did:key:"));
+        assert!(identity.did().unwrap().as_str().starts_with("did:key:"));
     }
 
     #[test]
@@ -398,7 +404,8 @@ mod tests {
         let key = generate_ed25519().unwrap();
         let bytes = key.raw();
 
-        let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, &bytes).unwrap();
+        let identity =
+            RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, &bytes).unwrap();
         assert_eq!(identity.identity_key_type(), IdentityKeyType::Ed25519);
         assert_eq!(identity.key_type(), KeyType::Ed25519);
     }
