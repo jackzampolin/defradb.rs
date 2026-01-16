@@ -42,8 +42,14 @@ impl std::fmt::Debug for TypeJoinMany {
         f.debug_struct("TypeJoinMany")
             .field("parent_side", &self.parent_side)
             .field("child_side", &self.child_side)
-            .field("parent_plan", &format_args!("<PlanNode: {}>", self.parent_plan.kind()))
-            .field("child_plan", &format_args!("<PlanNode: {}>", self.child_plan.kind()))
+            .field(
+                "parent_plan",
+                &format_args!("<PlanNode: {}>", self.parent_plan.kind()),
+            )
+            .field(
+                "child_plan",
+                &format_args!("<PlanNode: {}>", self.child_plan.kind()),
+            )
             .field("child_fk_index", &self.child_fk_index)
             .field("initialized", &self.initialized)
             .finish()
@@ -132,16 +138,8 @@ impl TypeJoinMany {
             .unwrap_or(self.child_plan.document_map());
 
         let array: Vec<JsonValue> = children
-            .into_iter()
-            .map(|doc| {
-                let mut obj = serde_json::Map::new();
-                for render_key in &child_mapping.render_keys {
-                    if let Some(value) = doc.get(render_key.index) {
-                        obj.insert(render_key.key.clone(), value.clone());
-                    }
-                }
-                JsonValue::Object(obj)
-            })
+            .iter()
+            .map(|doc| child_mapping.render_doc_to_json(doc))
             .collect();
 
         parent_doc.set(

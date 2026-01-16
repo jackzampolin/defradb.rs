@@ -18,10 +18,105 @@ pub use type_join_one::TypeJoinOne;
 mod tests {
     use super::*;
     use crate::document::DocumentMapping;
+    use crate::error::{QueryError, Result};
     use crate::plan::ScanNode;
     use crate::planner::{Doc, PlanNode};
+    use async_trait::async_trait;
     use schema::{CollectionVersion, FieldDescription, FieldKind};
     use serde_json::{json, Value as JsonValue};
+
+    /// Mock PlanNode that can be configured to return errors at different stages
+    struct MockErrorPlanNode {
+        mapping: DocumentMapping,
+        error_on_init: bool,
+        error_on_start: bool,
+        error_on_next: bool,
+        current_doc: Doc,
+        call_count: usize,
+    }
+
+    impl MockErrorPlanNode {
+        fn new(mapping: DocumentMapping) -> Self {
+            Self {
+                mapping,
+                error_on_init: false,
+                error_on_start: false,
+                error_on_next: false,
+                current_doc: Doc::default(),
+                call_count: 0,
+            }
+        }
+
+        fn with_error_on_init(mut self) -> Self {
+            self.error_on_init = true;
+            self
+        }
+
+        fn with_error_on_start(mut self) -> Self {
+            self.error_on_start = true;
+            self
+        }
+
+        fn with_error_on_next(mut self) -> Self {
+            self.error_on_next = true;
+            self
+        }
+    }
+
+    impl std::fmt::Debug for MockErrorPlanNode {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MockErrorPlanNode")
+                .field("error_on_init", &self.error_on_init)
+                .field("error_on_start", &self.error_on_start)
+                .field("error_on_next", &self.error_on_next)
+                .finish()
+        }
+    }
+
+    #[async_trait]
+    impl PlanNode for MockErrorPlanNode {
+        async fn init(&mut self) -> Result<()> {
+            if self.error_on_init {
+                return Err(QueryError::execution("mock init error"));
+            }
+            Ok(())
+        }
+
+        async fn start(&mut self) -> Result<()> {
+            if self.error_on_start {
+                return Err(QueryError::execution("mock start error"));
+            }
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<bool> {
+            self.call_count += 1;
+            if self.error_on_next {
+                return Err(QueryError::execution("mock next error"));
+            }
+            Ok(false)
+        }
+
+        fn value(&self) -> &Doc {
+            &self.current_doc
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn source(&self) -> Option<&dyn PlanNode> {
+            None
+        }
+
+        fn document_map(&self) -> &DocumentMapping {
+            &self.mapping
+        }
+
+        fn kind(&self) -> &'static str {
+            "mockError"
+        }
+    }
 
     // Helper to create a Users collection (the "one" side)
     fn make_users_collection() -> CollectionVersion {
@@ -535,16 +630,16 @@ mod tests {
                 None,
             ]),
         ];
-        let parent_scan =
-            ScanNode::new(authors_collection.clone(), authors_mapping.clone()).with_docs(author_docs);
+        let parent_scan = ScanNode::new(authors_collection.clone(), authors_mapping.clone())
+            .with_docs(author_docs);
 
         // Child: Books scan (for lookups)
         let book_docs = vec![
             Doc::with_fields(vec![
                 Some(json!("book-1")),
                 Some(json!("Harry Potter")),
-                None,                     // author object
-                Some(json!("author-1")),  // author_id FK
+                None,                    // author object
+                Some(json!("author-1")), // author_id FK
             ]),
             Doc::with_fields(vec![
                 Some(json!("book-2")),
@@ -770,7 +865,7 @@ mod tests {
             Doc::with_fields(vec![
                 Some(json!("emp-alice")),
                 Some(json!("Alice")),
-                None,           // manager object
+                None,                   // manager object
                 JsonValue::Null.into(), // manager_id (no manager)
             ]),
             Doc::with_fields(vec![
@@ -795,7 +890,10 @@ mod tests {
         let child_scan = ScanNode::new(employees_collection.clone(), employees_mapping.clone())
             .with_docs(employee_docs);
 
-        let manager_relation = employees_collection.field_by_name("manager").unwrap().clone();
+        let manager_relation = employees_collection
+            .field_by_name("manager")
+            .unwrap()
+            .clone();
 
         let parent_side = JoinSide::new(
             employees_collection.clone(),
@@ -1190,18 +1288,16 @@ mod tests {
             Some(json!("Orphan Author")),
             None, // book will be filled by join
         ])];
-        let parent_scan =
-            ScanNode::new(authors_collection.clone(), authors_mapping.clone()).with_docs(author_docs);
+        let parent_scan = ScanNode::new(authors_collection.clone(), authors_mapping.clone())
+            .with_docs(author_docs);
 
         // Child: Books that point to different authors
-        let book_docs = vec![
-            Doc::with_fields(vec![
-                Some(json!("book-1")),
-                Some(json!("Some Book")),
-                None,
-                Some(json!("author-other")), // FK points to different author
-            ]),
-        ];
+        let book_docs = vec![Doc::with_fields(vec![
+            Some(json!("book-1")),
+            Some(json!("Some Book")),
+            None,
+            Some(json!("author-other")), // FK points to different author
+        ])];
         let child_scan =
             ScanNode::new(books_collection.clone(), books_mapping.clone()).with_docs(book_docs);
 
@@ -1479,5 +1575,478 @@ mod tests {
 
         // Verify direction is Inverted (parent has array relation, no FK)
         assert!(matches!(join.direction, JoinDirection::Inverted));
+    }
+
+    // ==========================================================================
+    // Error Propagation Tests
+    // ==========================================================================
+
+    #[tokio::test]
+    async fn test_type_join_one_parent_init_error_propagation() {
+        // Test that errors from parent plan's init() are propagated
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+        let users_mapping = make_users_mapping();
+
+        // Parent plan that errors on init
+        let parent_plan = MockErrorPlanNode::new(posts_mapping.clone()).with_error_on_init();
+
+        let child_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(vec![]);
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_plan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            posts_mapping,
+        );
+
+        let result = join.init().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock init error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_one_parent_start_error_propagation() {
+        // Test that errors from parent plan's start() are propagated
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+        let users_mapping = make_users_mapping();
+
+        // Parent plan that errors on start
+        let parent_plan = MockErrorPlanNode::new(posts_mapping.clone()).with_error_on_start();
+
+        let child_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(vec![]);
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_plan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            posts_mapping,
+        );
+
+        join.init().await.unwrap();
+        let result = join.start().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock start error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_one_parent_next_error_propagation() {
+        // Test that errors from parent plan's next() are propagated
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+        let users_mapping = make_users_mapping();
+
+        // Parent plan that errors on next
+        let parent_plan = MockErrorPlanNode::new(posts_mapping.clone()).with_error_on_next();
+
+        let child_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(vec![]);
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_plan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            posts_mapping,
+        );
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock next error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_one_child_init_error_propagation() {
+        // Test that errors from child plan's init() (during lookup) are propagated
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+        let users_mapping = make_users_mapping();
+
+        // Parent scan with a document that has a valid FK
+        let post_docs = vec![Doc::with_fields(vec![
+            Some(json!("post-1")),
+            Some(json!("Test Post")),
+            None,
+            Some(json!("user-1")), // FK to trigger child lookup
+        ])];
+        let parent_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(post_docs);
+
+        // Child plan that errors on init
+        let child_plan = MockErrorPlanNode::new(users_mapping.clone()).with_error_on_init();
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            posts_mapping,
+        );
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        // next() triggers child lookup which calls child's init()
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock init error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_one_child_start_error_propagation() {
+        // Test that errors from child plan's start() (during lookup) are propagated
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+        let users_mapping = make_users_mapping();
+
+        let post_docs = vec![Doc::with_fields(vec![
+            Some(json!("post-1")),
+            Some(json!("Test Post")),
+            None,
+            Some(json!("user-1")),
+        ])];
+        let parent_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(post_docs);
+
+        // Child plan that errors on start
+        let child_plan = MockErrorPlanNode::new(users_mapping.clone()).with_error_on_start();
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            posts_mapping,
+        );
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock start error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_one_child_next_error_propagation() {
+        // Test that errors from child plan's next() (during lookup) are propagated
+        let posts_collection = make_posts_collection();
+        let users_collection = make_users_collection();
+
+        let posts_mapping = make_posts_mapping();
+        let users_mapping = make_users_mapping();
+
+        let post_docs = vec![Doc::with_fields(vec![
+            Some(json!("post-1")),
+            Some(json!("Test Post")),
+            None,
+            Some(json!("user-1")),
+        ])];
+        let parent_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(post_docs);
+
+        // Child plan that errors on next
+        let child_plan = MockErrorPlanNode::new(users_mapping.clone()).with_error_on_next();
+
+        let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
+        let child_relation = users_collection.field_by_name("posts").unwrap().clone();
+
+        let parent_side = JoinSide::new(posts_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(users_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinOne::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            posts_mapping,
+        );
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock next error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_parent_init_error_propagation() {
+        // Test that errors from parent plan's init() are propagated
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        // Parent plan that errors on init
+        let parent_plan = MockErrorPlanNode::new(users_mapping.clone()).with_error_on_init();
+
+        let child_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(vec![]);
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_plan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            users_mapping,
+        )
+        .unwrap();
+
+        let result = join.init().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock init error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_parent_start_error_propagation() {
+        // Test that errors from parent plan's start() are propagated
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        // Parent plan that errors on start
+        let parent_plan = MockErrorPlanNode::new(users_mapping.clone()).with_error_on_start();
+
+        let child_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(vec![]);
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_plan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            users_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        let result = join.start().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock start error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_parent_next_error_propagation() {
+        // Test that errors from parent plan's next() are propagated
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        // Parent plan that errors on next
+        let parent_plan = MockErrorPlanNode::new(users_mapping.clone()).with_error_on_next();
+
+        let child_scan =
+            ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(vec![]);
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_plan),
+            Box::new(child_scan),
+            parent_side,
+            child_side,
+            users_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock next error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_child_init_error_propagation() {
+        // Test that errors from child plan's init() (during lookup) are propagated
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        // Parent scan with a document that has valid _docID
+        let user_docs = vec![Doc::with_fields(vec![
+            Some(json!("user-1")),
+            Some(json!("Alice")),
+            None,
+        ])];
+        let parent_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(user_docs);
+
+        // Child plan that errors on init
+        let child_plan = MockErrorPlanNode::new(posts_mapping.clone()).with_error_on_init();
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            users_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        // next() triggers child lookup which calls child's init()
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock init error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_child_start_error_propagation() {
+        // Test that errors from child plan's start() (during lookup) are propagated
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        let user_docs = vec![Doc::with_fields(vec![
+            Some(json!("user-1")),
+            Some(json!("Alice")),
+            None,
+        ])];
+        let parent_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(user_docs);
+
+        // Child plan that errors on start
+        let child_plan = MockErrorPlanNode::new(posts_mapping.clone()).with_error_on_start();
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            users_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock start error"));
+    }
+
+    #[tokio::test]
+    async fn test_type_join_many_child_next_error_propagation() {
+        // Test that errors from child plan's next() (during lookup) are propagated
+        let users_collection = make_users_collection();
+        let posts_collection = make_posts_collection();
+
+        let users_mapping = make_users_mapping();
+        let posts_mapping = make_posts_mapping();
+
+        let user_docs = vec![Doc::with_fields(vec![
+            Some(json!("user-1")),
+            Some(json!("Alice")),
+            None,
+        ])];
+        let parent_scan =
+            ScanNode::new(users_collection.clone(), users_mapping.clone()).with_docs(user_docs);
+
+        // Child plan that errors on next
+        let child_plan = MockErrorPlanNode::new(posts_mapping.clone()).with_error_on_next();
+
+        let parent_relation = users_collection.field_by_name("posts").unwrap().clone();
+        let child_relation = posts_collection.field_by_name("author").unwrap().clone();
+
+        let parent_side = JoinSide::new(users_collection, parent_relation, 2).unwrap();
+        let child_side = JoinSide::new(posts_collection, child_relation, 2).unwrap();
+
+        let mut join = TypeJoinMany::new(
+            Box::new(parent_scan),
+            Box::new(child_plan),
+            parent_side,
+            child_side,
+            users_mapping,
+        )
+        .unwrap();
+
+        join.init().await.unwrap();
+        join.start().await.unwrap();
+        let result = join.next().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mock next error"));
     }
 }

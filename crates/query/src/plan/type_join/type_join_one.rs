@@ -46,8 +46,14 @@ impl std::fmt::Debug for TypeJoinOne {
         f.debug_struct("TypeJoinOne")
             .field("parent_side", &self.parent_side)
             .field("child_side", &self.child_side)
-            .field("parent_plan", &format_args!("<PlanNode: {}>", self.parent_plan.kind()))
-            .field("child_plan", &format_args!("<PlanNode: {}>", self.child_plan.kind()))
+            .field(
+                "parent_plan",
+                &format_args!("<PlanNode: {}>", self.parent_plan.kind()),
+            )
+            .field(
+                "child_plan",
+                &format_args!("<PlanNode: {}>", self.child_plan.kind()),
+            )
             .field("direction", &self.direction)
             .field("initialized", &self.initialized)
             .finish()
@@ -65,7 +71,9 @@ impl TypeJoinOne {
     ) -> Self {
         // Determine join direction based on which side holds the FK
         let direction = match parent_side.relation_id_field_index() {
-            Some(idx) => JoinDirection::Primary { parent_fk_index: idx },
+            Some(idx) => JoinDirection::Primary {
+                parent_fk_index: idx,
+            },
             None => JoinDirection::Inverted,
         };
 
@@ -115,70 +123,62 @@ impl TypeJoinOne {
 
     /// Find child document by FK lookup.
     async fn find_child_doc(&mut self, fk: &str) -> Result<Option<Doc>> {
-        // Re-initialize the child plan for this lookup
         self.child_plan.init().await?;
         self.child_plan.start().await?;
 
         while self.child_plan.next().await? {
             let child_doc = self.child_plan.value();
 
-            match &self.direction {
-                JoinDirection::Inverted => {
-                    // Looking for child doc where child's FK == parent's _docID
-                    if let Some(child_fk_idx) = self.child_side.relation_id_field_index() {
-                        let child_fk_value = child_doc.get(child_fk_idx);
+            let is_match = match &self.direction {
+                JoinDirection::Primary { .. } => child_doc.doc_id() == Some(fk),
+                JoinDirection::Inverted => self.child_fk_matches(child_doc, fk),
+            };
 
-                        // Log type mismatch for non-null, non-string FK values
-                        if let Some(v) = child_fk_value {
-                            if !v.is_null() && !v.is_string() {
-                                warn!(
-                                    child_collection = %self.child_side.collection().name,
-                                    relation_field = %self.child_side.relation_field().name,
-                                    fk_index = child_fk_idx,
-                                    actual_type = ?v,
-                                    "Child FK field has unexpected type, expected string or null"
-                                );
-                            }
-                        }
-
-                        if let Some(child_fk) = child_fk_value.and_then(|v| v.as_str()) {
-                            if child_fk == fk {
-                                return Ok(Some(child_doc.deep_clone()));
-                            }
-                        }
-                    }
-                }
-                JoinDirection::Primary { .. } => {
-                    // Looking for child doc where _docID == fk
-                    if child_doc.doc_id() == Some(fk) {
-                        return Ok(Some(child_doc.deep_clone()));
-                    }
-                }
+            if is_match {
+                return Ok(Some(child_doc.deep_clone()));
             }
         }
 
         Ok(None)
     }
 
+    /// Check if child document's FK matches the given value (for inverted joins).
+    fn child_fk_matches(&self, child_doc: &Doc, expected_fk: &str) -> bool {
+        let child_fk_idx = match self.child_side.relation_id_field_index() {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        let child_fk_value = child_doc.get(child_fk_idx);
+
+        // Log type mismatch for non-null, non-string FK values
+        if let Some(v) = child_fk_value {
+            if !v.is_null() && !v.is_string() {
+                warn!(
+                    child_collection = %self.child_side.collection().name,
+                    relation_field = %self.child_side.relation_field().name,
+                    fk_index = child_fk_idx,
+                    actual_type = ?v,
+                    "Child FK field has unexpected type, expected string or null"
+                );
+            }
+        }
+
+        child_fk_value.and_then(|v| v.as_str()) == Some(expected_fk)
+    }
+
     /// Merge child document into parent at the relation field index.
     fn merge_child(&self, parent_doc: &mut Doc, child_doc: Option<Doc>) {
+        // Get child mapping. Falls back to child plan's mapping if not explicitly
+        // set in parent mapping - this happens for simple queries where child
+        // mapping was not pre-configured during planning.
         let child_value = match child_doc {
             Some(doc) => {
-                // Get child mapping. Falls back to child plan's mapping if not explicitly
-                // set in parent mapping - this happens for simple queries where child
-                // mapping was not pre-configured during planning.
                 let child_mapping = self
                     .document_mapping
                     .child_at(self.parent_side.relation_field_index())
                     .unwrap_or(self.child_plan.document_map());
-
-                let mut obj = serde_json::Map::new();
-                for render_key in &child_mapping.render_keys {
-                    if let Some(value) = doc.get(render_key.index) {
-                        obj.insert(render_key.key.clone(), value.clone());
-                    }
-                }
-                JsonValue::Object(obj)
+                child_mapping.render_doc_to_json(&doc)
             }
             None => JsonValue::Null,
         };

@@ -163,14 +163,11 @@ impl Planner {
                         // One-to-many: child must have FK field
                         let child_field = if let Some(rel_name) = &relation_field.relation_name {
                             // Find the primary (non-array) relation field in target collection
-                            target_collection
-                                .fields
-                                .iter()
-                                .find(|f| {
-                                    f.relation_name.as_deref() == Some(rel_name)
-                                        && f.kind.is_relation()
-                                        && !f.kind.is_array()
-                                })
+                            target_collection.fields.iter().find(|f| {
+                                f.relation_name.as_deref() == Some(rel_name)
+                                    && f.kind.is_relation()
+                                    && !f.kind.is_array()
+                            })
                         } else {
                             None
                         };
@@ -215,19 +212,16 @@ impl Planner {
 
                         if !parent_has_fk {
                             // Inverted join - child must have FK
-                            let child_field =
-                                if let Some(rel_name) = &relation_field.relation_name {
-                                    target_collection
-                                        .fields
-                                        .iter()
-                                        .find(|f| {
-                                            f.relation_name.as_deref() == Some(rel_name)
-                                                && f.kind.is_relation()
-                                                && !f.kind.is_array()
-                                        })
-                                } else {
-                                    None
-                                };
+                            let child_field = if let Some(rel_name) = &relation_field.relation_name
+                            {
+                                target_collection.fields.iter().find(|f| {
+                                    f.relation_name.as_deref() == Some(rel_name)
+                                        && f.kind.is_relation()
+                                        && !f.kind.is_array()
+                                })
+                            } else {
+                                None
+                            };
 
                             match child_field {
                                 Some(f) => {
