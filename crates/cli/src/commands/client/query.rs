@@ -16,6 +16,7 @@ use clap::Args;
 use serde_json::Value as JsonValue;
 
 use super::http_client::HttpClient;
+use super::ClientContext;
 use crate::error::{Error, Result};
 
 /// Execute a GraphQL query against a DefraDB node
@@ -40,14 +41,17 @@ pub struct QueryArgs {
 
 impl QueryArgs {
     /// Execute the query command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let query = self.get_query()?;
         let variables = self.parse_variables()?;
 
-        let client = HttpClient::new(url)?;
-        let response = client
-            .graphql(&query, variables, self.txn_id.clone())
-            .await?;
+        // Use command-level txn_id if provided, otherwise use global context
+        let txn_id = self.txn_id.clone().or_else(|| ctx.tx_id.clone());
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, variables, txn_id).await?;
 
         if response.has_errors() {
             // Just return the error - CLI framework will handle displaying it

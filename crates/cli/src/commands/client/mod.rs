@@ -33,6 +33,19 @@ use crate::error::{Error, Result};
 
 pub use validation::{escape_graphql_string, validate_identifier};
 
+/// Client context passed to all subcommands
+#[derive(Debug, Clone)]
+pub struct ClientContext {
+    /// Server URL
+    pub url: String,
+    /// Authentication token (generated from identity)
+    pub auth_token: Option<String>,
+    /// Transaction ID
+    pub tx_id: Option<String>,
+    /// Verbose mode
+    pub verbose: bool,
+}
+
 /// Helper to get data from either inline argument or file
 pub fn get_data_from_args(data: &Option<String>, file: &Option<PathBuf>) -> Result<String> {
     if let Some(ref data) = data {
@@ -54,6 +67,18 @@ pub fn get_data_from_args(data: &Option<String>, file: &Option<PathBuf>) -> Resu
 /// Interact with a DefraDB node
 #[derive(Args, Debug)]
 pub struct ClientArgs {
+    /// Hex formatted private key used to authenticate with ACP
+    #[arg(long, short = 'i', global = true)]
+    pub identity: Option<String>,
+
+    /// Transaction ID to execute commands within
+    #[arg(long, global = true)]
+    pub tx: Option<u64>,
+
+    /// Enable verbose output (show HTTP requests/responses)
+    #[arg(long, short = 'v', global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: ClientCommand,
 }
@@ -77,14 +102,72 @@ impl ClientArgs {
     /// Execute the client command
     pub async fn execute(&self, config: Config, url_override: Option<String>) -> Result<()> {
         let url = get_url(&config, url_override);
+
+        // Generate auth token from identity if provided
+        let auth_token = if let Some(ref identity_hex) = self.identity {
+            Some(generate_auth_token(identity_hex, &url)?)
+        } else {
+            None
+        };
+
+        let ctx = ClientContext {
+            url,
+            auth_token,
+            tx_id: self.tx.map(|id| id.to_string()),
+            verbose: self.verbose,
+        };
+
         match &self.command {
-            ClientCommand::Query(args) => args.execute(&url).await,
-            ClientCommand::Schema(args) => args.execute(&url).await,
-            ClientCommand::Tx(args) => args.execute(&url).await,
-            ClientCommand::Collection(args) => args.execute(&url).await,
-            ClientCommand::Document(args) => args.execute(&url).await,
+            ClientCommand::Query(args) => args.execute(&ctx).await,
+            ClientCommand::Schema(args) => args.execute(&ctx).await,
+            ClientCommand::Tx(args) => args.execute(&ctx).await,
+            ClientCommand::Collection(args) => args.execute(&ctx).await,
+            ClientCommand::Document(args) => args.execute(&ctx).await,
         }
     }
+}
+
+/// Generate a JWT auth token from a hex-encoded private key.
+///
+/// Supports both secp256k1 (32 bytes, Go CLI default) and ed25519 (64 bytes) keys.
+fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String> {
+    use crypto::KeyType;
+    use identity::{new_token, RawIdentity};
+
+    // Decode hex private key
+    let key_bytes = hex::decode(identity_hex)
+        .map_err(|e| Error::InvalidIdentity(format!("invalid hex: {}", e)))?;
+
+    // Determine key type based on length:
+    // - secp256k1: 32 bytes (Go CLI default)
+    // - ed25519: 64 bytes (seed + public key) or 32 bytes (seed only)
+    let key_type = match key_bytes.len() {
+        32 => KeyType::Secp256k1, // Default to secp256k1 for 32-byte keys (Go CLI compat)
+        64 => KeyType::Ed25519,
+        len => {
+            return Err(Error::InvalidIdentity(format!(
+                "invalid key length: {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
+                len
+            )))
+        }
+    };
+
+    // Create identity from private key bytes
+    let identity = RawIdentity::from_bytes(key_type, &key_bytes)
+        .map_err(|e| Error::InvalidIdentity(format!("invalid private key: {}", e)))?;
+
+    // Generate JWT token with 15-minute expiration (matches Go CLI)
+    let token_bytes = new_token(
+        &identity,
+        std::time::Duration::from_secs(15 * 60),
+        Some(audience.to_string()),
+        None,
+    )
+    .map_err(|e| Error::InvalidIdentity(format!("failed to generate token: {}", e)))?;
+
+    // Convert bytes to string
+    String::from_utf8(token_bytes)
+        .map_err(|e| Error::InvalidIdentity(format!("token is not valid UTF-8: {}", e)))
 }
 
 /// Get the URL to connect to, prioritizing command-line override.

@@ -13,7 +13,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use url::Url;
@@ -25,6 +25,15 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Default connection timeout (10 seconds)
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Maximum number of retry attempts for transient failures
+const MAX_RETRIES: u32 = 3;
+
+/// Initial backoff delay in milliseconds
+const INITIAL_BACKOFF_MS: u64 = 100;
+
+/// HTTP status codes that are considered retryable
+const RETRYABLE_STATUS_CODES: &[u16] = &[408, 429, 500, 502, 503, 504];
 
 /// Global shared HTTP client for connection reuse across commands
 static SHARED_CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
@@ -49,6 +58,8 @@ fn get_shared_client() -> Result<&'static Client> {
 pub struct HttpClient {
     client: &'static Client,
     base_url: String,
+    auth_token: Option<String>,
+    verbose: bool,
 }
 
 /// GraphQL request body
@@ -122,7 +133,133 @@ impl HttpClient {
         Ok(Self {
             client: get_shared_client()?,
             base_url: normalized_url.to_string(),
+            auth_token: None,
+            verbose: false,
         })
+    }
+
+    /// Set the authentication token (JWT Bearer token) for ACP-protected operations
+    pub fn with_auth_token(mut self, token: Option<String>) -> Self {
+        self.auth_token = token;
+        self
+    }
+
+    /// Enable verbose mode to print request/response details
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Add authorization header if auth_token is set
+    fn add_auth_header(&self, request: RequestBuilder) -> RequestBuilder {
+        if let Some(ref token) = self.auth_token {
+            request.header("Authorization", format!("Bearer {}", token))
+        } else {
+            request
+        }
+    }
+
+    /// Check if a status code is retryable
+    fn is_retryable_status(status: StatusCode) -> bool {
+        RETRYABLE_STATUS_CODES.contains(&status.as_u16())
+    }
+
+    /// Check if an error is retryable (connection errors, timeouts)
+    fn is_retryable_error(error: &reqwest::Error) -> bool {
+        error.is_connect() || error.is_timeout()
+    }
+
+    /// Execute a request with retry logic for transient failures
+    async fn send_with_retry(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+    ) -> Result<Response> {
+        let mut last_error = None;
+        let mut backoff_ms = INITIAL_BACKOFF_MS;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                if self.verbose {
+                    eprintln!("Retry attempt {} after {}ms delay...", attempt, backoff_ms);
+                }
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms *= 2; // Exponential backoff
+            }
+
+            if self.verbose {
+                eprintln!(">>> {} {}", method, url);
+                if let Some(b) = body {
+                    eprintln!(">>> Body: {}", b);
+                }
+            }
+
+            let request = match method {
+                "GET" => self.add_auth_header(self.client.get(url)),
+                "POST" => {
+                    let req = self.add_auth_header(self.client.post(url));
+                    if let Some(b) = body {
+                        req.header("Content-Type", "application/json")
+                            .body(b.to_string())
+                    } else {
+                        req
+                    }
+                }
+                _ => {
+                    return Err(Error::Server(format!(
+                        "Unsupported HTTP method: {}",
+                        method
+                    )))
+                }
+            };
+
+            match request.send().await {
+                Ok(response) => {
+                    if self.verbose {
+                        eprintln!("<<< HTTP {}", response.status());
+                    }
+
+                    // Don't retry successful responses or client errors (4xx except specific ones)
+                    if response.status().is_success()
+                        || (response.status().is_client_error()
+                            && !Self::is_retryable_status(response.status()))
+                    {
+                        return Ok(response);
+                    }
+
+                    // Check if this status is retryable
+                    if Self::is_retryable_status(response.status()) && attempt < MAX_RETRIES {
+                        if self.verbose {
+                            eprintln!("Retryable status code: {}", response.status());
+                        }
+                        last_error = Some(Error::Server(format!("HTTP {}", response.status())));
+                        continue;
+                    }
+
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if self.verbose {
+                        eprintln!("<<< Error: {}", e);
+                    }
+
+                    // Only retry on transient errors
+                    if Self::is_retryable_error(&e) && attempt < MAX_RETRIES {
+                        if self.verbose {
+                            eprintln!("Retryable error, will retry...");
+                        }
+                        last_error = Some(Error::HttpRequest(e));
+                        continue;
+                    }
+
+                    return Err(Error::HttpRequest(e));
+                }
+            }
+        }
+
+        // All retries exhausted
+        Err(last_error.unwrap_or_else(|| Error::Server("Request failed after retries".to_string())))
     }
 
     /// Execute a GraphQL query
@@ -140,7 +277,8 @@ impl HttpClient {
         };
 
         let url = format!("{}/api/v0/graphql", self.base_url);
-        let response = self.client.post(&url).json(&request).send().await?;
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -161,7 +299,7 @@ impl HttpClient {
     /// Get the GraphQL schema
     pub async fn schema(&self) -> Result<String> {
         let url = format!("{}/api/v0/schema", self.base_url);
-        let response = self.client.get(&url).send().await?;
+        let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -206,7 +344,8 @@ impl HttpClient {
 
     /// Helper for POST requests with JSON body
     async fn post_json<T: DeserializeOwned>(&self, url: &str, body: &impl Serialize) -> Result<T> {
-        let response = self.client.post(url).json(body).send().await?;
+        let body_str = serde_json::to_string(body)?;
+        let response = self.send_with_retry("POST", url, Some(&body_str)).await?;
 
         if !response.status().is_success() {
             let status = response.status();

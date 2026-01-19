@@ -13,6 +13,7 @@
 use clap::{Args, Subcommand};
 
 use super::http_client::HttpClient;
+use super::ClientContext;
 use crate::error::Result;
 
 /// Interact with schema
@@ -35,17 +36,19 @@ pub struct SchemaDescribeArgs {}
 
 impl SchemaArgs {
     /// Execute the schema command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            SchemaCommand::Describe(args) => args.execute(url).await,
+            SchemaCommand::Describe(args) => args.execute(ctx).await,
         }
     }
 }
 
 impl SchemaDescribeArgs {
     /// Execute the schema describe command
-    pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url)?;
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
         let schema = client.schema().await?;
         println!("{schema}");
         Ok(())

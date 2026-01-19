@@ -14,7 +14,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value as JsonValue;
 
 use super::http_client::HttpClient;
-use super::validate_identifier;
+use super::{validate_identifier, ClientContext};
 use crate::error::{Error, Result};
 
 /// Interact with collections
@@ -47,10 +47,10 @@ pub struct CollectionDescribeArgs {
 
 impl CollectionArgs {
     /// Execute the collection command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            CollectionCommand::List(args) => args.execute(url).await,
-            CollectionCommand::Describe(args) => args.execute(url).await,
+            CollectionCommand::List(args) => args.execute(ctx).await,
+            CollectionCommand::Describe(args) => args.execute(ctx).await,
         }
     }
 }
@@ -88,9 +88,13 @@ fn is_builtin_field(name: &str) -> bool {
 
 impl CollectionListArgs {
     /// Execute the collection list command
-    pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url)?;
-        let response = client.graphql(INTROSPECTION_QUERY, None, None).await?;
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client
+            .graphql(INTROSPECTION_QUERY, None, ctx.tx_id.clone())
+            .await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));
@@ -107,7 +111,7 @@ impl CollectionListArgs {
 
 impl CollectionDescribeArgs {
     /// Execute the collection describe command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.name)?;
 
         let query = format!(
@@ -132,8 +136,10 @@ impl CollectionDescribeArgs {
             name = self.name
         );
 
-        let client = HttpClient::new(url)?;
-        let response = client.graphql(&query, None, None).await?;
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));

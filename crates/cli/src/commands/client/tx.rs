@@ -13,6 +13,7 @@
 use clap::{Args, Subcommand};
 
 use super::http_client::HttpClient;
+use super::ClientContext;
 use crate::error::Result;
 
 /// Manage transactions
@@ -59,19 +60,21 @@ pub struct TxDiscardArgs {
 
 impl TxArgs {
     /// Execute the transaction command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            TxCommand::Begin(args) => args.execute(url).await,
-            TxCommand::Commit(args) => args.execute(url).await,
-            TxCommand::Discard(args) => args.execute(url).await,
+            TxCommand::Begin(args) => args.execute(ctx).await,
+            TxCommand::Commit(args) => args.execute(ctx).await,
+            TxCommand::Discard(args) => args.execute(ctx).await,
         }
     }
 }
 
 impl TxBeginArgs {
     /// Execute the tx begin command
-    pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url)?;
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
         let response = client.tx_begin(self.readonly).await?;
         println!("{}", response.txn_id);
         Ok(())
@@ -80,8 +83,10 @@ impl TxBeginArgs {
 
 impl TxCommitArgs {
     /// Execute the tx commit command
-    pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url)?;
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
         let response = client.tx_commit(&self.txn_id).await?;
         println!("{}", response.status);
         Ok(())
@@ -90,8 +95,10 @@ impl TxCommitArgs {
 
 impl TxDiscardArgs {
     /// Execute the tx discard command
-    pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url)?;
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
         let response = client.tx_rollback(&self.txn_id).await?;
         println!("{}", response.status);
         Ok(())

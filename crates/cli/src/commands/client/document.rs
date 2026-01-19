@@ -16,7 +16,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value as JsonValue;
 
 use super::http_client::HttpClient;
-use super::{escape_graphql_string, get_data_from_args, validate_identifier};
+use super::{escape_graphql_string, get_data_from_args, validate_identifier, ClientContext};
 use crate::error::{Error, Result};
 
 /// Interact with documents
@@ -105,19 +105,19 @@ pub struct DocumentDeleteArgs {
 
 impl DocumentArgs {
     /// Execute the document command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            DocumentCommand::Create(args) => args.execute(url).await,
-            DocumentCommand::Get(args) => args.execute(url).await,
-            DocumentCommand::Update(args) => args.execute(url).await,
-            DocumentCommand::Delete(args) => args.execute(url).await,
+            DocumentCommand::Create(args) => args.execute(ctx).await,
+            DocumentCommand::Get(args) => args.execute(ctx).await,
+            DocumentCommand::Update(args) => args.execute(ctx).await,
+            DocumentCommand::Delete(args) => args.execute(ctx).await,
         }
     }
 }
 
 impl DocumentCreateArgs {
     /// Execute the document create command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
 
         let data = get_data_from_args(&self.data, &self.file)?;
@@ -130,8 +130,10 @@ impl DocumentCreateArgs {
             input = input_str
         );
 
-        let client = HttpClient::new(url)?;
-        let response = client.graphql(&query, None, None).await?;
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));
@@ -162,10 +164,10 @@ impl DocumentGetArgs {
     ///
     /// Note: Only scalar fields are returned. Relations are excluded for simplicity.
     /// Use `defra client query` for full control over field selection.
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
 
-        let fields = get_collection_fields(url, &self.collection).await?;
+        let fields = get_collection_fields(ctx, &self.collection).await?;
         let field_selection = fields.join(" ");
         let escaped_doc_id = escape_graphql_string(&self.doc_id);
 
@@ -176,8 +178,10 @@ impl DocumentGetArgs {
             fields = field_selection
         );
 
-        let client = HttpClient::new(url)?;
-        let response = client.graphql(&query, None, None).await?;
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
 
         if response.has_errors() {
             if self.json {
@@ -247,7 +251,7 @@ impl DocumentGetArgs {
 
 impl DocumentUpdateArgs {
     /// Execute the document update command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
 
         let data = get_data_from_args(&self.data, &self.file)?;
@@ -262,8 +266,10 @@ impl DocumentUpdateArgs {
             input = input_str
         );
 
-        let client = HttpClient::new(url)?;
-        let response = client.graphql(&query, None, None).await?;
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));
@@ -291,7 +297,7 @@ impl DocumentUpdateArgs {
 
 impl DocumentDeleteArgs {
     /// Execute the document delete command
-    pub async fn execute(&self, url: &str) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
 
         let escaped_doc_id = escape_graphql_string(&self.doc_id);
@@ -301,8 +307,10 @@ impl DocumentDeleteArgs {
             doc_id = escaped_doc_id
         );
 
-        let client = HttpClient::new(url)?;
-        let response = client.graphql(&query, None, None).await?;
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));
@@ -329,7 +337,7 @@ impl DocumentDeleteArgs {
 }
 
 /// Get the field names for a collection (excluding relations for simplicity)
-async fn get_collection_fields(url: &str, collection: &str) -> Result<Vec<String>> {
+async fn get_collection_fields(ctx: &ClientContext, collection: &str) -> Result<Vec<String>> {
     let query = format!(
         r#"
 {{
@@ -348,8 +356,10 @@ async fn get_collection_fields(url: &str, collection: &str) -> Result<Vec<String
 "#
     );
 
-    let client = HttpClient::new(url)?;
-    let response = client.graphql(&query, None, None).await?;
+    let client = HttpClient::new(&ctx.url)?
+        .with_auth_token(ctx.auth_token.clone())
+        .with_verbose(ctx.verbose);
+    let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
 
     if response.has_errors() {
         return Err(Error::Server(response.error_message()));
