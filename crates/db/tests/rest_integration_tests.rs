@@ -275,3 +275,224 @@ async fn test_full_crud_lifecycle() {
     let doc_ids = rest.get_collection_doc_ids("Users").await.unwrap();
     assert!(!doc_ids.contains(&doc_id.to_string()));
 }
+
+// =========================================================================
+// Edge case tests
+// =========================================================================
+
+#[tokio::test]
+async fn test_create_document_with_special_characters() {
+    let rest = create_rest_ops().await;
+
+    // Test document with newlines, tabs, quotes in string values
+    let created = rest
+        .create_document(
+            "Users",
+            json!({
+                "name": "Alice \"The Great\"\nSmith",
+                "age": 30
+            }),
+        )
+        .await
+        .unwrap();
+
+    let doc_id = created.get("_docID").unwrap().as_str().unwrap();
+    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.get("name").unwrap().as_str().unwrap(),
+        "Alice \"The Great\"\nSmith"
+    );
+}
+
+#[tokio::test]
+async fn test_create_document_with_tabs_and_carriage_returns() {
+    let rest = create_rest_ops().await;
+
+    let created = rest
+        .create_document(
+            "Users",
+            json!({
+                "name": "Name\twith\ttabs\rand\rreturns",
+                "age": 25
+            }),
+        )
+        .await
+        .unwrap();
+
+    let doc_id = created.get("_docID").unwrap().as_str().unwrap();
+    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.get("name").unwrap().as_str().unwrap(),
+        "Name\twith\ttabs\rand\rreturns"
+    );
+}
+
+#[tokio::test]
+async fn test_create_document_with_unicode() {
+    let rest = create_rest_ops().await;
+
+    let created = rest
+        .create_document(
+            "Users",
+            json!({
+                "name": "héllo 世界 🌍",
+                "age": 42
+            }),
+        )
+        .await
+        .unwrap();
+
+    let doc_id = created.get("_docID").unwrap().as_str().unwrap();
+    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.get("name").unwrap().as_str().unwrap(),
+        "héllo 世界 🌍"
+    );
+}
+
+#[tokio::test]
+async fn test_create_document_with_backslashes() {
+    let rest = create_rest_ops().await;
+
+    let created = rest
+        .create_document(
+            "Users",
+            json!({
+                "name": "path\\to\\file",
+                "age": 33
+            }),
+        )
+        .await
+        .unwrap();
+
+    let doc_id = created.get("_docID").unwrap().as_str().unwrap();
+    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.get("name").unwrap().as_str().unwrap(),
+        "path\\to\\file"
+    );
+}
+
+#[tokio::test]
+async fn test_update_document_with_special_characters() {
+    let rest = create_rest_ops().await;
+
+    // Create a document
+    let created = rest
+        .create_document("Users", json!({"name": "Original", "age": 20}))
+        .await
+        .unwrap();
+    let doc_id = created.get("_docID").unwrap().as_str().unwrap();
+
+    // Update with special characters
+    let updated = rest
+        .update_document(
+            "Users",
+            doc_id,
+            json!({"name": "New \"Name\"\nwith\tspecials"}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        updated.get("name").unwrap().as_str().unwrap(),
+        "New \"Name\"\nwith\tspecials"
+    );
+}
+
+#[tokio::test]
+async fn test_create_document_collection_not_found() {
+    let rest = create_rest_ops().await;
+
+    let result = rest
+        .create_document("NonExistent", json!({"name": "Test", "age": 1}))
+        .await;
+
+    assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
+}
+
+#[tokio::test]
+async fn test_update_document_collection_not_found() {
+    let rest = create_rest_ops().await;
+
+    let result = rest
+        .update_document(
+            "NonExistent",
+            "bae-00000000-0000-0000-0000-000000000000",
+            json!({"age": 50}),
+        )
+        .await;
+
+    assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
+}
+
+#[tokio::test]
+async fn test_delete_document_collection_not_found() {
+    let rest = create_rest_ops().await;
+
+    let result = rest
+        .delete_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000")
+        .await;
+
+    assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
+}
+
+#[tokio::test]
+async fn test_get_document_collection_not_found() {
+    let rest = create_rest_ops().await;
+
+    let result = rest
+        .get_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000")
+        .await;
+
+    assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
+}
+
+#[tokio::test]
+async fn test_create_document_with_empty_string() {
+    let rest = create_rest_ops().await;
+
+    let created = rest
+        .create_document("Users", json!({"name": "", "age": 0}))
+        .await
+        .unwrap();
+
+    let doc_id = created.get("_docID").unwrap().as_str().unwrap();
+    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    assert_eq!(fetched.get("name").unwrap().as_str().unwrap(), "");
+    assert_eq!(fetched.get("age").unwrap().as_i64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_create_multiple_documents_empty_array() {
+    let rest = create_rest_ops().await;
+
+    let results = rest.create_documents("Users", vec![]).await.unwrap();
+    assert!(results.is_empty());
+}
+
+#[tokio::test]
+async fn test_update_then_delete_document() {
+    let rest = create_rest_ops().await;
+
+    // Create
+    let created = rest
+        .create_document("Users", json!({"name": "ToDelete", "age": 99}))
+        .await
+        .unwrap();
+    let doc_id = created.get("_docID").unwrap().as_str().unwrap();
+
+    // Update
+    let _updated = rest
+        .update_document("Users", doc_id, json!({"age": 100}))
+        .await
+        .unwrap();
+
+    // Delete
+    let deleted = rest.delete_document("Users", doc_id).await.unwrap();
+    assert!(deleted);
+
+    // Verify gone
+    let fetched = rest.get_document("Users", doc_id).await.unwrap();
+    assert!(fetched.is_none());
+}

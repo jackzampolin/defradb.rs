@@ -202,11 +202,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         if has_nested {
             // Use the Planner for queries with nested selections (joins)
             // Note: ACP filtering for nested queries is not yet implemented
-            self.execute_nested_select_with_planner(select, fetcher, identity)
+            self.execute_nested_select_with_planner(select, fetcher, caller_identity)
                 .await
         } else {
             // Use the optimized path for simple queries
-            self.execute_simple_select(select, fetcher, collection, identity)
+            self.execute_simple_select(select, fetcher, collection, caller_identity)
                 .await
         }
     }
@@ -298,7 +298,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             plan = Box::new(PermissionFilterNode::new(
                 plan,
                 acp.clone(),
-                caller_identity,
+                identity,
                 &policy.id,
                 &policy.resource_name,
             ));

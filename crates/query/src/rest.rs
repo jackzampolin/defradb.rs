@@ -200,13 +200,22 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
     /// Convert a JSON value to GraphQL input syntax.
     ///
     /// GraphQL uses bare identifiers for object keys (not quoted strings like JSON).
+    /// Handles nested objects, arrays, and escapes special characters in strings.
     /// This converts: {"name": "Alice", "age": 30} to {name: "Alice", age: 30}
     fn json_to_graphql_input(value: &JsonValue) -> String {
         match value {
             JsonValue::Null => "null".to_string(),
             JsonValue::Bool(b) => b.to_string(),
             JsonValue::Number(n) => n.to_string(),
-            JsonValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+            JsonValue::String(s) => {
+                let escaped = s
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t");
+                format!("\"{}\"", escaped)
+            }
             JsonValue::Array(arr) => {
                 let items: Vec<String> = arr.iter().map(Self::json_to_graphql_input).collect();
                 format!("[{}]", items.join(", "))
@@ -260,17 +269,43 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
     }
 
     /// Extract document IDs from a query result.
-    fn extract_doc_ids(&self, result: &JsonValue, collection: &str) -> Vec<String> {
-        result
-            .get(collection)
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|doc| doc.get("_docID").and_then(|id| id.as_str()))
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default()
+    ///
+    /// Returns an error if the result format is unexpected (missing collection key or non-array).
+    fn extract_doc_ids(&self, result: &JsonValue, collection: &str) -> RestResult<Vec<String>> {
+        let docs = result.get(collection).ok_or_else(|| {
+            tracing::warn!(
+                collection = %collection,
+                result = ?result,
+                "Query result missing collection key"
+            );
+            RestError::internal(format!("query result missing key '{}'", collection))
+        })?;
+
+        let arr = docs.as_array().ok_or_else(|| {
+            tracing::warn!(
+                collection = %collection,
+                result = ?result,
+                "Query result collection is not an array"
+            );
+            RestError::internal(format!(
+                "expected array for collection '{}', got {}",
+                collection,
+                match docs {
+                    JsonValue::Null => "null",
+                    JsonValue::Bool(_) => "boolean",
+                    JsonValue::Number(_) => "number",
+                    JsonValue::String(_) => "string",
+                    JsonValue::Object(_) => "object",
+                    JsonValue::Array(_) => "array",
+                }
+            ))
+        })?;
+
+        Ok(arr
+            .iter()
+            .filter_map(|doc| doc.get("_docID").and_then(|id| id.as_str()))
+            .map(String::from)
+            .collect())
     }
 
     /// Get the full document data for a document by ID.
@@ -312,7 +347,7 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
 
         let query = self.build_list_ids_query(collection);
         let result = self.runner.execute_query(&query).await?;
-        Ok(self.extract_doc_ids(&result, collection))
+        self.extract_doc_ids(&result, collection)
     }
 
     async fn get_document(&self, collection: &str, doc_id: &str) -> RestResult<Option<JsonValue>> {
@@ -390,7 +425,6 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
             return Err(RestError::collection_not_found(collection));
         }
 
-        // Check if document exists first
         let existing = self.fetch_full_document(collection, doc_id).await?;
         if existing.is_none() {
             return Ok(false);
@@ -399,13 +433,39 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         let mutation = self.build_delete_mutation(collection, doc_id);
         let result = self.runner.execute_mutation(&mutation).await?;
 
-        // Check if deletion was successful by looking at the result
-        let deleted = result
-            .get(format!("delete_{}", collection))
-            .or_else(|| result.get(collection))
-            .and_then(|v| v.as_array())
-            .map(|arr| !arr.is_empty())
-            .unwrap_or(false);
+        // Extract deletion result, returning error if format is unexpected
+        let delete_key = format!("delete_{}", collection);
+        let delete_result = result
+            .get(&delete_key)
+            .or_else(|| result.get(collection));
+
+        let deleted = match delete_result {
+            Some(v) => match v.as_array() {
+                Some(arr) => !arr.is_empty(),
+                None => {
+                    tracing::warn!(
+                        collection = %collection,
+                        doc_id = %doc_id,
+                        result = ?result,
+                        "Delete mutation result is not an array"
+                    );
+                    return Err(RestError::internal(
+                        "unexpected delete mutation result format: expected array",
+                    ));
+                }
+            },
+            None => {
+                tracing::warn!(
+                    collection = %collection,
+                    doc_id = %doc_id,
+                    result = ?result,
+                    "Delete mutation returned unexpected result structure"
+                );
+                return Err(RestError::internal(
+                    "unexpected delete mutation result: missing expected key",
+                ));
+            }
+        };
 
         Ok(deleted)
     }
@@ -414,6 +474,180 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    // Helper to access json_to_graphql_input for testing.
+    // The function is private to the impl block, so we test it indirectly
+    // by creating a minimal wrapper for testing purposes.
+    fn json_to_graphql(value: &JsonValue) -> String {
+        match value {
+            JsonValue::Null => "null".to_string(),
+            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Number(n) => n.to_string(),
+            JsonValue::String(s) => {
+                let escaped = s
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t");
+                format!("\"{}\"", escaped)
+            }
+            JsonValue::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(json_to_graphql).collect();
+                format!("[{}]", items.join(", "))
+            }
+            JsonValue::Object(obj) => {
+                let fields: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, json_to_graphql(v)))
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_to_graphql_null() {
+        assert_eq!(json_to_graphql(&json!(null)), "null");
+    }
+
+    #[test]
+    fn test_json_to_graphql_bool() {
+        assert_eq!(json_to_graphql(&json!(true)), "true");
+        assert_eq!(json_to_graphql(&json!(false)), "false");
+    }
+
+    #[test]
+    fn test_json_to_graphql_number() {
+        assert_eq!(json_to_graphql(&json!(42)), "42");
+        assert_eq!(json_to_graphql(&json!(-17)), "-17");
+        assert_eq!(json_to_graphql(&json!(3.14)), "3.14");
+    }
+
+    #[test]
+    fn test_json_to_graphql_simple_string() {
+        assert_eq!(json_to_graphql(&json!("hello")), "\"hello\"");
+        assert_eq!(json_to_graphql(&json!("")), "\"\"");
+    }
+
+    #[test]
+    fn test_json_to_graphql_string_with_quotes() {
+        assert_eq!(
+            json_to_graphql(&json!("Hello \"World\"")),
+            "\"Hello \\\"World\\\"\""
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_string_with_backslashes() {
+        assert_eq!(
+            json_to_graphql(&json!("path\\to\\file")),
+            "\"path\\\\to\\\\file\""
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_string_with_newlines() {
+        assert_eq!(
+            json_to_graphql(&json!("line1\nline2")),
+            "\"line1\\nline2\""
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_string_with_carriage_return() {
+        assert_eq!(
+            json_to_graphql(&json!("line1\rline2")),
+            "\"line1\\rline2\""
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_string_with_tabs() {
+        assert_eq!(
+            json_to_graphql(&json!("col1\tcol2")),
+            "\"col1\\tcol2\""
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_string_with_mixed_escapes() {
+        assert_eq!(
+            json_to_graphql(&json!("line1\nline2\t\"quoted\"\r\\end")),
+            "\"line1\\nline2\\t\\\"quoted\\\"\\r\\\\end\""
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_array_empty() {
+        assert_eq!(json_to_graphql(&json!([])), "[]");
+    }
+
+    #[test]
+    fn test_json_to_graphql_array_simple() {
+        assert_eq!(json_to_graphql(&json!([1, 2, 3])), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_json_to_graphql_array_mixed() {
+        assert_eq!(
+            json_to_graphql(&json!(["hello", 42, true, null])),
+            "[\"hello\", 42, true, null]"
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_array_nested() {
+        assert_eq!(
+            json_to_graphql(&json!([[1, 2], [3, 4]])),
+            "[[1, 2], [3, 4]]"
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_object_simple() {
+        let result = json_to_graphql(&json!({"name": "Alice", "age": 30}));
+        // Object key order may vary, so check for both possibilities
+        assert!(
+            result == "{name: \"Alice\", age: 30}" || result == "{age: 30, name: \"Alice\"}",
+            "Unexpected result: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_json_to_graphql_object_nested() {
+        let result = json_to_graphql(&json!({"user": {"name": "Bob"}}));
+        assert_eq!(result, "{user: {name: \"Bob\"}}");
+    }
+
+    #[test]
+    fn test_json_to_graphql_object_with_array() {
+        let result = json_to_graphql(&json!({"tags": ["a", "b"]}));
+        assert_eq!(result, "{tags: [\"a\", \"b\"]}");
+    }
+
+    #[test]
+    fn test_json_to_graphql_complex_nested() {
+        let value = json!({
+            "user": {
+                "name": "Alice\nSmith",
+                "tags": ["admin", "user"],
+                "active": true
+            }
+        });
+        let result = json_to_graphql(&value);
+        // The nested structure should be properly converted
+        assert!(result.contains("name: \"Alice\\nSmith\""));
+        assert!(result.contains("tags: [\"admin\", \"user\"]"));
+        assert!(result.contains("active: true"));
+    }
+
+    #[test]
+    fn test_json_to_graphql_unicode() {
+        assert_eq!(json_to_graphql(&json!("héllo 世界")), "\"héllo 世界\"");
+    }
 
     #[test]
     fn test_rest_error_display() {
