@@ -13,20 +13,14 @@
 //! This binary provides the `defra` command for interacting with DefraDB nodes.
 //! It supports starting nodes, managing schemas, querying data, and more.
 
-mod cli;
-mod commands;
-mod config;
-mod error;
-mod logging;
-
 use std::process::ExitCode;
 
 use clap::Parser;
 use tracing::error;
 
-use crate::cli::Cli;
-use crate::config::Config;
-use crate::error::Result;
+use cli::cli::Cli;
+use cli::config::Config;
+use cli::error::Result;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -47,7 +41,7 @@ async fn run() -> Result<()> {
     let config = Config::load(&cli)?;
 
     // Initialize logging based on config
-    logging::init(&config)?;
+    cli::logging::init(&config)?;
 
     // Execute the command
     cli.execute(config).await

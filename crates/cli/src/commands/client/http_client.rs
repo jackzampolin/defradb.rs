@@ -27,13 +27,13 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// Maximum number of retry attempts for transient failures
-const MAX_RETRIES: u32 = 3;
+pub const MAX_RETRIES: u32 = 3;
 
 /// Initial backoff delay in milliseconds
-const INITIAL_BACKOFF_MS: u64 = 100;
+pub const INITIAL_BACKOFF_MS: u64 = 100;
 
 /// HTTP status codes that are considered retryable
-const RETRYABLE_STATUS_CODES: &[u16] = &[408, 429, 500, 502, 503, 504];
+pub const RETRYABLE_STATUS_CODES: &[u16] = &[408, 429, 500, 502, 503, 504];
 
 /// Global shared HTTP client for connection reuse across commands
 static SHARED_CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
@@ -160,8 +160,13 @@ impl HttpClient {
     }
 
     /// Check if a status code is retryable
-    fn is_retryable_status(status: StatusCode) -> bool {
+    pub fn is_retryable_status(status: StatusCode) -> bool {
         RETRYABLE_STATUS_CODES.contains(&status.as_u16())
+    }
+
+    /// Get the base URL for the client
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Check if an error is retryable (connection errors, timeouts)
@@ -386,139 +391,5 @@ impl GraphQLResponse {
             .map(|e| e.message.as_str())
             .collect::<Vec<_>>()
             .join("; ")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_http_client_new() {
-        let client = HttpClient::new("http://localhost:9181/").unwrap();
-        assert_eq!(client.base_url, "http://localhost:9181");
-    }
-
-    #[test]
-    fn test_http_client_new_invalid_url() {
-        let result = HttpClient::new("not-a-valid-url");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_graphql_request_serialization() {
-        let request = GraphQLRequest {
-            query: "{ Users { name } }".to_string(),
-            variables: None,
-            operation_name: None,
-            txn_id: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("query"));
-        assert!(!json.contains("variables"));
-    }
-
-    #[test]
-    fn test_graphql_request_with_txn_id() {
-        let request = GraphQLRequest {
-            query: "{ Users { name } }".to_string(),
-            variables: None,
-            operation_name: None,
-            txn_id: Some("12345".to_string()),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("\"txn_id\":\"12345\""));
-    }
-
-    #[test]
-    fn test_graphql_response_has_errors() {
-        let response = GraphQLResponse {
-            data: None,
-            errors: vec![GraphQLError {
-                message: "error".to_string(),
-            }],
-        };
-        assert!(response.has_errors());
-        assert_eq!(response.error_message(), "error");
-    }
-
-    #[test]
-    fn test_graphql_response_no_errors() {
-        let response = GraphQLResponse {
-            data: Some(serde_json::json!({})),
-            errors: vec![],
-        };
-        assert!(!response.has_errors());
-    }
-
-    #[test]
-    fn test_is_retryable_status_service_unavailable() {
-        assert!(HttpClient::is_retryable_status(
-            StatusCode::SERVICE_UNAVAILABLE
-        ));
-    }
-
-    #[test]
-    fn test_is_retryable_status_too_many_requests() {
-        assert!(HttpClient::is_retryable_status(
-            StatusCode::TOO_MANY_REQUESTS
-        ));
-    }
-
-    #[test]
-    fn test_is_retryable_status_internal_server_error() {
-        assert!(HttpClient::is_retryable_status(
-            StatusCode::INTERNAL_SERVER_ERROR
-        ));
-    }
-
-    #[test]
-    fn test_is_retryable_status_bad_gateway() {
-        assert!(HttpClient::is_retryable_status(StatusCode::BAD_GATEWAY));
-    }
-
-    #[test]
-    fn test_is_retryable_status_gateway_timeout() {
-        assert!(HttpClient::is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
-    }
-
-    #[test]
-    fn test_is_retryable_status_request_timeout() {
-        assert!(HttpClient::is_retryable_status(StatusCode::REQUEST_TIMEOUT));
-    }
-
-    #[test]
-    fn test_is_not_retryable_bad_request() {
-        assert!(!HttpClient::is_retryable_status(StatusCode::BAD_REQUEST));
-    }
-
-    #[test]
-    fn test_is_not_retryable_not_found() {
-        assert!(!HttpClient::is_retryable_status(StatusCode::NOT_FOUND));
-    }
-
-    #[test]
-    fn test_is_not_retryable_unauthorized() {
-        assert!(!HttpClient::is_retryable_status(StatusCode::UNAUTHORIZED));
-    }
-
-    #[test]
-    fn test_is_not_retryable_forbidden() {
-        assert!(!HttpClient::is_retryable_status(StatusCode::FORBIDDEN));
-    }
-
-    #[test]
-    fn test_is_not_retryable_ok() {
-        assert!(!HttpClient::is_retryable_status(StatusCode::OK));
-    }
-
-    #[test]
-    fn test_retry_constants() {
-        // Verify retry configuration values are sensible
-        assert_eq!(MAX_RETRIES, 3);
-        assert_eq!(INITIAL_BACKOFF_MS, 100);
-        assert!(RETRYABLE_STATUS_CODES.contains(&503));
-        assert!(RETRYABLE_STATUS_CODES.contains(&429));
-        assert!(RETRYABLE_STATUS_CODES.contains(&500));
     }
 }
