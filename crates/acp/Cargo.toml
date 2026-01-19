@@ -23,4 +23,5 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

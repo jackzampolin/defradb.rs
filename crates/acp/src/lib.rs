@@ -28,6 +28,7 @@ mod dac;
 mod error;
 mod local;
 mod permission;
+mod persistent;
 mod relation;
 mod store;
 
@@ -35,6 +36,7 @@ pub use dac::DocumentACP;
 pub use error::{Error, Result};
 pub use local::{LocalDocumentACP, MemoryAcpStore};
 pub use permission::DocumentPermission;
+pub use persistent::PersistentAcpStore;
 pub use relation::{
     RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
 };
