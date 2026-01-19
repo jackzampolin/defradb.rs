@@ -22,12 +22,9 @@ use crate::types::AES_NONCE_SIZE;
 /// assert_eq!(nonce.len(), 12);
 /// ```
 pub fn generate_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
-    #[cfg(test)]
-    {
-        // In test mode, use deterministic nonce for reproducibility
-        if USE_DETERMINISTIC_NONCE.load(std::sync::atomic::Ordering::Relaxed) {
-            return generate_deterministic_nonce();
-        }
+    // In test mode, use deterministic nonce for reproducibility
+    if USE_DETERMINISTIC_NONCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return generate_deterministic_nonce();
     }
 
     generate_random_nonce()
@@ -44,12 +41,12 @@ fn generate_random_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
 
 /// Generate a deterministic nonce for testing
 ///
-/// This should NEVER be used in production. It's only for testing purposes
-/// to ensure reproducible test results.
+/// **WARNING: This should NEVER be used in production.** It's only for testing
+/// purposes to ensure reproducible test results.
 ///
 /// Uses the same deterministic value as the Go implementation:
 /// "deterministic nonce for testing" (first 12 bytes)
-#[cfg(test)]
+#[doc(hidden)]
 pub fn generate_deterministic_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     // Match Go's generateTestNonce(): []byte("deterministic nonce for testing")[:12]
     let full_nonce = b"deterministic nonce for testing";
@@ -58,7 +55,10 @@ pub fn generate_deterministic_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     Ok(nonce)
 }
 
-/// Control whether to use deterministic nonces in tests
-#[cfg(test)]
+/// Control whether to use deterministic nonces in tests.
+///
+/// **WARNING: This should NEVER be set to true in production.**
+/// Only use for testing with reproducible nonces.
+#[doc(hidden)]
 pub static USE_DETERMINISTIC_NONCE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);

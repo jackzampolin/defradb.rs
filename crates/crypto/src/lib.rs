@@ -20,8 +20,7 @@ pub mod merkle_proof;
 pub mod signature;
 pub mod types;
 
-#[cfg(test)]
-mod go_compat;
+// Go compatibility tests extracted to crates/crypto/tests/go_compat_*.rs
 
 // Re-export commonly used types
 pub use defra_core::{Error, Result};
