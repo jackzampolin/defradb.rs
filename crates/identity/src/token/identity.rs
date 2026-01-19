@@ -18,7 +18,8 @@ pub struct TokenIdentity {
     pub(crate) bearer_token: String,
     pub(crate) authorized_account: Option<String>,
     pub(crate) key_type: IdentityKeyType,
-    pub(crate) claims: IdentityClaims,
+    /// The JWT claims from the token.
+    pub claims: IdentityClaims,
 }
 
 impl TokenIdentity {
