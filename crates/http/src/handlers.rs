@@ -50,6 +50,8 @@ pub async fn graphql(
         tracing::debug!(did = %did, "GraphQL POST request with identity");
     }
 
+    // Pass identity through to executor for ACP permission checks
+    let request = request.with_identity(identity.into_did());
     let response = state.executor.execute(request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
@@ -96,10 +98,18 @@ pub async fn graphql_get(
         None => None,
     };
 
-    let request = QueryRequest {
-        query: params.query,
-        operation_name: params.operation_name,
-        variables,
+    // Pass identity through to executor for ACP permission checks
+    let request = QueryRequest::new(params.query)
+        .with_identity(identity.into_did());
+    let request = if let Some(op_name) = params.operation_name {
+        request.with_operation_name(op_name)
+    } else {
+        request
+    };
+    let request = if let Some(vars) = variables {
+        request.with_variables(vars)
+    } else {
+        request
     };
 
     let response = state.executor.execute(request).await;
@@ -332,10 +342,18 @@ pub async fn graphql_transactional(
         tracing::debug!(did = %did, "GraphQL transactional request with identity");
     }
 
-    let query_request = QueryRequest {
-        query: request.query,
-        operation_name: request.operation_name,
-        variables: request.variables,
+    // Pass identity through to executor for ACP permission checks
+    let query_request = QueryRequest::new(request.query)
+        .with_identity(identity.into_did());
+    let query_request = if let Some(op_name) = request.operation_name {
+        query_request.with_operation_name(op_name)
+    } else {
+        query_request
+    };
+    let query_request = if let Some(vars) = request.variables {
+        query_request.with_variables(vars)
+    } else {
+        query_request
     };
 
     let response = match request.txn_id {

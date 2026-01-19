@@ -25,9 +25,14 @@ use crate::error::ErrorResponse;
 pub struct ExtractIdentity(pub Option<Did>);
 
 impl ExtractIdentity {
-    /// Returns the extracted DID if present.
+    /// Returns a reference to the extracted DID if present.
     pub fn did(&self) -> Option<&Did> {
         self.0.as_ref()
+    }
+
+    /// Consumes self and returns the extracted DID if present.
+    pub fn into_did(self) -> Option<Did> {
+        self.0
     }
 }
 

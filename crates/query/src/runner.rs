@@ -9,8 +9,10 @@
 //! a `TransactionRegistry`. The registry manages transaction lifecycle and provides
 //! transaction-scoped document fetchers for query execution.
 
+use acp::DocumentACP;
 use async_trait::async_trait;
 use document::Document;
+use identity::Did;
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
@@ -25,8 +27,8 @@ use crate::mapper::{AggregateType, Mutation, MutationType, Requestable, Select};
 use crate::mutator::DocMutator;
 use crate::plan::{
     AllDocsNode, AverageNode, CountNode, CreateInput, CreateNode, DeleteNode, GroupByNode,
-    LimitNode, MaxNode, MinNode, OrderByNode, ScanNode, SelectNode, SumNode, UpdateInput,
-    UpdateNode, UpsertInput, UpsertNode,
+    LimitNode, MaxNode, MinNode, OrderByNode, PermissionFilterNode, ScanNode, SelectNode, SumNode,
+    UpdateInput, UpdateNode, UpsertInput, UpsertNode,
 };
 use crate::planner::{Doc, PlanNode, Planner};
 use crate::query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
@@ -47,6 +49,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     registry: Arc<R>,
     /// Document mutator for mutation operations (optional)
     mutator: Option<Arc<dyn DocMutator>>,
+    /// Document ACP for permission checks (optional)
+    acp: Option<Arc<dyn DocumentACP>>,
 }
 
 impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
@@ -64,6 +68,7 @@ impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
             collections: collections_map,
             registry: Arc::new(NoOpTransactionRegistry),
             mutator: None,
+            acp: None,
         }
     }
 }
@@ -80,6 +85,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             collections: collections_map,
             registry: Arc::new(registry),
             mutator: None,
+            acp: None,
         }
     }
 
@@ -91,27 +97,49 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         self
     }
 
+    /// Set the document ACP for permission checks.
+    ///
+    /// When set, queries will filter results based on the identity's permissions.
+    /// Collections with a policy will have ACP enforced; others are unaffected.
+    pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
+        self.acp = Some(acp);
+        self
+    }
+
     /// Execute a GraphQL query and return JSON results.
     pub async fn execute_query(&self, query: &str) -> Result<JsonValue> {
-        self.execute_query_with_fetcher(query, self.fetcher.as_ref())
+        self.execute_query_internal(query, self.fetcher.as_ref(), None)
             .await
     }
 
-    /// Execute a GraphQL query with a specific fetcher.
+    /// Execute a GraphQL query with identity for ACP permission checks.
+    pub async fn execute_query_with_identity(
+        &self,
+        query: &str,
+        identity: Option<Did>,
+    ) -> Result<JsonValue> {
+        self.execute_query_internal(query, self.fetcher.as_ref(), identity)
+            .await
+    }
+
+    /// Execute a GraphQL query with a specific fetcher and identity.
     ///
     /// This is used internally for both regular queries (using the default fetcher)
     /// and transactional queries (using a transaction-scoped fetcher).
-    async fn execute_query_with_fetcher(
+    async fn execute_query_internal(
         &self,
         query: &str,
         fetcher: &dyn DocFetcher,
+        identity: Option<Did>,
     ) -> Result<JsonValue> {
         let selects = parse_query(query)?;
 
         let mut results = Map::new();
 
         for select in selects {
-            let result = self.execute_select_with_fetcher(&select, fetcher).await?;
+            let result = self
+                .execute_select_internal(&select, fetcher, identity.clone())
+                .await?;
             let key = select.field.output_name();
             results.insert(key.to_string(), result);
         }
@@ -119,11 +147,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(JsonValue::Object(results))
     }
 
-    /// Execute a single Select operation with a specific fetcher.
-    async fn execute_select_with_fetcher(
+    /// Execute a single Select operation with a specific fetcher and identity.
+    async fn execute_select_internal(
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
+        identity: Option<Did>,
     ) -> Result<JsonValue> {
         // Get collection schema
         let collection = self
@@ -230,6 +259,17 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Build and execute the plan
         let mut plan = self.build_plan(select, plan_docs, mapping.clone())?;
+
+        // Wrap with permission filter if collection has ACP policy and ACP is configured
+        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            plan = Box::new(PermissionFilterNode::new(
+                plan,
+                acp.clone(),
+                identity,
+                &policy.id,
+                &policy.resource_name,
+            ));
+        }
 
         // Execute the plan and collect results
         plan.init().await?;
@@ -796,8 +836,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         };
 
         // Route to appropriate handler based on operation type
+        // Pass identity through for ACP permission checks
         let result = match parsed {
-            ParsedOperation::Query(_) => self.execute_query(&request.query).await,
+            ParsedOperation::Query(_) => {
+                self.execute_query_with_identity(&request.query, request.identity)
+                    .await
+            }
             ParsedOperation::Mutation(_) => self.execute_mutation(&request.query).await,
         };
 
@@ -846,10 +890,10 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
             }
         };
 
-        // Get the transaction-scoped fetcher and execute
+        // Get the transaction-scoped fetcher and execute with identity for ACP
         let fetcher = txn_ctx.doc_fetcher();
         match self
-            .execute_query_with_fetcher(&request.query, fetcher.as_ref())
+            .execute_query_internal(&request.query, fetcher.as_ref(), request.identity)
             .await
         {
             Ok(data) => QueryResponse {
@@ -1146,11 +1190,7 @@ mod tests {
 
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
-        let request = QueryRequest {
-            query: "{ Users { name } }".to_string(),
-            operation_name: None,
-            variables: None,
-        };
+        let request = QueryRequest::new("{ Users { name } }");
 
         let response = runner.execute(request).await;
 
@@ -1200,11 +1240,7 @@ mod tests {
         let fetcher = MockFetcher::new();
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
-        let request = QueryRequest {
-            query: "{ InvalidCollection { name } }".to_string(),
-            operation_name: None,
-            variables: None,
-        };
+        let request = QueryRequest::new("{ InvalidCollection { name } }");
 
         let response = runner.execute(request).await;
 
@@ -3382,5 +3418,269 @@ mod tests {
         assert_eq!(alice.get("_sum").unwrap(), 0);
         // AVG of no values is null (SQL semantics)
         assert!(alice.get("_avg").unwrap().is_null());
+    }
+
+    // ========================================================================
+    // ACP Integration Tests
+    // ========================================================================
+
+    fn make_acp_collection() -> CollectionVersion {
+        use schema::PolicyDescription;
+
+        CollectionVersion::new(
+            "Users",
+            "v1",
+            "coll-acp",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "age", FieldKind::int()),
+            ],
+        )
+        .with_policy(PolicyDescription::new("policy-acp", "Users"))
+    }
+
+    fn test_acp_did() -> Did {
+        Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
+    }
+
+    fn test_acp_did2() -> Did {
+        Did::new("did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR").unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_acp_owner_sees_registered_docs() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        let owner = test_acp_did();
+
+        // Create docs with known IDs
+        let mut doc1 = Document::new();
+        doc1.set("_docID", "doc1");
+        doc1.set("name", "Alice");
+        doc1.set("age", 30i64);
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("_docID", "doc2");
+        doc2.set("name", "Bob");
+        doc2.set("age", 25i64);
+        fetcher.add_doc("Users", doc2);
+
+        // Register both docs with owner
+        acp.register_doc_object(&owner, "policy-acp", "Users", "doc1")
+            .await
+            .unwrap();
+        acp.register_doc_object(&owner, "policy-acp", "Users", "doc2")
+            .await
+            .unwrap();
+
+        let runner = QueryRunner::new(fetcher, vec![make_acp_collection()]).with_acp(acp);
+
+        // Owner should see both docs (include _docID for ACP to work with projection)
+        let result = runner
+            .execute_query_with_identity("{ Users { _docID name } }", Some(owner))
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 2, "owner should see all registered docs");
+    }
+
+    #[tokio::test]
+    async fn test_acp_non_owner_sees_nothing() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        let owner = test_acp_did();
+        let other = test_acp_did2();
+
+        // Create doc with known ID
+        let mut doc1 = Document::new();
+        doc1.set("_docID", "doc1");
+        doc1.set("name", "Alice");
+        fetcher.add_doc("Users", doc1);
+
+        // Register doc with owner
+        acp.register_doc_object(&owner, "policy-acp", "Users", "doc1")
+            .await
+            .unwrap();
+
+        let runner = QueryRunner::new(fetcher, vec![make_acp_collection()]).with_acp(acp);
+
+        // Non-owner without permissions should see nothing
+        let result = runner
+            .execute_query_with_identity("{ Users { _docID name } }", Some(other))
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(
+            users.len(),
+            0,
+            "non-owner without permissions should see no docs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_acp_reader_sees_shared_doc() {
+        use acp::{LocalDocumentACP, MemoryAcpStore, READER_RELATION};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        let owner = test_acp_did();
+        let reader = test_acp_did2();
+
+        // Create doc
+        let mut doc1 = Document::new();
+        doc1.set("_docID", "doc1");
+        doc1.set("name", "Alice");
+        fetcher.add_doc("Users", doc1);
+
+        // Register and share with reader
+        acp.register_doc_object(&owner, "policy-acp", "Users", "doc1")
+            .await
+            .unwrap();
+        acp.add_actor_relationship(&owner, &reader, "Users", "doc1", READER_RELATION)
+            .await
+            .unwrap();
+
+        let runner = QueryRunner::new(fetcher, vec![make_acp_collection()]).with_acp(acp);
+
+        // Reader should see the shared doc
+        let result = runner
+            .execute_query_with_identity("{ Users { _docID name } }", Some(reader))
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1, "reader should see shared doc");
+        assert_eq!(users[0].get("name").unwrap(), "Alice");
+    }
+
+    #[tokio::test]
+    async fn test_acp_anonymous_cannot_see_registered_doc() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        let owner = test_acp_did();
+
+        // Create doc
+        let mut doc1 = Document::new();
+        doc1.set("_docID", "doc1");
+        doc1.set("name", "Alice");
+        fetcher.add_doc("Users", doc1);
+
+        // Register with owner
+        acp.register_doc_object(&owner, "policy-acp", "Users", "doc1")
+            .await
+            .unwrap();
+
+        let runner = QueryRunner::new(fetcher, vec![make_acp_collection()]).with_acp(acp);
+
+        // Anonymous (None identity) should see nothing
+        let result = runner
+            .execute_query_with_identity("{ Users { _docID name } }", None)
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 0, "anonymous should not see registered docs");
+    }
+
+    #[tokio::test]
+    async fn test_acp_public_docs_visible_to_all() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        let owner = test_acp_did();
+        let other = test_acp_did2();
+
+        // Create two docs - one registered, one public
+        let mut doc1 = Document::new();
+        doc1.set("_docID", "doc1");
+        doc1.set("name", "Alice");
+        fetcher.add_doc("Users", doc1);
+
+        let mut doc2 = Document::new();
+        doc2.set("_docID", "doc2");
+        doc2.set("name", "Bob");
+        fetcher.add_doc("Users", doc2);
+
+        // Only register doc1 with owner
+        acp.register_doc_object(&owner, "policy-acp", "Users", "doc1")
+            .await
+            .unwrap();
+
+        let runner = QueryRunner::new(fetcher, vec![make_acp_collection()]).with_acp(acp);
+
+        // Non-owner should see only the unregistered (public) doc
+        let result = runner
+            .execute_query_with_identity("{ Users { _docID name } }", Some(other))
+            .await
+            .unwrap();
+
+        let users = result.get("Users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 1, "non-owner should see only public doc");
+        assert_eq!(users[0].get("name").unwrap(), "Bob");
+    }
+
+    #[tokio::test]
+    async fn test_identity_passed_through_execute_request() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        let owner = test_acp_did();
+
+        // Create doc
+        let mut doc1 = Document::new();
+        doc1.set("_docID", "doc1");
+        doc1.set("name", "Alice");
+        fetcher.add_doc("Users", doc1);
+
+        // Register with owner
+        acp.register_doc_object(&owner, "policy-acp", "Users", "doc1")
+            .await
+            .unwrap();
+
+        let runner = QueryRunner::new(fetcher, vec![make_acp_collection()]).with_acp(acp);
+
+        // Use the QueryRequest with identity (simulating HTTP flow)
+        let request =
+            QueryRequest::new("{ Users { _docID name } }").with_identity(Some(owner));
+        let response = runner.execute(request).await;
+
+        assert!(response.errors.is_empty());
+        let users = response
+            .data
+            .unwrap()
+            .get("Users")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            users.len(),
+            1,
+            "owner should see registered doc via execute()"
+        );
     }
 }

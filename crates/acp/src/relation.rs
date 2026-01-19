@@ -27,7 +27,8 @@ pub const DELETER_RELATION: &str = "deleter";
 /// Relations are policy-defined strings like "owner", "reader", etc.
 ///
 /// All path components are validated to prevent path traversal attacks.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Use `try_new` to construct instances from untrusted input.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct RelationTuple {
     /// The subject (identity) that has the relation
     subject: Did,
@@ -86,9 +87,11 @@ impl RelationTuple {
 
     /// Create a new relation tuple without validation.
     ///
-    /// Use `try_new` when working with untrusted input.
-    /// This method is for internal use where inputs are already validated.
-    pub fn new(
+    /// This is crate-internal for use where inputs are already validated
+    /// (e.g., from database storage or internal code paths).
+    ///
+    /// External code should use `try_new` to ensure path traversal safety.
+    pub(crate) fn new(
         subject: Did,
         relation: impl Into<String>,
         collection_id: impl Into<String>,
@@ -183,6 +186,32 @@ impl std::fmt::Display for RelationTuple {
             "{}@{}:{}#{}",
             self.subject, self.collection_id, self.doc_id, self.relation
         )
+    }
+}
+
+/// Custom Deserialize implementation that validates path components.
+/// This prevents path traversal attacks via deserialized data.
+impl<'de> Deserialize<'de> for RelationTuple {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        // Deserialize into a helper struct first
+        #[derive(Deserialize)]
+        struct RelationTupleRaw {
+            subject: Did,
+            relation: String,
+            collection_id: String,
+            doc_id: String,
+        }
+
+        let raw = RelationTupleRaw::deserialize(deserializer)?;
+
+        // Validate path components
+        RelationTuple::try_new(raw.subject, raw.relation, raw.collection_id, raw.doc_id)
+            .map_err(|e| D::Error::custom(e.to_string()))
     }
 }
 
@@ -285,5 +314,50 @@ mod tests {
         let json = serde_json::to_string(&tuple).unwrap();
         let parsed: RelationTuple = serde_json::from_str(&json).unwrap();
         assert_eq!(tuple, parsed);
+    }
+
+    #[test]
+    fn test_deserialize_rejects_path_traversal() {
+        // Craft JSON with path separator in relation field
+        let malicious_json = r#"{
+            "subject": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "relation": "reader/../admin",
+            "collection_id": "users",
+            "doc_id": "doc123"
+        }"#;
+
+        let result: std::result::Result<RelationTuple, _> = serde_json::from_str(malicious_json);
+        assert!(
+            result.is_err(),
+            "should reject path traversal in relation field"
+        );
+
+        // Craft JSON with path separator in collection_id
+        let malicious_json = r#"{
+            "subject": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "relation": "reader",
+            "collection_id": "users/../secrets",
+            "doc_id": "doc123"
+        }"#;
+
+        let result: std::result::Result<RelationTuple, _> = serde_json::from_str(malicious_json);
+        assert!(
+            result.is_err(),
+            "should reject path traversal in collection_id field"
+        );
+
+        // Craft JSON with path separator in doc_id
+        let malicious_json = r#"{
+            "subject": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "relation": "reader",
+            "collection_id": "users",
+            "doc_id": "doc/123"
+        }"#;
+
+        let result: std::result::Result<RelationTuple, _> = serde_json::from_str(malicious_json);
+        assert!(
+            result.is_err(),
+            "should reject path traversal in doc_id field"
+        );
     }
 }

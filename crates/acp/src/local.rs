@@ -15,6 +15,15 @@ use crate::permission::DocumentPermission;
 use crate::relation::{RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION};
 use crate::store::AcpStore;
 
+/// Known valid relation names that can be added.
+/// Owner relation is excluded because it's immutable (set at registration time).
+const VALID_ADDABLE_RELATIONS: &[&str] = &[READER_RELATION, UPDATER_RELATION, DELETER_RELATION];
+
+/// Check if a relation name is valid for adding.
+fn is_valid_relation(relation: &str) -> bool {
+    VALID_ADDABLE_RELATIONS.contains(&relation)
+}
+
 /// Local document ACP implementation using in-memory storage.
 ///
 /// This provides ACP functionality without requiring SourceHub.
@@ -150,6 +159,14 @@ impl DocumentACP for LocalDocumentACP {
             return Err(Error::InvalidRelation(
                 "cannot add owner relation".to_string(),
             ));
+        }
+
+        // Validate relation name against known valid relations
+        if !is_valid_relation(relation) {
+            return Err(Error::InvalidRelation(format!(
+                "unknown relation '{}', valid relations are: reader, updater, deleter",
+                relation
+            )));
         }
 
         let tuple = RelationTuple::new(target.clone(), relation, collection_id, doc_id);
@@ -603,6 +620,35 @@ mod tests {
             .add_actor_relationship(&owner, &other, "users", "doc1", OWNER_RELATION)
             .await;
         assert!(matches!(result, Err(Error::InvalidRelation(_))));
+    }
+
+    #[tokio::test]
+    async fn test_cannot_add_unknown_relation() {
+        let acp = create_acp();
+        let owner = test_did();
+        let other = test_did2();
+
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        // Try to add a typo/unknown relation
+        let result = acp
+            .add_actor_relationship(&owner, &other, "users", "doc1", "reador") // typo
+            .await;
+        assert!(
+            matches!(result, Err(Error::InvalidRelation(msg)) if msg.contains("unknown relation")),
+            "should reject unknown relation names"
+        );
+
+        // Try another unknown relation
+        let result = acp
+            .add_actor_relationship(&owner, &other, "users", "doc1", "admin")
+            .await;
+        assert!(
+            matches!(result, Err(Error::InvalidRelation(msg)) if msg.contains("unknown relation")),
+            "should reject 'admin' as unknown relation"
+        );
     }
 
     #[tokio::test]
