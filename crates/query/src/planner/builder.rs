@@ -5,9 +5,11 @@
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::debug;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::fetcher::DocFetcher;
 use crate::mapper::{Requestable, Select};
 use crate::plan::{
     IndexScanNode, JoinSide, LimitNode, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
@@ -31,9 +33,15 @@ impl PlanResult {
 }
 
 /// Query planner that builds execution plans from Select operations.
+///
+/// The planner can optionally be configured with a `DocFetcher` to enable
+/// ScanNodes to load their own data during execution. Without a fetcher,
+/// ScanNodes must have their data pre-loaded via `with_docs()`.
 pub struct Planner {
     /// Available collection schemas by name
     collections: HashMap<String, Arc<CollectionVersion>>,
+    /// Optional fetcher for ScanNodes to load data on-demand
+    fetcher: Option<Arc<dyn DocFetcher>>,
 }
 
 impl Planner {
@@ -43,7 +51,19 @@ impl Planner {
             .into_iter()
             .map(|c| (c.name.clone(), Arc::new(c)))
             .collect();
-        Self { collections }
+        Self {
+            collections,
+            fetcher: None,
+        }
+    }
+
+    /// Set a document fetcher for on-demand data loading.
+    ///
+    /// When set, ScanNodes created by this planner will use the fetcher
+    /// to load documents during initialization if no docs are pre-loaded.
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
+        self.fetcher = Some(fetcher);
+        self
     }
 
     /// Build an execution plan from a Select operation.
@@ -68,8 +88,24 @@ impl Planner {
         // Build the document mapping for this query
         let mapping = self.build_mapping(select, &collection)?;
 
-        // Check if an index can be used for the filter
-        let index_scan = self.try_select_index(select, &collection);
+        // Check if an index can be used for the filter.
+        // Note: Index selection is disabled when a fetcher is attached because:
+        // 1. IndexScanNode expects pre-loaded documents from index lookups
+        // 2. The DocFetcher trait doesn't support index-aware fetching
+        // 3. The Runner handles index lookups for simple queries; the Planner path
+        //    (with fetcher) is used for nested selections where ScanNode suffices
+        let index_scan = if self.fetcher.is_some() {
+            if select.filter.is_some() && !collection.indexes.is_empty() {
+                debug!(
+                    collection = %select.collection_name,
+                    available_indexes = collection.indexes.len(),
+                    "Index selection disabled for nested query path - using full scan"
+                );
+            }
+            None // Skip index selection when using fetcher-based data loading
+        } else {
+            self.try_select_index(select, &collection)
+        };
 
         // Build the plan tree bottom-up:
         // ScanNode/IndexScanNode -> SelectNode -> JoinNodes -> LimitNode
@@ -81,10 +117,13 @@ impl Planner {
                     .with_show_deleted(select.show_deleted),
             )
         } else {
-            Box::new(
-                ScanNode::new((*collection).clone(), mapping.clone())
-                    .with_show_deleted(select.show_deleted),
-            )
+            let mut scan = ScanNode::new((*collection).clone(), mapping.clone())
+                .with_show_deleted(select.show_deleted);
+            // Attach fetcher if available for on-demand data loading
+            if let Some(ref fetcher) = self.fetcher {
+                scan = scan.with_fetcher(fetcher.clone());
+            }
+            Box::new(scan)
         };
 
         // 2. Apply filter if present (for ScanNode) or residual filter (for IndexScanNode)
@@ -189,8 +228,12 @@ impl Planner {
                 // Set up child mapping in parent
                 mapping.set_child_at(relation_field_index, child_mapping.clone());
 
-                // Create the child scan plan
-                let child_scan = ScanNode::new((*target_collection).clone(), child_mapping.clone());
+                // Create the child scan plan with fetcher for on-demand loading
+                let mut child_scan =
+                    ScanNode::new((*target_collection).clone(), child_mapping.clone());
+                if let Some(ref fetcher) = self.fetcher {
+                    child_scan = child_scan.with_fetcher(fetcher.clone());
+                }
 
                 // Wrap in SelectNode if there's a filter on the nested select
                 let child_plan: Box<dyn PlanNode> = if let Some(ref filter) = nested_select.filter {
@@ -223,7 +266,12 @@ impl Planner {
                     None
                 };
 
-                // Get child relation field index (if it exists)
+                // Get child relation field index (if it exists).
+                // For bidirectional relations, this is the index of the back-reference field
+                // (e.g., `author` field on posts when joining from users.posts).
+                // For unidirectional relations (no back-reference), we default to index 0.
+                // This is safe because TypeJoin nodes use the relation_id_field_index()
+                // (derived from the FK field) for actual join matching, not this index.
                 let child_relation_index = target_relation_field
                     .and_then(|f| {
                         target_collection

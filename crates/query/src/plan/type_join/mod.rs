@@ -1724,17 +1724,15 @@ mod tests {
             posts_mapping,
         );
 
-        join.init().await.unwrap();
-        join.start().await.unwrap();
-        // next() triggers child lookup which calls child's init()
-        let result = join.next().await;
+        // With child caching, child plan errors surface during init() when building the cache
+        let result = join.init().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mock init error"));
     }
 
     #[tokio::test]
     async fn test_type_join_one_child_start_error_propagation() {
-        // Test that errors from child plan's start() (during lookup) are propagated
+        // Test that errors from child plan's start() are propagated during cache building
         let posts_collection = make_posts_collection();
         let users_collection = make_users_collection();
 
@@ -1767,16 +1765,15 @@ mod tests {
             posts_mapping,
         );
 
-        join.init().await.unwrap();
-        join.start().await.unwrap();
-        let result = join.next().await;
+        // With child caching, child plan errors surface during init() when building the cache
+        let result = join.init().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mock start error"));
     }
 
     #[tokio::test]
     async fn test_type_join_one_child_next_error_propagation() {
-        // Test that errors from child plan's next() (during lookup) are propagated
+        // Test that errors from child plan's next() are propagated during cache building
         let posts_collection = make_posts_collection();
         let users_collection = make_users_collection();
 
@@ -1809,9 +1806,8 @@ mod tests {
             posts_mapping,
         );
 
-        join.init().await.unwrap();
-        join.start().await.unwrap();
-        let result = join.next().await;
+        // With child caching, child plan errors surface during init() when building the cache
+        let result = join.init().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mock next error"));
     }
@@ -1960,17 +1956,15 @@ mod tests {
         )
         .unwrap();
 
-        join.init().await.unwrap();
-        join.start().await.unwrap();
-        // next() triggers child lookup which calls child's init()
-        let result = join.next().await;
+        // With child caching, child plan errors surface during init() when building the cache
+        let result = join.init().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mock init error"));
     }
 
     #[tokio::test]
     async fn test_type_join_many_child_start_error_propagation() {
-        // Test that errors from child plan's start() (during lookup) are propagated
+        // Test that errors from child plan's start() are propagated during cache building
         let users_collection = make_users_collection();
         let posts_collection = make_posts_collection();
 
@@ -2003,16 +1997,15 @@ mod tests {
         )
         .unwrap();
 
-        join.init().await.unwrap();
-        join.start().await.unwrap();
-        let result = join.next().await;
+        // With child caching, child plan errors surface during init() when building the cache
+        let result = join.init().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mock start error"));
     }
 
     #[tokio::test]
     async fn test_type_join_many_child_next_error_propagation() {
-        // Test that errors from child plan's next() (during lookup) are propagated
+        // Test that errors from child plan's next() are propagated during cache building
         let users_collection = make_users_collection();
         let posts_collection = make_posts_collection();
 
@@ -2045,9 +2038,8 @@ mod tests {
         )
         .unwrap();
 
-        join.init().await.unwrap();
-        join.start().await.unwrap();
-        let result = join.next().await;
+        // With child caching, child plan errors surface during init() when building the cache
+        let result = join.init().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mock next error"));
     }

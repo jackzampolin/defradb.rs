@@ -14,12 +14,13 @@ use document::Document;
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
+use tracing::warn;
 
-use crate::document::DocumentMapping;
+use crate::document::{document_to_plan_doc, documents_to_plan_docs, DocumentMapping};
 use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-use crate::json_convert::normal_value_to_json;
 use crate::mapper::{AggregateType, Mutation, MutationType, Requestable, Select};
 use crate::mutator::DocMutator;
 use crate::plan::{
@@ -27,7 +28,7 @@ use crate::plan::{
     LimitNode, MaxNode, MinNode, OrderByNode, ScanNode, SelectNode, SumNode, UpdateInput,
     UpdateNode, UpsertInput, UpsertNode,
 };
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, PlanNode, Planner};
 use crate::query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
 use crate::txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionHandle, TransactionRegistry,
@@ -133,9 +134,89 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         // Validate unsupported features and field references
         self.validate_select(select, collection)?;
 
+        // Check if this query has nested selections (relations)
+        let has_nested = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
+
+        if has_nested {
+            // Use the Planner for queries with nested selections (joins)
+            self.execute_nested_select_with_planner(select, fetcher)
+                .await
+        } else {
+            // Use the optimized path for simple queries
+            self.execute_simple_select(select, fetcher, collection)
+                .await
+        }
+    }
+
+    /// Execute a query with nested selections using the Planner.
+    ///
+    /// The Planner builds a proper join plan with TypeJoinOne/TypeJoinMany nodes.
+    /// ScanNodes fetch their own data via the attached fetcher.
+    async fn execute_nested_select_with_planner(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+    ) -> Result<JsonValue> {
+        // Create a fetcher wrapper that can be shared across plan nodes
+        // We need to wrap the reference in an Arc-compatible struct
+        let fetcher_arc = FetcherWrapper::new(fetcher);
+
+        // Build the plan using the Planner with fetcher support
+        let collections: Vec<CollectionVersion> = self
+            .collections
+            .values()
+            .map(|c| (**c).clone())
+            .collect();
+
+        let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        let plan_result = planner.plan_with_index_info(select)?;
+        let mut plan = plan_result.plan;
+
+        // Get the mapping from the plan
+        let mapping = plan.document_map().clone();
+
+        // Execute the plan and collect results
+        plan.init().await?;
+        plan.start().await?;
+
+        let mut results = Vec::new();
+
+        while plan.next().await? {
+            let doc = plan.value();
+            let json = self.doc_to_json(doc, &mapping)?;
+            results.push(json);
+        }
+
+        plan.close().await?;
+
+        Ok(JsonValue::Array(results))
+    }
+
+    /// Execute a simple query without nested selections.
+    ///
+    /// This is the optimized path that supports aggregations and grouping.
+    async fn execute_simple_select(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+        collection: &Arc<CollectionVersion>,
+    ) -> Result<JsonValue> {
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
             let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            let missing = result.missing_ids();
+            if !missing.is_empty() {
+                warn!(
+                    collection = %select.collection_name,
+                    missing_ids = ?missing,
+                    requested_count = doc_ids.len(),
+                    found_count = result.docs().len(),
+                    "Some requested documents were not found"
+                );
+            }
             result.into_docs()
         } else {
             fetcher.get_all(&select.collection_name).await?
@@ -145,7 +226,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = self.build_mapping(select, collection)?;
 
         // Convert storage documents to plan docs
-        let plan_docs = self.convert_documents(&docs, &mapping)?;
+        let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
 
         // Build and execute the plan
         let mut plan = self.build_plan(select, plan_docs, mapping.clone())?;
@@ -332,7 +413,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let mut matching_ids = Vec::new();
         for doc in &all_docs {
             // Convert Document to fields array for filter matching
-            let plan_doc = self.document_to_plan_doc(doc, &mapping)?;
+            let plan_doc = document_to_plan_doc(doc, &mapping)?;
             let fields = plan_doc.fields();
 
             if filter.matches(fields, &mapping)? {
@@ -411,16 +492,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             ));
         }
 
-        // Check for nested selections
-        for field in &select.fields {
-            if let Requestable::Select(nested) = field {
-                return Err(QueryError::execution(format!(
-                    "nested selections (relations) are not yet implemented; \
-                     remove the nested '{}' selection",
-                    nested.collection_name
-                )));
-            }
-        }
+        // Note: Nested selections (relations) are now supported via the Planner
 
         // Helper to check if a field exists in the collection schema
         let field_exists = |name: &str| -> bool {
@@ -481,8 +553,15 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                     // Use alias if provided, otherwise use the aggregate name
                     mapping.add_render_key(index, agg.output_name());
                 }
-                Requestable::Select(_) => {
-                    // Nested selections will be handled when relations are implemented
+                Requestable::Select(nested) => {
+                    // This code path should not be reached - nested selections should
+                    // be routed to execute_nested_select_with_planner. If we get here,
+                    // it indicates a bug in query routing.
+                    return Err(QueryError::internal(format!(
+                        "Unexpected nested select '{}' in simple query path - \
+                         this indicates a bug in query routing",
+                        nested.field.name
+                    )));
                 }
             }
         }
@@ -534,43 +613,6 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(mapping)
-    }
-
-    /// Convert storage Documents to plan Docs.
-    fn convert_documents(&self, docs: &[Document], mapping: &DocumentMapping) -> Result<Vec<Doc>> {
-        let mut result = Vec::with_capacity(docs.len());
-
-        for doc in docs {
-            let plan_doc = self.document_to_plan_doc(doc, mapping)?;
-            result.push(plan_doc);
-        }
-
-        Ok(result)
-    }
-
-    /// Convert a single storage Document to a plan Doc.
-    fn document_to_plan_doc(&self, doc: &Document, mapping: &DocumentMapping) -> Result<Doc> {
-        let num_fields = mapping.next_index();
-        let mut fields: Vec<Option<JsonValue>> = vec![None; num_fields];
-
-        // Set _docID if present in mapping
-        if let Some(index) = mapping.first_index_of_name("_docID") {
-            if let Some(doc_id) = doc.id() {
-                fields[index] = Some(JsonValue::String(doc_id.to_string()));
-            }
-        }
-
-        // Set other fields
-        for field_name in doc.field_names() {
-            if let Some(index) = mapping.first_index_of_name(field_name) {
-                if let Some(value) = doc.get(field_name) {
-                    let json = normal_value_to_json(value)?;
-                    fields[index] = Some(json);
-                }
-            }
-        }
-
-        Ok(Doc::with_fields(fields))
     }
 
     /// Build a plan tree from a Select operation and documents.
@@ -868,6 +910,121 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
     }
 }
 
+/// Wrapper to convert a `&dyn DocFetcher` reference into an owned `DocFetcher`.
+///
+/// This allows passing a fetcher reference to the Planner, which requires
+/// `Arc<dyn DocFetcher>`. The wrapper is only valid for the duration of the
+/// query execution.
+///
+/// # Safety Invariants
+///
+/// 1. **Lifetime**: The original `&dyn DocFetcher` reference MUST outlive all uses
+///    of this wrapper. The caller is responsible for ensuring this - currently
+///    enforced by only creating and using the wrapper within `execute_nested_select_with_planner`.
+///
+/// 2. **Thread Safety**: The `Send + Sync` implementations are safe because
+///    `DocFetcher: Send + Sync` (see fetcher.rs:65), meaning the underlying data
+///    can be safely accessed from any thread. The wrapper merely holds a pointer
+///    to data that is already thread-safe.
+///
+/// 3. **Fat Pointer Layout**: The transmute relies on the standard fat pointer layout
+///    `(data_ptr, vtable)` for trait objects, which is stable in practice but not
+///    formally guaranteed. Consider using `std::ptr::metadata` when it stabilizes
+///    for a safer alternative.
+struct FetcherWrapper {
+    // Store data pointer and vtable separately to avoid lifetime issues with fat pointers
+    data_ptr: *const (),
+    vtable: *const (),
+    // PhantomData to express the logical lifetime relationship, even though
+    // we can't enforce it at compile time due to the pointer erasure
+    _phantom: PhantomData<*const dyn DocFetcher>,
+}
+
+impl FetcherWrapper {
+    fn new(fetcher: &dyn DocFetcher) -> Self {
+        // Split the fat pointer into data and vtable components.
+        // This avoids the lifetime issue with *const dyn Trait.
+        let ptr = fetcher as *const dyn DocFetcher;
+        let (data_ptr, vtable) = unsafe {
+            std::mem::transmute::<*const dyn DocFetcher, (*const (), *const ())>(ptr)
+        };
+        Self {
+            data_ptr,
+            vtable,
+            _phantom: PhantomData,
+        }
+    }
+
+    fn get_fetcher(&self) -> &dyn DocFetcher {
+        // Reconstruct the fat pointer from data and vtable
+        let ptr = unsafe {
+            std::mem::transmute::<(*const (), *const ()), *const dyn DocFetcher>((
+                self.data_ptr,
+                self.vtable,
+            ))
+        };
+        // SAFETY: The caller guarantees the original reference outlives this wrapper
+        unsafe { &*ptr }
+    }
+}
+
+// SAFETY: These implementations are safe because:
+// 1. DocFetcher: Send + Sync (the underlying data is thread-safe)
+// 2. The wrapper only holds a pointer to already-thread-safe data
+// 3. The lifetime invariant (original ref outlives wrapper) is maintained by the caller
+unsafe impl Send for FetcherWrapper {}
+unsafe impl Sync for FetcherWrapper {}
+
+#[async_trait]
+impl DocFetcher for FetcherWrapper {
+    async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
+        self.get_fetcher()
+            .get_all(collection_name)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}': {}",
+                    collection_name, e
+                ))
+            })
+    }
+
+    async fn get_by_ids(
+        &self,
+        collection_name: &str,
+        doc_ids: &[String],
+    ) -> Result<FetchByIdsResult> {
+        self.get_fetcher()
+            .get_by_ids(collection_name, doc_ids)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (fetching {} doc IDs): {}",
+                    collection_name,
+                    doc_ids.len(),
+                    e
+                ))
+            })
+    }
+
+    async fn get_by_field_value(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        value: &str,
+    ) -> Result<Vec<Document>> {
+        self.get_fetcher()
+            .get_by_field_value(collection_name, field_name, value)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (field lookup {}='{}'): {}",
+                    collection_name, field_name, value, e
+                ))
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,6 +1172,15 @@ mod tests {
             _collection_name: &str,
             _doc_ids: &[String],
         ) -> Result<FetchByIdsResult> {
+            Err(QueryError::execution("storage failure"))
+        }
+
+        async fn get_by_field_value(
+            &self,
+            _collection_name: &str,
+            _field_name: &str,
+            _value: &str,
+        ) -> Result<Vec<Document>> {
             Err(QueryError::execution("storage failure"))
         }
     }
@@ -1399,7 +1565,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nested_selection_returns_error() {
+    async fn test_nested_selection_with_missing_relation_field() {
+        // Nested selections are now supported via the Planner.
+        // This test verifies that a query with nested selections fails gracefully
+        // when the relation field doesn't exist in the schema.
         let fetcher = MockFetcher::new();
         let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
 
@@ -1407,11 +1576,14 @@ mod tests {
             .execute_query("{ Users { name posts { title } } }")
             .await;
 
+        // Should fail because 'posts' is not a field in the Users collection
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("nested selections (relations) are not yet implemented"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("not found"),
+            "Expected field-not-found error, got: {}",
+            err
+        );
     }
 
     #[tokio::test]

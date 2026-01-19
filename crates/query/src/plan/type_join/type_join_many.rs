@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use tracing::warn;
 
 use crate::document::DocumentMapping;
@@ -14,9 +15,14 @@ use super::JoinSide;
 ///
 /// The join flow:
 /// 1. Parent plan yields a document (e.g., Author)
-/// 2. Scan child collection for all docs where their FK matches parent's _docID
+/// 2. Lookup all child docs where their FK matches parent's _docID
 /// 3. Collect all matching child documents into an array
 /// 4. Set the array on the parent document under the relation field key
+///
+/// # Optimization
+///
+/// Child documents are pre-loaded and indexed during `init()` to avoid
+/// O(N * M) nested loop scans. Lookups are O(1) via HashMap.
 pub struct TypeJoinMany {
     /// Parent side of the join (the "one" side)
     parent_side: JoinSide,
@@ -24,7 +30,7 @@ pub struct TypeJoinMany {
     child_side: JoinSide,
     /// The parent plan node
     parent_plan: Box<dyn PlanNode>,
-    /// The child plan node (for lookups)
+    /// The child plan node (scanned once during init)
     child_plan: Box<dyn PlanNode>,
     /// Document mapping for this join
     document_mapping: DocumentMapping,
@@ -35,6 +41,9 @@ pub struct TypeJoinMany {
     child_fk_index: usize,
     /// Whether initialized
     initialized: bool,
+    /// Cached child documents indexed by FK field value.
+    /// Key is the child's FK value (points to parent's _docID).
+    child_cache: HashMap<String, Vec<Doc>>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -88,14 +97,22 @@ impl TypeJoinMany {
             current_doc: Doc::default(),
             child_fk_index,
             initialized: false,
+            child_cache: HashMap::new(),
         })
     }
 
-    /// Find all child documents that match the parent's _docID.
-    async fn find_child_docs(&mut self, parent_doc_id: &str) -> Result<Vec<Doc>> {
-        let mut children = Vec::new();
+    /// Find all child documents that match the parent's _docID using the cache.
+    fn find_child_docs(&self, parent_doc_id: &str) -> Vec<Doc> {
+        self.child_cache
+            .get(parent_doc_id)
+            .map(|docs| docs.iter().map(|d| d.deep_clone()).collect())
+            .unwrap_or_default()
+    }
 
-        // Re-initialize the child plan for this lookup
+    /// Build the child cache by scanning child_plan once.
+    /// Indexes children by their FK field value.
+    async fn build_child_cache(&mut self) -> Result<()> {
+        self.child_cache.clear();
         self.child_plan.init().await?;
         self.child_plan.start().await?;
 
@@ -116,15 +133,25 @@ impl TypeJoinMany {
                 }
             }
 
-            // Check if child's FK matches parent's _docID
-            if let Some(child_fk) = child_fk_value.and_then(|v| v.as_str()) {
-                if child_fk == parent_doc_id {
-                    children.push(child_doc.deep_clone());
-                }
+            // Index by FK value for O(1) lookup
+            if let Some(fk) = child_fk_value.and_then(|v| v.as_str()) {
+                self.child_cache
+                    .entry(fk.to_string())
+                    .or_default()
+                    .push(child_doc.deep_clone());
+            } else {
+                warn!(
+                    child_collection = %self.child_side.collection().name,
+                    doc_id = ?child_doc.doc_id(),
+                    fk_index = self.child_fk_index,
+                    fk_value = ?child_fk_value,
+                    "Child document skipped - FK field is null or not a string"
+                );
             }
         }
 
-        Ok(children)
+        self.child_plan.close().await?;
+        Ok(())
     }
 
     /// Merge child documents into parent as an array.
@@ -152,6 +179,9 @@ impl TypeJoinMany {
 #[async_trait]
 impl PlanNode for TypeJoinMany {
     async fn init(&mut self) -> Result<()> {
+        // Build child cache first (scans child_plan once)
+        self.build_child_cache().await?;
+        // Then init parent plan
         self.parent_plan.init().await?;
         self.initialized = true;
         Ok(())
@@ -174,12 +204,11 @@ impl PlanNode for TypeJoinMany {
 
         let mut parent_doc = self.parent_plan.value().deep_clone();
 
-        // Get parent's _docID for the lookup
-        let children = if let Some(parent_id) = parent_doc.doc_id() {
-            self.find_child_docs(parent_id).await?
-        } else {
-            Vec::new()
-        };
+        // Get parent's _docID for the lookup (O(1) cache lookup)
+        let children = parent_doc
+            .doc_id()
+            .map(|id| self.find_child_docs(id))
+            .unwrap_or_default();
 
         // Merge children array into parent
         self.merge_children(&mut parent_doc, children);
@@ -194,7 +223,8 @@ impl PlanNode for TypeJoinMany {
 
     async fn close(&mut self) -> Result<()> {
         self.parent_plan.close().await?;
-        self.child_plan.close().await?;
+        // child_plan was already closed in build_child_cache()
+        self.child_cache.clear();
         self.initialized = false;
         Ok(())
     }

@@ -75,4 +75,26 @@ pub trait DocFetcher: Send + Sync {
         collection_name: &str,
         doc_ids: &[String],
     ) -> Result<FetchByIdsResult>;
+
+    /// Get documents by a field value (for FK lookups).
+    ///
+    /// This method is optimized for type joins - it looks up documents where
+    /// a specific field equals a given value. Implementations may use indexes
+    /// for efficient lookups when available.
+    ///
+    /// # Arguments
+    ///
+    /// * `collection_name` - The collection to search
+    /// * `field_name` - The field to match (e.g., "author_id" for FK lookups)
+    /// * `value` - The value to match against
+    ///
+    /// # Returns
+    ///
+    /// All documents where the field equals the given value.
+    async fn get_by_field_value(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        value: &str,
+    ) -> Result<Vec<Document>>;
 }

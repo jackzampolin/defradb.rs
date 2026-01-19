@@ -72,6 +72,28 @@ impl DocFetcher for MockFetcher {
 
         Ok(FetchByIdsResult::partial(found, missing))
     }
+
+    async fn get_by_field_value(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        value: &str,
+    ) -> Result<Vec<Document>> {
+        let docs = self.docs.lock().unwrap();
+        let all = docs.get(collection_name).cloned().unwrap_or_default();
+
+        let matching: Vec<Document> = all
+            .into_iter()
+            .filter(|doc| {
+                doc.get(field_name)
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == value)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        Ok(matching)
+    }
 }
 
 /// Mock transaction context for testing.

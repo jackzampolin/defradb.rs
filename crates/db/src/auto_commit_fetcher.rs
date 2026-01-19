@@ -137,6 +137,61 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 
         Ok(FetchByIdsResult::partial(docs, missing_ids))
     }
+
+    async fn get_by_field_value(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        value: &str,
+    ) -> query::error::Result<Vec<Document>> {
+        // Get collection from DB cache
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Create a read-only transaction
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        // Get the datastore
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+
+        // Get all documents and filter by field value.
+        // This is a fallback implementation - index-based lookup can be added later.
+        let all_docs = collection
+            .get_all_with_datastore(&datastore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        let matching_docs: Vec<Document> = all_docs
+            .into_iter()
+            .filter(|doc| {
+                doc.get(field_name)
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == value)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        // Discard the read-only transaction
+        if let Err(e) = txn.discard() {
+            warn!(
+                collection = %collection_name,
+                error = %e,
+                "Failed to discard read-only transaction after get_by_field_value"
+            );
+        }
+
+        Ok(matching_docs)
+    }
 }
 
 #[cfg(test)]

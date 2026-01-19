@@ -1,11 +1,13 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use schema::CollectionVersion;
 
-use crate::document::DocumentMapping;
+use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::Result;
+use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::planner::{Doc, PlanNode};
 
@@ -13,6 +15,15 @@ use crate::planner::{Doc, PlanNode};
 ///
 /// This is the primary data source node in query plans.
 /// It reads documents from storage and yields them to parent nodes.
+///
+/// # Data Loading
+///
+/// ScanNode can obtain documents in two ways:
+/// 1. Pre-loaded via `with_docs()` - for testing or when data is already available
+/// 2. On-demand via a `DocFetcher` - fetches during `init()` if docs are empty
+///
+/// When a fetcher is provided and no docs are pre-loaded, the node will
+/// automatically fetch all documents from the collection during initialization.
 pub struct ScanNode {
     /// Collection schema
     collection: CollectionVersion,
@@ -30,6 +41,10 @@ pub struct ScanNode {
     position: usize,
     /// Whether the node has been initialized
     initialized: bool,
+    /// Optional fetcher for loading documents on-demand
+    fetcher: Option<Arc<dyn DocFetcher>>,
+    /// Whether docs were explicitly provided (even if empty)
+    docs_provided: bool,
 }
 
 impl ScanNode {
@@ -44,6 +59,8 @@ impl ScanNode {
             docs: Vec::new(),
             position: 0,
             initialized: false,
+            fetcher: None,
+            docs_provided: false,
         }
     }
 
@@ -59,9 +76,21 @@ impl ScanNode {
         self
     }
 
-    /// Set documents directly (for testing or in-memory operations)
+    /// Set documents directly (for testing or in-memory operations).
+    ///
+    /// Providing an empty vector is valid and represents an empty collection.
     pub fn with_docs(mut self, docs: Vec<Doc>) -> Self {
         self.docs = docs;
+        self.docs_provided = true;
+        self
+    }
+
+    /// Set a document fetcher for on-demand data loading.
+    ///
+    /// When set, the node will fetch documents from storage during `init()`
+    /// if no documents were pre-loaded via `with_docs()`.
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
+        self.fetcher = Some(fetcher);
         self
     }
 
@@ -69,12 +98,34 @@ impl ScanNode {
     pub fn collection(&self) -> &CollectionVersion {
         &self.collection
     }
+
+    /// Get the collection name
+    pub fn collection_name(&self) -> &str {
+        &self.collection.name
+    }
 }
 
 #[async_trait]
 impl PlanNode for ScanNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
+
+        // If docs weren't provided and we have a fetcher, load documents from storage
+        if !self.docs_provided {
+            if let Some(ref fetcher) = self.fetcher {
+                let storage_docs = fetcher.get_all(&self.collection.name).await?;
+                self.docs = documents_to_plan_docs(&storage_docs, &self.document_mapping)?;
+            } else {
+                // No docs provided and no fetcher - this is a programming error.
+                // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
+                return Err(crate::error::QueryError::internal(format!(
+                    "ScanNode for collection '{}' has no documents and no fetcher - \
+                     this indicates a bug in query planning or test setup",
+                    self.collection.name
+                )));
+            }
+        }
+
         self.initialized = true;
         Ok(())
     }
