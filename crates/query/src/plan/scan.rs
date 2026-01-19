@@ -2,7 +2,6 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::warn;
 
 use schema::CollectionVersion;
 
@@ -44,6 +43,8 @@ pub struct ScanNode {
     initialized: bool,
     /// Optional fetcher for loading documents on-demand
     fetcher: Option<Arc<dyn DocFetcher>>,
+    /// Whether docs were explicitly provided (even if empty)
+    docs_provided: bool,
 }
 
 impl ScanNode {
@@ -59,6 +60,7 @@ impl ScanNode {
             position: 0,
             initialized: false,
             fetcher: None,
+            docs_provided: false,
         }
     }
 
@@ -74,9 +76,12 @@ impl ScanNode {
         self
     }
 
-    /// Set documents directly (for testing or in-memory operations)
+    /// Set documents directly (for testing or in-memory operations).
+    ///
+    /// Providing an empty vector is valid and represents an empty collection.
     pub fn with_docs(mut self, docs: Vec<Doc>) -> Self {
         self.docs = docs;
+        self.docs_provided = true;
         self
     }
 
@@ -105,18 +110,19 @@ impl PlanNode for ScanNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
 
-        // If docs are empty and we have a fetcher, load documents from storage
-        if self.docs.is_empty() {
+        // If docs weren't provided and we have a fetcher, load documents from storage
+        if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
                 let storage_docs = fetcher.get_all(&self.collection.name).await?;
                 self.docs = documents_to_plan_docs(&storage_docs, &self.document_mapping)?;
             } else {
-                // No docs and no fetcher - this is likely a misconfiguration.
-                // The query will return empty results, which may not be intended.
-                warn!(
-                    collection = %self.collection.name,
-                    "ScanNode initialized with no documents and no fetcher - query will yield no results"
-                );
+                // No docs provided and no fetcher - this is a programming error.
+                // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
+                return Err(crate::error::QueryError::internal(format!(
+                    "ScanNode for collection '{}' has no documents and no fetcher - \
+                     this indicates a bug in query planning or test setup",
+                    self.collection.name
+                )));
             }
         }
 

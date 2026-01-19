@@ -5,6 +5,7 @@
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::debug;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -94,6 +95,13 @@ impl Planner {
         // 3. The Runner handles index lookups for simple queries; the Planner path
         //    (with fetcher) is used for nested selections where ScanNode suffices
         let index_scan = if self.fetcher.is_some() {
+            if select.filter.is_some() && !collection.indexes.is_empty() {
+                debug!(
+                    collection = %select.collection_name,
+                    available_indexes = collection.indexes.len(),
+                    "Index selection disabled for nested query path - using full scan"
+                );
+            }
             None // Skip index selection when using fetcher-based data loading
         } else {
             self.try_select_index(select, &collection)

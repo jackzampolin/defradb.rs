@@ -16,6 +16,7 @@ use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::document::{document_to_plan_doc, documents_to_plan_docs, DocumentMapping};
 use crate::error::{QueryError, Result, TransactionError};
@@ -206,6 +207,16 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
             let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            let missing = result.missing_ids();
+            if !missing.is_empty() {
+                warn!(
+                    collection = %select.collection_name,
+                    missing_ids = ?missing,
+                    requested_count = doc_ids.len(),
+                    found_count = result.docs().len(),
+                    "Some requested documents were not found"
+                );
+            }
             result.into_docs()
         } else {
             fetcher.get_all(&select.collection_name).await?
@@ -542,8 +553,15 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                     // Use alias if provided, otherwise use the aggregate name
                     mapping.add_render_key(index, agg.output_name());
                 }
-                Requestable::Select(_) => {
-                    // Nested selections will be handled when relations are implemented
+                Requestable::Select(nested) => {
+                    // This code path should not be reached - nested selections should
+                    // be routed to execute_nested_select_with_planner. If we get here,
+                    // it indicates a bug in query routing.
+                    return Err(QueryError::internal(format!(
+                        "Unexpected nested select '{}' in simple query path - \
+                         this indicates a bug in query routing",
+                        nested.field.name
+                    )));
                 }
             }
         }
