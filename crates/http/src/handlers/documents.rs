@@ -50,7 +50,13 @@ pub async fn get_document(
                     "Invalid document ID: {}",
                     doc_id
                 ))),
-                _ => Err(HttpError::Internal(e.to_string())),
+                query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
+                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
+                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
+                query::rest::RestError::DocumentNotFound(_) => Err(HttpError::NotFound(format!(
+                    "Document '{}' not found in collection '{}'",
+                    doc_id, collection
+                ))),
             }
         }
     }
@@ -92,7 +98,9 @@ pub async fn create_document(
             );
             // Return single doc if single input, array if array input
             let response = if docs.len() == 1 {
-                docs.into_iter().next().unwrap()
+                docs.into_iter()
+                    .next()
+                    .expect("docs.len() == 1 but iterator was empty")
             } else {
                 JsonValue::Array(docs)
             };
@@ -106,7 +114,16 @@ pub async fn create_document(
                     collection
                 ))),
                 query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
-                _ => Err(HttpError::Internal(e.to_string())),
+                query::rest::RestError::InvalidDocId(msg) => Err(HttpError::BadRequest(format!(
+                    "Invalid document ID: {}",
+                    msg
+                ))),
+                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
+                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
+                query::rest::RestError::DocumentNotFound(_) => Err(HttpError::NotFound(format!(
+                    "Document not found in collection '{}'",
+                    collection
+                ))),
             }
         }
     }
@@ -155,7 +172,8 @@ pub async fn update_document(
                     doc_id
                 ))),
                 query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
-                _ => Err(HttpError::Internal(e.to_string())),
+                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
+                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
             }
         }
     }
@@ -200,7 +218,13 @@ pub async fn delete_document(
                     "Invalid document ID: {}",
                     doc_id
                 ))),
-                _ => Err(HttpError::Internal(e.to_string())),
+                query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
+                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
+                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
+                query::rest::RestError::DocumentNotFound(_) => Err(HttpError::NotFound(format!(
+                    "Document '{}' not found in collection '{}'",
+                    doc_id, collection
+                ))),
             }
         }
     }
@@ -497,5 +521,199 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Empty array tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_create_empty_document_array() {
+        let state = create_state();
+        let result =
+            create_document(State(state), Path("Users".to_string()), Json(json!([]))).await;
+        assert!(result.is_ok());
+        let Json(docs) = result.unwrap();
+        assert!(docs.is_array());
+        assert!(docs.as_array().unwrap().is_empty());
+    }
+
+    // =========================================================================
+    // InvalidDocId error path tests
+    // =========================================================================
+
+    fn create_invalid_doc_id_state() -> AppState {
+        AppState {
+            executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            rest: Some(Arc::new(FailingMockRestOperations::with_invalid_doc_id(
+                "bad-id",
+            ))),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_document_invalid_doc_id() {
+        let state = create_invalid_doc_id_state();
+        let result = get_document(
+            State(state),
+            Path(("Users".to_string(), "bad-id".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::BadRequest(msg) => assert!(msg.contains("Invalid document ID")),
+            other => panic!("Expected BadRequest error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_document_invalid_doc_id() {
+        let state = create_invalid_doc_id_state();
+        let result = update_document(
+            State(state),
+            Path(("Users".to_string(), "bad-id".to_string())),
+            Json(json!({"age": 31})),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::BadRequest(msg) => assert!(msg.contains("Invalid document ID")),
+            other => panic!("Expected BadRequest error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_document_invalid_doc_id() {
+        let state = create_invalid_doc_id_state();
+        let result = delete_document(
+            State(state),
+            Path(("Users".to_string(), "bad-id".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::BadRequest(msg) => assert!(msg.contains("Invalid document ID")),
+            other => panic!("Expected BadRequest error, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // InvalidInput error path tests
+    // =========================================================================
+
+    fn create_invalid_input_state() -> AppState {
+        AppState {
+            executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            rest: Some(Arc::new(FailingMockRestOperations::with_invalid_input(
+                "type mismatch: expected String, got Int",
+            ))),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_document_invalid_input() {
+        let state = create_invalid_input_state();
+        let result = create_document(
+            State(state),
+            Path("Users".to_string()),
+            Json(json!({"name": 123})),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::BadRequest(msg) => assert!(msg.contains("type mismatch")),
+            other => panic!("Expected BadRequest error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_document_invalid_input() {
+        let state = create_invalid_input_state();
+        let result = update_document(
+            State(state),
+            Path(("Users".to_string(), "bae-123".to_string())),
+            Json(json!({"age": "not-a-number"})),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::BadRequest(msg) => assert!(msg.contains("type mismatch")),
+            other => panic!("Expected BadRequest error, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // PermissionDenied error path tests
+    // =========================================================================
+
+    fn create_permission_denied_state() -> AppState {
+        AppState {
+            executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            rest: Some(Arc::new(FailingMockRestOperations::with_permission_denied(
+                "access denied for user",
+            ))),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_document_permission_denied() {
+        let state = create_permission_denied_state();
+        let result = get_document(
+            State(state),
+            Path(("Users".to_string(), "bae-123".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
+            other => panic!("Expected Forbidden error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_document_permission_denied() {
+        let state = create_permission_denied_state();
+        let result = create_document(
+            State(state),
+            Path("Users".to_string()),
+            Json(json!({"name": "Test"})),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
+            other => panic!("Expected Forbidden error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_document_permission_denied() {
+        let state = create_permission_denied_state();
+        let result = update_document(
+            State(state),
+            Path(("Users".to_string(), "bae-123".to_string())),
+            Json(json!({"age": 31})),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
+            other => panic!("Expected Forbidden error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_document_permission_denied() {
+        let state = create_permission_denied_state();
+        let result = delete_document(
+            State(state),
+            Path(("Users".to_string(), "bae-123".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
+            other => panic!("Expected Forbidden error, got {:?}", other),
+        }
     }
 }

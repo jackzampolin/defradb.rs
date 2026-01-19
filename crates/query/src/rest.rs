@@ -22,6 +22,8 @@ pub enum RestError {
     InvalidDocId(String),
     /// Invalid input data.
     InvalidInput(String),
+    /// Permission denied (ACP check failed).
+    PermissionDenied(String),
     /// Storage or execution error.
     Internal(String),
 }
@@ -33,6 +35,7 @@ impl std::fmt::Display for RestError {
             Self::DocumentNotFound(id) => write!(f, "document not found: {}", id),
             Self::InvalidDocId(id) => write!(f, "invalid document ID: {}", id),
             Self::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
+            Self::PermissionDenied(msg) => write!(f, "permission denied: {}", msg),
             Self::Internal(msg) => write!(f, "internal error: {}", msg),
         }
     }
@@ -57,6 +60,10 @@ impl RestError {
         Self::InvalidInput(msg.into())
     }
 
+    pub fn permission_denied(msg: impl Into<String>) -> Self {
+        Self::PermissionDenied(msg.into())
+    }
+
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
@@ -65,10 +72,41 @@ impl RestError {
 impl From<QueryError> for RestError {
     fn from(err: QueryError) -> Self {
         match err {
+            // Not found errors
             QueryError::CollectionNotFound(name) => Self::CollectionNotFound(name),
             QueryError::DocumentNotFound(id) => Self::DocumentNotFound(id),
+            // Invalid input errors (user-fixable, should be 400 Bad Request)
             QueryError::InvalidDocId(id) => Self::InvalidDocId(id),
             QueryError::InvalidMutationInput(msg) => Self::InvalidInput(msg),
+            QueryError::Parse(msg) => Self::InvalidInput(format!("parse error: {}", msg)),
+            QueryError::InvalidFilter(msg) => {
+                Self::InvalidInput(format!("invalid filter: {}", msg))
+            }
+            QueryError::FilterFieldNotSelected { field, collection } => {
+                Self::InvalidInput(format!(
+                    "filter field '{}' must be in select list for '{}'",
+                    field, collection
+                ))
+            }
+            QueryError::UnknownField(name) => {
+                Self::InvalidInput(format!("unknown field: {}", name))
+            }
+            QueryError::TypeMismatch { expected, actual } => Self::InvalidInput(format!(
+                "type mismatch: expected {}, got {}",
+                expected, actual
+            )),
+            QueryError::RequiredFieldMissing(field) => {
+                Self::InvalidInput(format!("required field missing: {}", field))
+            }
+            QueryError::InvalidAggregateTarget(msg) => {
+                Self::InvalidInput(format!("invalid aggregate target: {}", msg))
+            }
+            // Permission errors (should be 403 Forbidden)
+            QueryError::PermissionDenied(msg) => Self::PermissionDenied(msg),
+            QueryError::AcpRegistrationFailed { doc_id, message } => Self::PermissionDenied(
+                format!("ACP registration failed for '{}': {}", doc_id, message),
+            ),
+            // True internal errors (500 Internal Server Error)
             other => Self::Internal(other.to_string()),
         }
     }
@@ -159,12 +197,16 @@ mod tests {
         let err = RestError::invalid_input("missing field");
         assert_eq!(err.to_string(), "invalid input: missing field");
 
+        let err = RestError::permission_denied("access denied");
+        assert_eq!(err.to_string(), "permission denied: access denied");
+
         let err = RestError::internal("storage failure");
         assert_eq!(err.to_string(), "internal error: storage failure");
     }
 
     #[test]
     fn test_rest_error_from_query_error() {
+        // Not found errors
         let err = QueryError::collection_not_found("Users");
         let rest_err: RestError = err.into();
         assert!(matches!(rest_err, RestError::CollectionNotFound(_)));
@@ -172,5 +214,44 @@ mod tests {
         let err = QueryError::DocumentNotFound("bae-123".into());
         let rest_err: RestError = err.into();
         assert!(matches!(rest_err, RestError::DocumentNotFound(_)));
+
+        // Invalid input errors (user-fixable)
+        let err = QueryError::parse("unexpected token");
+        let rest_err: RestError = err.into();
+        assert!(matches!(rest_err, RestError::InvalidInput(_)));
+        assert!(rest_err.to_string().contains("parse error"));
+
+        let err = QueryError::invalid_filter("bad condition");
+        let rest_err: RestError = err.into();
+        assert!(matches!(rest_err, RestError::InvalidInput(_)));
+        assert!(rest_err.to_string().contains("invalid filter"));
+
+        let err = QueryError::unknown_field("foo");
+        let rest_err: RestError = err.into();
+        assert!(matches!(rest_err, RestError::InvalidInput(_)));
+        assert!(rest_err.to_string().contains("unknown field"));
+
+        let err = QueryError::TypeMismatch {
+            expected: "String".into(),
+            actual: "Int".into(),
+        };
+        let rest_err: RestError = err.into();
+        assert!(matches!(rest_err, RestError::InvalidInput(_)));
+        assert!(rest_err.to_string().contains("type mismatch"));
+
+        let err = QueryError::RequiredFieldMissing("name".into());
+        let rest_err: RestError = err.into();
+        assert!(matches!(rest_err, RestError::InvalidInput(_)));
+        assert!(rest_err.to_string().contains("required field missing"));
+
+        // Permission errors
+        let err = QueryError::permission_denied("not authorized");
+        let rest_err: RestError = err.into();
+        assert!(matches!(rest_err, RestError::PermissionDenied(_)));
+
+        let err = QueryError::acp_registration_failed("bae-123", "policy error");
+        let rest_err: RestError = err.into();
+        assert!(matches!(rest_err, RestError::PermissionDenied(_)));
+        assert!(rest_err.to_string().contains("ACP registration failed"));
     }
 }

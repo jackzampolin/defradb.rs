@@ -35,8 +35,12 @@ pub async fn list_collections(
     match rest.list_collections().await {
         Ok(collections) => Ok(Json(CollectionsResponse { collections })),
         Err(e) => {
-            tracing::error!(error = %e, "Failed to list collections");
-            Err(HttpError::Internal(e.to_string()))
+            tracing::warn!(error = %e, "Failed to list collections");
+            match e {
+                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
+                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
+                _ => Err(HttpError::Internal(e.to_string())),
+            }
         }
     }
 }
@@ -62,6 +66,8 @@ pub async fn get_collection_doc_ids(
                     "Collection '{}' not found",
                     name
                 ))),
+                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
+                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
                 _ => Err(HttpError::Internal(e.to_string())),
             }
         }

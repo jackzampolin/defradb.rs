@@ -17,6 +17,9 @@ pub enum HttpError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -35,6 +38,7 @@ impl IntoResponse for HttpError {
         let (status, message) = match &self {
             HttpError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             HttpError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            HttpError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             HttpError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             HttpError::QueryExecution(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
         };

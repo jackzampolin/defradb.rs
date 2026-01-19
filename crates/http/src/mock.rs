@@ -405,15 +405,44 @@ impl RestOperations for MockRestOperations {
 }
 
 /// Mock REST operations that always fails (for error path testing).
+///
+/// Supports configurable error types for testing different error paths.
 #[derive(Debug, Clone)]
 pub struct FailingMockRestOperations {
-    error_message: String,
+    error: RestError,
 }
 
 impl FailingMockRestOperations {
+    /// Create a mock that always returns an internal error with the given message.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
-            error_message: message.into(),
+            error: RestError::internal(message),
+        }
+    }
+
+    /// Create a mock that always returns the specified error.
+    pub fn with_error(error: RestError) -> Self {
+        Self { error }
+    }
+
+    /// Create a mock that returns InvalidDocId errors.
+    pub fn with_invalid_doc_id(id: impl Into<String>) -> Self {
+        Self {
+            error: RestError::invalid_doc_id(id),
+        }
+    }
+
+    /// Create a mock that returns InvalidInput errors.
+    pub fn with_invalid_input(msg: impl Into<String>) -> Self {
+        Self {
+            error: RestError::invalid_input(msg),
+        }
+    }
+
+    /// Create a mock that returns PermissionDenied errors.
+    pub fn with_permission_denied(msg: impl Into<String>) -> Self {
+        Self {
+            error: RestError::permission_denied(msg),
         }
     }
 }
@@ -421,11 +450,11 @@ impl FailingMockRestOperations {
 #[async_trait]
 impl RestOperations for FailingMockRestOperations {
     async fn list_collections(&self) -> RestResult<Vec<String>> {
-        Err(RestError::internal(&self.error_message))
+        Err(self.error.clone())
     }
 
     async fn get_collection_doc_ids(&self, _collection: &str) -> RestResult<Vec<String>> {
-        Err(RestError::internal(&self.error_message))
+        Err(self.error.clone())
     }
 
     async fn get_document(
@@ -433,11 +462,11 @@ impl RestOperations for FailingMockRestOperations {
         _collection: &str,
         _doc_id: &str,
     ) -> RestResult<Option<JsonValue>> {
-        Err(RestError::internal(&self.error_message))
+        Err(self.error.clone())
     }
 
     async fn create_document(&self, _collection: &str, _data: JsonValue) -> RestResult<JsonValue> {
-        Err(RestError::internal(&self.error_message))
+        Err(self.error.clone())
     }
 
     async fn create_documents(
@@ -445,7 +474,7 @@ impl RestOperations for FailingMockRestOperations {
         _collection: &str,
         _data: Vec<JsonValue>,
     ) -> RestResult<Vec<JsonValue>> {
-        Err(RestError::internal(&self.error_message))
+        Err(self.error.clone())
     }
 
     async fn update_document(
@@ -454,11 +483,11 @@ impl RestOperations for FailingMockRestOperations {
         _doc_id: &str,
         _patch: JsonValue,
     ) -> RestResult<JsonValue> {
-        Err(RestError::internal(&self.error_message))
+        Err(self.error.clone())
     }
 
     async fn delete_document(&self, _collection: &str, _doc_id: &str) -> RestResult<bool> {
-        Err(RestError::internal(&self.error_message))
+        Err(self.error.clone())
     }
 }
 
