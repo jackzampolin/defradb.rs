@@ -120,4 +120,10 @@ pub enum Error {
 
     #[error("collection not found: {0}")]
     CollectionNotFound(String),
+
+    #[error("missing required input: {0}")]
+    MissingInput(String),
+
+    #[error("invalid identifier: {0}")]
+    InvalidIdentifier(String),
 }

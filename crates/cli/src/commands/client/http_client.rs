@@ -10,15 +10,38 @@
 
 //! HTTP client for communicating with DefraDB server
 
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::error::{Error, Result};
 
+/// Default timeout for HTTP requests (30 seconds)
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Default connection timeout (10 seconds)
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Global shared HTTP client for connection reuse across commands
+static SHARED_CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn get_shared_client() -> &'static Client {
+    SHARED_CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+            .pool_max_idle_per_host(5)
+            .build()
+            .expect("Failed to build HTTP client")
+    })
+}
+
 /// HTTP client for DefraDB server communication
 pub struct HttpClient {
-    client: Client,
+    client: &'static Client,
     base_url: String,
 }
 
@@ -79,10 +102,12 @@ pub struct ErrorResponse {
 }
 
 impl HttpClient {
-    /// Create a new HTTP client with the given base URL
+    /// Create a new HTTP client with the given base URL.
+    ///
+    /// Uses a shared connection pool with configured timeouts for efficiency.
     pub fn new(base_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: get_shared_client(),
             base_url: base_url.trim_end_matches('/').to_string(),
         }
     }

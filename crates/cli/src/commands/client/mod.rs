@@ -16,6 +16,9 @@ mod http_client;
 mod query;
 mod schema;
 mod tx;
+mod validation;
+
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
@@ -26,7 +29,27 @@ pub use schema::SchemaArgs;
 pub use tx::TxArgs;
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+pub use validation::{escape_graphql_string, validate_identifier};
+
+/// Helper to get data from either inline argument or file
+pub fn get_data_from_args(data: &Option<String>, file: &Option<PathBuf>) -> Result<String> {
+    if let Some(ref data) = data {
+        return Ok(data.clone());
+    }
+
+    if let Some(ref path) = file {
+        return std::fs::read_to_string(path).map_err(|e| Error::ReadFile {
+            path: path.clone(),
+            source: e,
+        });
+    }
+
+    Err(Error::MissingInput(
+        "either data or --file must be provided".to_string(),
+    ))
+}
 
 /// Interact with a DefraDB node
 #[derive(Args, Debug)]
@@ -77,6 +100,8 @@ fn get_url(config: &Config, url_override: Option<String>) -> String {
 mod tests {
     use super::*;
     use crate::config::ApiConfig;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_get_url_with_override() {
@@ -101,5 +126,55 @@ mod tests {
         let config = Config::default();
         let url = get_url(&config, None);
         assert_eq!(url, "http://127.0.0.1:9181");
+    }
+
+    #[test]
+    fn test_get_data_from_args_inline() {
+        let data = Some(r#"{"name": "Alice"}"#.to_string());
+        let file = None;
+        let result = get_data_from_args(&data, &file).unwrap();
+        assert_eq!(result, r#"{"name": "Alice"}"#);
+    }
+
+    #[test]
+    fn test_get_data_from_args_from_file() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, r#"{{"name": "Bob"}}"#).unwrap();
+
+        let data = None;
+        let file = Some(temp_file.path().to_path_buf());
+        let result = get_data_from_args(&data, &file).unwrap();
+        assert!(result.contains("Bob"));
+    }
+
+    #[test]
+    fn test_get_data_from_args_missing_input() {
+        let data = None;
+        let file = None;
+        let result = get_data_from_args(&data, &file);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("missing required input"));
+    }
+
+    #[test]
+    fn test_validate_identifier_valid() {
+        assert!(validate_identifier("Users").is_ok());
+        assert!(validate_identifier("_private").is_ok());
+        assert!(validate_identifier("User123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_identifier_invalid() {
+        assert!(validate_identifier("").is_err());
+        assert!(validate_identifier("123Users").is_err());
+        assert!(validate_identifier("User-Name").is_err());
+    }
+
+    #[test]
+    fn test_escape_graphql_string() {
+        assert_eq!(escape_graphql_string("hello"), "hello");
+        assert_eq!(escape_graphql_string(r#"test"value"#), r#"test\"value"#);
+        assert_eq!(escape_graphql_string("test\nvalue"), "test\\nvalue");
     }
 }

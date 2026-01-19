@@ -175,7 +175,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 .await
         } else {
             // Use the optimized path for simple queries
-            self.execute_simple_select(select, fetcher, collection)
+            self.execute_simple_select(select, fetcher, collection, identity)
                 .await
         }
     }
@@ -229,6 +229,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         fetcher: &dyn DocFetcher,
         collection: &Arc<CollectionVersion>,
+        identity: Option<Did>,
     ) -> Result<JsonValue> {
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {

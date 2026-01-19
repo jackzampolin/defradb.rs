@@ -16,6 +16,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value as JsonValue;
 
 use super::http_client::HttpClient;
+use super::{escape_graphql_string, get_data_from_args, validate_identifier};
 use crate::error::{Error, Result};
 
 /// Interact with documents
@@ -64,6 +65,10 @@ pub struct DocumentGetArgs {
     /// The document ID
     #[arg(value_name = "DOC_ID")]
     pub doc_id: String,
+
+    /// Output in JSON format with consistent structure for programmatic use
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for document update command
@@ -113,7 +118,9 @@ impl DocumentArgs {
 impl DocumentCreateArgs {
     /// Execute the document create command
     pub async fn execute(&self, url: &str) -> Result<()> {
-        let data = self.get_data()?;
+        validate_identifier(&self.collection)?;
+
+        let data = get_data_from_args(&self.data, &self.file)?;
         let parsed: JsonValue = serde_json::from_str(&data)?;
 
         let input_str = serde_json::to_string(&parsed)?;
@@ -140,35 +147,24 @@ impl DocumentCreateArgs {
 
         Ok(())
     }
-
-    fn get_data(&self) -> Result<String> {
-        if let Some(ref data) = self.data {
-            return Ok(data.clone());
-        }
-
-        if let Some(ref path) = self.file {
-            return std::fs::read_to_string(path).map_err(|e| Error::ReadFile {
-                path: path.clone(),
-                source: e,
-            });
-        }
-
-        Err(Error::Server(
-            "Either data or --file must be provided".to_string(),
-        ))
-    }
 }
 
 impl DocumentGetArgs {
-    /// Execute the document get command
+    /// Execute the document get command.
+    ///
+    /// Note: Only scalar fields are returned. Relations are excluded for simplicity.
+    /// Use `defra client query` for full control over field selection.
     pub async fn execute(&self, url: &str) -> Result<()> {
+        validate_identifier(&self.collection)?;
+
         let fields = get_collection_fields(url, &self.collection).await?;
         let field_selection = fields.join(" ");
+        let escaped_doc_id = escape_graphql_string(&self.doc_id);
 
         let query = format!(
             r#"{{ {collection}(filter: {{_docID: {{_eq: "{doc_id}"}}}}) {{ {fields} }} }}"#,
             collection = self.collection,
-            doc_id = self.doc_id,
+            doc_id = escaped_doc_id,
             fields = field_selection
         );
 
@@ -176,6 +172,14 @@ impl DocumentGetArgs {
         let response = client.graphql(&query, None, None).await?;
 
         if response.has_errors() {
+            if self.json {
+                let output = serde_json::json!({
+                    "success": false,
+                    "error": response.error_message()
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
+            }
             return Err(Error::Server(response.error_message()));
         }
 
@@ -183,10 +187,32 @@ impl DocumentGetArgs {
             if let Some(results) = data.get(&self.collection) {
                 if let Some(arr) = results.as_array() {
                     if arr.is_empty() {
-                        println!("Document not found");
+                        if self.json {
+                            let output = serde_json::json!({
+                                "success": true,
+                                "data": null
+                            });
+                            println!("{}", serde_json::to_string_pretty(&output)?);
+                        } else {
+                            println!("Document not found");
+                        }
                     } else if arr.len() == 1 {
-                        let output = serde_json::to_string_pretty(&arr[0])?;
-                        println!("{output}");
+                        if self.json {
+                            let output = serde_json::json!({
+                                "success": true,
+                                "data": arr[0]
+                            });
+                            println!("{}", serde_json::to_string_pretty(&output)?);
+                        } else {
+                            let output = serde_json::to_string_pretty(&arr[0])?;
+                            println!("{output}");
+                        }
+                    } else if self.json {
+                        let output = serde_json::json!({
+                            "success": true,
+                            "data": results
+                        });
+                        println!("{}", serde_json::to_string_pretty(&output)?);
                     } else {
                         let output = serde_json::to_string_pretty(results)?;
                         println!("{output}");
@@ -202,14 +228,17 @@ impl DocumentGetArgs {
 impl DocumentUpdateArgs {
     /// Execute the document update command
     pub async fn execute(&self, url: &str) -> Result<()> {
-        let data = self.get_data()?;
+        validate_identifier(&self.collection)?;
+
+        let data = get_data_from_args(&self.data, &self.file)?;
         let parsed: JsonValue = serde_json::from_str(&data)?;
 
         let input_str = serde_json::to_string(&parsed)?;
+        let escaped_doc_id = escape_graphql_string(&self.doc_id);
         let query = format!(
             r#"mutation {{ update_{collection}(docIDs: ["{doc_id}"], input: {input}) {{ _docID }} }}"#,
             collection = self.collection,
-            doc_id = self.doc_id,
+            doc_id = escaped_doc_id,
             input = input_str
         );
 
@@ -230,32 +259,18 @@ impl DocumentUpdateArgs {
 
         Ok(())
     }
-
-    fn get_data(&self) -> Result<String> {
-        if let Some(ref data) = self.data {
-            return Ok(data.clone());
-        }
-
-        if let Some(ref path) = self.file {
-            return std::fs::read_to_string(path).map_err(|e| Error::ReadFile {
-                path: path.clone(),
-                source: e,
-            });
-        }
-
-        Err(Error::Server(
-            "Either data or --file must be provided".to_string(),
-        ))
-    }
 }
 
 impl DocumentDeleteArgs {
     /// Execute the document delete command
     pub async fn execute(&self, url: &str) -> Result<()> {
+        validate_identifier(&self.collection)?;
+
+        let escaped_doc_id = escape_graphql_string(&self.doc_id);
         let query = format!(
             r#"mutation {{ delete_{collection}(docIDs: ["{doc_id}"]) {{ _docID }} }}"#,
             collection = self.collection,
-            doc_id = self.doc_id
+            doc_id = escaped_doc_id
         );
 
         let client = HttpClient::new(url);
@@ -360,23 +375,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_document_create_args_get_data_inline() {
-        let args = DocumentCreateArgs {
-            collection: "Users".to_string(),
-            data: Some(r#"{"name": "Alice"}"#.to_string()),
-            file: None,
-        };
-        assert_eq!(args.get_data().unwrap(), r#"{"name": "Alice"}"#);
+    fn test_get_data_from_args_inline() {
+        let data = Some(r#"{"name": "Alice"}"#.to_string());
+        let file = None;
+        assert_eq!(
+            get_data_from_args(&data, &file).unwrap(),
+            r#"{"name": "Alice"}"#
+        );
     }
 
     #[test]
-    fn test_document_create_args_no_data() {
-        let args = DocumentCreateArgs {
-            collection: "Users".to_string(),
-            data: None,
-            file: None,
-        };
-        assert!(args.get_data().is_err());
+    fn test_get_data_from_args_no_data() {
+        let data = None;
+        let file = None;
+        assert!(get_data_from_args(&data, &file).is_err());
     }
 
     #[test]
@@ -384,9 +396,11 @@ mod tests {
         let args = DocumentGetArgs {
             collection: "Users".to_string(),
             doc_id: "bae-123".to_string(),
+            json: false,
         };
         assert_eq!(args.collection, "Users");
         assert_eq!(args.doc_id, "bae-123");
+        assert!(!args.json);
     }
 
     #[test]
@@ -397,5 +411,28 @@ mod tests {
         };
         assert_eq!(args.collection, "Users");
         assert_eq!(args.doc_id, "bae-456");
+    }
+
+    #[test]
+    fn test_validate_collection_name_valid() {
+        assert!(validate_identifier("Users").is_ok());
+        assert!(validate_identifier("User_Posts").is_ok());
+        assert!(validate_identifier("_private").is_ok());
+    }
+
+    #[test]
+    fn test_validate_collection_name_invalid() {
+        assert!(validate_identifier("").is_err());
+        assert!(validate_identifier("123Users").is_err());
+        assert!(validate_identifier("User-Posts").is_err());
+    }
+
+    #[test]
+    fn test_escape_doc_id() {
+        assert_eq!(escape_graphql_string("bae-123"), "bae-123");
+        assert_eq!(
+            escape_graphql_string(r#"bae-123"injection"#),
+            r#"bae-123\"injection"#
+        );
     }
 }

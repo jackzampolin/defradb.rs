@@ -14,6 +14,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value as JsonValue;
 
 use super::http_client::HttpClient;
+use super::validate_identifier;
 use crate::error::{Error, Result};
 
 /// Interact with collections
@@ -67,14 +68,23 @@ const INTROSPECTION_QUERY: &str = r#"
 }
 "#;
 
-/// Built-in GraphQL fields to filter out
-const BUILTIN_FIELDS: &[&str] = &[
-    "__schema",
-    "__type",
-    "commits",
-    "latestCommits",
-    "allCommits",
-];
+/// Check if a field name is a built-in GraphQL or DefraDB field.
+///
+/// Uses pattern matching to be resilient to new built-in types.
+fn is_builtin_field(name: &str) -> bool {
+    // GraphQL introspection fields
+    if name.starts_with("__") {
+        return true;
+    }
+
+    // DefraDB commit-related fields (case-insensitive suffix matching)
+    let lower = name.to_lowercase();
+    if lower == "commits" || lower.ends_with("commits") {
+        return true;
+    }
+
+    false
+}
 
 impl CollectionListArgs {
     /// Execute the collection list command
@@ -98,10 +108,12 @@ impl CollectionListArgs {
 impl CollectionDescribeArgs {
     /// Execute the collection describe command
     pub async fn execute(&self, url: &str) -> Result<()> {
+        validate_identifier(&self.name)?;
+
         let query = format!(
             r#"
 {{
-  __type(name: "{}") {{
+  __type(name: "{name}") {{
     name
     fields {{
       name
@@ -117,7 +129,7 @@ impl CollectionDescribeArgs {
   }}
 }}
 "#,
-            self.name
+            name = self.name
         );
 
         let client = HttpClient::new(url);
@@ -159,7 +171,7 @@ fn extract_collections(data: &Option<JsonValue>) -> Result<Vec<String>> {
     let mut collections: Vec<String> = fields
         .iter()
         .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
-        .filter(|name| !BUILTIN_FIELDS.contains(name))
+        .filter(|name| !is_builtin_field(name))
         .map(|s| s.to_string())
         .collect();
 
@@ -171,6 +183,28 @@ fn extract_collections(data: &Option<JsonValue>) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_is_builtin_field_introspection() {
+        assert!(is_builtin_field("__schema"));
+        assert!(is_builtin_field("__type"));
+        assert!(is_builtin_field("__typename"));
+    }
+
+    #[test]
+    fn test_is_builtin_field_commits() {
+        assert!(is_builtin_field("commits"));
+        assert!(is_builtin_field("latestCommits"));
+        assert!(is_builtin_field("allCommits"));
+        assert!(is_builtin_field("userCommits"));
+    }
+
+    #[test]
+    fn test_is_builtin_field_user_collections() {
+        assert!(!is_builtin_field("Users"));
+        assert!(!is_builtin_field("Posts"));
+        assert!(!is_builtin_field("Comments"));
+    }
 
     #[test]
     fn test_extract_collections() {
@@ -193,6 +227,25 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_collections_filters_new_commit_variants() {
+        let data = Some(json!({
+            "__schema": {
+                "queryType": {
+                    "fields": [
+                        {"name": "Users"},
+                        {"name": "latestCommits"},
+                        {"name": "allCommits"},
+                        {"name": "documentCommits"}
+                    ]
+                }
+            }
+        }));
+
+        let collections = extract_collections(&data).unwrap();
+        assert_eq!(collections, vec!["Users"]);
+    }
+
+    #[test]
     fn test_extract_collections_empty() {
         let data = Some(json!({
             "__schema": {
@@ -211,5 +264,13 @@ mod tests {
         let data = None;
         let result = extract_collections(&data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_collection_name() {
+        assert!(validate_identifier("Users").is_ok());
+        assert!(validate_identifier("User_Posts").is_ok());
+        assert!(validate_identifier("").is_err());
+        assert!(validate_identifier("123Users").is_err());
     }
 }
