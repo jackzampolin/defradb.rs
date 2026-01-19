@@ -165,6 +165,13 @@ impl TypeJoinOne {
             if let Some(k) = key {
                 // For one-to-one, we only keep the first match
                 self.child_cache.entry(k).or_insert(child_doc);
+            } else {
+                warn!(
+                    child_collection = %self.child_side.collection().name,
+                    doc_id = ?child_doc.doc_id(),
+                    direction = ?self.direction,
+                    "Child document skipped during cache building - no valid lookup key"
+                );
             }
         }
 

@@ -112,6 +112,7 @@ impl TypeJoinMany {
     /// Build the child cache by scanning child_plan once.
     /// Indexes children by their FK field value.
     async fn build_child_cache(&mut self) -> Result<()> {
+        self.child_cache.clear();
         self.child_plan.init().await?;
         self.child_plan.start().await?;
 
@@ -138,6 +139,14 @@ impl TypeJoinMany {
                     .entry(fk.to_string())
                     .or_default()
                     .push(child_doc.deep_clone());
+            } else {
+                warn!(
+                    child_collection = %self.child_side.collection().name,
+                    doc_id = ?child_doc.doc_id(),
+                    fk_index = self.child_fk_index,
+                    fk_value = ?child_fk_value,
+                    "Child document skipped - FK field is null or not a string"
+                );
             }
         }
 
