@@ -197,6 +197,30 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
         Self { runner }
     }
 
+    /// Convert a JSON value to GraphQL input syntax.
+    ///
+    /// GraphQL uses bare identifiers for object keys (not quoted strings like JSON).
+    /// This converts: {"name": "Alice", "age": 30} to {name: "Alice", age: 30}
+    fn json_to_graphql_input(value: &JsonValue) -> String {
+        match value {
+            JsonValue::Null => "null".to_string(),
+            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Number(n) => n.to_string(),
+            JsonValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+            JsonValue::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(Self::json_to_graphql_input).collect();
+                format!("[{}]", items.join(", "))
+            }
+            JsonValue::Object(obj) => {
+                let fields: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, Self::json_to_graphql_input(v)))
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
+        }
+    }
+
     /// Build a GraphQL query to fetch all document IDs in a collection.
     fn build_list_ids_query(&self, collection: &str) -> String {
         format!(
@@ -207,27 +231,29 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
 
     /// Build a GraphQL create mutation.
     fn build_create_mutation(&self, collection: &str, data: &JsonValue) -> String {
+        let graphql_data = Self::json_to_graphql_input(data);
         format!(
-            r#"mutation {{ create_{collection}(input: [{data}]) {{ _docID }} }}"#,
+            r#"mutation {{ create_{collection}(input: [{graphql_data}]) {{ _docID }} }}"#,
             collection = collection,
-            data = data
+            graphql_data = graphql_data
         )
     }
 
     /// Build a GraphQL update mutation.
     fn build_update_mutation(&self, collection: &str, doc_id: &str, patch: &JsonValue) -> String {
+        let graphql_patch = Self::json_to_graphql_input(patch);
         format!(
-            r#"mutation {{ update_{collection}(docID: "{doc_id}", input: {patch}) {{ _docID }} }}"#,
+            r#"mutation {{ update_{collection}(docIDs: ["{doc_id}"], input: {graphql_patch}) {{ _docID }} }}"#,
             collection = collection,
             doc_id = doc_id,
-            patch = patch
+            graphql_patch = graphql_patch
         )
     }
 
     /// Build a GraphQL delete mutation.
     fn build_delete_mutation(&self, collection: &str, doc_id: &str) -> String {
         format!(
-            r#"mutation {{ delete_{collection}(docID: "{doc_id}") {{ _docID }} }}"#,
+            r#"mutation {{ delete_{collection}(docIDs: ["{doc_id}"]) {{ _docID }} }}"#,
             collection = collection,
             doc_id = doc_id
         )

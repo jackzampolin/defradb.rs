@@ -70,6 +70,15 @@ impl Server {
         }
     }
 
+    /// Create a server from an Arc'd executor with custom configuration.
+    pub fn from_arc_with_config(executor: Arc<dyn QueryExecutor>, config: ServerConfig) -> Self {
+        Self {
+            config,
+            executor,
+            rest: None,
+        }
+    }
+
     /// Set REST operations for collection/document endpoints.
     ///
     /// When REST operations are configured, the server enables additional endpoints:
