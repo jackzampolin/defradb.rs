@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use acp::{DocumentACP, DocumentPermission};
+use acp::{DocumentACP, DocumentPermission, Identity};
 use identity::Did;
 use schema::CollectionVersion;
 
@@ -17,7 +17,7 @@ use schema::CollectionVersion;
 /// 3. Identity has the required permission
 pub async fn check_doc_permission(
     acp: &dyn DocumentACP,
-    identity: Option<&Did>,
+    identity: &Identity,
     permission: DocumentPermission,
     collection: &CollectionVersion,
     doc_id: &str,
@@ -99,13 +99,21 @@ pub struct AcpContext {
     /// Document ACP for permission checks
     pub acp: Arc<dyn DocumentACP>,
     /// Identity making the request
-    pub identity: Option<Did>,
+    pub identity: Identity,
 }
 
 impl AcpContext {
     /// Create a new ACP context.
-    pub fn new(acp: Arc<dyn DocumentACP>, identity: Option<Did>) -> Self {
+    pub fn new(acp: Arc<dyn DocumentACP>, identity: Identity) -> Self {
         Self { acp, identity }
+    }
+
+    /// Create from an optional DID for backward compatibility.
+    pub fn from_optional_did(acp: Arc<dyn DocumentACP>, did: Option<Did>) -> Self {
+        Self {
+            acp,
+            identity: Identity::from(did),
+        }
     }
 
     /// Check if identity has permission for a document operation.
@@ -117,7 +125,7 @@ impl AcpContext {
     ) -> acp::Result<bool> {
         check_doc_permission(
             self.acp.as_ref(),
-            self.identity.as_ref(),
+            &self.identity,
             permission,
             collection,
             doc_id,
@@ -131,13 +139,7 @@ impl AcpContext {
         collection: &CollectionVersion,
         doc_id: &str,
     ) -> acp::Result<()> {
-        register_doc_if_needed(
-            self.acp.as_ref(),
-            self.identity.as_ref(),
-            collection,
-            doc_id,
-        )
-        .await
+        register_doc_if_needed(self.acp.as_ref(), self.identity.did(), collection, doc_id).await
     }
 }
 
@@ -189,7 +191,7 @@ mod tests {
         // Anyone should have access when there's no policy
         let allowed = check_doc_permission(
             &acp,
-            None, // Anonymous
+            &Identity::Anonymous,
             DocumentPermission::Read,
             &collection,
             "doc1",
@@ -256,7 +258,7 @@ mod tests {
         // Owner should have update permission
         let allowed = check_doc_permission(
             &acp,
-            Some(&owner),
+            &Identity::Authenticated(owner),
             DocumentPermission::Update,
             &collection,
             "doc1",
@@ -282,7 +284,7 @@ mod tests {
         // Stranger should NOT have update permission
         let allowed = check_doc_permission(
             &acp,
-            Some(&stranger),
+            &Identity::Authenticated(stranger),
             DocumentPermission::Update,
             &collection,
             "doc1",
@@ -299,7 +301,7 @@ mod tests {
         let collection = collection_with_policy();
         let owner = test_did();
 
-        let ctx = AcpContext::new(acp, Some(owner));
+        let ctx = AcpContext::new(acp, Identity::Authenticated(owner));
 
         // Register document using context
         ctx.register_doc(&collection, "doc1").await.unwrap();

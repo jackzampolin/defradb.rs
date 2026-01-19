@@ -26,6 +26,7 @@
 
 mod dac;
 mod error;
+mod identity;
 mod local;
 mod permission;
 mod persistent;
@@ -34,6 +35,7 @@ mod store;
 
 pub use dac::DocumentACP;
 pub use error::{Error, Result};
+pub use identity::Identity;
 pub use local::{LocalDocumentACP, MemoryAcpStore};
 pub use permission::DocumentPermission;
 pub use persistent::PersistentAcpStore;

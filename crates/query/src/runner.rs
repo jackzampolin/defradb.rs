@@ -9,7 +9,7 @@
 //! a `TransactionRegistry`. The registry manages transaction lifecycle and provides
 //! transaction-scoped document fetchers for query execution.
 
-use acp::DocumentACP;
+use acp::{DocumentACP, Identity};
 use async_trait::async_trait;
 use document::Document;
 use identity::Did;
@@ -298,7 +298,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             plan = Box::new(PermissionFilterNode::new(
                 plan,
                 acp.clone(),
-                identity,
+                Identity::from(identity),
                 &policy.id,
                 &policy.resource_name,
             ));
@@ -426,10 +426,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 MutationType::Update | MutationType::Upsert => {
                     // For UPDATE, check updater permission on each target doc
                     if let Some(ref doc_ids) = doc_ids_for_check {
+                        let identity_for_acp = Identity::from(identity.as_ref());
                         for doc_id in doc_ids {
                             let has_permission = acp
                                 .check_doc_access(
-                                    caller_identity.as_ref(),
+                                    &identity_for_acp,
                                     DocumentPermission::Update,
                                     &policy.id,
                                     &policy.resource_name,
@@ -439,7 +440,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
                                         doc_id = %doc_id,
-                                        caller_identity = ?caller_identity,
+                                        identity = %identity_for_acp,
                                         error = %e,
                                         "ACP permission check failed during UPDATE, denying access"
                                     );
@@ -465,10 +466,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 MutationType::Delete => {
                     // For DELETE, check deleter permission on each target doc
                     if let Some(ref doc_ids) = doc_ids_for_check {
+                        let identity_for_acp = Identity::from(identity.as_ref());
                         for doc_id in doc_ids {
                             let has_permission = acp
                                 .check_doc_access(
-                                    caller_identity.as_ref(),
+                                    &identity_for_acp,
                                     DocumentPermission::Delete,
                                     &policy.id,
                                     &policy.resource_name,
@@ -478,7 +480,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
                                         doc_id = %doc_id,
-                                        caller_identity = ?caller_identity,
+                                        identity = %identity_for_acp,
                                         error = %e,
                                         "ACP permission check failed during DELETE, denying access"
                                     );
@@ -3942,7 +3944,7 @@ mod tests {
         // Verify owner has access
         let has_access = acp
             .check_doc_access(
-                Some(&owner),
+                &Identity::Authenticated(owner),
                 acp::DocumentPermission::Read,
                 "policy-acp",
                 "Users",

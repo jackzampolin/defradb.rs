@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::dac::DocumentACP;
 use crate::error::{Error, Result};
+use crate::identity::Identity;
 use crate::permission::DocumentPermission;
 use crate::relation::{
     RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
@@ -93,7 +94,7 @@ impl DocumentACP for LocalDocumentACP {
 
     async fn check_doc_access(
         &self,
-        identity: Option<&Did>,
+        identity: &Identity,
         permission: DocumentPermission,
         _policy_id: &str,
         resource_name: &str,
@@ -105,14 +106,14 @@ impl DocumentACP for LocalDocumentACP {
             return Ok(true);
         }
 
-        // Document is registered, need identity to access
-        let identity = match identity {
-            Some(id) => id,
-            None => return Ok(false), // Anonymous cannot access registered docs
+        // Document is registered, need authenticated identity to access
+        let did = match identity {
+            Identity::Authenticated(did) => did,
+            Identity::Anonymous => return Ok(false), // Anonymous cannot access registered docs
         };
 
         // Owner always has all permissions (DPI rule: every permission starts with owner)
-        if self.is_owner(identity, resource_name, doc_id).await? {
+        if self.is_owner(did, resource_name, doc_id).await? {
             return Ok(true);
         }
 
@@ -122,23 +123,23 @@ impl DocumentACP for LocalDocumentACP {
             DocumentPermission::Read => {
                 // reader OR updater OR deleter grants read (implied read)
                 Ok(self
-                    .has_relation(identity, resource_name, doc_id, READER_RELATION)
+                    .has_relation(did, resource_name, doc_id, READER_RELATION)
                     .await?
                     || self
-                        .has_relation(identity, resource_name, doc_id, UPDATER_RELATION)
+                        .has_relation(did, resource_name, doc_id, UPDATER_RELATION)
                         .await?
                     || self
-                        .has_relation(identity, resource_name, doc_id, DELETER_RELATION)
+                        .has_relation(did, resource_name, doc_id, DELETER_RELATION)
                         .await?)
             }
             DocumentPermission::Update => {
                 // updater grants update
-                self.has_relation(identity, resource_name, doc_id, UPDATER_RELATION)
+                self.has_relation(did, resource_name, doc_id, UPDATER_RELATION)
                     .await
             }
             DocumentPermission::Delete => {
                 // deleter grants delete
-                self.has_relation(identity, resource_name, doc_id, DELETER_RELATION)
+                self.has_relation(did, resource_name, doc_id, DELETER_RELATION)
                     .await
             }
         }
@@ -272,6 +273,9 @@ impl AcpStore for MemoryAcpStore {
         collection_id: &str,
         doc_id: &str,
     ) -> Result<Vec<RelationTuple>> {
+        // Validate inputs to prevent path traversal
+        RelationTuple::validate_prefix(collection_id, doc_id)?;
+
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         let tuples = self
             .tuples
@@ -289,6 +293,9 @@ impl AcpStore for MemoryAcpStore {
         doc_id: &str,
         relation: &str,
     ) -> Result<Vec<Did>> {
+        // Validate inputs to prevent path traversal
+        RelationTuple::validate_relation_prefix(collection_id, doc_id, relation)?;
+
         let prefix = RelationTuple::relation_prefix(collection_id, doc_id, relation);
         let subjects = self
             .tuples
@@ -306,6 +313,9 @@ impl AcpStore for MemoryAcpStore {
         collection_id: &str,
         doc_id: &str,
     ) -> Result<Vec<String>> {
+        // Validate inputs to prevent path traversal
+        RelationTuple::validate_prefix(collection_id, doc_id)?;
+
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         let relations = self
             .tuples
@@ -318,12 +328,18 @@ impl AcpStore for MemoryAcpStore {
     }
 
     async fn delete_doc_tuples(&self, collection_id: &str, doc_id: &str) -> Result<()> {
+        // Validate inputs to prevent path traversal
+        RelationTuple::validate_prefix(collection_id, doc_id)?;
+
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         self.tuples.write().retain(|k, _| !k.starts_with(&prefix));
         Ok(())
     }
 
     async fn is_doc_registered(&self, collection_id: &str, doc_id: &str) -> Result<bool> {
+        // Validate inputs to prevent path traversal
+        RelationTuple::validate_prefix(collection_id, doc_id)?;
+
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         Ok(self.tuples.read().keys().any(|k| k.starts_with(&prefix)))
     }
@@ -353,7 +369,13 @@ mod tests {
 
         // Anonymous can access unregistered doc
         let access = acp
-            .check_doc_access(None, DocumentPermission::Read, "policy1", "users", "doc1")
+            .check_doc_access(
+                &Identity::Anonymous,
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1",
+            )
             .await
             .unwrap();
         assert!(access, "unregistered doc should allow anonymous read");
@@ -361,7 +383,7 @@ mod tests {
         // Any identity can access unregistered doc
         let access = acp
             .check_doc_access(
-                Some(&test_did()),
+                &Identity::Authenticated(test_did()),
                 DocumentPermission::Update,
                 "policy1",
                 "users",
@@ -413,9 +435,10 @@ mod tests {
             .await
             .unwrap();
 
+        let owner_id = Identity::Authenticated(owner);
         assert!(acp
             .check_doc_access(
-                Some(&owner),
+                &owner_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -425,7 +448,7 @@ mod tests {
             .unwrap());
         assert!(acp
             .check_doc_access(
-                Some(&owner),
+                &owner_id,
                 DocumentPermission::Update,
                 "policy1",
                 "users",
@@ -435,7 +458,7 @@ mod tests {
             .unwrap());
         assert!(acp
             .check_doc_access(
-                Some(&owner),
+                &owner_id,
                 DocumentPermission::Delete,
                 "policy1",
                 "users",
@@ -455,7 +478,13 @@ mod tests {
             .unwrap();
 
         let access = acp
-            .check_doc_access(None, DocumentPermission::Read, "policy1", "users", "doc1")
+            .check_doc_access(
+                &Identity::Anonymous,
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1",
+            )
             .await
             .unwrap();
         assert!(!access, "anonymous should not read registered doc");
@@ -471,9 +500,10 @@ mod tests {
             .await
             .unwrap();
 
+        let other_id = Identity::Authenticated(other);
         assert!(!acp
             .check_doc_access(
-                Some(&other),
+                &other_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -483,7 +513,7 @@ mod tests {
             .unwrap());
         assert!(!acp
             .check_doc_access(
-                Some(&other),
+                &other_id,
                 DocumentPermission::Update,
                 "policy1",
                 "users",
@@ -493,7 +523,7 @@ mod tests {
             .unwrap());
         assert!(!acp
             .check_doc_access(
-                Some(&other),
+                &other_id,
                 DocumentPermission::Delete,
                 "policy1",
                 "users",
@@ -521,10 +551,11 @@ mod tests {
             .unwrap();
         assert!(added, "relationship should be added");
 
+        let reader_id = Identity::Authenticated(reader);
         // Reader can read
         assert!(acp
             .check_doc_access(
-                Some(&reader),
+                &reader_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -536,7 +567,7 @@ mod tests {
         // Reader cannot update
         assert!(!acp
             .check_doc_access(
-                Some(&reader),
+                &reader_id,
                 DocumentPermission::Update,
                 "policy1",
                 "users",
@@ -548,7 +579,7 @@ mod tests {
         // Reader cannot delete
         assert!(!acp
             .check_doc_access(
-                Some(&reader),
+                &reader_id,
                 DocumentPermission::Delete,
                 "policy1",
                 "users",
@@ -572,10 +603,11 @@ mod tests {
             .await
             .unwrap();
 
+        let updater_id = Identity::Authenticated(updater);
         // Updater can read (implied)
         assert!(acp
             .check_doc_access(
-                Some(&updater),
+                &updater_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -587,7 +619,7 @@ mod tests {
         // Updater can update
         assert!(acp
             .check_doc_access(
-                Some(&updater),
+                &updater_id,
                 DocumentPermission::Update,
                 "policy1",
                 "users",
@@ -599,7 +631,7 @@ mod tests {
         // Updater cannot delete
         assert!(!acp
             .check_doc_access(
-                Some(&updater),
+                &updater_id,
                 DocumentPermission::Delete,
                 "policy1",
                 "users",
@@ -709,10 +741,11 @@ mod tests {
             .await
             .unwrap();
 
+        let reader_id = Identity::Authenticated(reader.clone());
         // Verify reader has access
         assert!(acp
             .check_doc_access(
-                Some(&reader),
+                &reader_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -731,7 +764,7 @@ mod tests {
         // Verify reader no longer has access
         assert!(!acp
             .check_doc_access(
-                Some(&reader),
+                &reader_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -774,10 +807,11 @@ mod tests {
             .await
             .unwrap();
 
+        let deleter_id = Identity::Authenticated(deleter);
         // Deleter can read (implied by deleter relation)
         assert!(
             acp.check_doc_access(
-                Some(&deleter),
+                &deleter_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -791,7 +825,7 @@ mod tests {
         // Deleter can delete
         assert!(
             acp.check_doc_access(
-                Some(&deleter),
+                &deleter_id,
                 DocumentPermission::Delete,
                 "policy1",
                 "users",
@@ -805,7 +839,7 @@ mod tests {
         // Deleter CANNOT update
         assert!(
             !acp.check_doc_access(
-                Some(&deleter),
+                &deleter_id,
                 DocumentPermission::Update,
                 "policy1",
                 "users",
@@ -831,10 +865,11 @@ mod tests {
             .await
             .unwrap();
 
+        let deleter_id = Identity::Authenticated(deleter.clone());
         // Verify deleter has access
         assert!(acp
             .check_doc_access(
-                Some(&deleter),
+                &deleter_id,
                 DocumentPermission::Delete,
                 "policy1",
                 "users",
@@ -851,7 +886,7 @@ mod tests {
         // Verify deleter no longer has delete access
         assert!(!acp
             .check_doc_access(
-                Some(&deleter),
+                &deleter_id,
                 DocumentPermission::Delete,
                 "policy1",
                 "users",
@@ -863,7 +898,7 @@ mod tests {
         // Verify deleter also lost implied read access
         assert!(!acp
             .check_doc_access(
-                Some(&deleter),
+                &deleter_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -940,10 +975,11 @@ mod tests {
             .await
             .unwrap();
 
+        let reader_id = Identity::Authenticated(reader);
         // Reader CAN access users/doc1
         assert!(
             acp.check_doc_access(
-                Some(&reader),
+                &reader_id,
                 DocumentPermission::Read,
                 "policy1",
                 "users",
@@ -957,7 +993,7 @@ mod tests {
         // Reader CANNOT access posts/doc1 (different collection, no permission)
         assert!(
             !acp.check_doc_access(
-                Some(&reader),
+                &reader_id,
                 DocumentPermission::Read,
                 "policy1",
                 "posts",
@@ -966,6 +1002,110 @@ mod tests {
             .await
             .unwrap(),
             "reader should NOT access posts/doc1 (cross-collection isolation)"
+        );
+    }
+
+    // MemoryAcpStore path traversal validation tests
+
+    #[tokio::test]
+    async fn test_memory_store_validates_get_doc_tuples() {
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = LocalDocumentACP::new(store.clone());
+
+        // Register a doc first
+        acp.register_doc_object(&test_did(), "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        // Valid inputs should work
+        assert!(store.get_doc_tuples("users", "doc1").await.is_ok());
+
+        // Path traversal attempts should be rejected
+        assert!(
+            store.get_doc_tuples("../etc", "passwd").await.is_err(),
+            "path traversal should be rejected"
+        );
+        assert!(
+            store
+                .get_doc_tuples("users", "doc/../../../etc/passwd")
+                .await
+                .is_err(),
+            "path traversal should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_validates_is_doc_registered() {
+        let store = MemoryAcpStore::new();
+
+        // Valid inputs should work
+        assert!(store.is_doc_registered("users", "doc1").await.is_ok());
+
+        // Path traversal attempts should be rejected
+        assert!(
+            store.is_doc_registered("../etc", "passwd").await.is_err(),
+            "path traversal should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_validates_delete_doc_tuples() {
+        let store = MemoryAcpStore::new();
+
+        // Valid inputs should work
+        assert!(store.delete_doc_tuples("users", "doc1").await.is_ok());
+
+        // Path traversal attempts should be rejected
+        assert!(
+            store.delete_doc_tuples("../etc", "passwd").await.is_err(),
+            "path traversal should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_validates_get_relation_subjects() {
+        let store = MemoryAcpStore::new();
+
+        // Valid inputs should work
+        assert!(store
+            .get_relation_subjects("users", "doc1", "owner")
+            .await
+            .is_ok());
+
+        // Path traversal attempts should be rejected
+        assert!(
+            store
+                .get_relation_subjects("../etc", "passwd", "owner")
+                .await
+                .is_err(),
+            "path traversal should be rejected"
+        );
+        assert!(
+            store
+                .get_relation_subjects("users", "doc1", "../admin")
+                .await
+                .is_err(),
+            "path traversal in relation should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_validates_get_subject_relations() {
+        let store = MemoryAcpStore::new();
+
+        // Valid inputs should work
+        assert!(store
+            .get_subject_relations(&test_did(), "users", "doc1")
+            .await
+            .is_ok());
+
+        // Path traversal attempts should be rejected
+        assert!(
+            store
+                .get_subject_relations(&test_did(), "../etc", "passwd")
+                .await
+                .is_err(),
+            "path traversal should be rejected"
         );
     }
 }

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use identity::Did;
 
 use crate::error::Result;
+use crate::identity::Identity;
 use crate::permission::DocumentPermission;
 
 /// Document ACP interface (matches Go acp/dac/dac.go)
@@ -49,19 +50,19 @@ pub trait DocumentACP: Send + Sync {
     ///
     /// # Access Rules
     /// 1. If document is unregistered (public) -> allow all
-    /// 2. If identity is None -> deny (anonymous cannot access registered docs)
+    /// 2. If identity is Anonymous -> deny (anonymous cannot access registered docs)
     /// 3. If identity is owner -> allow all
     /// 4. Check if identity has specific relation granting permission
     ///
     /// # Arguments
-    /// * `identity` - The DID of the requester (None for anonymous)
+    /// * `identity` - The identity of the requester (Anonymous or Authenticated)
     /// * `permission` - The permission being requested
     /// * `policy_id` - The policy ID from the collection
     /// * `resource_name` - The resource name from the policy
     /// * `doc_id` - The document ID being accessed
     async fn check_doc_access(
         &self,
-        identity: Option<&Did>,
+        identity: &Identity,
         permission: DocumentPermission,
         policy_id: &str,
         resource_name: &str,
