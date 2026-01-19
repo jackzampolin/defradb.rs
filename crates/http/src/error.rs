@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use query::rest::RestError;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -16,6 +17,9 @@ pub enum HttpError {
 
     #[error("not found: {0}")]
     NotFound(String),
+
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 
     #[error("internal error: {0}")]
     Internal(String),
@@ -35,11 +39,31 @@ impl IntoResponse for HttpError {
         let (status, message) = match &self {
             HttpError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             HttpError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            HttpError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             HttpError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             HttpError::QueryExecution(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
         };
 
         (status, Json(ErrorResponse { error: message })).into_response()
+    }
+}
+
+impl From<RestError> for HttpError {
+    fn from(err: RestError) -> Self {
+        match err {
+            RestError::CollectionNotFound(name) => {
+                HttpError::NotFound(format!("Collection '{}' not found", name))
+            }
+            RestError::DocumentNotFound(id) => {
+                HttpError::NotFound(format!("Document '{}' not found", id))
+            }
+            RestError::InvalidDocId(id) => {
+                HttpError::BadRequest(format!("Invalid document ID: {}", id))
+            }
+            RestError::InvalidInput(msg) => HttpError::BadRequest(msg),
+            RestError::PermissionDenied(msg) => HttpError::Forbidden(msg),
+            RestError::Internal(msg) => HttpError::Internal(msg),
+        }
     }
 }
 

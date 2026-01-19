@@ -11,9 +11,10 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use query::executor::QueryExecutor;
+use query::rest::RestOperations;
 
 use crate::error::Result;
-use crate::router::create_router;
+use crate::router::{create_router, create_router_with_rest};
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -38,6 +39,7 @@ impl Default for ServerConfig {
 pub struct Server {
     config: ServerConfig,
     executor: Arc<dyn QueryExecutor>,
+    rest: Option<Arc<dyn RestOperations>>,
 }
 
 impl Server {
@@ -46,6 +48,7 @@ impl Server {
         Self {
             config: ServerConfig::default(),
             executor: Arc::new(executor),
+            rest: None,
         }
     }
 
@@ -54,6 +57,7 @@ impl Server {
         Self {
             config,
             executor: Arc::new(executor),
+            rest: None,
         }
     }
 
@@ -62,7 +66,37 @@ impl Server {
         Self {
             config: ServerConfig::default(),
             executor,
+            rest: None,
         }
+    }
+
+    /// Create a server from an Arc'd executor with custom configuration.
+    pub fn from_arc_with_config(executor: Arc<dyn QueryExecutor>, config: ServerConfig) -> Self {
+        Self {
+            config,
+            executor,
+            rest: None,
+        }
+    }
+
+    /// Set REST operations for collection/document endpoints.
+    ///
+    /// When REST operations are configured, the server enables additional endpoints:
+    /// - `GET /api/v0/collections` - List all collections
+    /// - `GET /api/v0/collections/{name}` - Get document IDs in collection
+    /// - `POST /api/v0/collections/{name}` - Create document(s)
+    /// - `GET /api/v0/collections/{name}/{docID}` - Get document
+    /// - `PATCH /api/v0/collections/{name}/{docID}` - Update document
+    /// - `DELETE /api/v0/collections/{name}/{docID}` - Delete document
+    pub fn with_rest<R: RestOperations + 'static>(mut self, rest: R) -> Self {
+        self.rest = Some(Arc::new(rest));
+        self
+    }
+
+    /// Set REST operations from an Arc.
+    pub fn with_rest_arc(mut self, rest: Arc<dyn RestOperations>) -> Self {
+        self.rest = Some(rest);
+        self
     }
 
     /// Build the router with all routes and middleware.
@@ -76,9 +110,12 @@ impl Server {
     pub fn router(&self) -> Result<Router> {
         let cors = self.build_cors_layer()?;
 
-        Ok(create_router(Arc::clone(&self.executor))
-            .layer(TraceLayer::new_for_http())
-            .layer(cors))
+        let router = match &self.rest {
+            Some(rest) => create_router_with_rest(Arc::clone(&self.executor), Arc::clone(rest)),
+            None => create_router(Arc::clone(&self.executor)),
+        };
+
+        Ok(router.layer(TraceLayer::new_for_http()).layer(cors))
     }
 
     /// Build CORS layer matching Go DefraDB behavior.
@@ -647,5 +684,56 @@ mod tests {
             body_str.contains("type Query"),
             "Schema should contain Query type"
         );
+    }
+
+    #[tokio::test]
+    async fn test_server_with_rest_operations() {
+        use crate::mock::MockRestOperations;
+
+        let server = Server::new(MockQueryExecutor::new()).with_rest(MockRestOperations::new());
+        let router = server.router().unwrap();
+
+        // Test that REST endpoints work when REST operations are configured
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/collections")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify response body
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(
+            json.get("collections").is_some(),
+            "Response should contain 'collections' field"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_server_without_rest_returns_error_for_collections() {
+        let server = Server::new(MockQueryExecutor::new());
+        let router = server.router().unwrap();
+
+        // Without REST operations, collections endpoint should return 500
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v0/collections")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

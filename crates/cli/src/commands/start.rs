@@ -639,20 +639,32 @@ impl Node {
                 Arc::new(acp::LocalDocumentACP::new(acp_store));
             info!("Document ACP configured");
 
-            // Create query runner with transaction and mutation support
-            let mut executor = query::QueryRunner::with_registry(fetcher, collections, registry)
+            // Create query runner with transaction, mutation, and ACP support
+            let mut query_runner = query::QueryRunner::with_registry(fetcher, collections, registry)
                 .with_mutator(mutator)
                 .with_acp(document_acp);
 
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {
                 info!("Query runner configured with default identity for ACP");
-                executor = executor.with_default_identity(did);
+                query_runner = query_runner.with_default_identity(did);
             }
 
-            let server = defra_http::Server::with_config(executor, server_config);
+            let runner = Arc::new(query_runner);
 
-            info!("HTTP server configured on {}", api_address);
+            // Create REST operations that wrap the query runner
+            let rest_ops = query::rest::RestOperationsImpl::new(Arc::clone(&runner));
+
+            // Create HTTP server with REST endpoints enabled
+            // Cast the Arc<QueryRunner> to Arc<dyn QueryExecutor> for the server
+            let executor: Arc<dyn query::executor::QueryExecutor> = runner;
+            let server = defra_http::Server::from_arc_with_config(executor, server_config)
+                .with_rest(rest_ops);
+
+            info!(
+                "HTTP server configured on {} with REST endpoints enabled",
+                api_address
+            );
             server
         };
 
