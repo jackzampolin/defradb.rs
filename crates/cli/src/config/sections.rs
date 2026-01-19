@@ -82,6 +82,11 @@ impl ApiConfig {
 
         Ok(())
     }
+
+    /// Check if TLS is enabled (both pubkey_path and privkey_path are configured)
+    pub fn tls_enabled(&self) -> bool {
+        !self.pubkey_path.is_empty() && !self.privkey_path.is_empty()
+    }
 }
 
 /// Datastore configuration
@@ -266,6 +271,27 @@ mod tests {
         config.pubkey_path = "/path/to/pub.key".to_string();
         config.privkey_path = "/path/to/priv.key".to_string();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_api_config_tls_enabled_false_by_default() {
+        let config = ApiConfig::default();
+        assert!(!config.tls_enabled());
+    }
+
+    #[test]
+    fn test_api_config_tls_enabled_true_when_configured() {
+        let mut config = ApiConfig::default();
+        config.pubkey_path = "/path/to/pub.key".to_string();
+        config.privkey_path = "/path/to/priv.key".to_string();
+        assert!(config.tls_enabled());
+    }
+
+    #[test]
+    fn test_api_config_tls_enabled_false_partial_config() {
+        let mut config = ApiConfig::default();
+        config.pubkey_path = "/path/to/pub.key".to_string();
+        assert!(!config.tls_enabled());
     }
 
     #[test]

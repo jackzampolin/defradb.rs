@@ -12,7 +12,7 @@
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::{KeyringArgs, StartArgs, VersionArgs};
+use crate::commands::{ClientArgs, KeyringArgs, StartArgs, VersionArgs};
 use crate::config::Config;
 use crate::error::Result;
 
@@ -57,7 +57,7 @@ pub struct Cli {
     pub no_log_color: Option<bool>,
 
     /// URL of HTTP endpoint to listen on or connect to
-    #[arg(long, global = true, env = "DEFRA_URL")]
+    #[arg(long, global = true, env = "DEFRA_API_ADDRESS")]
     pub url: Option<String>,
 
     /// Service name to use when using the system backend
@@ -100,6 +100,9 @@ pub enum Command {
 
     /// Manage keys in the keyring
     Keyring(KeyringArgs),
+
+    /// Interact with a DefraDB node
+    Client(ClientArgs),
 }
 
 impl Cli {
@@ -109,6 +112,7 @@ impl Cli {
             Command::Start(args) => args.execute(config).await,
             Command::Version(args) => args.execute(),
             Command::Keyring(args) => args.execute(config),
+            Command::Client(args) => args.execute(config, self.url).await,
         }
     }
 }

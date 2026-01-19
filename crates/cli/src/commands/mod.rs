@@ -10,10 +10,12 @@
 
 //! CLI subcommands
 
+mod client;
 mod keyring_cmd;
 mod start;
 mod version;
 
+pub use client::ClientArgs;
 pub use keyring_cmd::KeyringArgs;
 pub use start::StartArgs;
 pub use version::VersionArgs;

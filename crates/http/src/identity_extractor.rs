@@ -139,14 +139,20 @@ where
         'life1: 'async_trait,
         Self: 'async_trait,
     {
-        // Get the auth header value before entering the async block
-        let auth_value = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        // Get the auth header value, returning error for malformed headers
+        let auth_result: Result<Option<String>, IdentityExtractionError> =
+            match parts.headers.get(AUTHORIZATION) {
+                Some(value) => match value.to_str() {
+                    Ok(s) => Ok(Some(s.to_string())),
+                    Err(_) => Err(IdentityExtractionError::InvalidToken(
+                        "Authorization header contains invalid characters".to_string(),
+                    )),
+                },
+                None => Ok(None),
+            };
 
         Box::pin(async move {
+            let auth_value = auth_result?;
             let result = extract_identity_from_auth_header(auth_value.as_deref())?;
             Ok(ExtractIdentity(result))
         })
@@ -221,14 +227,20 @@ where
         'life1: 'async_trait,
         Self: 'async_trait,
     {
-        // Get the auth header value before entering the async block
-        let auth_value = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        // Get the auth header value, returning error for malformed headers
+        let auth_result: Result<Option<String>, IdentityExtractionError> =
+            match parts.headers.get(AUTHORIZATION) {
+                Some(value) => match value.to_str() {
+                    Ok(s) => Ok(Some(s.to_string())),
+                    Err(_) => Err(IdentityExtractionError::InvalidToken(
+                        "Authorization header contains invalid characters".to_string(),
+                    )),
+                },
+                None => Ok(None),
+            };
 
         Box::pin(async move {
+            let auth_value = auth_result?;
             let result = extract_token_identity_from_auth_header(auth_value.as_deref())?;
             Ok(ExtractTokenIdentity(result))
         })
