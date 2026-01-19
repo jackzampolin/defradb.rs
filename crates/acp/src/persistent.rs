@@ -150,7 +150,11 @@ impl AcpStore for PersistentAcpStore {
 
         let mut tuples = Vec::new();
 
-        while let Some(kv) = iter.next().await.map_err(|e| Error::Storage(e.to_string()))? {
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
             let tuple: RelationTuple =
                 serde_json::from_slice(&kv.value).map_err(|e| Error::Storage(e.to_string()))?;
             tuples.push(tuple);
@@ -185,7 +189,11 @@ impl AcpStore for PersistentAcpStore {
 
         let mut subjects = Vec::new();
 
-        while let Some(kv) = iter.next().await.map_err(|e| Error::Storage(e.to_string()))? {
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
             let tuple: RelationTuple =
                 serde_json::from_slice(&kv.value).map_err(|e| Error::Storage(e.to_string()))?;
             subjects.push(tuple.subject().clone());
@@ -220,7 +228,11 @@ impl AcpStore for PersistentAcpStore {
 
         let mut relations = Vec::new();
 
-        while let Some(kv) = iter.next().await.map_err(|e| Error::Storage(e.to_string()))? {
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
             let tuple: RelationTuple =
                 serde_json::from_slice(&kv.value).map_err(|e| Error::Storage(e.to_string()))?;
             if tuple.subject() == subject {
@@ -253,7 +265,11 @@ impl AcpStore for PersistentAcpStore {
                 .await
                 .map_err(|e| Error::Storage(e.to_string()))?;
 
-            while let Some(kv) = iter.next().await.map_err(|e| Error::Storage(e.to_string()))? {
+            while let Some(kv) = iter
+                .next()
+                .await
+                .map_err(|e| Error::Storage(e.to_string()))?
+            {
                 keys_to_delete.push(kv.key);
             }
         }
@@ -426,7 +442,32 @@ mod tests {
         let result = store.get_doc_tuples("../etc", "passwd").await;
         assert!(result.is_err(), "path traversal should be rejected");
 
-        let result = store.get_doc_tuples("users", "doc/../../../etc/passwd").await;
+        let result = store
+            .get_doc_tuples("users", "doc/../../../etc/passwd")
+            .await;
         assert!(result.is_err(), "path traversal should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_persistent_store_unicode_identifiers() {
+        let tmp_dir = TempDir::new().unwrap();
+        let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
+
+        // Unicode characters in collection_id and doc_id should work
+        let tuple = RelationTuple::owner(test_did(), "用户", "文档1");
+        store.put_tuple(&tuple).await.unwrap();
+        assert!(
+            store.has_tuple(&tuple).await.unwrap(),
+            "should store tuple with unicode identifiers"
+        );
+
+        // Verify retrieval works
+        let tuples = store.get_doc_tuples("用户", "文档1").await.unwrap();
+        assert_eq!(tuples.len(), 1);
+        assert!(store.is_doc_registered("用户", "文档1").await.unwrap());
+
+        // Cleanup works
+        store.delete_doc_tuples("用户", "文档1").await.unwrap();
+        assert!(!store.is_doc_registered("用户", "文档1").await.unwrap());
     }
 }

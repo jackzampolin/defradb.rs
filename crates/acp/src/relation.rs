@@ -44,7 +44,7 @@ pub struct RelationTuple {
 }
 
 /// Validate a path component for storage key safety.
-/// Rejects empty strings and strings containing path separators.
+/// Rejects empty strings, strings containing path separators, and null bytes.
 fn validate_path_component(value: &str, field_name: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::InvalidPolicy(format!(
@@ -56,6 +56,12 @@ fn validate_path_component(value: &str, field_name: &str) -> Result<()> {
         return Err(Error::InvalidPolicy(format!(
             "{} cannot contain path separators: {}",
             field_name, value
+        )));
+    }
+    if value.contains('\0') {
+        return Err(Error::InvalidPolicy(format!(
+            "{} cannot contain null bytes",
+            field_name
         )));
     }
     Ok(())
@@ -318,6 +324,13 @@ mod tests {
 
         // Empty doc_id should fail
         assert!(RelationTuple::try_new(did.clone(), "reader", "users", "").is_err());
+
+        // Null bytes should fail
+        assert!(RelationTuple::try_new(did.clone(), "reader\0admin", "users", "doc123").is_err());
+        assert!(
+            RelationTuple::try_new(did.clone(), "reader", "users\0internal", "doc123").is_err()
+        );
+        assert!(RelationTuple::try_new(did.clone(), "reader", "users", "doc\0123").is_err());
     }
 
     #[test]
