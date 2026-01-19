@@ -144,16 +144,15 @@ impl DocumentCreateArgs {
             .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
 
         let key = format!("create_{}", self.collection);
-        if let Some(result) = data.get(&key) {
-            let output = serde_json::to_string_pretty(result)?;
-            println!("{output}");
-        } else {
-            eprintln!(
-                "Warning: Server response did not contain expected key '{}'. Raw response:",
-                key
-            );
-            eprintln!("{}", serde_json::to_string_pretty(&data)?);
-        }
+        let result = data.get(&key).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing expected key '{}'. Response: {}",
+                key,
+                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+            ))
+        })?;
+        let output = serde_json::to_string_pretty(result)?;
+        println!("{output}");
 
         Ok(())
     }
@@ -280,16 +279,15 @@ impl DocumentUpdateArgs {
             .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
 
         let key = format!("update_{}", self.collection);
-        if let Some(result) = data.get(&key) {
-            let output = serde_json::to_string_pretty(result)?;
-            println!("{output}");
-        } else {
-            eprintln!(
-                "Warning: Server response did not contain expected key '{}'. Raw response:",
-                key
-            );
-            eprintln!("{}", serde_json::to_string_pretty(&data)?);
-        }
+        let result = data.get(&key).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing expected key '{}'. Response: {}",
+                key,
+                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+            ))
+        })?;
+        let output = serde_json::to_string_pretty(result)?;
+        println!("{output}");
 
         Ok(())
     }
@@ -321,16 +319,15 @@ impl DocumentDeleteArgs {
             .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
 
         let key = format!("delete_{}", self.collection);
-        if let Some(result) = data.get(&key) {
-            let output = serde_json::to_string_pretty(result)?;
-            println!("{output}");
-        } else {
-            eprintln!(
-                "Warning: Server response did not contain expected key '{}'. Raw response:",
-                key
-            );
-            eprintln!("{}", serde_json::to_string_pretty(&data)?);
-        }
+        let result = data.get(&key).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing expected key '{}'. Response: {}",
+                key,
+                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+            ))
+        })?;
+        let output = serde_json::to_string_pretty(result)?;
+        println!("{output}");
 
         Ok(())
     }

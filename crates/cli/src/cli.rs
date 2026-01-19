@@ -57,7 +57,7 @@ pub struct Cli {
     pub no_log_color: Option<bool>,
 
     /// URL of HTTP endpoint to listen on or connect to
-    #[arg(long, global = true, env = "DEFRA_URL")]
+    #[arg(long, global = true, env = "DEFRA_API_ADDRESS")]
     pub url: Option<String>,
 
     /// Service name to use when using the system backend

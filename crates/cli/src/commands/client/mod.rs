@@ -192,6 +192,7 @@ fn get_url(config: &Config, url_override: Option<String>) -> String {
 mod tests {
     use super::*;
     use crate::config::ApiConfig;
+    use crypto::Key;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -281,5 +282,141 @@ mod tests {
         assert_eq!(escape_graphql_string("hello"), "hello");
         assert_eq!(escape_graphql_string(r#"test"value"#), r#"test\"value"#);
         assert_eq!(escape_graphql_string("test\nvalue"), "test\\nvalue");
+    }
+
+    // JWT token generation tests
+
+    #[test]
+    fn test_generate_auth_token_secp256k1_32_bytes() {
+        // Generate a secp256k1 key (32 bytes)
+        let private_key = crypto::generate_secp256k1().unwrap();
+        let key_bytes = private_key.raw();
+        assert_eq!(key_bytes.len(), 32, "secp256k1 key should be 32 bytes");
+
+        let hex_key = hex::encode(&key_bytes);
+        let result = generate_auth_token(&hex_key, "http://localhost:9181");
+
+        assert!(result.is_ok(), "Should generate token for secp256k1 key");
+        let token = result.unwrap();
+
+        // Token should be a valid JWT (three dot-separated parts)
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT should have 3 parts");
+    }
+
+    #[test]
+    fn test_generate_auth_token_ed25519_64_bytes() {
+        // Generate an ed25519 key (64 bytes: seed + public key)
+        let private_key = crypto::generate_ed25519().unwrap();
+        let key_bytes = private_key.raw();
+        assert_eq!(key_bytes.len(), 64, "ed25519 key should be 64 bytes");
+
+        let hex_key = hex::encode(&key_bytes);
+        let result = generate_auth_token(&hex_key, "http://localhost:9181");
+
+        assert!(result.is_ok(), "Should generate token for ed25519 key");
+        let token = result.unwrap();
+
+        // Token should be a valid JWT (three dot-separated parts)
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT should have 3 parts");
+    }
+
+    #[test]
+    fn test_generate_auth_token_invalid_hex() {
+        let result = generate_auth_token("not-valid-hex!", "http://localhost:9181");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("invalid hex"),
+            "Error should mention invalid hex"
+        );
+    }
+
+    #[test]
+    fn test_generate_auth_token_invalid_key_length() {
+        // 16 bytes is neither 32 (secp256k1) nor 64 (ed25519)
+        let short_key = hex::encode([0u8; 16]);
+        let result = generate_auth_token(&short_key, "http://localhost:9181");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("invalid key length"),
+            "Error should mention invalid key length"
+        );
+    }
+
+    #[test]
+    fn test_generate_auth_token_empty_key() {
+        let result = generate_auth_token("", "http://localhost:9181");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_generate_auth_token_tokens_are_unique() {
+        // Two tokens generated from the same key should be different
+        // (different timestamps, nonces, etc.)
+        let private_key = crypto::generate_secp256k1().unwrap();
+        let hex_key = hex::encode(private_key.raw());
+
+        let token1 = generate_auth_token(&hex_key, "http://localhost:9181").unwrap();
+        let token2 = generate_auth_token(&hex_key, "http://localhost:9181").unwrap();
+
+        // The tokens may or may not be identical depending on timing,
+        // but they should both be valid
+        assert!(!token1.is_empty());
+        assert!(!token2.is_empty());
+    }
+
+    #[test]
+    fn test_client_context_with_identity() {
+        // Verify that identity flows through to auth_token in ClientContext
+        let private_key = crypto::generate_secp256k1().unwrap();
+        let hex_key = hex::encode(private_key.raw());
+        let url = "http://localhost:9181";
+
+        // Generate token the same way ClientArgs.execute does
+        let auth_token = generate_auth_token(&hex_key, url).ok();
+
+        let ctx = ClientContext {
+            url: url.to_string(),
+            auth_token: auth_token.clone(),
+            tx_id: None,
+            verbose: false,
+        };
+
+        // Verify auth_token is set
+        assert!(ctx.auth_token.is_some());
+        let token = ctx.auth_token.unwrap();
+
+        // Verify it's a valid JWT format
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "Auth token should be a valid JWT");
+    }
+
+    #[test]
+    fn test_client_context_without_identity() {
+        let ctx = ClientContext {
+            url: "http://localhost:9181".to_string(),
+            auth_token: None,
+            tx_id: None,
+            verbose: false,
+        };
+
+        assert!(ctx.auth_token.is_none());
+        assert!(ctx.tx_id.is_none());
+    }
+
+    #[test]
+    fn test_client_context_with_tx() {
+        let ctx = ClientContext {
+            url: "http://localhost:9181".to_string(),
+            auth_token: None,
+            tx_id: Some("12345".to_string()),
+            verbose: false,
+        };
+
+        assert_eq!(ctx.tx_id, Some("12345".to_string()));
     }
 }

@@ -145,17 +145,20 @@ impl CollectionDescribeArgs {
             return Err(Error::Server(response.error_message()));
         }
 
-        if let Some(data) = response.data {
-            if let Some(type_info) = data.get("__type") {
-                if type_info.is_null() {
-                    return Err(Error::CollectionNotFound(self.name.clone()));
-                }
-                let output = serde_json::to_string_pretty(type_info)?;
-                println!("{output}");
-            } else {
-                return Err(Error::CollectionNotFound(self.name.clone()));
-            }
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
+
+        let type_info = data
+            .get("__type")
+            .ok_or_else(|| Error::CollectionNotFound(self.name.clone()))?;
+
+        if type_info.is_null() {
+            return Err(Error::CollectionNotFound(self.name.clone()));
         }
+
+        let output = serde_json::to_string_pretty(type_info)?;
+        println!("{output}");
 
         Ok(())
     }

@@ -58,10 +58,10 @@ impl QueryArgs {
             return Err(Error::Server(response.error_message()));
         }
 
-        if let Some(data) = response.data {
-            let output = serde_json::to_string_pretty(&data)?;
-            println!("{output}");
-        }
+        // Always output data, even if null (for consistent piping/scripting)
+        let data = response.data.unwrap_or(serde_json::Value::Null);
+        let output = serde_json::to_string_pretty(&data)?;
+        println!("{output}");
 
         Ok(())
     }
