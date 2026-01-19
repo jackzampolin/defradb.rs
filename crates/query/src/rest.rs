@@ -5,8 +5,12 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
 use crate::error::QueryError;
+use crate::fetcher::DocFetcher;
+use crate::runner::QueryRunner;
+use crate::txn::TransactionRegistry;
 
 /// Result type for REST operations.
 pub type RestResult<T> = std::result::Result<T, RestError>;
@@ -177,6 +181,209 @@ pub trait RestOperations: Send + Sync {
     ///
     /// Returns true if the document was deleted, false if it didn't exist.
     async fn delete_document(&self, collection: &str, doc_id: &str) -> RestResult<bool>;
+}
+
+/// Production implementation of REST operations using QueryRunner.
+///
+/// This wraps a QueryRunner and translates REST operations into GraphQL queries/mutations.
+pub struct RestOperationsImpl<F: DocFetcher, R: TransactionRegistry> {
+    runner: Arc<QueryRunner<F, R>>,
+}
+
+impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
+    /// Create a new REST operations implementation.
+    ///
+    /// The QueryRunner must have a mutator configured for create/update/delete operations.
+    pub fn new(runner: Arc<QueryRunner<F, R>>) -> Self {
+        Self { runner }
+    }
+
+    /// Build a GraphQL query to fetch all document IDs in a collection.
+    fn build_list_ids_query(&self, collection: &str) -> String {
+        format!(
+            r#"{{ {collection} {{ _docID }} }}"#,
+            collection = collection
+        )
+    }
+
+    /// Build a GraphQL create mutation.
+    fn build_create_mutation(&self, collection: &str, data: &JsonValue) -> String {
+        format!(
+            r#"mutation {{ create_{collection}(input: [{data}]) {{ _docID }} }}"#,
+            collection = collection,
+            data = data
+        )
+    }
+
+    /// Build a GraphQL update mutation.
+    fn build_update_mutation(&self, collection: &str, doc_id: &str, patch: &JsonValue) -> String {
+        format!(
+            r#"mutation {{ update_{collection}(docID: "{doc_id}", input: {patch}) {{ _docID }} }}"#,
+            collection = collection,
+            doc_id = doc_id,
+            patch = patch
+        )
+    }
+
+    /// Build a GraphQL delete mutation.
+    fn build_delete_mutation(&self, collection: &str, doc_id: &str) -> String {
+        format!(
+            r#"mutation {{ delete_{collection}(docID: "{doc_id}") {{ _docID }} }}"#,
+            collection = collection,
+            doc_id = doc_id
+        )
+    }
+
+    /// Extract document IDs from a query result.
+    fn extract_doc_ids(&self, result: &JsonValue, collection: &str) -> Vec<String> {
+        result
+            .get(collection)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|doc| doc.get("_docID").and_then(|id| id.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get the full document data for a document by ID.
+    async fn fetch_full_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+    ) -> RestResult<Option<JsonValue>> {
+        // Query all fields by not specifying a selection (the runner returns all fields)
+        let query = format!(
+            r#"{{ {collection}(docID: "{doc_id}") }}"#,
+            collection = collection,
+            doc_id = doc_id
+        );
+
+        let result = self.runner.execute_query(&query).await?;
+
+        // Extract the document from the result
+        let doc = result
+            .get(collection)
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .cloned();
+
+        Ok(doc)
+    }
+}
+
+#[async_trait]
+impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImpl<F, R> {
+    async fn list_collections(&self) -> RestResult<Vec<String>> {
+        Ok(self.runner.collection_names())
+    }
+
+    async fn get_collection_doc_ids(&self, collection: &str) -> RestResult<Vec<String>> {
+        if !self.runner.has_collection(collection) {
+            return Err(RestError::collection_not_found(collection));
+        }
+
+        let query = self.build_list_ids_query(collection);
+        let result = self.runner.execute_query(&query).await?;
+        Ok(self.extract_doc_ids(&result, collection))
+    }
+
+    async fn get_document(&self, collection: &str, doc_id: &str) -> RestResult<Option<JsonValue>> {
+        if !self.runner.has_collection(collection) {
+            return Err(RestError::collection_not_found(collection));
+        }
+
+        self.fetch_full_document(collection, doc_id).await
+    }
+
+    async fn create_document(&self, collection: &str, data: JsonValue) -> RestResult<JsonValue> {
+        if !self.runner.has_collection(collection) {
+            return Err(RestError::collection_not_found(collection));
+        }
+
+        let mutation = self.build_create_mutation(collection, &data);
+        let result = self.runner.execute_mutation(&mutation).await?;
+
+        // Extract the created document's ID and fetch the full document
+        let doc_id = result
+            .get(format!("create_{}", collection))
+            .or_else(|| result.get(collection))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|doc| doc.get("_docID"))
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| RestError::internal("failed to get created document ID"))?;
+
+        // Fetch and return the full document
+        self.fetch_full_document(collection, doc_id)
+            .await?
+            .ok_or_else(|| RestError::internal("created document not found"))
+    }
+
+    async fn create_documents(
+        &self,
+        collection: &str,
+        data: Vec<JsonValue>,
+    ) -> RestResult<Vec<JsonValue>> {
+        let mut results = Vec::with_capacity(data.len());
+        for item in data {
+            let result = self.create_document(collection, item).await?;
+            results.push(result);
+        }
+        Ok(results)
+    }
+
+    async fn update_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        patch: JsonValue,
+    ) -> RestResult<JsonValue> {
+        if !self.runner.has_collection(collection) {
+            return Err(RestError::collection_not_found(collection));
+        }
+
+        // Check if document exists first
+        let existing = self.fetch_full_document(collection, doc_id).await?;
+        if existing.is_none() {
+            return Err(RestError::document_not_found(doc_id));
+        }
+
+        let mutation = self.build_update_mutation(collection, doc_id, &patch);
+        self.runner.execute_mutation(&mutation).await?;
+
+        // Fetch and return the updated document
+        self.fetch_full_document(collection, doc_id)
+            .await?
+            .ok_or_else(|| RestError::internal("updated document not found"))
+    }
+
+    async fn delete_document(&self, collection: &str, doc_id: &str) -> RestResult<bool> {
+        if !self.runner.has_collection(collection) {
+            return Err(RestError::collection_not_found(collection));
+        }
+
+        // Check if document exists first
+        let existing = self.fetch_full_document(collection, doc_id).await?;
+        if existing.is_none() {
+            return Ok(false);
+        }
+
+        let mutation = self.build_delete_mutation(collection, doc_id);
+        let result = self.runner.execute_mutation(&mutation).await?;
+
+        // Check if deletion was successful by looking at the result
+        let deleted = result
+            .get(format!("delete_{}", collection))
+            .or_else(|| result.get(collection))
+            .and_then(|v| v.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]

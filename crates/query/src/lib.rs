@@ -47,7 +47,7 @@ pub use plan::{
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
-pub use rest::{RestError, RestOperations, RestResult};
+pub use rest::{RestError, RestOperations, RestOperationsImpl, RestResult};
 pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::parse_sdl;
 pub use txn::{

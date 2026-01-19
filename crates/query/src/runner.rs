@@ -1009,6 +1009,20 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         Ok(JsonValue::Object(obj))
     }
+
+    /// Get the names of all collections.
+    ///
+    /// Returns a sorted list of collection names registered with this runner.
+    pub fn collection_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.collections.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Check if a collection exists.
+    pub fn has_collection(&self, name: &str) -> bool {
+        self.collections.contains_key(name)
+    }
 }
 
 #[async_trait]
