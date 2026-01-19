@@ -31,7 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use acp::{DocumentACP, DocumentPermission};
+use acp::{DocumentACP, DocumentPermission, Identity};
 use cid::Cid;
 use identity::Did;
 use libp2p::PeerId;
@@ -421,12 +421,12 @@ impl BlockAccessController {
             None => return false, // Deny if no ACP and not a replicator
         };
 
-        // Look up peer's DID
-        let did = self.peer_identities.get_did(peer_id);
+        // Look up peer's DID and convert to Identity
+        let identity = Identity::from(self.peer_identities.get_did(peer_id));
 
         // Check document-level ACP permissions
         // Fail-closed: deny access on any error to prevent security bypass
-        acp.check_doc_access(did.as_ref(), permission, policy_id, resource_name, doc_id)
+        acp.check_doc_access(&identity, permission, policy_id, resource_name, doc_id)
             .await
             .unwrap_or_else(|e| {
                 tracing::error!(
@@ -1133,7 +1133,7 @@ mod tests {
 
         async fn check_doc_access(
             &self,
-            _identity: Option<&Did>,
+            _identity: &Identity,
             _permission: DocumentPermission,
             _policy_id: &str,
             _resource_name: &str,

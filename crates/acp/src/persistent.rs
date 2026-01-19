@@ -470,4 +470,106 @@ mod tests {
         store.delete_doc_tuples("用户", "文档1").await.unwrap();
         assert!(!store.is_doc_registered("用户", "文档1").await.unwrap());
     }
+
+    #[tokio::test]
+    async fn test_persistent_store_get_relation_subjects() {
+        let tmp_dir = TempDir::new().unwrap();
+        let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
+
+        let did1 = test_did();
+        let did2 = test_did2();
+
+        // Add owner and reader relations
+        let owner_tuple = RelationTuple::owner(did1.clone(), "users", "doc1");
+        let reader_tuple = RelationTuple::new(did2.clone(), "reader", "users", "doc1");
+
+        store.put_tuple(&owner_tuple).await.unwrap();
+        store.put_tuple(&reader_tuple).await.unwrap();
+
+        // Get subjects with "owner" relation
+        let owners = store
+            .get_relation_subjects("users", "doc1", "owner")
+            .await
+            .unwrap();
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0], did1);
+
+        // Get subjects with "reader" relation
+        let readers = store
+            .get_relation_subjects("users", "doc1", "reader")
+            .await
+            .unwrap();
+        assert_eq!(readers.len(), 1);
+        assert_eq!(readers[0], did2);
+
+        // Non-existent relation returns empty
+        let deleters = store
+            .get_relation_subjects("users", "doc1", "deleter")
+            .await
+            .unwrap();
+        assert!(deleters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_persistent_store_get_subject_relations() {
+        let tmp_dir = TempDir::new().unwrap();
+        let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
+
+        let did = test_did();
+
+        // Add multiple relations for the same subject on the same doc
+        let owner_tuple = RelationTuple::owner(did.clone(), "users", "doc1");
+        let reader_tuple = RelationTuple::new(did.clone(), "reader", "users", "doc1");
+
+        store.put_tuple(&owner_tuple).await.unwrap();
+        store.put_tuple(&reader_tuple).await.unwrap();
+
+        // Get relations for the subject on doc1
+        let relations = store
+            .get_subject_relations(&did, "users", "doc1")
+            .await
+            .unwrap();
+        assert_eq!(relations.len(), 2);
+        assert!(relations.contains(&"owner".to_string()));
+        assert!(relations.contains(&"reader".to_string()));
+
+        // Different doc returns no relations
+        let relations = store
+            .get_subject_relations(&did, "users", "doc2")
+            .await
+            .unwrap();
+        assert!(relations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_persistent_store_validates_relation_prefix() {
+        let tmp_dir = TempDir::new().unwrap();
+        let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
+
+        // Path traversal in relation parameter should be rejected
+        let result = store
+            .get_relation_subjects("users", "doc1", "../admin")
+            .await;
+        assert!(
+            result.is_err(),
+            "path traversal in relation should be rejected"
+        );
+
+        let result = store
+            .get_relation_subjects("users", "doc1", "reader/../../admin")
+            .await;
+        assert!(
+            result.is_err(),
+            "nested path traversal in relation should be rejected"
+        );
+
+        // Backslash in relation should also be rejected
+        let result = store
+            .get_relation_subjects("users", "doc1", "reader\\admin")
+            .await;
+        assert!(
+            result.is_err(),
+            "backslash in relation should be rejected"
+        );
+    }
 }

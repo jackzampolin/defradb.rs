@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use acp::{DocumentACP, DocumentPermission};
+use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
 use identity::Did;
 
@@ -25,8 +25,8 @@ pub struct PermissionFilterNode {
     /// Document ACP for permission checks
     acp: Arc<dyn DocumentACP>,
 
-    /// Identity requesting access (None = anonymous)
-    identity: Option<Did>,
+    /// Identity requesting access
+    identity: Identity,
 
     /// Policy ID from the collection
     policy_id: String,
@@ -47,13 +47,13 @@ impl PermissionFilterNode {
     /// # Arguments
     /// * `source` - The source node to filter
     /// * `acp` - Document ACP for permission checks
-    /// * `identity` - The identity requesting access (None for anonymous)
+    /// * `identity` - The identity requesting access
     /// * `policy_id` - Policy ID from the collection
     /// * `resource_name` - Resource name from the policy
     pub fn new(
         source: Box<dyn PlanNode>,
         acp: Arc<dyn DocumentACP>,
-        identity: Option<Did>,
+        identity: Identity,
         policy_id: impl Into<String>,
         resource_name: impl Into<String>,
     ) -> Self {
@@ -69,6 +69,17 @@ impl PermissionFilterNode {
         }
     }
 
+    /// Create from an optional DID for backward compatibility.
+    pub fn from_optional_did(
+        source: Box<dyn PlanNode>,
+        acp: Arc<dyn DocumentACP>,
+        did: Option<Did>,
+        policy_id: impl Into<String>,
+        resource_name: impl Into<String>,
+    ) -> Self {
+        Self::new(source, acp, Identity::from(did), policy_id, resource_name)
+    }
+
     /// Check if the identity has read permission for a document.
     ///
     /// Fail-closed: returns false on any error to prevent security bypass.
@@ -76,7 +87,7 @@ impl PermissionFilterNode {
         Ok(self
             .acp
             .check_doc_access(
-                self.identity.as_ref(),
+                &self.identity,
                 DocumentPermission::Read,
                 &self.policy_id,
                 &self.resource_name,
@@ -88,7 +99,7 @@ impl PermissionFilterNode {
                     doc_id = %doc_id,
                     policy_id = %self.policy_id,
                     resource_name = %self.resource_name,
-                    identity = ?self.identity,
+                    identity = %self.identity,
                     error = %e,
                     "Permission check failed, denying access to document"
                 );
@@ -212,13 +223,8 @@ mod tests {
         let docs = make_test_docs();
         let scan = create_scan_node(docs);
 
-        let mut filter = PermissionFilterNode::new(
-            Box::new(scan),
-            acp,
-            None, // Anonymous
-            "policy1",
-            "users",
-        );
+        let mut filter =
+            PermissionFilterNode::new(Box::new(scan), acp, Identity::Anonymous, "policy1", "users");
 
         filter.init().await.unwrap();
         filter.start().await.unwrap();
@@ -250,7 +256,7 @@ mod tests {
         let mut filter = PermissionFilterNode::new(
             Box::new(scan),
             acp,
-            Some(owner), // Owner identity
+            Identity::Authenticated(owner),
             "policy1",
             "users",
         );
@@ -286,7 +292,7 @@ mod tests {
         let mut filter = PermissionFilterNode::new(
             Box::new(scan),
             acp,
-            Some(stranger), // Different identity
+            Identity::Authenticated(stranger),
             "policy1",
             "users",
         );
@@ -326,8 +332,13 @@ mod tests {
         let docs = make_test_docs();
         let scan = create_scan_node(docs);
 
-        let mut filter =
-            PermissionFilterNode::new(Box::new(scan), acp, Some(reader), "policy1", "users");
+        let mut filter = PermissionFilterNode::new(
+            Box::new(scan),
+            acp,
+            Identity::Authenticated(reader),
+            "policy1",
+            "users",
+        );
 
         filter.init().await.unwrap();
         filter.start().await.unwrap();
@@ -364,13 +375,8 @@ mod tests {
         let docs = make_test_docs();
         let scan = create_scan_node(docs);
 
-        let mut filter = PermissionFilterNode::new(
-            Box::new(scan),
-            acp,
-            None, // Anonymous
-            "policy1",
-            "users",
-        );
+        let mut filter =
+            PermissionFilterNode::new(Box::new(scan), acp, Identity::Anonymous, "policy1", "users");
 
         filter.init().await.unwrap();
         filter.start().await.unwrap();
@@ -415,7 +421,7 @@ mod tests {
 
         async fn check_doc_access(
             &self,
-            _identity: Option<&Did>,
+            _identity: &Identity,
             _permission: acp::DocumentPermission,
             _policy_id: &str,
             _resource_name: &str,
@@ -466,7 +472,7 @@ mod tests {
         let mut filter = PermissionFilterNode::new(
             Box::new(scan),
             acp,
-            Some(test_did()), // Even with identity
+            Identity::Authenticated(test_did()),
             "policy1",
             "users",
         );
@@ -494,13 +500,8 @@ mod tests {
         let docs = make_test_docs();
         let scan = create_scan_node(docs);
 
-        let mut filter = PermissionFilterNode::new(
-            Box::new(scan),
-            acp,
-            None, // Anonymous
-            "policy1",
-            "users",
-        );
+        let mut filter =
+            PermissionFilterNode::new(Box::new(scan), acp, Identity::Anonymous, "policy1", "users");
 
         filter.init().await.unwrap();
         filter.start().await.unwrap();

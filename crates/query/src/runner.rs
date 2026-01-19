@@ -9,7 +9,7 @@
 //! a `TransactionRegistry`. The registry manages transaction lifecycle and provides
 //! transaction-scoped document fetchers for query execution.
 
-use acp::DocumentACP;
+use acp::{DocumentACP, Identity};
 use async_trait::async_trait;
 use document::Document;
 use identity::Did;
@@ -199,9 +199,34 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .any(|f| matches!(f, Requestable::Select(_)));
 
+        // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
+        // See issue #114 for tracking the full fix.
+        if has_nested && self.acp.is_some() {
+            // Check root collection for ACP
+            if collection.policy.is_some() {
+                return Err(QueryError::execution(format!(
+                    "Nested queries on ACP-protected collections are not yet supported. \
+                     Collection '{}' has an ACP policy. Remove nested selections or use \
+                     separate queries. See issue #114 for tracking.",
+                    collection.name
+                )));
+            }
+
+            // Check nested collections by resolving relation targets from parent collection
+            if let Some(acp_coll) = self.find_acp_collection_in_nested(select, collection) {
+                return Err(QueryError::execution(format!(
+                    "Nested queries on ACP-protected collections are not yet supported. \
+                     Collection '{}' has an ACP policy. Remove nested selections or use \
+                     separate queries. See issue #114 for tracking.",
+                    acp_coll
+                )));
+            }
+        }
+
         if has_nested {
             // Use the Planner for queries with nested selections (joins)
-            // Note: ACP filtering for nested queries is not yet implemented
+            // Note: ACP filtering for nested queries is not yet implemented.
+            // Queries on ACP-protected collections are blocked above.
             self.execute_nested_select_with_planner(select, fetcher, caller_identity)
                 .await
         } else {
@@ -216,8 +241,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     /// The Planner builds a proper join plan with TypeJoinOne/TypeJoinMany nodes.
     /// ScanNodes fetch their own data via the attached fetcher.
     ///
-    /// Note: ACP filtering for nested queries is not yet implemented.
-    /// The identity parameter is accepted for future use.
+    /// Note: This path does NOT enforce ACP permissions. Queries involving
+    /// ACP-protected collections are blocked at the caller level (execute_select_internal).
+    /// The identity parameter is accepted for future use when Planner ACP is implemented.
     async fn execute_nested_select_with_planner(
         &self,
         select: &Select,
@@ -298,7 +324,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             plan = Box::new(PermissionFilterNode::new(
                 plan,
                 acp.clone(),
-                identity,
+                Identity::from(identity),
                 &policy.id,
                 &policy.resource_name,
             ));
@@ -426,10 +452,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 MutationType::Update | MutationType::Upsert => {
                     // For UPDATE, check updater permission on each target doc
                     if let Some(ref doc_ids) = doc_ids_for_check {
+                        let identity_for_acp = Identity::from(caller_identity.as_ref());
                         for doc_id in doc_ids {
                             let has_permission = acp
                                 .check_doc_access(
-                                    caller_identity.as_ref(),
+                                    &identity_for_acp,
                                     DocumentPermission::Update,
                                     &policy.id,
                                     &policy.resource_name,
@@ -439,7 +466,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
                                         doc_id = %doc_id,
-                                        caller_identity = ?caller_identity,
+                                        identity = %identity_for_acp,
                                         error = %e,
                                         "ACP permission check failed during UPDATE, denying access"
                                     );
@@ -465,10 +492,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 MutationType::Delete => {
                     // For DELETE, check deleter permission on each target doc
                     if let Some(ref doc_ids) = doc_ids_for_check {
+                        let identity_for_acp = Identity::from(caller_identity.as_ref());
                         for doc_id in doc_ids {
                             let has_permission = acp
                                 .check_doc_access(
-                                    caller_identity.as_ref(),
+                                    &identity_for_acp,
                                     DocumentPermission::Delete,
                                     &policy.id,
                                     &policy.resource_name,
@@ -478,7 +506,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
                                         doc_id = %doc_id,
-                                        caller_identity = ?caller_identity,
+                                        identity = %identity_for_acp,
                                         error = %e,
                                         "ACP permission check failed during DELETE, denying access"
                                     );
@@ -586,7 +614,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                         let is_registered = acp
                             .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
                             .await
-                            .unwrap_or(false);
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    doc_id = %doc_id,
+                                    error = %e,
+                                    "Failed to check document registration status - assuming unregistered"
+                                );
+                                false
+                            });
 
                         // Only register if not already registered (new document)
                         if !is_registered {
@@ -1022,6 +1057,45 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     /// Check if a collection exists.
     pub fn has_collection(&self, name: &str) -> bool {
         self.collections.contains_key(name)
+    }
+
+    /// Find the first ACP-protected collection in nested selections.
+    ///
+    /// This resolves relation field names to actual collection names by looking up
+    /// the relation definition in the parent collection's schema.
+    ///
+    /// Returns Some(collection_name) if an ACP-protected collection is found, None otherwise.
+    fn find_acp_collection_in_nested(
+        &self,
+        select: &Select,
+        parent_collection: &CollectionVersion,
+    ) -> Option<String> {
+        for field in &select.fields {
+            if let Requestable::Select(nested) = field {
+                // The nested select's collection_name is the field name in the query
+                // We need to resolve it to the actual target collection via the relation
+                let field_name = &nested.collection_name;
+
+                // Find the relation field in the parent collection
+                if let Some(relation_field) = parent_collection.fields.iter().find(|f| &f.name == field_name) {
+                    // Get the target collection name from the relation field's kind
+                    if let Some(target_coll_name) = relation_field.kind.relation_collection_id() {
+                        // Check if target collection has ACP
+                        if let Some(target_coll) = self.collections.get(target_coll_name) {
+                            if target_coll.policy.is_some() {
+                                return Some(target_coll.name.clone());
+                            }
+
+                            // Recursively check deeper nested selections
+                            if let Some(deep_acp) = self.find_acp_collection_in_nested(nested, target_coll) {
+                                return Some(deep_acp);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -3942,7 +4016,7 @@ mod tests {
         // Verify owner has access
         let has_access = acp
             .check_doc_access(
-                Some(&owner),
+                &Identity::Authenticated(owner),
                 acp::DocumentPermission::Read,
                 "policy-acp",
                 "Users",
@@ -4345,5 +4419,223 @@ mod tests {
             "anyone should be able to update public (unregistered) doc: {:?}",
             result.as_ref().err()
         );
+    }
+
+    // =====================================================================
+    // Nested Query ACP Blocking Tests (Issue #114)
+    // =====================================================================
+
+    /// Helper to create a collection with a relation field (for nested query tests)
+    fn make_collection_with_relation() -> CollectionVersion {
+        CollectionVersion::new(
+            "Authors",
+            "v1",
+            "coll-authors",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                // Relation to Books collection (is_array=true for one-to-many)
+                FieldDescription::new("3", "books", FieldKind::relation("Books", true)),
+            ],
+        )
+    }
+
+    fn make_related_collection_with_acp() -> CollectionVersion {
+        use schema::PolicyDescription;
+
+        CollectionVersion::new(
+            "Books",
+            "v1",
+            "coll-books",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "title", FieldKind::string()),
+                FieldDescription::new("3", "author_id", FieldKind::string()),
+            ],
+        )
+        .with_policy(PolicyDescription::new("policy-books", "Books"))
+    }
+
+    fn make_related_collection_no_acp() -> CollectionVersion {
+        CollectionVersion::new(
+            "Books",
+            "v1",
+            "coll-books",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "title", FieldKind::string()),
+                FieldDescription::new("3", "author_id", FieldKind::string()),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn test_nested_query_blocked_when_nested_collection_has_acp() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        // Set up collections: Authors (no ACP) with relation to Books (has ACP)
+        let runner = QueryRunner::new(
+            fetcher,
+            vec![
+                make_collection_with_relation(),
+                make_related_collection_with_acp(),
+            ],
+        )
+        .with_acp(acp);
+
+        // Attempt a nested query that touches the ACP-protected collection
+        let result = runner
+            .execute_query("{ Authors { name books { title } } }")
+            .await;
+
+        // Should be rejected due to ACP protection on nested collection
+        assert!(result.is_err(), "nested query on ACP collection should fail");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "error should mention nested queries not supported: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("Books"),
+            "error should mention the ACP-protected collection: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nested_query_blocked_when_root_collection_has_acp() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+        use schema::PolicyDescription;
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        // Set up root collection with ACP
+        let acp_collection = make_collection_with_relation()
+            .with_policy(PolicyDescription::new("policy-authors", "Authors"));
+
+        let runner = QueryRunner::new(
+            fetcher,
+            vec![acp_collection, make_related_collection_no_acp()],
+        )
+        .with_acp(acp);
+
+        // Attempt a nested query where root has ACP
+        let result = runner
+            .execute_query("{ Authors { name books { title } } }")
+            .await;
+
+        // Should be rejected
+        assert!(result.is_err(), "nested query on ACP root should fail");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "error should mention nested queries not supported: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nested_query_allowed_when_no_acp_configured() {
+        // Without ACP configured on the runner, nested queries should work
+        // (even if collections have policy metadata - the runner just doesn't enforce)
+        let fetcher = MockFetcher::new();
+
+        // Note: NOT calling .with_acp() - no ACP on runner
+        let runner = QueryRunner::new(
+            fetcher,
+            vec![
+                make_collection_with_relation(),
+                make_related_collection_with_acp(),
+            ],
+        );
+
+        // This should NOT be blocked since ACP isn't configured on runner
+        // (It may still fail for other reasons like missing relation data, but not due to ACP block)
+        let result = runner
+            .execute_query("{ Authors { name books { title } } }")
+            .await;
+
+        // Should not contain our ACP blocking error
+        if let Err(ref e) = result {
+            assert!(
+                !e.to_string().contains("not yet supported"),
+                "should not block when ACP not configured: {}",
+                e
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_nested_query_allowed_when_no_collections_have_acp() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        // Both collections have no ACP policy
+        let runner = QueryRunner::new(
+            fetcher,
+            vec![
+                make_collection_with_relation(),
+                make_related_collection_no_acp(),
+            ],
+        )
+        .with_acp(acp);
+
+        // This should NOT be blocked - no ACP policies involved
+        let result = runner
+            .execute_query("{ Authors { name books { title } } }")
+            .await;
+
+        // Should not contain our ACP blocking error
+        if let Err(ref e) = result {
+            assert!(
+                !e.to_string().contains("not yet supported"),
+                "should not block when no collections have ACP: {}",
+                e
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_simple_query_still_works_with_acp() {
+        use acp::{LocalDocumentACP, MemoryAcpStore};
+
+        let fetcher = MockFetcher::new();
+        let store = Arc::new(MemoryAcpStore::new());
+        let acp = Arc::new(LocalDocumentACP::new(store));
+
+        // Add a doc
+        let mut doc = Document::new();
+        doc.set("_docID", "author1");
+        doc.set("name", "Jane Austen");
+        fetcher.add_doc("Authors", doc);
+
+        let runner = QueryRunner::new(
+            fetcher,
+            vec![
+                make_collection_with_relation(),
+                make_related_collection_with_acp(),
+            ],
+        )
+        .with_acp(acp);
+
+        // Simple query (no nested) should still work
+        let result = runner
+            .execute_query("{ Authors { name } }")
+            .await
+            .expect("simple query should work even with ACP configured");
+
+        let authors = result.get("Authors").unwrap().as_array().unwrap();
+        assert_eq!(authors.len(), 1);
+        assert_eq!(authors[0].get("name").unwrap(), "Jane Austen");
     }
 }
