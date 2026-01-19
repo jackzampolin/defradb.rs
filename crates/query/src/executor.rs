@@ -4,6 +4,7 @@
 //! The HTTP crate depends on this trait, allowing parallel development of HTTP and query execution.
 
 use async_trait::async_trait;
+use identity::Did;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -23,6 +24,11 @@ pub struct QueryRequest {
     /// Optional variables for the query.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variables: Option<JsonValue>,
+
+    /// Identity for ACP permission checks (None = anonymous).
+    /// This is set by the HTTP layer from the Authorization header.
+    #[serde(skip)]
+    pub identity: Option<Did>,
 }
 
 impl QueryRequest {
@@ -32,6 +38,7 @@ impl QueryRequest {
             query: query.into(),
             operation_name: None,
             variables: None,
+            identity: None,
         }
     }
 
@@ -44,6 +51,12 @@ impl QueryRequest {
     /// Set variables.
     pub fn with_variables(mut self, vars: JsonValue) -> Self {
         self.variables = Some(vars);
+        self
+    }
+
+    /// Set the identity for ACP permission checks.
+    pub fn with_identity(mut self, identity: Option<Did>) -> Self {
+        self.identity = identity;
         self
     }
 }

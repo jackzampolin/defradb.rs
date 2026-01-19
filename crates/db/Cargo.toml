@@ -38,6 +38,7 @@ blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
+acp = { path = "../acp" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

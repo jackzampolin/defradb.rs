@@ -36,5 +36,7 @@
 mod access;
 mod store;
 
-pub use access::{AccessMode, BlockAccessController, BlockAccessFn, ReplicatorRegistry};
+pub use access::{
+    AccessMode, BlockAccessController, BlockAccessFn, PeerIdentityRegistry, ReplicatorRegistry,
+};
 pub use store::BitswapStoreAdapter;

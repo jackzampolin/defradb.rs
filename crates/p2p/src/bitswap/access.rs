@@ -14,30 +14,26 @@
 //! `hasAccess` callback pattern. In Go, the callback is registered with
 //! `host.SetBlockAccessFunc(p.hasAccess)` and receives (ctx, peerID, cid).
 //!
-//! # Current Limitations
-//!
-//! The Rust libp2p-bitswap-next crate doesn't support per-request access control
-//! callbacks. The `BitswapStore::get` method doesn't receive peer information.
-//!
-//! For now, access control is implemented at the **sync coordinator level**,
-//! where we have peer context. This provides:
-//! - Replicator-based access (fast path)
-//! - Collection subscription validation
-//!
-//! Full ACP integration will require modifications to the bitswap layer.
-//!
-//! # Go DefraDB Pattern
+//! # Access Control Flow
 //!
 //! Go's access control logic (from `internal/db/p2p/p2p.go:hasAccess`):
-//! 1. If ACP not configured → allow all
-//! 2. Check if peer is a replicator for the collection → allow
-//! 3. Get peer's identity token and verify it
-//! 4. Check document-level ACP permissions → allow/deny
+//! 1. If ACP not configured (Open mode) → allow all
+//! 2. Check if peer is a replicator for the collection → allow (fast path)
+//! 3. Look up peer's DID from PeerIdentityRegistry
+//! 4. Check document-level ACP permissions via DocumentACP → allow/deny
+//!
+//! # Components
+//!
+//! - `ReplicatorRegistry`: Tracks which peers are authorized replicators
+//! - `PeerIdentityRegistry`: Maps PeerId to DID for ACP lookups
+//! - `BlockAccessController`: Main entry point for access decisions
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use acp::{DocumentACP, DocumentPermission};
 use cid::Cid;
+use identity::Did;
 use libp2p::PeerId;
 use parking_lot::RwLock;
 
@@ -242,12 +238,62 @@ impl AccessMode {
     }
 }
 
+/// Registry that maps peer IDs to their decentralized identifiers (DIDs).
+///
+/// When a peer connects and provides an identity token, their DID is registered
+/// here. This allows the BlockAccessController to look up a peer's identity
+/// for document-level ACP checks.
+#[derive(Debug, Default)]
+pub struct PeerIdentityRegistry {
+    /// Map of peer ID to their DID
+    identities: RwLock<HashMap<PeerId, Did>>,
+}
+
+impl PeerIdentityRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            identities: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a peer's DID.
+    ///
+    /// Called when a peer provides a valid identity token.
+    pub fn register(&self, peer_id: PeerId, did: Did) {
+        self.identities.write().insert(peer_id, did);
+    }
+
+    /// Unregister a peer's DID.
+    ///
+    /// Called when a peer disconnects or their token expires.
+    pub fn unregister(&self, peer_id: &PeerId) {
+        self.identities.write().remove(peer_id);
+    }
+
+    /// Get the DID for a peer, if registered.
+    pub fn get_did(&self, peer_id: &PeerId) -> Option<Did> {
+        self.identities.read().get(peer_id).cloned()
+    }
+
+    /// Check if a peer has a registered identity.
+    pub fn has_identity(&self, peer_id: &PeerId) -> bool {
+        self.identities.read().contains_key(peer_id)
+    }
+}
+
 /// Block access controller that combines replicator checks with ACP.
 ///
 /// This is the main entry point for access control decisions.
 pub struct BlockAccessController {
     /// Replicator registry for fast-path checks
     replicators: Arc<ReplicatorRegistry>,
+
+    /// Peer identity registry for DID lookups
+    peer_identities: Arc<PeerIdentityRegistry>,
+
+    /// Optional document ACP for permission checks
+    document_acp: Option<Arc<dyn DocumentACP>>,
 
     /// Access control mode
     mode: AccessMode,
@@ -256,7 +302,27 @@ pub struct BlockAccessController {
 impl BlockAccessController {
     /// Create a new access controller with the specified mode.
     pub fn new(replicators: Arc<ReplicatorRegistry>, mode: AccessMode) -> Self {
-        Self { replicators, mode }
+        Self {
+            replicators,
+            peer_identities: Arc::new(PeerIdentityRegistry::new()),
+            document_acp: None,
+            mode,
+        }
+    }
+
+    /// Create a new access controller with full configuration.
+    pub fn with_acp(
+        replicators: Arc<ReplicatorRegistry>,
+        peer_identities: Arc<PeerIdentityRegistry>,
+        document_acp: Arc<dyn DocumentACP>,
+        mode: AccessMode,
+    ) -> Self {
+        Self {
+            replicators,
+            peer_identities,
+            document_acp: Some(document_acp),
+            mode,
+        }
     }
 
     /// Create a new access controller with open access (no ACP).
@@ -274,12 +340,20 @@ impl BlockAccessController {
         self.mode
     }
 
-    /// Check if a peer has access to a block.
+    /// Get the peer identity registry.
+    pub fn peer_identities(&self) -> &Arc<PeerIdentityRegistry> {
+        &self.peer_identities
+    }
+
+    /// Check if a peer has access to a block (synchronous, fast path only).
     ///
     /// This mirrors Go's `hasAccess` function logic:
     /// 1. If mode is Open → allow
     /// 2. If peer is replicator for block's collection → allow
     /// 3. If no replicator match, deny access
+    ///
+    /// Note: This method does NOT perform ACP checks. Use `has_access_acp`
+    /// for full access control including document-level permissions.
     ///
     /// # Arguments
     /// * `peer_id` - The peer requesting access
@@ -306,6 +380,65 @@ impl BlockAccessController {
 
         // Default: deny in Controlled mode when no replicator match
         false
+    }
+
+    /// Check if a peer has access to a document with full ACP checks.
+    ///
+    /// This is the full access control path that includes document-level
+    /// permission checks:
+    /// 1. If mode is Open → allow
+    /// 2. If peer is replicator for the collection → allow (fast path)
+    /// 3. Look up peer's DID from identity registry
+    /// 4. Check document-level ACP permissions → allow/deny
+    ///
+    /// # Arguments
+    /// * `peer_id` - The peer requesting access
+    /// * `permission` - The permission being requested (Read/Update/Delete)
+    /// * `policy_id` - The policy ID from the collection
+    /// * `resource_name` - The resource name from the policy
+    /// * `doc_id` - The document being accessed
+    pub async fn has_access_acp(
+        &self,
+        peer_id: &PeerId,
+        permission: DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> bool {
+        // Fast path: Open mode allows all access
+        if self.mode.is_open() {
+            return true;
+        }
+
+        // Fast path: peer is a replicator for this collection
+        if self.replicators.is_replicator(resource_name, peer_id) {
+            return true;
+        }
+
+        // No ACP configured - fall back to replicator-only mode
+        let acp = match &self.document_acp {
+            Some(acp) => acp,
+            None => return false, // Deny if no ACP and not a replicator
+        };
+
+        // Look up peer's DID
+        let did = self.peer_identities.get_did(peer_id);
+
+        // Check document-level ACP permissions
+        // Fail-closed: deny access on any error to prevent security bypass
+        acp.check_doc_access(did.as_ref(), permission, policy_id, resource_name, doc_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    peer_id = %peer_id,
+                    doc_id = %doc_id,
+                    resource_name = %resource_name,
+                    permission = %permission,
+                    error = %e,
+                    "ACP check failed, denying access"
+                );
+                false
+            })
     }
 
     /// Create a closure that can be used as a BlockAccessFn.
@@ -713,6 +846,357 @@ mod tests {
         assert_eq!(
             registry1.is_replicator("comments", &peer2),
             registry2.is_replicator("comments", &peer2)
+        );
+    }
+
+    // PeerIdentityRegistry tests
+
+    fn test_did() -> Did {
+        Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
+    }
+
+    fn test_did2() -> Did {
+        Did::new("did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR").unwrap()
+    }
+
+    #[test]
+    fn test_peer_identity_registry_register_get() {
+        let registry = PeerIdentityRegistry::new();
+        let peer = PeerId::random();
+        let did = test_did();
+
+        assert!(!registry.has_identity(&peer));
+        assert!(registry.get_did(&peer).is_none());
+
+        registry.register(peer, did.clone());
+
+        assert!(registry.has_identity(&peer));
+        assert_eq!(registry.get_did(&peer), Some(did));
+    }
+
+    #[test]
+    fn test_peer_identity_registry_unregister() {
+        let registry = PeerIdentityRegistry::new();
+        let peer = PeerId::random();
+        let did = test_did();
+
+        registry.register(peer, did);
+        assert!(registry.has_identity(&peer));
+
+        registry.unregister(&peer);
+        assert!(!registry.has_identity(&peer));
+        assert!(registry.get_did(&peer).is_none());
+    }
+
+    #[test]
+    fn test_peer_identity_registry_multiple_peers() {
+        let registry = PeerIdentityRegistry::new();
+        let peer1 = PeerId::random();
+        let peer2 = PeerId::random();
+        let did1 = test_did();
+        let did2 = test_did2();
+
+        registry.register(peer1, did1.clone());
+        registry.register(peer2, did2.clone());
+
+        assert_eq!(registry.get_did(&peer1), Some(did1));
+        assert_eq!(registry.get_did(&peer2), Some(did2));
+    }
+
+    #[test]
+    fn test_peer_identity_registry_overwrite() {
+        let registry = PeerIdentityRegistry::new();
+        let peer = PeerId::random();
+        let did1 = test_did();
+        let did2 = test_did2();
+
+        registry.register(peer, did1);
+        registry.register(peer, did2.clone());
+
+        // Second registration should overwrite
+        assert_eq!(registry.get_did(&peer), Some(did2));
+    }
+
+    // ACP-aware access tests
+
+    #[tokio::test]
+    async fn test_access_controller_acp_open_mode_allows_all() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let acp = Arc::new(acp::LocalDocumentACP::new(Arc::new(
+            acp::MemoryAcpStore::new(),
+        )));
+
+        let controller =
+            BlockAccessController::with_acp(replicators, peer_identities, acp, AccessMode::Open);
+
+        let peer = PeerId::random();
+        assert!(
+            controller
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_access_controller_acp_replicator_fast_path() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer = PeerId::random();
+        replicators.add_replicator("users", peer);
+
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let acp = Arc::new(acp::LocalDocumentACP::new(Arc::new(
+            acp::MemoryAcpStore::new(),
+        )));
+
+        let controller = BlockAccessController::with_acp(
+            replicators,
+            peer_identities,
+            acp,
+            AccessMode::Controlled,
+        );
+
+        // Replicator should have access without ACP check
+        assert!(
+            controller
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_access_controller_acp_registered_doc_owner_allowed() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let store = Arc::new(acp::MemoryAcpStore::new());
+        let acp = Arc::new(acp::LocalDocumentACP::new(store));
+
+        let peer = PeerId::random();
+        let did = test_did();
+
+        // Register peer's identity
+        peer_identities.register(peer, did.clone());
+
+        // Register document with owner
+        acp.register_doc_object(&did, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        let controller = BlockAccessController::with_acp(
+            replicators,
+            peer_identities,
+            acp,
+            AccessMode::Controlled,
+        );
+
+        // Owner should have access
+        assert!(
+            controller
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_access_controller_acp_non_owner_denied() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let store = Arc::new(acp::MemoryAcpStore::new());
+        let acp = Arc::new(acp::LocalDocumentACP::new(store));
+
+        let owner_peer = PeerId::random();
+        let stranger_peer = PeerId::random();
+        let owner_did = test_did();
+        let stranger_did = test_did2();
+
+        // Register both peers' identities
+        peer_identities.register(owner_peer, owner_did.clone());
+        peer_identities.register(stranger_peer, stranger_did);
+
+        // Register document with owner
+        acp.register_doc_object(&owner_did, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        let controller = BlockAccessController::with_acp(
+            replicators,
+            peer_identities,
+            acp,
+            AccessMode::Controlled,
+        );
+
+        // Stranger should be denied
+        assert!(
+            !controller
+                .has_access_acp(
+                    &stranger_peer,
+                    DocumentPermission::Read,
+                    "policy1",
+                    "users",
+                    "doc1"
+                )
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_access_controller_acp_anonymous_peer_denied() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let store = Arc::new(acp::MemoryAcpStore::new());
+        let acp = Arc::new(acp::LocalDocumentACP::new(store));
+
+        let owner_did = test_did();
+
+        // Register document with owner
+        acp.register_doc_object(&owner_did, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        let controller = BlockAccessController::with_acp(
+            replicators,
+            peer_identities,
+            acp,
+            AccessMode::Controlled,
+        );
+
+        // Peer without registered identity should be denied
+        let anonymous_peer = PeerId::random();
+        assert!(
+            !controller
+                .has_access_acp(
+                    &anonymous_peer,
+                    DocumentPermission::Read,
+                    "policy1",
+                    "users",
+                    "doc1"
+                )
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_access_controller_acp_unregistered_doc_allows_all() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let acp = Arc::new(acp::LocalDocumentACP::new(Arc::new(
+            acp::MemoryAcpStore::new(),
+        )));
+
+        let controller = BlockAccessController::with_acp(
+            replicators,
+            peer_identities,
+            acp,
+            AccessMode::Controlled,
+        );
+
+        // Anonymous peer can access unregistered (public) document
+        let peer = PeerId::random();
+        assert!(
+            controller
+                .has_access_acp(
+                    &peer,
+                    DocumentPermission::Read,
+                    "policy1",
+                    "users",
+                    "unregistered_doc"
+                )
+                .await
+        );
+    }
+
+    // Fail-closed behavior tests
+
+    /// Mock ACP that always returns an error for check_doc_access
+    struct FailingAcp;
+
+    #[async_trait::async_trait]
+    impl acp::DocumentACP for FailingAcp {
+        async fn register_doc_object(
+            &self,
+            _identity: &Did,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn is_doc_registered(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn check_doc_access(
+            &self,
+            _identity: Option<&Did>,
+            _permission: DocumentPermission,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn add_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target_actor: &Did,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn delete_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target_actor: &Did,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn unregister_doc_object(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_access_controller_acp_denies_on_error() {
+        let replicators = Arc::new(ReplicatorRegistry::new());
+        let peer_identities = Arc::new(PeerIdentityRegistry::new());
+        let failing_acp = Arc::new(FailingAcp);
+
+        let peer = PeerId::random();
+        let did = test_did();
+        peer_identities.register(peer, did);
+
+        let controller = BlockAccessController::with_acp(
+            replicators,
+            peer_identities,
+            failing_acp,
+            AccessMode::Controlled,
+        );
+
+        // When ACP check fails with an error, access should be DENIED (fail-closed)
+        assert!(
+            !controller
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
+                .await,
+            "fail-closed: ACP error should result in access denied"
         );
     }
 }

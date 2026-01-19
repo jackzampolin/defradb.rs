@@ -1,0 +1,26 @@
+[package]
+name = "acp"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Access Control Policy for DefraDB"
+
+[dependencies]
+defra-core = { path = "../defra-core" }
+identity = { path = "../identity" }
+schema = { path = "../schema" }
+storage = { path = "../storage" }
+
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
