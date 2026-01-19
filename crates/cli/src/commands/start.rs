@@ -387,8 +387,17 @@ impl Node {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
-                Self::init_store_and_server(store, &config, peer_keypair, user_identity.clone())
-                    .await?
+                // Use in-memory ACP store for memory datastore
+                let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+                info!("Using in-memory ACP store");
+                Self::init_store_and_server(
+                    store,
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    acp_store,
+                )
+                .await?
             }
             DatastoreType::Badger => {
                 info!(
@@ -396,8 +405,24 @@ impl Node {
                     config.data_path().display()
                 );
                 let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
-                Self::init_store_and_server(store, &config, peer_keypair, user_identity.clone())
-                    .await?
+                // Use persistent ACP store at <rootdir>/local_document_acp
+                let acp_path = config.rootdir.join("local_document_acp");
+                info!("Using persistent ACP store at {}", acp_path.display());
+                let acp_store: Arc<dyn acp::AcpStore> =
+                    Arc::new(acp::PersistentAcpStore::open(&acp_path).map_err(|e| {
+                        Error::Storage(storage::Error::Other(format!(
+                            "failed to open ACP store: {}",
+                            e
+                        )))
+                    })?);
+                Self::init_store_and_server(
+                    store,
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    acp_store,
+                )
+                .await?
             }
         };
 
@@ -516,6 +541,7 @@ impl Node {
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
+        acp_store: Arc<dyn acp::AcpStore>,
     ) -> Result<(Option<p2p::P2PHostHandle>, defra_http::Server)>
     where
         S: storage::corekv::Store + 'static,
@@ -608,9 +634,15 @@ impl Node {
                 }
             }
 
+            // Create LocalDocumentACP with the provided store
+            let document_acp: Arc<dyn acp::DocumentACP> =
+                Arc::new(acp::LocalDocumentACP::new(acp_store));
+            info!("Document ACP configured");
+
             // Create query runner with transaction and mutation support
             let mut executor = query::QueryRunner::with_registry(fetcher, collections, registry)
-                .with_mutator(mutator);
+                .with_mutator(mutator)
+                .with_acp(document_acp);
 
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {
