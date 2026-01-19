@@ -55,4 +55,6 @@ pub use router::{create_router, create_router_with_rest, AppState};
 pub use server::{Server, ServerConfig};
 
 #[cfg(any(test, feature = "test-utils"))]
-pub use mock::{FailingMockRestOperations, MockQueryExecutor, MockRestOperations};
+pub use mock::{
+    FailingMockExecutor, FailingMockRestOperations, MockQueryExecutor, MockRestOperations,
+};
