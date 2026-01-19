@@ -10,6 +10,7 @@ mod max;
 mod min;
 pub mod mutation;
 mod orderby;
+mod permission_filter;
 mod scan;
 mod select;
 mod sum;
@@ -28,6 +29,7 @@ pub use mutation::{
     UpsertNode,
 };
 pub use orderby::OrderByNode;
+pub use permission_filter::PermissionFilterNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
 pub use sum::SumNode;

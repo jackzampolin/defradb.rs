@@ -147,6 +147,14 @@ pub enum QueryError {
     /// Internal error (should not happen)
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Permission denied (ACP check failed)
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
+    /// ACP registration failed during document creation
+    #[error("ACP registration failed for document '{doc_id}': {message}")]
+    AcpRegistrationFailed { doc_id: String, message: String },
 }
 
 impl QueryError {
@@ -189,6 +197,22 @@ impl QueryError {
     /// Create an internal error
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    /// Create a permission denied error
+    pub fn permission_denied(msg: impl Into<String>) -> Self {
+        Self::PermissionDenied(msg.into())
+    }
+
+    /// Create an ACP registration failed error
+    pub fn acp_registration_failed(
+        doc_id: impl Into<String>,
+        error: impl std::fmt::Display,
+    ) -> Self {
+        Self::AcpRegistrationFailed {
+            doc_id: doc_id.into(),
+            message: error.to_string(),
+        }
     }
 }
 

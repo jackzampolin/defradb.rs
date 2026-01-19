@@ -16,6 +16,7 @@ members = [
     "crates/db",
     "crates/keyring",
     "crates/identity",
+    "crates/acp",
 ]
 
 [workspace.package]
