@@ -588,7 +588,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                         let is_registered = acp
                             .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
                             .await
-                            .unwrap_or(false);
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    doc_id = %doc_id,
+                                    error = %e,
+                                    "Failed to check document registration status - assuming unregistered"
+                                );
+                                false
+                            });
 
                         // Only register if not already registered (new document)
                         if !is_registered {

@@ -551,7 +551,12 @@ impl Node {
             Some(identity) => match identity.did() {
                 Ok(did) => Some(did),
                 Err(e) => {
-                    warn!("Failed to extract DID from user identity: {}", e);
+                    error!(
+                        error = %e,
+                        "Failed to extract DID from --identity flag. \
+                         ACP will treat all requests as anonymous. \
+                         Check that your identity key is valid and matches the --identity-key-type."
+                    );
                     None
                 }
             },

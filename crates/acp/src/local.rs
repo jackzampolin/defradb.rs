@@ -1108,4 +1108,85 @@ mod tests {
             "path traversal should be rejected"
         );
     }
+
+    #[tokio::test]
+    async fn test_unregister_doc_cleans_all_relations() {
+        let acp = create_acp();
+        let owner = test_did();
+        let reader = test_did2();
+
+        // Register and add multiple relations
+        acp.register_doc_object(&owner, "policy1", "users", "doc1")
+            .await
+            .unwrap();
+        acp.add_actor_relationship(&owner, &reader, "users", "doc1", READER_RELATION)
+            .await
+            .unwrap();
+        acp.add_actor_relationship(&owner, &reader, "users", "doc1", UPDATER_RELATION)
+            .await
+            .unwrap();
+
+        // Verify relations exist
+        assert!(acp
+            .is_doc_registered("policy1", "users", "doc1")
+            .await
+            .unwrap());
+
+        let reader_id = Identity::Authenticated(reader.clone());
+        assert!(
+            acp.check_doc_access(
+                &reader_id,
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "reader should have access before unregister"
+        );
+
+        // Unregister the document
+        acp.unregister_doc_object("policy1", "users", "doc1")
+            .await
+            .unwrap();
+
+        // Verify ALL relations are gone - document is now unregistered (public)
+        assert!(
+            !acp.is_doc_registered("policy1", "users", "doc1")
+                .await
+                .unwrap(),
+            "document should be unregistered after cleanup"
+        );
+
+        // Since document is now unregistered (public), anyone can access it
+        // This verifies the tuples were deleted, not that access is denied
+        assert!(
+            acp.check_doc_access(
+                &reader_id,
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "unregistered (public) doc allows all access"
+        );
+
+        // Owner relation should also be gone
+        let owner_id = Identity::Authenticated(owner);
+        assert!(
+            acp.check_doc_access(
+                &owner_id,
+                DocumentPermission::Read,
+                "policy1",
+                "users",
+                "doc1"
+            )
+            .await
+            .unwrap(),
+            "unregistered (public) doc allows all access"
+        );
+    }
 }

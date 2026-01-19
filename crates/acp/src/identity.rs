@@ -20,7 +20,7 @@ use identity::Did;
 ///
 /// - `Anonymous`: Can access unregistered (public) documents only
 /// - `Authenticated`: Can access owned documents and documents with granted relations
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Identity {
     /// No identity provided (anonymous/unauthenticated request).
     Anonymous,
@@ -59,6 +59,7 @@ impl Identity {
     }
 
     /// Convert to Option<&Did> for compatibility with existing APIs.
+    #[deprecated(since = "0.1.0", note = "use did() instead")]
     pub fn as_option(&self) -> Option<&Did> {
         self.did()
     }
@@ -156,6 +157,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_identity_as_option() {
         let did = test_did();
 
@@ -164,6 +166,21 @@ mod tests {
 
         let auth = Identity::authenticated(did.clone());
         assert_eq!(auth.as_option(), Some(&did));
+    }
+
+    #[test]
+    fn test_identity_hash() {
+        use std::collections::HashSet;
+
+        let did = test_did();
+        let mut set = HashSet::new();
+
+        set.insert(Identity::Anonymous);
+        set.insert(Identity::Authenticated(did.clone()));
+
+        assert!(set.contains(&Identity::Anonymous));
+        assert!(set.contains(&Identity::Authenticated(did)));
+        assert_eq!(set.len(), 2);
     }
 
     #[test]
