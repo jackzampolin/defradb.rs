@@ -28,6 +28,7 @@ pub mod mutator;
 pub mod plan;
 pub mod planner;
 pub mod query_parse;
+pub mod rest;
 pub mod runner;
 pub mod schema_gen;
 pub mod sdl_parse;
@@ -46,6 +47,7 @@ pub use plan::{
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
+pub use rest::{RestError, RestOperations, RestResult};
 pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::parse_sdl;
 pub use txn::{

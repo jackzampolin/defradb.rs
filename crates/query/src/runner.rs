@@ -146,9 +146,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     pub async fn execute_query_with_identity(
         &self,
         query: &str,
-        identity: Option<Did>,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
-        self.execute_query_internal(query, self.fetcher.as_ref(), identity)
+        self.execute_query_internal(query, self.fetcher.as_ref(), caller_identity)
             .await
     }
 
@@ -160,7 +160,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         query: &str,
         fetcher: &dyn DocFetcher,
-        identity: Option<Did>,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         let selects = parse_query(query)?;
 
@@ -168,7 +168,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         for select in selects {
             let result = self
-                .execute_select_internal(&select, fetcher, identity.clone())
+                .execute_select_internal(&select, fetcher, caller_identity.clone())
                 .await?;
             let key = select.field.output_name();
             results.insert(key.to_string(), result);
@@ -182,7 +182,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
-        identity: Option<Did>,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         // Get collection schema
         let collection = self
@@ -298,7 +298,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             plan = Box::new(PermissionFilterNode::new(
                 plan,
                 acp.clone(),
-                identity,
+                caller_identity,
                 &policy.id,
                 &policy.resource_name,
             ));
@@ -355,28 +355,28 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL mutation with identity for ACP permission checks.
     ///
     /// For collections with ACP policies:
-    /// - CREATE: Registers created documents with identity as owner (if identity provided)
-    /// - UPDATE: Checks identity has updater permission on each document
-    /// - DELETE: Checks identity has deleter permission on each document
+    /// - CREATE: Registers created documents with caller_identity as owner (if caller_identity provided)
+    /// - UPDATE: Checks caller_identity has updater permission on each document
+    /// - DELETE: Checks caller_identity has deleter permission on each document
     pub async fn execute_mutation_with_identity(
         &self,
         mutation_str: &str,
-        identity: Option<Did>,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         let mutator = self.mutator.as_ref().ok_or_else(|| {
             QueryError::execution("mutations require a mutator; call with_mutator() first")
         })?;
 
-        self.execute_mutation_internal(mutation_str, mutator.clone(), identity)
+        self.execute_mutation_internal(mutation_str, mutator.clone(), caller_identity)
             .await
     }
 
-    /// Execute a GraphQL mutation with a specific mutator and identity.
+    /// Execute a GraphQL mutation with a specific mutator and caller_identity.
     async fn execute_mutation_internal(
         &self,
         mutation_str: &str,
         mutator: Arc<dyn DocMutator>,
-        identity: Option<Did>,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations(mutation_str)?;
 
@@ -384,7 +384,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         for mutation in mutations {
             let result = self
-                .execute_single_mutation(&mutation, mutator.clone(), identity.clone())
+                .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone())
                 .await?;
             // Use collection name as key (Go behavior)
             results.insert(mutation.collection_name.clone(), result);
@@ -398,7 +398,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         mutation: &Mutation,
         mutator: Arc<dyn DocMutator>,
-        identity: Option<Did>,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         use acp::DocumentPermission;
 
@@ -429,7 +429,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                         for doc_id in doc_ids {
                             let has_permission = acp
                                 .check_doc_access(
-                                    identity.as_ref(),
+                                    caller_identity.as_ref(),
                                     DocumentPermission::Update,
                                     &policy.id,
                                     &policy.resource_name,
@@ -439,7 +439,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
                                         doc_id = %doc_id,
-                                        identity = ?identity,
+                                        caller_identity = ?caller_identity,
                                         error = %e,
                                         "ACP permission check failed during UPDATE, denying access"
                                     );
@@ -448,7 +448,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
                             if !has_permission {
                                 return Err(QueryError::permission_denied(format!(
-                                    "identity does not have update permission on document '{}'",
+                                    "caller_identity does not have update permission on document '{}'",
                                     doc_id
                                 )));
                             }
@@ -468,7 +468,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                         for doc_id in doc_ids {
                             let has_permission = acp
                                 .check_doc_access(
-                                    identity.as_ref(),
+                                    caller_identity.as_ref(),
                                     DocumentPermission::Delete,
                                     &policy.id,
                                     &policy.resource_name,
@@ -478,7 +478,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
                                         doc_id = %doc_id,
-                                        identity = ?identity,
+                                        caller_identity = ?caller_identity,
                                         error = %e,
                                         "ACP permission check failed during DELETE, denying access"
                                     );
@@ -487,7 +487,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
                             if !has_permission {
                                 return Err(QueryError::permission_denied(format!(
-                                    "identity does not have delete permission on document '{}'",
+                                    "caller_identity does not have delete permission on document '{}'",
                                     doc_id
                                 )));
                             }
@@ -572,13 +572,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         plan.close().await?;
 
-        // For CREATE/UPSERT operations with identity: register created docs with ACP
+        // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
         if matches!(
             mutation.mutation_type,
             MutationType::Create | MutationType::Upsert
         ) {
-            if let (Some(ref acp), Some(ref policy), Some(ref identity)) =
-                (&self.acp, &collection.policy, &identity)
+            if let (Some(ref acp), Some(ref policy), Some(ref identity_did)) =
+                (&self.acp, &collection.policy, &caller_identity)
             {
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
@@ -594,7 +594,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                             // CRITICAL: Registration failure must fail the mutation to prevent
                             // documents from being created without proper access control
                             acp.register_doc_object(
-                                identity,
+                                identity_did,
                                 &policy.id,
                                 &policy.resource_name,
                                 doc_id,
