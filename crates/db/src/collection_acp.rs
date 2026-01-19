@@ -28,8 +28,14 @@ pub async fn check_doc_permission(
         None => return Ok(true),
     };
 
-    acp.check_doc_access(identity, permission, &policy.id, &policy.resource_name, doc_id)
-        .await
+    acp.check_doc_access(
+        identity,
+        permission,
+        &policy.id,
+        &policy.resource_name,
+        doc_id,
+    )
+    .await
 }
 
 /// Register a document with ACP after creation.
@@ -126,7 +132,13 @@ impl AcpContext {
         collection: &CollectionVersion,
         doc_id: &str,
     ) -> acp::Result<()> {
-        register_doc_if_needed(self.acp.as_ref(), self.identity.as_ref(), collection, doc_id).await
+        register_doc_if_needed(
+            self.acp.as_ref(),
+            self.identity.as_ref(),
+            collection,
+            doc_id,
+        )
+        .await
     }
 }
 

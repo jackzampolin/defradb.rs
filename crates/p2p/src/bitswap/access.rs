@@ -927,23 +927,13 @@ mod tests {
             acp::MemoryAcpStore::new(),
         )));
 
-        let controller = BlockAccessController::with_acp(
-            replicators,
-            peer_identities,
-            acp,
-            AccessMode::Open,
-        );
+        let controller =
+            BlockAccessController::with_acp(replicators, peer_identities, acp, AccessMode::Open);
 
         let peer = PeerId::random();
         assert!(
             controller
-                .has_access_acp(
-                    &peer,
-                    DocumentPermission::Read,
-                    "policy1",
-                    "users",
-                    "doc1"
-                )
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
                 .await
         );
     }
@@ -969,13 +959,7 @@ mod tests {
         // Replicator should have access without ACP check
         assert!(
             controller
-                .has_access_acp(
-                    &peer,
-                    DocumentPermission::Read,
-                    "policy1",
-                    "users",
-                    "doc1"
-                )
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
                 .await
         );
     }
@@ -1008,13 +992,7 @@ mod tests {
         // Owner should have access
         assert!(
             controller
-                .has_access_acp(
-                    &peer,
-                    DocumentPermission::Read,
-                    "policy1",
-                    "users",
-                    "doc1"
-                )
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
                 .await
         );
     }
@@ -1207,13 +1185,7 @@ mod tests {
         // When ACP check fails with an error, access should be DENIED (fail-closed)
         assert!(
             !controller
-                .has_access_acp(
-                    &peer,
-                    DocumentPermission::Read,
-                    "policy1",
-                    "users",
-                    "doc1"
-                )
+                .has_access_acp(&peer, DocumentPermission::Read, "policy1", "users", "doc1")
                 .await,
             "fail-closed: ACP error should result in access denied"
         );

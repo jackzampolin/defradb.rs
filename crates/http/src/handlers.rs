@@ -99,8 +99,7 @@ pub async fn graphql_get(
     };
 
     // Pass identity through to executor for ACP permission checks
-    let request = QueryRequest::new(params.query)
-        .with_identity(identity.into_did());
+    let request = QueryRequest::new(params.query).with_identity(identity.into_did());
     let request = if let Some(op_name) = params.operation_name {
         request.with_operation_name(op_name)
     } else {
@@ -343,8 +342,7 @@ pub async fn graphql_transactional(
     }
 
     // Pass identity through to executor for ACP permission checks
-    let query_request = QueryRequest::new(request.query)
-        .with_identity(identity.into_did());
+    let query_request = QueryRequest::new(request.query).with_identity(identity.into_did());
     let query_request = if let Some(op_name) = request.operation_name {
         query_request.with_operation_name(op_name)
     } else {
@@ -578,7 +576,8 @@ mod tests {
             txn_id: None,
         };
 
-        let response = graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
+        let response =
+            graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -595,7 +594,8 @@ mod tests {
             txn_id: Some("mock-txn-001".to_string()),
         };
 
-        let response = graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
+        let response =
+            graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -612,7 +612,8 @@ mod tests {
             txn_id: Some("".to_string()), // Empty string is invalid
         };
 
-        let response = graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
+        let response =
+            graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
         assert!(response.has_errors());
         assert!(response.errors[0]
             .message

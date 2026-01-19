@@ -326,13 +326,8 @@ mod tests {
         let docs = make_test_docs();
         let scan = create_scan_node(docs);
 
-        let mut filter = PermissionFilterNode::new(
-            Box::new(scan),
-            acp,
-            Some(reader),
-            "policy1",
-            "users",
-        );
+        let mut filter =
+            PermissionFilterNode::new(Box::new(scan), acp, Some(reader), "policy1", "users");
 
         filter.init().await.unwrap();
         filter.start().await.unwrap();

@@ -308,7 +308,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     /// "#).await?;
     /// ```
     pub async fn execute_mutation(&self, mutation_str: &str) -> Result<JsonValue> {
-        self.execute_mutation_with_identity(mutation_str, None).await
+        self.execute_mutation_with_identity(mutation_str, None)
+            .await
     }
 
     /// Execute a GraphQL mutation with identity for ACP permission checks.
@@ -511,7 +512,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                     if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
                         // Register the document with the creator as owner
                         if let Err(e) = acp
-                            .register_doc_object(identity, &policy.id, &policy.resource_name, doc_id)
+                            .register_doc_object(
+                                identity,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
                             .await
                         {
                             tracing::warn!(
@@ -3772,8 +3778,7 @@ mod tests {
         let runner = QueryRunner::new(fetcher, vec![make_acp_collection()]).with_acp(acp);
 
         // Use the QueryRequest with identity (simulating HTTP flow)
-        let request =
-            QueryRequest::new("{ Users { _docID name } }").with_identity(Some(owner));
+        let request = QueryRequest::new("{ Users { _docID name } }").with_identity(Some(owner));
         let response = runner.execute(request).await;
 
         assert!(response.errors.is_empty());
@@ -4194,9 +4199,7 @@ mod tests {
             r#"mutation {{ update_Users(docIDs: ["{}"], input: {{name: "Hacked"}}) {{ _docID }} }}"#,
             doc_id
         );
-        let result = runner
-            .execute_mutation_with_identity(&mutation, None)
-            .await;
+        let result = runner.execute_mutation_with_identity(&mutation, None).await;
 
         assert!(
             result.is_err(),

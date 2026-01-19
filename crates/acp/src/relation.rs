@@ -47,7 +47,10 @@ pub struct RelationTuple {
 /// Rejects empty strings and strings containing path separators.
 fn validate_path_component(value: &str, field_name: &str) -> Result<()> {
     if value.is_empty() {
-        return Err(Error::InvalidPolicy(format!("{} cannot be empty", field_name)));
+        return Err(Error::InvalidPolicy(format!(
+            "{} cannot be empty",
+            field_name
+        )));
     }
     if value.contains('/') || value.contains('\\') {
         return Err(Error::InvalidPolicy(format!(
@@ -126,7 +129,11 @@ impl RelationTuple {
     }
 
     /// Create an owner relation tuple.
-    pub fn owner(subject: Did, collection_id: impl Into<String>, doc_id: impl Into<String>) -> Self {
+    pub fn owner(
+        subject: Did,
+        collection_id: impl Into<String>,
+        doc_id: impl Into<String>,
+    ) -> Self {
         Self::new(subject, OWNER_RELATION, collection_id, doc_id)
     }
 
@@ -157,7 +164,11 @@ impl RelationTuple {
     /// Validate a relation prefix.
     ///
     /// Returns an error if any component contains path separators.
-    pub fn validate_relation_prefix(collection_id: &str, doc_id: &str, relation: &str) -> Result<()> {
+    pub fn validate_relation_prefix(
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
+    ) -> Result<()> {
         validate_path_component(collection_id, "collection_id")?;
         validate_path_component(doc_id, "doc_id")?;
         validate_path_component(relation, "relation")?;

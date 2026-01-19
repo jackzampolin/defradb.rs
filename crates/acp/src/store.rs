@@ -24,7 +24,8 @@ pub trait AcpStore: Send + Sync {
     async fn has_tuple(&self, tuple: &RelationTuple) -> Result<bool>;
 
     /// Get all tuples for a document.
-    async fn get_doc_tuples(&self, collection_id: &str, doc_id: &str) -> Result<Vec<RelationTuple>>;
+    async fn get_doc_tuples(&self, collection_id: &str, doc_id: &str)
+        -> Result<Vec<RelationTuple>>;
 
     /// Get all subjects with a specific relation to a document.
     async fn get_relation_subjects(

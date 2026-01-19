@@ -12,7 +12,9 @@ use std::sync::Arc;
 use crate::dac::DocumentACP;
 use crate::error::{Error, Result};
 use crate::permission::DocumentPermission;
-use crate::relation::{RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION};
+use crate::relation::{
+    RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
+};
 use crate::store::AcpStore;
 
 /// Known valid relation names that can be added.
@@ -40,12 +42,7 @@ impl LocalDocumentACP {
     }
 
     /// Check if the subject is the owner of the document.
-    async fn is_owner(
-        &self,
-        subject: &Did,
-        collection_id: &str,
-        doc_id: &str,
-    ) -> Result<bool> {
+    async fn is_owner(&self, subject: &Did, collection_id: &str, doc_id: &str) -> Result<bool> {
         let tuple = RelationTuple::owner(subject.clone(), collection_id, doc_id);
         self.store.has_tuple(&tuple).await
     }
@@ -124,17 +121,25 @@ impl DocumentACP for LocalDocumentACP {
         match permission {
             DocumentPermission::Read => {
                 // reader OR updater OR deleter grants read (implied read)
-                Ok(self.has_relation(identity, resource_name, doc_id, READER_RELATION).await?
-                    || self.has_relation(identity, resource_name, doc_id, UPDATER_RELATION).await?
-                    || self.has_relation(identity, resource_name, doc_id, DELETER_RELATION).await?)
+                Ok(self
+                    .has_relation(identity, resource_name, doc_id, READER_RELATION)
+                    .await?
+                    || self
+                        .has_relation(identity, resource_name, doc_id, UPDATER_RELATION)
+                        .await?
+                    || self
+                        .has_relation(identity, resource_name, doc_id, DELETER_RELATION)
+                        .await?)
             }
             DocumentPermission::Update => {
                 // updater grants update
-                self.has_relation(identity, resource_name, doc_id, UPDATER_RELATION).await
+                self.has_relation(identity, resource_name, doc_id, UPDATER_RELATION)
+                    .await
             }
             DocumentPermission::Delete => {
                 // deleter grants delete
-                self.has_relation(identity, resource_name, doc_id, DELETER_RELATION).await
+                self.has_relation(identity, resource_name, doc_id, DELETER_RELATION)
+                    .await
             }
         }
     }
@@ -252,7 +257,11 @@ impl AcpStore for MemoryAcpStore {
         Ok(self.tuples.read().contains_key(&tuple.storage_key()))
     }
 
-    async fn get_doc_tuples(&self, collection_id: &str, doc_id: &str) -> Result<Vec<RelationTuple>> {
+    async fn get_doc_tuples(
+        &self,
+        collection_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<RelationTuple>> {
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         let tuples = self
             .tuples

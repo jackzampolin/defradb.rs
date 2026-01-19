@@ -112,13 +112,7 @@ where
     fn from_request_parts<'life0, 'life1, 'async_trait>(
         parts: &'life0 mut Parts,
         _state: &'life1 S,
-    ) -> std::pin::Pin<
-        Box<
-            dyn Future<Output = Result<Self, Self::Rejection>>
-                + Send
-                + 'async_trait,
-        >,
-    >
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
         'life1: 'async_trait,
@@ -200,13 +194,7 @@ where
     fn from_request_parts<'life0, 'life1, 'async_trait>(
         parts: &'life0 mut Parts,
         _state: &'life1 S,
-    ) -> std::pin::Pin<
-        Box<
-            dyn Future<Output = Result<Self, Self::Rejection>>
-                + Send
-                + 'async_trait,
-        >,
-    >
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
         'life1: 'async_trait,
