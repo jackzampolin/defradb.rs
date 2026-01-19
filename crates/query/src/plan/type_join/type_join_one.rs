@@ -100,6 +100,11 @@ impl TypeJoinOne {
         }
     }
 
+    /// Returns the direction of this join.
+    pub fn direction(&self) -> &JoinDirection {
+        &self.direction
+    }
+
     /// Extract the foreign key value from the parent document.
     ///
     /// For primary joins, extracts the FK field value.
