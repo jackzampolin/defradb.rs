@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use query::rest::RestError;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -44,6 +45,25 @@ impl IntoResponse for HttpError {
         };
 
         (status, Json(ErrorResponse { error: message })).into_response()
+    }
+}
+
+impl From<RestError> for HttpError {
+    fn from(err: RestError) -> Self {
+        match err {
+            RestError::CollectionNotFound(name) => {
+                HttpError::NotFound(format!("Collection '{}' not found", name))
+            }
+            RestError::DocumentNotFound(id) => {
+                HttpError::NotFound(format!("Document '{}' not found", id))
+            }
+            RestError::InvalidDocId(id) => {
+                HttpError::BadRequest(format!("Invalid document ID: {}", id))
+            }
+            RestError::InvalidInput(msg) => HttpError::BadRequest(msg),
+            RestError::PermissionDenied(msg) => HttpError::Forbidden(msg),
+            RestError::Internal(msg) => HttpError::Internal(msg),
+        }
     }
 }
 

@@ -41,23 +41,7 @@ pub async fn get_document(
                 error = %e,
                 "Failed to get document"
             );
-            match e {
-                query::rest::RestError::CollectionNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Collection '{}' not found",
-                    collection
-                ))),
-                query::rest::RestError::InvalidDocId(_) => Err(HttpError::BadRequest(format!(
-                    "Invalid document ID: {}",
-                    doc_id
-                ))),
-                query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
-                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
-                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
-                query::rest::RestError::DocumentNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Document '{}' not found in collection '{}'",
-                    doc_id, collection
-                ))),
-            }
+            Err(e.into())
         }
     }
 }
@@ -108,23 +92,7 @@ pub async fn create_document(
         }
         Err(e) => {
             tracing::warn!(collection = %collection, error = %e, "Failed to create document");
-            match e {
-                query::rest::RestError::CollectionNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Collection '{}' not found",
-                    collection
-                ))),
-                query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
-                query::rest::RestError::InvalidDocId(msg) => Err(HttpError::BadRequest(format!(
-                    "Invalid document ID: {}",
-                    msg
-                ))),
-                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
-                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
-                query::rest::RestError::DocumentNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Document not found in collection '{}'",
-                    collection
-                ))),
-            }
+            Err(e.into())
         }
     }
 }
@@ -158,23 +126,7 @@ pub async fn update_document(
                 error = %e,
                 "Failed to update document"
             );
-            match e {
-                query::rest::RestError::CollectionNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Collection '{}' not found",
-                    collection
-                ))),
-                query::rest::RestError::DocumentNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Document '{}' not found in collection '{}'",
-                    doc_id, collection
-                ))),
-                query::rest::RestError::InvalidDocId(_) => Err(HttpError::BadRequest(format!(
-                    "Invalid document ID: {}",
-                    doc_id
-                ))),
-                query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
-                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
-                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
-            }
+            Err(e.into())
         }
     }
 }
@@ -209,23 +161,7 @@ pub async fn delete_document(
                 error = %e,
                 "Failed to delete document"
             );
-            match e {
-                query::rest::RestError::CollectionNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Collection '{}' not found",
-                    collection
-                ))),
-                query::rest::RestError::InvalidDocId(_) => Err(HttpError::BadRequest(format!(
-                    "Invalid document ID: {}",
-                    doc_id
-                ))),
-                query::rest::RestError::InvalidInput(msg) => Err(HttpError::BadRequest(msg)),
-                query::rest::RestError::PermissionDenied(msg) => Err(HttpError::Forbidden(msg)),
-                query::rest::RestError::Internal(msg) => Err(HttpError::Internal(msg)),
-                query::rest::RestError::DocumentNotFound(_) => Err(HttpError::NotFound(format!(
-                    "Document '{}' not found in collection '{}'",
-                    doc_id, collection
-                ))),
-            }
+            Err(e.into())
         }
     }
 }

@@ -144,7 +144,6 @@ pub trait RestOperations: Send + Sync {
     /// Get all document IDs in a collection.
     ///
     /// Returns a list of document IDs (bae-...) for all documents in the collection.
-    /// For large collections, consider implementing pagination in the future.
     async fn get_collection_doc_ids(&self, collection: &str) -> RestResult<Vec<String>>;
 
     /// Get a single document by ID.
