@@ -51,6 +51,11 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     mutator: Option<Arc<dyn DocMutator>>,
     /// Document ACP for permission checks (optional)
     acp: Option<Arc<dyn DocumentACP>>,
+    /// Default identity for ACP permission checks.
+    ///
+    /// Used when a request doesn't include an explicit identity (e.g., no bearer token).
+    /// Typically set from the `--identity` CLI flag.
+    default_identity: Option<Did>,
 }
 
 impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
@@ -69,6 +74,7 @@ impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
             registry: Arc::new(NoOpTransactionRegistry),
             mutator: None,
             acp: None,
+            default_identity: None,
         }
     }
 }
@@ -86,6 +92,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             registry: Arc::new(registry),
             mutator: None,
             acp: None,
+            default_identity: None,
         }
     }
 
@@ -104,6 +111,29 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         self.acp = Some(acp);
         self
+    }
+
+    /// Set the default identity for ACP permission checks.
+    ///
+    /// This identity is used when a request doesn't include an explicit identity
+    /// (e.g., no `Authorization: Bearer <token>` header). Typically set from
+    /// the `--identity` CLI flag.
+    ///
+    /// When a request DOES include an identity, that identity takes precedence
+    /// over the default.
+    pub fn with_default_identity(mut self, identity: Did) -> Self {
+        self.default_identity = Some(identity);
+        self
+    }
+
+    /// Resolve the effective identity for a request.
+    ///
+    /// Priority:
+    /// 1. Request-provided identity (from bearer token)
+    /// 2. Default identity (from --identity CLI flag)
+    /// 3. Anonymous (None)
+    fn resolve_identity(&self, request_identity: Option<Did>) -> Option<Did> {
+        request_identity.or_else(|| self.default_identity.clone())
     }
 
     /// Execute a GraphQL query and return JSON results.
@@ -171,7 +201,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         if has_nested {
             // Use the Planner for queries with nested selections (joins)
-            self.execute_nested_select_with_planner(select, fetcher)
+            // Note: ACP filtering for nested queries is not yet implemented
+            self.execute_nested_select_with_planner(select, fetcher, identity)
                 .await
         } else {
             // Use the optimized path for simple queries
@@ -184,10 +215,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// The Planner builds a proper join plan with TypeJoinOne/TypeJoinMany nodes.
     /// ScanNodes fetch their own data via the attached fetcher.
+    ///
+    /// Note: ACP filtering for nested queries is not yet implemented.
+    /// The identity parameter is accepted for future use.
     async fn execute_nested_select_with_planner(
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
+        _identity: Option<Did>,
     ) -> Result<JsonValue> {
         // Create a fetcher wrapper that can be shared across plan nodes
         // We need to wrap the reference in an Arc-compatible struct
@@ -994,15 +1029,18 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
             }
         };
 
+        // Resolve effective identity: request identity takes precedence over default
+        let identity = self.resolve_identity(request.identity);
+
         // Route to appropriate handler based on operation type
         // Pass identity through for ACP permission checks
         let result = match parsed {
             ParsedOperation::Query(_) => {
-                self.execute_query_with_identity(&request.query, request.identity)
+                self.execute_query_with_identity(&request.query, identity)
                     .await
             }
             ParsedOperation::Mutation(_) => {
-                self.execute_mutation_with_identity(&request.query, request.identity)
+                self.execute_mutation_with_identity(&request.query, identity)
                     .await
             }
         };
@@ -1052,10 +1090,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
             }
         };
 
+        // Resolve effective identity: request identity takes precedence over default
+        let identity = self.resolve_identity(request.identity);
+
         // Get the transaction-scoped fetcher and execute with identity for ACP
         let fetcher = txn_ctx.doc_fetcher();
         match self
-            .execute_query_internal(&request.query, fetcher.as_ref(), request.identity)
+            .execute_query_internal(&request.query, fetcher.as_ref(), identity)
             .await
         {
             Ok(data) => QueryResponse {
