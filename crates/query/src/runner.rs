@@ -1006,6 +1006,23 @@ impl DocFetcher for FetcherWrapper {
                 ))
             })
     }
+
+    async fn get_by_field_value(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        value: &str,
+    ) -> Result<Vec<Document>> {
+        self.get_fetcher()
+            .get_by_field_value(collection_name, field_name, value)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (field lookup {}='{}'): {}",
+                    collection_name, field_name, value, e
+                ))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -1155,6 +1172,15 @@ mod tests {
             _collection_name: &str,
             _doc_ids: &[String],
         ) -> Result<FetchByIdsResult> {
+            Err(QueryError::execution("storage failure"))
+        }
+
+        async fn get_by_field_value(
+            &self,
+            _collection_name: &str,
+            _field_name: &str,
+            _value: &str,
+        ) -> Result<Vec<Document>> {
             Err(QueryError::execution("storage failure"))
         }
     }

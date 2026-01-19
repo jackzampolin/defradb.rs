@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use tracing::warn;
 
 use crate::document::DocumentMapping;
@@ -15,13 +16,18 @@ use super::{JoinDirection, JoinSide};
 /// **Primary side join flow** (when parent has the FK, e.g., `Book.author`):
 /// 1. Parent plan yields a document (e.g., Book with `author_id: "bae-123"`)
 /// 2. Extract the FK value from the relation's ID field (e.g., `author_id`)
-/// 3. Scan child collection for document where `_docID` matches the FK value
+/// 3. Lookup child document where `_docID` matches the FK value
 /// 4. Merge the child document into the parent under the relation field key
 ///
 /// **Secondary/inverted side join flow** (when parent lacks FK, e.g., `Author.book`):
 /// 1. Parent plan yields a document (e.g., Author with `_docID: "bae-123"`)
-/// 2. Scan child collection for docs where their FK matches parent's `_docID`
+/// 2. Lookup child document where their FK matches parent's `_docID`
 /// 3. Merge the first matching child document
+///
+/// # Optimization
+///
+/// Child documents are pre-loaded and indexed during `init()` to avoid
+/// O(N * M) nested loop scans. Lookups are O(1) via HashMap.
 pub struct TypeJoinOne {
     /// Parent side of the join (outer loop)
     parent_side: JoinSide,
@@ -29,7 +35,7 @@ pub struct TypeJoinOne {
     child_side: JoinSide,
     /// The parent plan node
     parent_plan: Box<dyn PlanNode>,
-    /// The child plan node (re-initialized for each lookup)
+    /// The child plan node (scanned once during init)
     child_plan: Box<dyn PlanNode>,
     /// Document mapping for this join
     document_mapping: DocumentMapping,
@@ -39,6 +45,10 @@ pub struct TypeJoinOne {
     pub(crate) direction: JoinDirection,
     /// Whether initialized
     initialized: bool,
+    /// Cached child documents indexed by lookup key.
+    /// For Primary joins: key is child's _docID
+    /// For Inverted joins: key is child's FK field value
+    child_cache: HashMap<String, Doc>,
 }
 
 impl std::fmt::Debug for TypeJoinOne {
@@ -86,6 +96,7 @@ impl TypeJoinOne {
             current_doc: Doc::default(),
             direction,
             initialized: false,
+            child_cache: HashMap::new(),
         }
     }
 
@@ -121,50 +132,44 @@ impl TypeJoinOne {
         }
     }
 
-    /// Find child document by FK lookup.
-    async fn find_child_doc(&mut self, fk: &str) -> Result<Option<Doc>> {
+    /// Find child document by FK lookup using the pre-built cache.
+    fn find_child_doc(&self, fk: &str) -> Option<Doc> {
+        self.child_cache.get(fk).map(|doc| doc.deep_clone())
+    }
+
+    /// Build the child cache by scanning child_plan once.
+    /// For Primary joins: index by child's _docID
+    /// For Inverted joins: index by child's FK field value
+    async fn build_child_cache(&mut self) -> Result<()> {
         self.child_plan.init().await?;
         self.child_plan.start().await?;
 
-        while self.child_plan.next().await? {
-            let child_doc = self.child_plan.value();
+        let child_fk_idx = self.child_side.relation_id_field_index();
 
-            let is_match = match &self.direction {
-                JoinDirection::Primary { .. } => child_doc.doc_id() == Some(fk),
-                JoinDirection::Inverted => self.child_fk_matches(child_doc, fk),
+        while self.child_plan.next().await? {
+            let child_doc = self.child_plan.value().deep_clone();
+
+            let key = match &self.direction {
+                JoinDirection::Primary { .. } => {
+                    // Index by child's _docID for FK → doc lookup
+                    child_doc.doc_id().map(String::from)
+                }
+                JoinDirection::Inverted => {
+                    // Index by child's FK field value for reverse lookup
+                    child_fk_idx.and_then(|idx| {
+                        child_doc.get(idx).and_then(|v| v.as_str().map(String::from))
+                    })
+                }
             };
 
-            if is_match {
-                return Ok(Some(child_doc.deep_clone()));
+            if let Some(k) = key {
+                // For one-to-one, we only keep the first match
+                self.child_cache.entry(k).or_insert(child_doc);
             }
         }
 
-        Ok(None)
-    }
-
-    /// Check if child document's FK matches the given value (for inverted joins).
-    fn child_fk_matches(&self, child_doc: &Doc, expected_fk: &str) -> bool {
-        let child_fk_idx = match self.child_side.relation_id_field_index() {
-            Some(idx) => idx,
-            None => return false,
-        };
-
-        let child_fk_value = child_doc.get(child_fk_idx);
-
-        // Log type mismatch for non-null, non-string FK values
-        if let Some(v) = child_fk_value {
-            if !v.is_null() && !v.is_string() {
-                warn!(
-                    child_collection = %self.child_side.collection().name,
-                    relation_field = %self.child_side.relation_field().name,
-                    fk_index = child_fk_idx,
-                    actual_type = ?v,
-                    "Child FK field has unexpected type, expected string or null"
-                );
-            }
-        }
-
-        child_fk_value.and_then(|v| v.as_str()) == Some(expected_fk)
+        self.child_plan.close().await?;
+        Ok(())
     }
 
     /// Merge child document into parent at the relation field index.
@@ -190,6 +195,9 @@ impl TypeJoinOne {
 #[async_trait]
 impl PlanNode for TypeJoinOne {
     async fn init(&mut self) -> Result<()> {
+        // Build child cache first (scans child_plan once)
+        self.build_child_cache().await?;
+        // Then init parent plan
         self.parent_plan.init().await?;
         self.initialized = true;
         Ok(())
@@ -212,12 +220,10 @@ impl PlanNode for TypeJoinOne {
 
         let mut parent_doc = self.parent_plan.value().deep_clone();
 
-        // Extract FK and lookup child
-        let child_doc = if let Some(fk) = self.extract_fk(&parent_doc) {
-            self.find_child_doc(&fk).await?
-        } else {
-            None
-        };
+        // Extract FK and lookup child in cache (O(1) lookup)
+        let child_doc = self
+            .extract_fk(&parent_doc)
+            .and_then(|fk| self.find_child_doc(&fk));
 
         // Merge child into parent
         self.merge_child(&mut parent_doc, child_doc);
@@ -232,7 +238,8 @@ impl PlanNode for TypeJoinOne {
 
     async fn close(&mut self) -> Result<()> {
         self.parent_plan.close().await?;
-        self.child_plan.close().await?;
+        // child_plan was already closed in build_child_cache()
+        self.child_cache.clear();
         self.initialized = false;
         Ok(())
     }

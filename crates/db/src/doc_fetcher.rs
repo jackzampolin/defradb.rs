@@ -125,4 +125,33 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
 
         Ok(FetchByIdsResult::partial(docs, missing_ids))
     }
+
+    async fn get_by_field_value(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        value: &str,
+    ) -> query::error::Result<Vec<Document>> {
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        // Get all documents and filter by field value.
+        // This is a fallback implementation - index-based lookup can be added later.
+        let all_docs = collection
+            .get_all_with_datastore(&datastore)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        let matching_docs: Vec<Document> = all_docs
+            .into_iter()
+            .filter(|doc| {
+                doc.get(field_name)
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == value)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        Ok(matching_docs)
+    }
 }
