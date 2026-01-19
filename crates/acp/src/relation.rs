@@ -178,15 +178,52 @@ impl RelationTuple {
     /// Get the prefix for scanning all relations of a document.
     ///
     /// Key format: `/acp/{collection_id}/{doc_id}/`
+    ///
+    /// # Security
+    ///
+    /// This method constructs a storage key from the inputs. Callers MUST validate
+    /// inputs using [`Self::validate_prefix`] before calling this method with
+    /// untrusted input to prevent path traversal attacks.
+    ///
+    /// For trusted internal calls where inputs are known to be safe, validation
+    /// can be skipped.
     pub fn doc_prefix(collection_id: &str, doc_id: &str) -> String {
         format!("/acp/{}/{}/", collection_id, doc_id)
+    }
+
+    /// Get the prefix for scanning all relations of a document with validation.
+    ///
+    /// This is the safe version that validates inputs before constructing the prefix.
+    /// Use this when constructing prefixes from potentially untrusted input.
+    pub fn doc_prefix_validated(collection_id: &str, doc_id: &str) -> Result<String> {
+        Self::validate_prefix(collection_id, doc_id)?;
+        Ok(Self::doc_prefix(collection_id, doc_id))
     }
 
     /// Get the prefix for scanning all tuples with a specific relation.
     ///
     /// Key format: `/acp/{collection_id}/{doc_id}/{relation}/`
+    ///
+    /// # Security
+    ///
+    /// This method constructs a storage key from the inputs. Callers MUST validate
+    /// inputs using [`Self::validate_relation_prefix`] before calling this method
+    /// with untrusted input to prevent path traversal attacks.
     pub fn relation_prefix(collection_id: &str, doc_id: &str, relation: &str) -> String {
         format!("/acp/{}/{}/{}/", collection_id, doc_id, relation)
+    }
+
+    /// Get the prefix for scanning tuples with a specific relation, with validation.
+    ///
+    /// This is the safe version that validates inputs before constructing the prefix.
+    /// Use this when constructing prefixes from potentially untrusted input.
+    pub fn relation_prefix_validated(
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
+    ) -> Result<String> {
+        Self::validate_relation_prefix(collection_id, doc_id, relation)?;
+        Ok(Self::relation_prefix(collection_id, doc_id, relation))
     }
 }
 

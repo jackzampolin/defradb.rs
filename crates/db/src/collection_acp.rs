@@ -65,13 +65,13 @@ pub async fn register_doc_if_needed(
 /// Clean up ACP relations when deleting a document.
 ///
 /// This should be called when deleting a document to remove all
-/// associated relation tuples from the ACP store.
+/// associated relation tuples from the ACP store (owner, reader, updater, deleter).
 pub async fn unregister_doc_if_needed(
     acp: &dyn DocumentACP,
     collection: &CollectionVersion,
     doc_id: &str,
 ) -> acp::Result<()> {
-    // Only need to check if document is registered if collection has policy
+    // Only need to clean up if collection has policy
     let policy = match &collection.policy {
         Some(p) => p,
         None => return Ok(()), // No policy = no ACP tuples to clean up
@@ -85,10 +85,9 @@ pub async fn unregister_doc_if_needed(
         return Ok(()); // Not registered, nothing to clean up
     }
 
-    // The AcpStore's delete_doc_tuples will be called by the LocalDocumentACP
-    // For now, we just need to verify the document can be deleted
-    // The actual tuple cleanup is handled by the delete mutation
-    Ok(())
+    // Delete all ACP tuples for this document
+    acp.unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
+        .await
 }
 
 /// ACP context for mutation operations.

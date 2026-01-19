@@ -405,7 +405,7 @@ mod tests {
         };
         let request = QueryRequest::new("{ users { name } }");
 
-        let response = graphql(State(state), ExtractIdentity(None), Json(request)).await;
+        let response = graphql(State(state), ExtractIdentity::anonymous(), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -421,7 +421,7 @@ mod tests {
             variables: None,
         };
 
-        let response = graphql_get(State(state), ExtractIdentity(None), Query(params)).await;
+        let response = graphql_get(State(state), ExtractIdentity::anonymous(), Query(params)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -437,7 +437,7 @@ mod tests {
             variables: Some(json!({"limit": 10}).to_string()),
         };
 
-        let response = graphql_get(State(state), ExtractIdentity(None), Query(params)).await;
+        let response = graphql_get(State(state), ExtractIdentity::anonymous(), Query(params)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -453,7 +453,7 @@ mod tests {
             variables: Some("{invalid json".to_string()),
         };
 
-        let response = graphql_get(State(state), ExtractIdentity(None), Query(params)).await;
+        let response = graphql_get(State(state), ExtractIdentity::anonymous(), Query(params)).await;
         assert!(response.has_errors());
         assert!(response.data.is_none());
         assert!(response.errors[0].message.contains("invalid JSON"));
@@ -577,7 +577,7 @@ mod tests {
         };
 
         let response =
-            graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
+            graphql_transactional(State(state), ExtractIdentity::anonymous(), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -595,7 +595,7 @@ mod tests {
         };
 
         let response =
-            graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
+            graphql_transactional(State(state), ExtractIdentity::anonymous(), Json(request)).await;
         assert!(response.data.is_some());
         assert!(!response.has_errors());
     }
@@ -613,7 +613,7 @@ mod tests {
         };
 
         let response =
-            graphql_transactional(State(state), ExtractIdentity(None), Json(request)).await;
+            graphql_transactional(State(state), ExtractIdentity::anonymous(), Json(request)).await;
         assert!(response.has_errors());
         assert!(response.errors[0]
             .message

@@ -113,4 +113,20 @@ pub trait DocumentACP: Send + Sync {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool>;
+
+    /// Unregister a document, removing all ACP tuples.
+    ///
+    /// This should be called when a document is deleted to clean up
+    /// all associated relation tuples (owner, reader, updater, etc.).
+    ///
+    /// # Arguments
+    /// * `policy_id` - The policy ID from the collection
+    /// * `resource_name` - The resource name from the policy
+    /// * `doc_id` - The document ID being unregistered
+    async fn unregister_doc_object(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<()>;
 }

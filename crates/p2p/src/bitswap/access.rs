@@ -1163,6 +1163,15 @@ mod tests {
         ) -> acp::Result<bool> {
             Err(acp::Error::Storage("simulated storage failure".to_string()))
         }
+
+        async fn unregister_doc_object(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
     }
 
     #[tokio::test]

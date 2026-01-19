@@ -217,6 +217,16 @@ impl DocumentACP for LocalDocumentACP {
         self.store.delete_tuple(&tuple).await?;
         Ok(true)
     }
+
+    async fn unregister_doc_object(
+        &self,
+        _policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<()> {
+        // Delete all tuples for this document (owner, reader, updater, deleter, etc.)
+        self.store.delete_doc_tuples(resource_name, doc_id).await
+    }
 }
 
 /// In-memory ACP store for local use and testing.

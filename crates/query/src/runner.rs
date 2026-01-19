@@ -269,6 +269,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 &policy.id,
                 &policy.resource_name,
             ));
+        } else if collection.policy.is_some() && self.acp.is_none() {
+            // Collection has an ACP policy but ACP is not configured on this runner
+            // This means ACP enforcement is disabled - all documents will be accessible
+            tracing::warn!(
+                collection = %collection.name,
+                "Collection has ACP policy but QueryRunner has no ACP configured - ACP enforcement is DISABLED"
+            );
         }
 
         // Execute the plan and collect results
@@ -396,7 +403,15 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                     doc_id,
                                 )
                                 .await
-                                .unwrap_or(false); // Fail-closed on errors
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!(
+                                        doc_id = %doc_id,
+                                        identity = ?identity,
+                                        error = %e,
+                                        "ACP permission check failed during UPDATE, denying access"
+                                    );
+                                    false // Fail-closed on errors
+                                });
 
                             if !has_permission {
                                 return Err(QueryError::permission_denied(format!(
@@ -405,6 +420,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 )));
                             }
                         }
+                    } else {
+                        // No doc_ids to check - this means the mutation has no targets
+                        // Log this as it may indicate a logic issue
+                        tracing::debug!(
+                            collection = %mutation.collection_name,
+                            "UPDATE mutation has no doc_ids for ACP permission check - no documents will be affected"
+                        );
                     }
                 }
                 MutationType::Delete => {
@@ -420,7 +442,15 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                     doc_id,
                                 )
                                 .await
-                                .unwrap_or(false); // Fail-closed on errors
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!(
+                                        doc_id = %doc_id,
+                                        identity = ?identity,
+                                        error = %e,
+                                        "ACP permission check failed during DELETE, denying access"
+                                    );
+                                    false // Fail-closed on errors
+                                });
 
                             if !has_permission {
                                 return Err(QueryError::permission_denied(format!(
@@ -429,6 +459,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 )));
                             }
                         }
+                    } else {
+                        // No doc_ids to check - this means the mutation has no targets
+                        tracing::debug!(
+                            collection = %mutation.collection_name,
+                            "DELETE mutation has no doc_ids for ACP permission check - no documents will be affected"
+                        );
                     }
                 }
                 MutationType::Create => {
@@ -503,28 +539,42 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         plan.close().await?;
 
-        // For CREATE operations with identity: register created docs with ACP
-        if mutation.mutation_type == MutationType::Create {
+        // For CREATE/UPSERT operations with identity: register created docs with ACP
+        if matches!(
+            mutation.mutation_type,
+            MutationType::Create | MutationType::Upsert
+        ) {
             if let (Some(ref acp), Some(ref policy), Some(ref identity)) =
                 (&self.acp, &collection.policy, &identity)
             {
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
-                        // Register the document with the creator as owner
-                        if let Err(e) = acp
-                            .register_doc_object(
+                        // Check if document is already registered (for upsert of existing doc)
+                        let is_registered = acp
+                            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
+                            .await
+                            .unwrap_or(false);
+
+                        // Only register if not already registered (new document)
+                        if !is_registered {
+                            // Register the document with the creator as owner
+                            // CRITICAL: Registration failure must fail the mutation to prevent
+                            // documents from being created without proper access control
+                            acp.register_doc_object(
                                 identity,
                                 &policy.id,
                                 &policy.resource_name,
                                 doc_id,
                             )
                             .await
-                        {
-                            tracing::warn!(
-                                doc_id = %doc_id,
-                                error = %e,
-                                "Failed to register document with ACP - document will be public"
-                            );
+                            .map_err(|e| {
+                                tracing::error!(
+                                    doc_id = %doc_id,
+                                    error = %e,
+                                    "Failed to register document with ACP - aborting mutation"
+                                );
+                                QueryError::acp_registration_failed(doc_id, e)
+                            })?;
                         }
                     }
                 }

@@ -386,4 +386,135 @@ mod tests {
         assert_eq!(seen_docs.len(), 1);
         assert!(seen_docs.contains(&"doc3".to_string()));
     }
+
+    // Test fail-closed behavior: when ACP errors occur, documents should be denied
+
+    /// A DocumentACP implementation that always fails
+    struct FailingAcp;
+
+    #[async_trait::async_trait]
+    impl acp::DocumentACP for FailingAcp {
+        async fn register_doc_object(
+            &self,
+            _identity: &Did,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn is_doc_registered(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn check_doc_access(
+            &self,
+            _identity: Option<&Did>,
+            _permission: acp::DocumentPermission,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn add_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target: &Did,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn delete_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target: &Did,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+        ) -> acp::Result<bool> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+
+        async fn unregister_doc_object(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Err(acp::Error::Storage("simulated storage failure".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_permission_filter_fail_closed_on_acp_error() {
+        // Create a FailingAcp that always returns errors
+        let acp = Arc::new(FailingAcp);
+        let docs = make_test_docs();
+        let scan = create_scan_node(docs);
+
+        let mut filter = PermissionFilterNode::new(
+            Box::new(scan),
+            acp,
+            Some(test_did()), // Even with identity
+            "policy1",
+            "users",
+        );
+
+        filter.init().await.unwrap();
+        filter.start().await.unwrap();
+
+        // All docs should be DENIED because the ACP check fails (fail-closed behavior)
+        let mut count = 0;
+        while filter.next().await.unwrap() {
+            count += 1;
+        }
+
+        // CRITICAL: No documents should pass through when ACP errors occur
+        assert_eq!(
+            count, 0,
+            "fail-closed: ACP errors should result in all documents being denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permission_filter_fail_closed_anonymous_with_error() {
+        // Create a FailingAcp that always returns errors
+        let acp = Arc::new(FailingAcp);
+        let docs = make_test_docs();
+        let scan = create_scan_node(docs);
+
+        let mut filter = PermissionFilterNode::new(
+            Box::new(scan),
+            acp,
+            None, // Anonymous
+            "policy1",
+            "users",
+        );
+
+        filter.init().await.unwrap();
+        filter.start().await.unwrap();
+
+        // All docs should be DENIED because the ACP check fails
+        let mut count = 0;
+        while filter.next().await.unwrap() {
+            count += 1;
+        }
+
+        // CRITICAL: No documents should pass through when ACP errors occur
+        assert_eq!(
+            count, 0,
+            "fail-closed: ACP errors should deny access even for anonymous"
+        );
+    }
 }

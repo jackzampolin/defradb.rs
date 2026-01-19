@@ -21,10 +21,26 @@ use crate::error::ErrorResponse;
 /// If no Authorization header is present, the identity is None (anonymous).
 /// If the token is invalid or malformed, returns a 403 Forbidden error
 /// (matching Go DefraDB behavior).
+///
+/// The inner field is private to prevent construction without proper validation.
+/// Use the extractor mechanism or `ExtractIdentity::anonymous()` for testing.
 #[derive(Debug, Clone)]
-pub struct ExtractIdentity(pub Option<Did>);
+pub struct ExtractIdentity(Option<Did>);
 
 impl ExtractIdentity {
+    /// Create an anonymous identity (no authentication).
+    /// Use this for testing or internal code that needs to represent anonymous access.
+    pub fn anonymous() -> Self {
+        Self(None)
+    }
+
+    /// Create an identity from a validated DID.
+    /// Use this for testing or internal code that has already validated the identity.
+    #[cfg(test)]
+    pub(crate) fn from_did(did: Did) -> Self {
+        Self(Some(did))
+    }
+
     /// Returns a reference to the extracted DID if present.
     pub fn did(&self) -> Option<&Did> {
         self.0.as_ref()
@@ -33,6 +49,11 @@ impl ExtractIdentity {
     /// Consumes self and returns the extracted DID if present.
     pub fn into_did(self) -> Option<Did> {
         self.0
+    }
+
+    /// Check if this is an anonymous (unauthenticated) request.
+    pub fn is_anonymous(&self) -> bool {
+        self.0.is_none()
     }
 }
 
@@ -248,14 +269,14 @@ mod tests {
     async fn test_no_auth_header_returns_anonymous() {
         let result = extract_from_request(None).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().0.is_none());
+        assert!(result.unwrap().is_anonymous());
     }
 
     #[tokio::test]
     async fn test_empty_bearer_returns_anonymous() {
         let result = extract_from_request(Some("Bearer ")).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().0.is_none());
+        assert!(result.unwrap().is_anonymous());
     }
 
     #[tokio::test]
@@ -277,8 +298,8 @@ mod tests {
         let result = extract_from_request(Some(&auth_header)).await;
         assert!(result.is_ok());
         let extracted = result.unwrap();
-        assert!(extracted.0.is_some());
-        assert_eq!(extracted.0.unwrap(), expected_did);
+        assert!(!extracted.is_anonymous());
+        assert_eq!(extracted.into_did().unwrap(), expected_did);
     }
 
     #[tokio::test]
@@ -289,8 +310,8 @@ mod tests {
         let result = extract_from_request(Some(&auth_header)).await;
         assert!(result.is_ok());
         let extracted = result.unwrap();
-        assert!(extracted.0.is_some());
-        assert_eq!(extracted.0.unwrap(), expected_did);
+        assert!(!extracted.is_anonymous());
+        assert_eq!(extracted.into_did().unwrap(), expected_did);
     }
 
     #[tokio::test]
@@ -317,7 +338,7 @@ mod tests {
         let result = ExtractTokenIdentity::from_request_parts(&mut parts, &()).await;
         assert!(result.is_ok());
         let extracted = result.unwrap();
-        assert!(extracted.0.is_some());
+        assert!(extracted.identity().is_some());
         assert_eq!(extracted.did().unwrap(), expected_did);
     }
 }
