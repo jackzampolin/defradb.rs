@@ -147,6 +147,10 @@ pub enum QueryError {
     /// Internal error (should not happen)
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Permission denied (ACP check failed)
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
 }
 
 impl QueryError {
@@ -189,6 +193,11 @@ impl QueryError {
     /// Create an internal error
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    /// Create a permission denied error
+    pub fn permission_denied(msg: impl Into<String>) -> Self {
+        Self::PermissionDenied(msg.into())
     }
 }
 
