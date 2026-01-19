@@ -157,7 +157,9 @@ impl TypeJoinOne {
                 JoinDirection::Inverted => {
                     // Index by child's FK field value for reverse lookup
                     child_fk_idx.and_then(|idx| {
-                        child_doc.get(idx).and_then(|v| v.as_str().map(String::from))
+                        child_doc
+                            .get(idx)
+                            .and_then(|v| v.as_str().map(String::from))
                     })
                 }
             };

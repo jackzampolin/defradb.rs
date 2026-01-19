@@ -520,6 +520,18 @@ impl Node {
     where
         S: storage::corekv::Store + 'static,
     {
+        // Extract DID from user identity for query runner (before consuming it)
+        let user_did = match &user_identity {
+            Some(identity) => match identity.did() {
+                Ok(did) => Some(did),
+                Err(e) => {
+                    warn!("Failed to extract DID from user identity: {}", e);
+                    None
+                }
+            },
+            None => None,
+        };
+
         // Build database options with optional user identity
         let mut db_options = db::DbOptions::new();
         if let Some(identity) = user_identity {
@@ -597,8 +609,15 @@ impl Node {
             }
 
             // Create query runner with transaction and mutation support
-            let executor = query::QueryRunner::with_registry(fetcher, collections, registry)
+            let mut executor = query::QueryRunner::with_registry(fetcher, collections, registry)
                 .with_mutator(mutator);
+
+            // Wire default identity for ACP permission checks (from --identity CLI flag)
+            if let Some(did) = user_did {
+                info!("Query runner configured with default identity for ACP");
+                executor = executor.with_default_identity(did);
+            }
+
             let server = defra_http::Server::with_config(executor, server_config);
 
             info!("HTTP server configured on {}", api_address);
