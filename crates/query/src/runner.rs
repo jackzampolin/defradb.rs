@@ -165,11 +165,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let fetcher_arc = FetcherWrapper::new(fetcher);
 
         // Build the plan using the Planner with fetcher support
-        let collections: Vec<CollectionVersion> = self
-            .collections
-            .values()
-            .map(|c| (**c).clone())
-            .collect();
+        let collections: Vec<CollectionVersion> =
+            self.collections.values().map(|c| (**c).clone()).collect();
 
         let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
         let plan_result = planner.plan_with_index_info(select)?;
@@ -945,9 +942,8 @@ impl FetcherWrapper {
         // Split the fat pointer into data and vtable components.
         // This avoids the lifetime issue with *const dyn Trait.
         let ptr = fetcher as *const dyn DocFetcher;
-        let (data_ptr, vtable) = unsafe {
-            std::mem::transmute::<*const dyn DocFetcher, (*const (), *const ())>(ptr)
-        };
+        let (data_ptr, vtable) =
+            unsafe { std::mem::transmute::<*const dyn DocFetcher, (*const (), *const ())>(ptr) };
         Self {
             data_ptr,
             vtable,

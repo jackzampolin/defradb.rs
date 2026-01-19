@@ -105,4 +105,19 @@ pub enum Error {
 
     #[error("invalid identity: {0}")]
     InvalidIdentity(String),
+
+    #[error("HTTP request failed: {0}")]
+    HttpRequest(#[from] reqwest::Error),
+
+    #[error("server returned error: {0}")]
+    Server(String),
+
+    #[error("failed to read file {path}: {source}")]
+    ReadFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("collection not found: {0}")]
+    CollectionNotFound(String),
 }

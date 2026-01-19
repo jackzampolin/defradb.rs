@@ -1,0 +1,401 @@
+// Copyright 2025 Democratized Data Foundation
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
+//! Document command implementation
+
+use std::path::PathBuf;
+
+use clap::{Args, Subcommand};
+use serde_json::Value as JsonValue;
+
+use super::http_client::HttpClient;
+use crate::error::{Error, Result};
+
+/// Interact with documents
+#[derive(Args, Debug)]
+pub struct DocumentArgs {
+    #[command(subcommand)]
+    pub command: DocumentCommand,
+}
+
+/// Document subcommands
+#[derive(Subcommand, Debug)]
+pub enum DocumentCommand {
+    /// Create a new document
+    Create(DocumentCreateArgs),
+    /// Get a document by ID
+    Get(DocumentGetArgs),
+    /// Update a document
+    Update(DocumentUpdateArgs),
+    /// Delete a document
+    Delete(DocumentDeleteArgs),
+}
+
+/// Arguments for document create command
+#[derive(Args, Debug)]
+pub struct DocumentCreateArgs {
+    /// The collection name
+    #[arg(value_name = "COLLECTION")]
+    pub collection: String,
+
+    /// The document data (JSON)
+    #[arg(value_name = "DATA")]
+    pub data: Option<String>,
+
+    /// Path to a file containing the document data
+    #[arg(long, short = 'f', conflicts_with = "data")]
+    pub file: Option<PathBuf>,
+}
+
+/// Arguments for document get command
+#[derive(Args, Debug)]
+pub struct DocumentGetArgs {
+    /// The collection name
+    #[arg(value_name = "COLLECTION")]
+    pub collection: String,
+
+    /// The document ID
+    #[arg(value_name = "DOC_ID")]
+    pub doc_id: String,
+}
+
+/// Arguments for document update command
+#[derive(Args, Debug)]
+pub struct DocumentUpdateArgs {
+    /// The collection name
+    #[arg(value_name = "COLLECTION")]
+    pub collection: String,
+
+    /// The document ID
+    #[arg(value_name = "DOC_ID")]
+    pub doc_id: String,
+
+    /// The update data (JSON)
+    #[arg(value_name = "DATA")]
+    pub data: Option<String>,
+
+    /// Path to a file containing the update data
+    #[arg(long, short = 'f', conflicts_with = "data")]
+    pub file: Option<PathBuf>,
+}
+
+/// Arguments for document delete command
+#[derive(Args, Debug)]
+pub struct DocumentDeleteArgs {
+    /// The collection name
+    #[arg(value_name = "COLLECTION")]
+    pub collection: String,
+
+    /// The document ID
+    #[arg(value_name = "DOC_ID")]
+    pub doc_id: String,
+}
+
+impl DocumentArgs {
+    /// Execute the document command
+    pub async fn execute(&self, url: &str) -> Result<()> {
+        match &self.command {
+            DocumentCommand::Create(args) => args.execute(url).await,
+            DocumentCommand::Get(args) => args.execute(url).await,
+            DocumentCommand::Update(args) => args.execute(url).await,
+            DocumentCommand::Delete(args) => args.execute(url).await,
+        }
+    }
+}
+
+impl DocumentCreateArgs {
+    /// Execute the document create command
+    pub async fn execute(&self, url: &str) -> Result<()> {
+        let data = self.get_data()?;
+        let parsed: JsonValue = serde_json::from_str(&data)?;
+
+        let input_str = serde_json::to_string(&parsed)?;
+        let query = format!(
+            r#"mutation {{ create_{collection}(input: {input}) {{ _docID }} }}"#,
+            collection = self.collection,
+            input = input_str
+        );
+
+        let client = HttpClient::new(url);
+        let response = client.graphql(&query, None, None).await?;
+
+        if response.has_errors() {
+            return Err(Error::Server(response.error_message()));
+        }
+
+        if let Some(data) = response.data {
+            let key = format!("create_{}", self.collection);
+            if let Some(result) = data.get(&key) {
+                let output = serde_json::to_string_pretty(result)?;
+                println!("{output}");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_data(&self) -> Result<String> {
+        if let Some(ref data) = self.data {
+            return Ok(data.clone());
+        }
+
+        if let Some(ref path) = self.file {
+            return std::fs::read_to_string(path).map_err(|e| Error::ReadFile {
+                path: path.clone(),
+                source: e,
+            });
+        }
+
+        Err(Error::Server(
+            "Either data or --file must be provided".to_string(),
+        ))
+    }
+}
+
+impl DocumentGetArgs {
+    /// Execute the document get command
+    pub async fn execute(&self, url: &str) -> Result<()> {
+        let fields = get_collection_fields(url, &self.collection).await?;
+        let field_selection = fields.join(" ");
+
+        let query = format!(
+            r#"{{ {collection}(filter: {{_docID: {{_eq: "{doc_id}"}}}}) {{ {fields} }} }}"#,
+            collection = self.collection,
+            doc_id = self.doc_id,
+            fields = field_selection
+        );
+
+        let client = HttpClient::new(url);
+        let response = client.graphql(&query, None, None).await?;
+
+        if response.has_errors() {
+            return Err(Error::Server(response.error_message()));
+        }
+
+        if let Some(data) = response.data {
+            if let Some(results) = data.get(&self.collection) {
+                if let Some(arr) = results.as_array() {
+                    if arr.is_empty() {
+                        println!("Document not found");
+                    } else if arr.len() == 1 {
+                        let output = serde_json::to_string_pretty(&arr[0])?;
+                        println!("{output}");
+                    } else {
+                        let output = serde_json::to_string_pretty(results)?;
+                        println!("{output}");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl DocumentUpdateArgs {
+    /// Execute the document update command
+    pub async fn execute(&self, url: &str) -> Result<()> {
+        let data = self.get_data()?;
+        let parsed: JsonValue = serde_json::from_str(&data)?;
+
+        let input_str = serde_json::to_string(&parsed)?;
+        let query = format!(
+            r#"mutation {{ update_{collection}(docIDs: ["{doc_id}"], input: {input}) {{ _docID }} }}"#,
+            collection = self.collection,
+            doc_id = self.doc_id,
+            input = input_str
+        );
+
+        let client = HttpClient::new(url);
+        let response = client.graphql(&query, None, None).await?;
+
+        if response.has_errors() {
+            return Err(Error::Server(response.error_message()));
+        }
+
+        if let Some(data) = response.data {
+            let key = format!("update_{}", self.collection);
+            if let Some(result) = data.get(&key) {
+                let output = serde_json::to_string_pretty(result)?;
+                println!("{output}");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_data(&self) -> Result<String> {
+        if let Some(ref data) = self.data {
+            return Ok(data.clone());
+        }
+
+        if let Some(ref path) = self.file {
+            return std::fs::read_to_string(path).map_err(|e| Error::ReadFile {
+                path: path.clone(),
+                source: e,
+            });
+        }
+
+        Err(Error::Server(
+            "Either data or --file must be provided".to_string(),
+        ))
+    }
+}
+
+impl DocumentDeleteArgs {
+    /// Execute the document delete command
+    pub async fn execute(&self, url: &str) -> Result<()> {
+        let query = format!(
+            r#"mutation {{ delete_{collection}(docIDs: ["{doc_id}"]) {{ _docID }} }}"#,
+            collection = self.collection,
+            doc_id = self.doc_id
+        );
+
+        let client = HttpClient::new(url);
+        let response = client.graphql(&query, None, None).await?;
+
+        if response.has_errors() {
+            return Err(Error::Server(response.error_message()));
+        }
+
+        if let Some(data) = response.data {
+            let key = format!("delete_{}", self.collection);
+            if let Some(result) = data.get(&key) {
+                let output = serde_json::to_string_pretty(result)?;
+                println!("{output}");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Get the field names for a collection (excluding relations for simplicity)
+async fn get_collection_fields(url: &str, collection: &str) -> Result<Vec<String>> {
+    let query = format!(
+        r#"
+{{
+  __type(name: "{collection}") {{
+    fields {{
+      name
+      type {{
+        kind
+        ofType {{
+          kind
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+    );
+
+    let client = HttpClient::new(url);
+    let response = client.graphql(&query, None, None).await?;
+
+    if response.has_errors() {
+        return Err(Error::Server(response.error_message()));
+    }
+
+    let data = response
+        .data
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+
+    let type_info = data
+        .get("__type")
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+
+    if type_info.is_null() {
+        return Err(Error::CollectionNotFound(collection.to_string()));
+    }
+
+    let fields = type_info
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+
+    let scalar_fields: Vec<String> = fields
+        .iter()
+        .filter_map(|f| {
+            let name = f.get("name")?.as_str()?;
+            let type_info = f.get("type")?;
+            let kind = type_info.get("kind").and_then(|k| k.as_str())?;
+
+            // Include SCALAR fields and NON_NULL scalars
+            if kind == "SCALAR" {
+                return Some(name.to_string());
+            }
+
+            if kind == "NON_NULL" {
+                if let Some(of_type) = type_info.get("ofType") {
+                    if let Some(inner_kind) = of_type.get("kind").and_then(|k| k.as_str()) {
+                        if inner_kind == "SCALAR" {
+                            return Some(name.to_string());
+                        }
+                    }
+                }
+            }
+
+            None
+        })
+        .collect();
+
+    if scalar_fields.is_empty() {
+        // Fallback to _docID only
+        Ok(vec!["_docID".to_string()])
+    } else {
+        Ok(scalar_fields)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_document_create_args_get_data_inline() {
+        let args = DocumentCreateArgs {
+            collection: "Users".to_string(),
+            data: Some(r#"{"name": "Alice"}"#.to_string()),
+            file: None,
+        };
+        assert_eq!(args.get_data().unwrap(), r#"{"name": "Alice"}"#);
+    }
+
+    #[test]
+    fn test_document_create_args_no_data() {
+        let args = DocumentCreateArgs {
+            collection: "Users".to_string(),
+            data: None,
+            file: None,
+        };
+        assert!(args.get_data().is_err());
+    }
+
+    #[test]
+    fn test_document_get_args() {
+        let args = DocumentGetArgs {
+            collection: "Users".to_string(),
+            doc_id: "bae-123".to_string(),
+        };
+        assert_eq!(args.collection, "Users");
+        assert_eq!(args.doc_id, "bae-123");
+    }
+
+    #[test]
+    fn test_document_delete_args() {
+        let args = DocumentDeleteArgs {
+            collection: "Users".to_string(),
+            doc_id: "bae-456".to_string(),
+        };
+        assert_eq!(args.collection, "Users");
+        assert_eq!(args.doc_id, "bae-456");
+    }
+}

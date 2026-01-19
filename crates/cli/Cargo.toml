@@ -62,8 +62,9 @@ libipld = { workspace = true }
 # libp2p (for P2P keypair types)
 libp2p = { workspace = true }
 
-[dev-dependencies]
-# HTTP client for integration tests
+# HTTP client for CLI client commands
 reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
 tempfile = "3.17"
 portpicker = "0.1"
