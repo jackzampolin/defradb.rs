@@ -126,4 +126,10 @@ pub enum Error {
 
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
+
+    #[error("failed to initialize HTTP client: {0}")]
+    HttpClientInit(String),
+
+    #[error("invalid URL '{0}': {1}")]
+    InvalidUrl(String, String),
 }

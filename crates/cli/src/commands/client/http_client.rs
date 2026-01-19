@@ -16,6 +16,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use url::Url;
 
 use crate::error::{Error, Result};
 
@@ -26,17 +27,22 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// Global shared HTTP client for connection reuse across commands
-static SHARED_CLIENT: OnceLock<Client> = OnceLock::new();
+static SHARED_CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
 
-fn get_shared_client() -> &'static Client {
-    SHARED_CLIENT.get_or_init(|| {
+fn get_shared_client() -> Result<&'static Client> {
+    let result = SHARED_CLIENT.get_or_init(|| {
         Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
             .pool_max_idle_per_host(5)
             .build()
-            .expect("Failed to build HTTP client")
-    })
+            .map_err(|e| format!("{}", e))
+    });
+
+    match result {
+        Ok(client) => Ok(client),
+        Err(msg) => Err(Error::HttpClientInit(msg.clone())),
+    }
 }
 
 /// HTTP client for DefraDB server communication
@@ -105,11 +111,18 @@ impl HttpClient {
     /// Create a new HTTP client with the given base URL.
     ///
     /// Uses a shared connection pool with configured timeouts for efficiency.
-    pub fn new(base_url: &str) -> Self {
-        Self {
-            client: get_shared_client(),
-            base_url: base_url.trim_end_matches('/').to_string(),
-        }
+    /// Returns an error if the URL is invalid or the HTTP client fails to initialize.
+    pub fn new(base_url: &str) -> Result<Self> {
+        let normalized_url = base_url.trim_end_matches('/');
+
+        // Validate the URL format
+        Url::parse(normalized_url)
+            .map_err(|e| Error::InvalidUrl(normalized_url.to_string(), e.to_string()))?;
+
+        Ok(Self {
+            client: get_shared_client()?,
+            base_url: normalized_url.to_string(),
+        })
     }
 
     /// Execute a GraphQL query
@@ -131,7 +144,13 @@ impl HttpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read error response body: {}", e);
+                    String::new()
+                }
+            };
             return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
         }
 
@@ -146,7 +165,13 @@ impl HttpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read error response body: {}", e);
+                    String::new()
+                }
+            };
             return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
         }
 
@@ -185,7 +210,13 @@ impl HttpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read error response body: {}", e);
+                    String::new()
+                }
+            };
             if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body_text) {
                 return Err(Error::Server(err.error));
             }
@@ -223,8 +254,14 @@ mod tests {
 
     #[test]
     fn test_http_client_new() {
-        let client = HttpClient::new("http://localhost:9181/");
+        let client = HttpClient::new("http://localhost:9181/").unwrap();
         assert_eq!(client.base_url, "http://localhost:9181");
+    }
+
+    #[test]
+    fn test_http_client_new_invalid_url() {
+        let result = HttpClient::new("not-a-valid-url");
+        assert!(result.is_err());
     }
 
     #[test]

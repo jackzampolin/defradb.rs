@@ -44,15 +44,13 @@ impl QueryArgs {
         let query = self.get_query()?;
         let variables = self.parse_variables()?;
 
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client
             .graphql(&query, variables, self.txn_id.clone())
             .await?;
 
         if response.has_errors() {
-            for error in &response.errors {
-                eprintln!("Error: {}", error.message);
-            }
+            // Just return the error - CLI framework will handle displaying it
             return Err(Error::Server(response.error_message()));
         }
 
@@ -76,8 +74,8 @@ impl QueryArgs {
             });
         }
 
-        Err(Error::Server(
-            "Either a query or --file must be provided".to_string(),
+        Err(Error::MissingInput(
+            "either a query or --file must be provided".to_string(),
         ))
     }
 

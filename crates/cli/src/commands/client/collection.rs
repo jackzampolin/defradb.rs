@@ -89,7 +89,7 @@ fn is_builtin_field(name: &str) -> bool {
 impl CollectionListArgs {
     /// Execute the collection list command
     pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.graphql(INTROSPECTION_QUERY, None, None).await?;
 
         if response.has_errors() {
@@ -132,7 +132,7 @@ impl CollectionDescribeArgs {
             name = self.name
         );
 
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.graphql(&query, None, None).await?;
 
         if response.has_errors() {

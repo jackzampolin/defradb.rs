@@ -87,13 +87,22 @@ impl ClientArgs {
     }
 }
 
-/// Get the URL to connect to, prioritizing command-line override
+/// Get the URL to connect to, prioritizing command-line override.
+///
+/// Uses HTTPS if TLS is configured (both pubkey_path and privkey_path are set).
 fn get_url(config: &Config, url_override: Option<String>) -> String {
     if let Some(url) = url_override {
         return url;
     }
 
-    format!("http://{}", config.api.address)
+    // Use HTTPS if TLS is configured
+    let scheme = if config.api.tls_enabled() {
+        "https"
+    } else {
+        "http"
+    };
+
+    format!("{}://{}", scheme, config.api.address)
 }
 
 #[cfg(test)]
@@ -126,6 +135,19 @@ mod tests {
         let config = Config::default();
         let url = get_url(&config, None);
         assert_eq!(url, "http://127.0.0.1:9181");
+    }
+
+    #[test]
+    fn test_get_url_with_tls() {
+        let mut config = Config::default();
+        config.api = ApiConfig {
+            address: "127.0.0.1:9181".to_string(),
+            pubkey_path: "/path/to/pub.key".to_string(),
+            privkey_path: "/path/to/priv.key".to_string(),
+            ..Default::default()
+        };
+        let url = get_url(&config, None);
+        assert_eq!(url, "https://127.0.0.1:9181");
     }
 
     #[test]

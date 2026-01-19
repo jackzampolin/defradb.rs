@@ -45,7 +45,7 @@ impl SchemaArgs {
 impl SchemaDescribeArgs {
     /// Execute the schema describe command
     pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let schema = client.schema().await?;
         println!("{schema}");
         Ok(())

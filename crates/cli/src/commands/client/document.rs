@@ -130,19 +130,27 @@ impl DocumentCreateArgs {
             input = input_str
         );
 
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.graphql(&query, None, None).await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));
         }
 
-        if let Some(data) = response.data {
-            let key = format!("create_{}", self.collection);
-            if let Some(result) = data.get(&key) {
-                let output = serde_json::to_string_pretty(result)?;
-                println!("{output}");
-            }
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
+
+        let key = format!("create_{}", self.collection);
+        if let Some(result) = data.get(&key) {
+            let output = serde_json::to_string_pretty(result)?;
+            println!("{output}");
+        } else {
+            eprintln!(
+                "Warning: Server response did not contain expected key '{}'. Raw response:",
+                key
+            );
+            eprintln!("{}", serde_json::to_string_pretty(&data)?);
         }
 
         Ok(())
@@ -168,7 +176,7 @@ impl DocumentGetArgs {
             fields = field_selection
         );
 
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.graphql(&query, None, None).await?;
 
         if response.has_errors() {
@@ -178,47 +186,59 @@ impl DocumentGetArgs {
                     "error": response.error_message()
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
-                return Ok(());
             }
+            // Always return error for proper exit code, even in JSON mode
             return Err(Error::Server(response.error_message()));
         }
 
-        if let Some(data) = response.data {
-            if let Some(results) = data.get(&self.collection) {
-                if let Some(arr) = results.as_array() {
-                    if arr.is_empty() {
-                        if self.json {
-                            let output = serde_json::json!({
-                                "success": true,
-                                "data": null
-                            });
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        } else {
-                            println!("Document not found");
-                        }
-                    } else if arr.len() == 1 {
-                        if self.json {
-                            let output = serde_json::json!({
-                                "success": true,
-                                "data": arr[0]
-                            });
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        } else {
-                            let output = serde_json::to_string_pretty(&arr[0])?;
-                            println!("{output}");
-                        }
-                    } else if self.json {
-                        let output = serde_json::json!({
-                            "success": true,
-                            "data": results
-                        });
-                        println!("{}", serde_json::to_string_pretty(&output)?);
-                    } else {
-                        let output = serde_json::to_string_pretty(results)?;
-                        println!("{output}");
-                    }
-                }
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned no data".to_string()))?;
+
+        let results = data.get(&self.collection).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing collection key '{}'",
+                self.collection
+            ))
+        })?;
+
+        let arr = results.as_array().ok_or_else(|| {
+            Error::Server(format!(
+                "Expected array for collection '{}', got: {}",
+                self.collection, results
+            ))
+        })?;
+
+        if arr.is_empty() {
+            if self.json {
+                let output = serde_json::json!({
+                    "success": true,
+                    "data": null
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                println!("Document not found");
             }
+        } else if arr.len() == 1 {
+            if self.json {
+                let output = serde_json::json!({
+                    "success": true,
+                    "data": arr[0]
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                let output = serde_json::to_string_pretty(&arr[0])?;
+                println!("{output}");
+            }
+        } else if self.json {
+            let output = serde_json::json!({
+                "success": true,
+                "data": results
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            let output = serde_json::to_string_pretty(results)?;
+            println!("{output}");
         }
 
         Ok(())
@@ -242,19 +262,27 @@ impl DocumentUpdateArgs {
             input = input_str
         );
 
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.graphql(&query, None, None).await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));
         }
 
-        if let Some(data) = response.data {
-            let key = format!("update_{}", self.collection);
-            if let Some(result) = data.get(&key) {
-                let output = serde_json::to_string_pretty(result)?;
-                println!("{output}");
-            }
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
+
+        let key = format!("update_{}", self.collection);
+        if let Some(result) = data.get(&key) {
+            let output = serde_json::to_string_pretty(result)?;
+            println!("{output}");
+        } else {
+            eprintln!(
+                "Warning: Server response did not contain expected key '{}'. Raw response:",
+                key
+            );
+            eprintln!("{}", serde_json::to_string_pretty(&data)?);
         }
 
         Ok(())
@@ -273,19 +301,27 @@ impl DocumentDeleteArgs {
             doc_id = escaped_doc_id
         );
 
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.graphql(&query, None, None).await?;
 
         if response.has_errors() {
             return Err(Error::Server(response.error_message()));
         }
 
-        if let Some(data) = response.data {
-            let key = format!("delete_{}", self.collection);
-            if let Some(result) = data.get(&key) {
-                let output = serde_json::to_string_pretty(result)?;
-                println!("{output}");
-            }
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
+
+        let key = format!("delete_{}", self.collection);
+        if let Some(result) = data.get(&key) {
+            let output = serde_json::to_string_pretty(result)?;
+            println!("{output}");
+        } else {
+            eprintln!(
+                "Warning: Server response did not contain expected key '{}'. Raw response:",
+                key
+            );
+            eprintln!("{}", serde_json::to_string_pretty(&data)?);
         }
 
         Ok(())
@@ -312,7 +348,7 @@ async fn get_collection_fields(url: &str, collection: &str) -> Result<Vec<String
 "#
     );
 
-    let client = HttpClient::new(url);
+    let client = HttpClient::new(url)?;
     let response = client.graphql(&query, None, None).await?;
 
     if response.has_errors() {
@@ -363,7 +399,12 @@ async fn get_collection_fields(url: &str, collection: &str) -> Result<Vec<String
         .collect();
 
     if scalar_fields.is_empty() {
-        // Fallback to _docID only
+        // Fallback to _docID if collection has no scalar fields (e.g., only relations)
+        eprintln!(
+            "Warning: No queryable scalar fields found for collection '{}'. Only _docID will be returned.",
+            collection
+        );
+        eprintln!("Use 'defra client query' for full control over field selection.");
         Ok(vec!["_docID".to_string()])
     } else {
         Ok(scalar_fields)

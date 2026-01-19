@@ -71,7 +71,7 @@ impl TxArgs {
 impl TxBeginArgs {
     /// Execute the tx begin command
     pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.tx_begin(self.readonly).await?;
         println!("{}", response.txn_id);
         Ok(())
@@ -81,7 +81,7 @@ impl TxBeginArgs {
 impl TxCommitArgs {
     /// Execute the tx commit command
     pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.tx_commit(&self.txn_id).await?;
         println!("{}", response.status);
         Ok(())
@@ -91,7 +91,7 @@ impl TxCommitArgs {
 impl TxDiscardArgs {
     /// Execute the tx discard command
     pub async fn execute(&self, url: &str) -> Result<()> {
-        let client = HttpClient::new(url);
+        let client = HttpClient::new(url)?;
         let response = client.tx_rollback(&self.txn_id).await?;
         println!("{}", response.status);
         Ok(())
