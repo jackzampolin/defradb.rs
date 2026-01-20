@@ -31,6 +31,19 @@
 /// For large datasets, consider using a different backend or implementing
 /// lazy-loading snapshots.
 ///
+/// # Async Callback Lifecycle
+///
+/// Transaction callbacks follow fire-and-forget semantics (matching Go DefraDB):
+///
+/// - **Sync callbacks**: Executed inline during commit/discard, blocking until complete
+/// - **Async callbacks on commit**: Awaited during commit, blocking return until complete
+/// - **Async callbacks on discard**: Spawned as background tasks (fire-and-forget)
+///
+/// **Important**: Async discard callbacks may not complete if the process exits
+/// before they finish. Callers requiring completion guarantees should use
+/// `sync::WaitGroup` or similar synchronization, or prefer `commit()` over
+/// `discard()` when async cleanup is critical.
+///
 /// # Use Cases
 ///
 /// - Production deployments requiring WASM compatibility
@@ -52,7 +65,9 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use redb::{Database, ReadTransaction, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -68,9 +83,16 @@ const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 ///
 /// This store wraps a redb Database instance and provides MVCC transaction
 /// support through snapshots and buffered writes.
+///
+/// # Active Transaction Tracking
+///
+/// The store tracks the number of active transactions. When closing, the store
+/// will reject new transactions and wait for existing ones to complete.
 pub struct RedbStore {
     db: Arc<Database>,
     closed: Arc<RwLock<bool>>,
+    /// Count of active transactions (for graceful shutdown)
+    active_txn_count: Arc<AtomicUsize>,
 }
 
 impl RedbStore {
@@ -106,7 +128,13 @@ impl RedbStore {
         Ok(Self {
             db: Arc::new(db),
             closed: Arc::new(RwLock::new(false)),
+            active_txn_count: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// Get the current count of active transactions.
+    pub fn active_transaction_count(&self) -> usize {
+        self.active_txn_count.load(Ordering::SeqCst)
     }
 
     /// Check if the store is closed.
@@ -122,16 +150,36 @@ impl Store for RedbStore {
             return Err(Error::DBClosed);
         }
 
+        // Increment active transaction count
+        self.active_txn_count.fetch_add(1, Ordering::SeqCst);
+
         // Capture a snapshot for read isolation
-        let read_txn = self.db.begin_read()?;
-        let snapshot = capture_snapshot(&read_txn)?;
+        let read_txn = match self.db.begin_read() {
+            Ok(txn) => txn,
+            Err(e) => {
+                // Decrement count on failure
+                self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+                return Err(e.into());
+            }
+        };
+
+        let snapshot = match capture_snapshot(&read_txn) {
+            Ok(s) => s,
+            Err(e) => {
+                // Decrement count on failure
+                self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
 
         Ok(Box::new(RedbTxn {
             db: Arc::clone(&self.db),
+            active_txn_count: Arc::clone(&self.active_txn_count),
             snapshot,
             pending: Mutex::new(BTreeMap::new()),
             readonly,
             discarded: Mutex::new(false),
+            committed: Mutex::new(false),
             on_success: Mutex::new(Vec::new()),
             on_success_async: Mutex::new(Vec::new()),
             on_error: Mutex::new(Vec::new()),
@@ -142,8 +190,36 @@ impl Store for RedbStore {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut closed = self.closed.write().await;
-        *closed = true;
+        // Mark as closed first to prevent new transactions
+        {
+            let mut closed = self.closed.write().await;
+            *closed = true;
+        }
+
+        // Wait for active transactions to complete (with timeout)
+        let active = self.active_txn_count.load(Ordering::SeqCst);
+        if active > 0 {
+            tracing::info!(
+                active_transactions = active,
+                "Store closing with active transactions - waiting for completion"
+            );
+
+            // Poll for up to 5 seconds for transactions to complete
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(5);
+            while self.active_txn_count.load(Ordering::SeqCst) > 0 {
+                if start.elapsed() > timeout {
+                    let remaining = self.active_txn_count.load(Ordering::SeqCst);
+                    tracing::warn!(
+                        remaining_transactions = remaining,
+                        "Timeout waiting for transactions to complete during close"
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
         Ok(())
     }
 }
@@ -177,6 +253,84 @@ impl Dropable for RedbStore {
     }
 }
 
+/// Guard to decrement active transaction count on drop.
+///
+/// Used in commit() to ensure the count is decremented even on early returns.
+struct TxnCountGuard(Arc<AtomicUsize>);
+
+impl Drop for TxnCountGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Compute the start and end bounds for a BTreeMap range query from IterOptions.
+///
+/// This optimizes iteration by using the underlying data structure's range
+/// capabilities instead of filtering after iteration.
+fn compute_range_bounds(opts: &IterOptions) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    // Determine start bound
+    let start_bound = match (opts.prefix(), opts.start()) {
+        (Some(prefix), Some(start)) => {
+            // Use whichever is greater
+            if prefix > start {
+                Bound::Included(prefix.to_vec())
+            } else {
+                Bound::Included(start.to_vec())
+            }
+        }
+        (Some(prefix), None) => Bound::Included(prefix.to_vec()),
+        (None, Some(start)) => Bound::Included(start.to_vec()),
+        (None, None) => Bound::Unbounded,
+    };
+
+    // Determine end bound
+    let end_bound = match (opts.prefix(), opts.end()) {
+        (Some(prefix), Some(end)) => {
+            // Compute prefix end (prefix with last byte incremented)
+            let prefix_end = prefix_to_end_bound(prefix);
+            // Use whichever is smaller
+            if let Some(pe) = prefix_end {
+                if pe.as_slice() < end {
+                    Bound::Excluded(pe)
+                } else {
+                    Bound::Excluded(end.to_vec())
+                }
+            } else {
+                Bound::Excluded(end.to_vec())
+            }
+        }
+        (Some(prefix), None) => {
+            match prefix_to_end_bound(prefix) {
+                Some(end) => Bound::Excluded(end),
+                None => Bound::Unbounded, // Prefix is all 0xFF bytes
+            }
+        }
+        (None, Some(end)) => Bound::Excluded(end.to_vec()),
+        (None, None) => Bound::Unbounded,
+    };
+
+    (start_bound, end_bound)
+}
+
+/// Compute the exclusive end bound for a prefix.
+///
+/// Given a prefix like "foo", returns "fop" (the first key that doesn't match the prefix).
+/// Returns None if the prefix is all 0xFF bytes (meaning iteration should go to the end).
+fn prefix_to_end_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    // Increment the last byte, handling overflow
+    while let Some(last) = end.pop() {
+        if last < 0xFF {
+            end.push(last + 1);
+            return Some(end);
+        }
+        // If the byte was 0xFF, we popped it and try the next one
+    }
+    // All bytes were 0xFF
+    None
+}
+
 /// Capture a snapshot of the current database state into memory.
 fn capture_snapshot(read_txn: &ReadTransaction) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
     let mut snapshot = BTreeMap::new();
@@ -204,6 +358,9 @@ struct RedbTxn {
     /// Reference to the redb database
     db: Arc<Database>,
 
+    /// Reference to the active transaction counter (for decrement on complete)
+    active_txn_count: Arc<AtomicUsize>,
+
     /// Snapshot of store at transaction start (for reads)
     snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
 
@@ -215,6 +372,9 @@ struct RedbTxn {
 
     /// Whether the transaction has been discarded
     discarded: Mutex<bool>,
+
+    /// Whether the transaction has been committed
+    committed: Mutex<bool>,
 
     /// Callbacks for successful commit
     on_success: Mutex<Vec<TxnCallback>>,
@@ -329,16 +489,48 @@ impl Reader for RedbTxn {
             return Err(Error::DiscardedTxn);
         }
 
-        // Merge snapshot and pending changes
-        let mut merged = self.snapshot.clone();
+        // Compute the effective range bounds for efficient range queries
+        let (start_bound, end_bound) = compute_range_bounds(&opts);
+
+        // Build merged data using range queries for efficiency
+        // Only iterate over the relevant range instead of cloning entire snapshot
+        let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = self
+            .snapshot
+            .range((start_bound.clone(), end_bound.clone()))
+            .filter(|(k, _)| {
+                // Apply prefix filter if set
+                if let Some(prefix) = opts.prefix() {
+                    k.starts_with(prefix)
+                } else {
+                    true
+                }
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Merge pending changes that fall within the range
         let pending = self.pending.lock();
         for (key, value) in pending.iter() {
-            match value {
-                Some(v) => {
-                    merged.insert(key.clone(), v.clone());
-                }
-                None => {
-                    merged.remove(key);
+            // Check if key falls within the range
+            let in_range = match (&start_bound, &end_bound) {
+                (Bound::Included(s), Bound::Excluded(e)) => key.as_slice() >= s.as_slice() && key.as_slice() < e.as_slice(),
+                (Bound::Included(s), Bound::Unbounded) => key.as_slice() >= s.as_slice(),
+                (Bound::Unbounded, Bound::Excluded(e)) => key.as_slice() < e.as_slice(),
+                (Bound::Unbounded, Bound::Unbounded) => true,
+                _ => true, // Other combinations shouldn't occur
+            };
+
+            // Also check prefix if set
+            let matches_prefix = opts.prefix().map_or(true, |p| key.starts_with(p));
+
+            if in_range && matches_prefix {
+                match value {
+                    Some(v) => {
+                        merged.insert(key.clone(), v.clone());
+                    }
+                    None => {
+                        merged.remove(key);
+                    }
                 }
             }
         }
@@ -389,6 +581,9 @@ impl Writer for RedbTxn {
 #[async_trait]
 impl Txn for RedbTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
+        // Helper to decrement count on all exit paths
+        let _guard = TxnCountGuard(Arc::clone(&self.active_txn_count));
+
         if *self.discarded.lock() {
             tracing::warn!("Attempted to commit a discarded transaction");
             let on_error = std::mem::take(&mut *self.on_error.lock());
@@ -397,6 +592,13 @@ impl Txn for RedbTxn {
             Self::execute_async_callbacks(on_error_async).await;
             return Err(Error::DiscardedTxn);
         }
+
+        if *self.committed.lock() {
+            tracing::warn!("Attempted to commit an already committed transaction");
+            return Err(Error::Other("Transaction already committed".into()));
+        }
+
+        *self.committed.lock() = true;
 
         // Clone pending changes before any async operations
         let pending = self.pending.lock().clone();
@@ -496,6 +698,9 @@ impl Txn for RedbTxn {
     }
 
     fn discard(self: Box<Self>) {
+        // Decrement active transaction count
+        self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+
         *self.discarded.lock() = true;
 
         // Execute sync discard callbacks
@@ -574,44 +779,22 @@ struct RedbIterator {
 }
 
 impl RedbIterator {
+    /// Create a new iterator from pre-filtered data.
+    ///
+    /// The data should already be filtered for prefix/start/end bounds.
+    /// This constructor only handles ordering (reverse) and keys-only mode.
     fn new(data: BTreeMap<Vec<u8>, Vec<u8>>, opts: IterOptions) -> Result<Self> {
-        // Apply filters and convert to Vec
-        let mut filtered: Vec<_> = data
-            .into_iter()
-            .filter(|(k, _)| {
-                // Apply prefix filter
-                if let Some(prefix) = opts.prefix() {
-                    if !k.starts_with(prefix) {
-                        return false;
-                    }
-                }
-
-                // Apply start filter
-                if let Some(start) = opts.start() {
-                    if k.as_slice() < start {
-                        return false;
-                    }
-                }
-
-                // Apply end filter
-                if let Some(end) = opts.end() {
-                    if k.as_slice() >= end {
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .collect();
+        // Convert to Vec - data is already filtered by iterator() method
+        let mut items: Vec<_> = data.into_iter().collect();
 
         // Apply reverse ordering
         let reverse = opts.reverse();
         if reverse {
-            filtered.reverse();
+            items.reverse();
         }
 
         Ok(Self {
-            data: filtered,
+            data: items,
             position: 0,
             closed: false,
             keys_only: opts.keys_only(),
@@ -897,4 +1080,293 @@ mod redb_specific_tests {
     // Note: Tests for "operations after discard/commit" are unnecessary because
     // Rust's ownership system enforces this at compile time - discard() and commit()
     // take `self: Box<Self>`, consuming the transaction and preventing further use.
+
+    #[tokio::test]
+    async fn test_redb_active_transaction_tracking() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        assert_eq!(store.active_transaction_count(), 0, "No active transactions initially");
+
+        // Create a transaction
+        let txn1 = store.new_txn(true).await.unwrap();
+        assert_eq!(store.active_transaction_count(), 1, "One active transaction");
+
+        // Create another
+        let txn2 = store.new_txn(false).await.unwrap();
+        assert_eq!(store.active_transaction_count(), 2, "Two active transactions");
+
+        // Discard one
+        txn1.discard();
+        assert_eq!(store.active_transaction_count(), 1, "One active after discard");
+
+        // Commit the other
+        txn2.commit().await.unwrap();
+        assert_eq!(store.active_transaction_count(), 0, "None active after commit");
+    }
+
+    #[tokio::test]
+    async fn test_redb_close_waits_for_transactions() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        // Create a transaction
+        let txn = store.new_txn(true).await.unwrap();
+        assert_eq!(store.active_transaction_count(), 1);
+
+        // Spawn close in background
+        let store_clone = Arc::clone(&store);
+        let close_handle = tokio::spawn(async move {
+            store_clone.close().await.unwrap();
+        });
+
+        // Small delay to let close start
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Discard the transaction
+        txn.discard();
+
+        // Close should complete
+        tokio::time::timeout(std::time::Duration::from_secs(2), close_handle)
+            .await
+            .expect("Close should complete")
+            .expect("Close should succeed");
+
+        assert_eq!(store.active_transaction_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_redb_operations_on_closed_store_fail() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        store.close().await.unwrap();
+
+        // New transactions should fail
+        let result = store.new_txn(true).await;
+        assert!(result.is_err(), "new_txn should fail on closed store");
+    }
+
+    #[tokio::test]
+    async fn test_redb_iterator_prefix_filtering() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        // Insert keys with different prefixes
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"user:1", b"alice").await.unwrap();
+        txn.set(b"user:2", b"bob").await.unwrap();
+        txn.set(b"user:3", b"carol").await.unwrap();
+        txn.set(b"doc:1", b"document1").await.unwrap();
+        txn.set(b"doc:2", b"document2").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Test prefix iteration
+        let txn = store.new_txn(true).await.unwrap();
+        let opts = IterOptions::new().with_prefix(b"user:".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut count = 0;
+        while let Some(kv) = iter.next().await.unwrap() {
+            assert!(kv.key.starts_with(b"user:"), "Key should have prefix");
+            count += 1;
+        }
+        assert_eq!(count, 3, "Should have 3 user keys");
+
+        // Test doc prefix
+        let opts = IterOptions::new().with_prefix(b"doc:".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut count = 0;
+        while let Some(kv) = iter.next().await.unwrap() {
+            assert!(kv.key.starts_with(b"doc:"), "Key should have prefix");
+            count += 1;
+        }
+        assert_eq!(count, 2, "Should have 2 doc keys");
+    }
+
+    #[tokio::test]
+    async fn test_redb_iterator_range_filtering() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        // Insert alphabetically ordered keys
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"a", b"1").await.unwrap();
+        txn.set(b"b", b"2").await.unwrap();
+        txn.set(b"c", b"3").await.unwrap();
+        txn.set(b"d", b"4").await.unwrap();
+        txn.set(b"e", b"5").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Test range iteration [b, d)
+        let txn = store.new_txn(true).await.unwrap();
+        let opts = IterOptions::new()
+            .with_start(b"b".to_vec())
+            .with_end(b"d".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let keys: Vec<_> = {
+            let mut keys = vec![];
+            while let Some(kv) = iter.next().await.unwrap() {
+                keys.push(kv.key);
+            }
+            keys
+        };
+
+        assert_eq!(keys.len(), 2, "Should have keys b and c");
+        assert_eq!(keys[0], b"b");
+        assert_eq!(keys[1], b"c");
+    }
+
+    #[tokio::test]
+    async fn test_redb_iterator_reverse() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"a", b"1").await.unwrap();
+        txn.set(b"b", b"2").await.unwrap();
+        txn.set(b"c", b"3").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let txn = store.new_txn(true).await.unwrap();
+        let opts = IterOptions::new().with_reverse(true);
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        let mut keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            keys.push(kv.key);
+        }
+
+        assert_eq!(keys, vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_redb_empty_key_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        // Empty key should be rejected
+        let result = txn.set(b"", b"value").await;
+        assert!(result.is_err(), "Empty key should be rejected");
+
+        let result = txn.get(b"").await;
+        assert!(result.is_err(), "Empty key get should be rejected");
+
+        let result = txn.delete(b"").await;
+        assert!(result.is_err(), "Empty key delete should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_redb_read_only_txn_rejects_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        let mut txn = store.new_txn(true).await.unwrap(); // read-only
+
+        let result = txn.set(b"key", b"value").await;
+        assert!(result.is_err(), "Read-only txn should reject set");
+
+        let result = txn.delete(b"key").await;
+        assert!(result.is_err(), "Read-only txn should reject delete");
+    }
+
+    #[tokio::test]
+    async fn test_redb_pending_changes_merged_with_snapshot() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        // Setup initial data
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"existing", b"original").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Start a new transaction with pending changes
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"existing", b"modified").await.unwrap();
+        txn.set(b"new_key", b"new_value").await.unwrap();
+
+        // Pending changes should be visible
+        assert_eq!(
+            txn.get(b"existing").await.unwrap(),
+            Some(b"modified".to_vec()),
+            "Should see pending modification"
+        );
+        assert_eq!(
+            txn.get(b"new_key").await.unwrap(),
+            Some(b"new_value".to_vec()),
+            "Should see pending new key"
+        );
+
+        // Iterator should also merge pending changes
+        let opts = IterOptions::new();
+        let mut iter = txn.iterator(opts).await.unwrap();
+        let mut found_keys = std::collections::HashSet::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            found_keys.insert(kv.key);
+        }
+        assert!(found_keys.contains(&b"existing".to_vec()));
+        assert!(found_keys.contains(&b"new_key".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_redb_pending_delete_removes_from_snapshot() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        // Setup initial data
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"to_delete", b"value").await.unwrap();
+        txn.set(b"to_keep", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Delete in a new transaction
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.delete(b"to_delete").await.unwrap();
+
+        // Deleted key should not be visible
+        assert_eq!(
+            txn.get(b"to_delete").await.unwrap(),
+            None,
+            "Deleted key should not be visible"
+        );
+        assert!(!txn.has(b"to_delete").await.unwrap());
+
+        // Iterator should not include deleted key
+        let opts = IterOptions::new();
+        let mut iter = txn.iterator(opts).await.unwrap();
+        while let Some(kv) = iter.next().await.unwrap() {
+            assert_ne!(kv.key, b"to_delete", "Deleted key should not appear in iterator");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_directory_handling() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().to_path_buf();
+
+        // Opening with directory path should work (creates data.redb inside)
+        {
+            let store = RedbStore::open(&dir_path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"key", b"value").await.unwrap();
+            txn.commit().await.unwrap();
+            store.close().await.unwrap();
+            // Store dropped here, releasing the lock
+        }
+
+        // Verify the database file was created inside the directory
+        let db_path = dir_path.join("data.redb");
+        assert!(db_path.exists(), "data.redb should be created in directory");
+
+        // Reopen and verify data
+        {
+            let store = RedbStore::open(&dir_path).unwrap();
+            let txn = store.new_txn(true).await.unwrap();
+            assert_eq!(txn.get(b"key").await.unwrap(), Some(b"value".to_vec()));
+        }
+    }
 }

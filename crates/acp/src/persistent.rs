@@ -45,15 +45,69 @@ impl PersistentAcpStore {
     ///
     /// Creates the directory and database file (`acp.redb`) if they don't exist.
     /// The path should be a directory (e.g., `<root>/local_document_acp/`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The directory cannot be created (permission denied, disk full, etc.)
+    /// - The path exists but is not a directory
+    /// - The database file cannot be opened (corruption, permission denied, etc.)
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let dir_path = path.as_ref();
+
+        // Check if path exists but is not a directory
+        if dir_path.exists() && !dir_path.is_dir() {
+            return Err(Error::Storage(format!(
+                "ACP path exists but is not a directory: {}",
+                dir_path.display()
+            )));
+        }
+
         // Create the directory if it doesn't exist
         if !dir_path.exists() {
-            std::fs::create_dir_all(dir_path)
-                .map_err(|e| Error::Storage(format!("failed to create ACP directory: {}", e)))?;
+            std::fs::create_dir_all(dir_path).map_err(|e| {
+                let kind = e.kind();
+                Error::Storage(format!(
+                    "failed to create ACP directory '{}': {} ({})",
+                    dir_path.display(),
+                    e,
+                    match kind {
+                        std::io::ErrorKind::PermissionDenied => "check directory permissions",
+                        std::io::ErrorKind::NotFound => "parent directory does not exist",
+                        _ => "check disk space and permissions",
+                    }
+                ))
+            })?;
         }
+
+        // Verify we can write to the directory
         let db_path = dir_path.join("acp.redb");
-        let store = RedbStore::open(db_path).map_err(|e| Error::Storage(e.to_string()))?;
+        if db_path.exists() {
+            // Check if we can read the existing file
+            let metadata = std::fs::metadata(&db_path).map_err(|e| {
+                Error::Storage(format!(
+                    "cannot access ACP database '{}': {}",
+                    db_path.display(),
+                    e
+                ))
+            })?;
+
+            if !metadata.is_file() {
+                return Err(Error::Storage(format!(
+                    "ACP database path is not a file: {}",
+                    db_path.display()
+                )));
+            }
+        }
+
+        let store = RedbStore::open(&db_path).map_err(|e| {
+            Error::Storage(format!(
+                "failed to open ACP database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+
         Ok(Self {
             store: Arc::new(store),
         })
