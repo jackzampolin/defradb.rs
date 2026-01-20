@@ -29,6 +29,10 @@ impl RedbStoreOptions {
     ///
     /// Redb uses this to control memory usage for caching pages.
     /// Larger values can improve read performance for frequently accessed data.
+    ///
+    /// If not set, redb defaults to 1 GiB (1,073,741,824 bytes).
+    /// A value of 0 disables caching entirely, which may significantly
+    /// degrade performance.
     pub fn with_cache_size(mut self, bytes: usize) -> Self {
         self.cache_size = Some(bytes);
         self
