@@ -33,6 +33,9 @@ use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
 use crate::collection_acp::check_doc_permission;
 use crate::CollectionCache;
 
+/// Type alias for peer-to-DID conversion function.
+pub type PeerToDidMapper = dyn Fn(&str) -> Option<Did> + Send + Sync;
+
 /// Error type for ACP merge handler operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AcpMergeError {
@@ -70,7 +73,7 @@ pub struct AcpMergeHandler<H> {
     collections: CollectionCache,
     /// Optional function to convert PeerId to DID.
     /// If None, peer identity cannot be verified and merges to protected docs will fail.
-    peer_to_did: Option<Arc<dyn Fn(&str) -> Option<Did> + Send + Sync>>,
+    peer_to_did: Option<Arc<PeerToDidMapper>>,
 }
 
 impl<H> AcpMergeHandler<H> {

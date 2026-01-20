@@ -28,6 +28,9 @@ tracing.workspace = true
 # IPLD
 cid.workspace = true
 
+# P2P
+libp2p.workspace = true
+
 # Internal crates
 storage = { path = "../storage" }
 datastore = { path = "../datastore" }
