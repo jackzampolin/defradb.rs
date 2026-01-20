@@ -18,6 +18,19 @@
 /// All reads within the transaction see the database state as it was at that moment,
 /// regardless of concurrent writes by other transactions.
 ///
+/// # Memory Considerations
+///
+/// **WARNING**: This implementation loads the entire database snapshot into memory
+/// (via `BTreeMap`) when a transaction is created. This approach provides correct
+/// snapshot isolation but has significant memory implications:
+///
+/// - Memory usage scales linearly with database size
+/// - Multiple concurrent read transactions multiply memory usage
+/// - Not suitable for databases larger than available RAM
+///
+/// For large datasets, consider using a different backend or implementing
+/// lazy-loading snapshots.
+///
 /// # Use Cases
 ///
 /// - Production deployments requiring WASM compatibility
@@ -64,17 +77,24 @@ impl RedbStore {
     /// Open a redb database at the specified path.
     ///
     /// If the database doesn't exist, it will be created.
+    /// If the path is a directory, creates `data.redb` inside it.
     ///
     /// # Arguments
     ///
-    /// * `path` - Path to the database file
+    /// * `path` - Path to the database file or directory
     ///
     /// # Returns
     ///
     /// * `Ok(RedbStore)` on success
     /// * `Err(Error)` if the database cannot be opened
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let db = Database::create(path)?;
+        let path = path.as_ref();
+        let db_path = if path.is_dir() {
+            path.join("data.redb")
+        } else {
+            path.to_path_buf()
+        };
+        let db = Database::create(db_path)?;
 
         // Ensure the KV table exists by opening a write transaction
         {
@@ -370,6 +390,7 @@ impl Writer for RedbTxn {
 impl Txn for RedbTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
         if *self.discarded.lock() {
+            tracing::warn!("Attempted to commit a discarded transaction");
             let on_error = std::mem::take(&mut *self.on_error.lock());
             let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
             Self::execute_callbacks(on_error);
@@ -385,6 +406,11 @@ impl Txn for RedbTxn {
             let write_txn = match self.db.begin_write() {
                 Ok(txn) => txn,
                 Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        pending_changes = pending.len(),
+                        "Failed to begin write transaction during commit"
+                    );
                     let on_error = std::mem::take(&mut *self.on_error.lock());
                     let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
                     Self::execute_callbacks(on_error);
@@ -397,6 +423,10 @@ impl Txn for RedbTxn {
                 let mut table = match write_txn.open_table(KV_TABLE) {
                     Ok(t) => t,
                     Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to open KV table during commit"
+                        );
                         let on_error = std::mem::take(&mut *self.on_error.lock());
                         let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
                         Self::execute_callbacks(on_error);
@@ -409,6 +439,12 @@ impl Txn for RedbTxn {
                     match value {
                         Some(v) => {
                             if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
+                                tracing::error!(
+                                    error = %e,
+                                    key_len = key.len(),
+                                    value_len = v.len(),
+                                    "Failed to insert key during commit"
+                                );
                                 let on_error = std::mem::take(&mut *self.on_error.lock());
                                 let on_error_async =
                                     std::mem::take(&mut *self.on_error_async.lock());
@@ -419,6 +455,11 @@ impl Txn for RedbTxn {
                         }
                         None => {
                             if let Err(e) = table.remove(key.as_slice()) {
+                                tracing::error!(
+                                    error = %e,
+                                    key_len = key.len(),
+                                    "Failed to delete key during commit"
+                                );
                                 let on_error = std::mem::take(&mut *self.on_error.lock());
                                 let on_error_async =
                                     std::mem::take(&mut *self.on_error_async.lock());
@@ -432,6 +473,11 @@ impl Txn for RedbTxn {
             }
 
             if let Err(e) = write_txn.commit() {
+                tracing::error!(
+                    error = %e,
+                    pending_changes = pending.len(),
+                    "Failed to finalize commit"
+                );
                 let on_error = std::mem::take(&mut *self.on_error.lock());
                 let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
                 Self::execute_callbacks(on_error);
@@ -643,40 +689,40 @@ impl Iterator for RedbIterator {
     }
 }
 
-// Convert redb errors to our error type
+// Convert redb errors to our error type with context
 impl From<redb::Error> for Error {
     fn from(err: redb::Error) -> Self {
-        Error::Backend(err.to_string())
+        Error::Backend(format!("redb error: {}", err))
     }
 }
 
 impl From<redb::DatabaseError> for Error {
     fn from(err: redb::DatabaseError) -> Self {
-        Error::Backend(err.to_string())
+        Error::Backend(format!("redb database error: {}", err))
     }
 }
 
 impl From<redb::TransactionError> for Error {
     fn from(err: redb::TransactionError) -> Self {
-        Error::Backend(err.to_string())
+        Error::Backend(format!("redb transaction error: {}", err))
     }
 }
 
 impl From<redb::TableError> for Error {
     fn from(err: redb::TableError) -> Self {
-        Error::Backend(err.to_string())
+        Error::Backend(format!("redb table error: {}", err))
     }
 }
 
 impl From<redb::StorageError> for Error {
     fn from(err: redb::StorageError) -> Self {
-        Error::Backend(err.to_string())
+        Error::Backend(format!("redb storage error: {}", err))
     }
 }
 
 impl From<redb::CommitError> for Error {
     fn from(err: redb::CommitError) -> Self {
-        Error::Backend(err.to_string())
+        Error::Backend(format!("redb commit error: {}", err))
     }
 }
 
@@ -847,4 +893,8 @@ mod redb_specific_tests {
             "New reader should see committed changes"
         );
     }
+
+    // Note: Tests for "operations after discard/commit" are unnecessary because
+    // Rust's ownership system enforces this at compile time - discard() and commit()
+    // take `self: Box<Self>`, consuming the transaction and preventing further use.
 }

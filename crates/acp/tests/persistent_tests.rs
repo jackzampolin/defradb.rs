@@ -1,4 +1,4 @@
-//! Tests for PersistentAcpStore backed by RocksDB.
+//! Tests for PersistentAcpStore backed by redb.
 
 use acp::{AcpStore, PersistentAcpStore, RelationTuple};
 use identity::Did;

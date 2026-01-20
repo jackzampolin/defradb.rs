@@ -142,7 +142,7 @@ impl std::str::FromStr for KeyringBackend {
 
 /// Datastore backend options
 ///
-/// Note: "rocksdb" is accepted as an alias for "badger" for compatibility.
+/// Note: "rocksdb" and "redb" are accepted as aliases for "badger" for compatibility.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DatastoreType {
@@ -165,7 +165,7 @@ impl std::str::FromStr for DatastoreType {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "badger" | "rocksdb" => Ok(DatastoreType::Badger),
+            "badger" | "rocksdb" | "redb" => Ok(DatastoreType::Badger),
             "memory" => Ok(DatastoreType::Memory),
             _ => Err(Error::InvalidDatastore(s.to_string())),
         }

@@ -214,8 +214,8 @@ async fn test_http_server_schema_endpoint_returns_empty() {
     let _ = tokio::time::timeout(Duration::from_secs(5), node_handle).await;
 }
 
-/// Create a test config with RocksDB backend
-fn test_config_rocksdb(port: u16, temp_dir: &std::path::Path) -> Config {
+/// Create a test config with Redb backend
+fn test_config_redb(port: u16, temp_dir: &std::path::Path) -> Config {
     Config {
         rootdir: temp_dir.to_path_buf(),
         log: cli::config::LogConfig::default(),
@@ -226,7 +226,7 @@ fn test_config_rocksdb(port: u16, temp_dir: &std::path::Path) -> Config {
             privkey_path: String::new(),
         },
         datastore: cli::config::DatastoreConfig {
-            store: DatastoreType::Badger, // Use RocksDB backend
+            store: DatastoreType::Badger, // Use Redb backend
             path: String::new(),
             max_txn_retries: 5,
             valuelogfilesize: 1 << 30,
@@ -251,13 +251,13 @@ fn test_config_rocksdb(port: u16, temp_dir: &std::path::Path) -> Config {
 }
 
 #[tokio::test]
-async fn test_http_server_with_rocksdb_backend() {
+async fn test_http_server_with_redb_backend() {
     let temp_dir = tempfile::tempdir().unwrap();
     let port = portpicker::pick_unused_port().expect("No free ports");
-    let config = test_config_rocksdb(port, temp_dir.path());
+    let config = test_config_redb(port, temp_dir.path());
     let api_url = format!("http://127.0.0.1:{}", port);
 
-    // Create node with RocksDB backend
+    // Create node with Redb backend
     let node = Node::new(config, None).await.unwrap();
     let shutdown_tx = node.shutdown_tx.clone();
 
@@ -265,7 +265,7 @@ async fn test_http_server_with_rocksdb_backend() {
 
     wait_for_server(&api_url, 20).await;
 
-    // Test health check works with RocksDB
+    // Test health check works with Redb
     let client = reqwest::Client::new();
     let response = client
         .get(format!("{}/health-check", api_url))
@@ -305,7 +305,7 @@ async fn test_http_graphql_returns_documents_from_database() {
 
     // Phase 1: Pre-seed database with collection and documents
     {
-        let store = storage::RocksDBStore::open(data_path).unwrap();
+        let store = storage::RedbStore::open(data_path).unwrap();
         let database = db::DB::new(store);
 
         // Create Users collection
@@ -352,7 +352,7 @@ async fn test_http_graphql_returns_documents_from_database() {
             privkey_path: String::new(),
         },
         datastore: cli::config::DatastoreConfig {
-            store: DatastoreType::Badger, // Uses RocksDB
+            store: DatastoreType::Badger, // Uses Redb
             path: String::new(),
             max_txn_retries: 5,
             valuelogfilesize: 1 << 30,
@@ -433,7 +433,7 @@ async fn test_http_graphql_create_mutation() {
 
     // Phase 1: Pre-seed database with collection (no documents)
     {
-        let store = storage::RocksDBStore::open(data_path).unwrap();
+        let store = storage::RedbStore::open(data_path).unwrap();
         let database = db::DB::new(store);
 
         let schema = CollectionVersion::new(
@@ -451,7 +451,7 @@ async fn test_http_graphql_create_mutation() {
     }
 
     // Phase 2: Start server and create document via mutation
-    let config = test_config_rocksdb(port, temp_dir.path());
+    let config = test_config_redb(port, temp_dir.path());
     let api_url = format!("http://127.0.0.1:{}", port);
     let node = Node::new(config, None).await.unwrap();
     let shutdown_tx = node.shutdown_tx.clone();
@@ -532,7 +532,7 @@ async fn test_http_graphql_update_mutation() {
     // Phase 1: Pre-seed database with a document
     let doc_id: String;
     {
-        let store = storage::RocksDBStore::open(data_path).unwrap();
+        let store = storage::RedbStore::open(data_path).unwrap();
         let database = db::DB::new(store);
 
         let schema = CollectionVersion::new(
@@ -562,7 +562,7 @@ async fn test_http_graphql_update_mutation() {
     }
 
     // Phase 2: Start server and update the document
-    let config = test_config_rocksdb(port, temp_dir.path());
+    let config = test_config_redb(port, temp_dir.path());
     let api_url = format!("http://127.0.0.1:{}", port);
     let node = Node::new(config, None).await.unwrap();
     let shutdown_tx = node.shutdown_tx.clone();
@@ -638,7 +638,7 @@ async fn test_http_graphql_delete_mutation() {
     // Phase 1: Pre-seed database with two documents
     let doc_id_to_delete: String;
     {
-        let store = storage::RocksDBStore::open(data_path).unwrap();
+        let store = storage::RedbStore::open(data_path).unwrap();
         let database = db::DB::new(store);
 
         let schema = CollectionVersion::new(
@@ -674,7 +674,7 @@ async fn test_http_graphql_delete_mutation() {
     }
 
     // Phase 2: Start server and delete one document
-    let config = test_config_rocksdb(port, temp_dir.path());
+    let config = test_config_redb(port, temp_dir.path());
     let api_url = format!("http://127.0.0.1:{}", port);
     let node = Node::new(config, None).await.unwrap();
     let shutdown_tx = node.shutdown_tx.clone();
@@ -735,7 +735,7 @@ async fn test_http_transaction_begin() {
 
     // Pre-seed database with collection
     {
-        let store = storage::RocksDBStore::open(data_path).unwrap();
+        let store = storage::RedbStore::open(data_path).unwrap();
         let database = db::DB::new(store);
         let schema = CollectionVersion::new(
             "Users",
@@ -750,7 +750,7 @@ async fn test_http_transaction_begin() {
         database.close().await.unwrap();
     }
 
-    let config = test_config_rocksdb(port, temp_dir.path());
+    let config = test_config_redb(port, temp_dir.path());
     let api_url = format!("http://127.0.0.1:{}", port);
     let node = Node::new(config, None).await.unwrap();
     let shutdown_tx = node.shutdown_tx.clone();
@@ -812,7 +812,7 @@ async fn test_http_transaction_commit_flow() {
 
     // Pre-seed database with collection and document
     {
-        let store = storage::RocksDBStore::open(data_path).unwrap();
+        let store = storage::RedbStore::open(data_path).unwrap();
         let database = db::DB::new(store);
         let schema = CollectionVersion::new(
             "Users",
@@ -837,7 +837,7 @@ async fn test_http_transaction_commit_flow() {
         database.close().await.unwrap();
     }
 
-    let config = test_config_rocksdb(port, temp_dir.path());
+    let config = test_config_redb(port, temp_dir.path());
     let api_url = format!("http://127.0.0.1:{}", port);
     let node = Node::new(config, None).await.unwrap();
     let shutdown_tx = node.shutdown_tx.clone();
@@ -910,7 +910,7 @@ async fn test_http_transaction_rollback() {
 
     // Pre-seed database with collection
     {
-        let store = storage::RocksDBStore::open(data_path).unwrap();
+        let store = storage::RedbStore::open(data_path).unwrap();
         let database = db::DB::new(store);
         let schema = CollectionVersion::new(
             "Users",
@@ -925,7 +925,7 @@ async fn test_http_transaction_rollback() {
         database.close().await.unwrap();
     }
 
-    let config = test_config_rocksdb(port, temp_dir.path());
+    let config = test_config_redb(port, temp_dir.path());
     let api_url = format!("http://127.0.0.1:{}", port);
     let node = Node::new(config, None).await.unwrap();
     let shutdown_tx = node.shutdown_tx.clone();

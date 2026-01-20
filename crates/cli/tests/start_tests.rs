@@ -71,14 +71,14 @@ fn test_apply_to_config_badger_store_succeeds() {
 }
 
 #[test]
-fn test_apply_to_config_rocksdb_alias_succeeds() {
+fn test_apply_to_config_redb_alias_succeeds() {
     let mut config = Config::default();
     let mut args = default_start_args();
-    args.store = Some("rocksdb".to_string());
+    args.store = Some("redb".to_string());
 
     let result = args.apply_to_config(&mut config);
     assert!(result.is_ok());
-    // rocksdb is an alias for badger in Rust implementation
+    // redb is an alias for badger in Rust implementation
     assert_eq!(config.datastore.store, DatastoreType::Badger);
 }
 

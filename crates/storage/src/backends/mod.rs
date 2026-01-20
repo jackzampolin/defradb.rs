@@ -19,12 +19,12 @@
 /// | Persistence | No | Yes |
 /// | WASM Support | Yes | Yes |
 /// | Performance | Very Fast | Fast |
-/// | Memory Usage | High (all in RAM) | Configurable |
+/// | Memory Usage | High (all in RAM) | High (snapshot per txn) |
 /// | Crash Recovery | No | Yes |
 /// | Concurrent Access | Yes | Yes |
 /// | ACID Transactions | Yes | Yes |
 /// | Snapshot Isolation | Yes (MVCC) | Yes |
-/// | Use Case | Testing, Dev | Production |
+/// | Use Case | Testing, Dev | Production (small DBs) |
 ///
 /// # Example
 ///
