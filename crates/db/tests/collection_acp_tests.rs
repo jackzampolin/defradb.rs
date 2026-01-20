@@ -301,11 +301,10 @@ async fn test_policy_change_mid_transaction_resource_name_change() {
         .unwrap();
 
     // Verify document is registered under old resource name
-    assert!(
-        acp.is_doc_registered(&policy_v1.id, &policy_v1.resource_name, "doc1")
-            .await
-            .unwrap()
-    );
+    assert!(acp
+        .is_doc_registered(&policy_v1.id, &policy_v1.resource_name, "doc1")
+        .await
+        .unwrap());
 
     // Now create a "new version" with different resource name
     let mut collection_v2 = collection_v1.clone();
@@ -314,18 +313,16 @@ async fn test_policy_change_mid_transaction_resource_name_change() {
 
     // Document should NOT be registered under new resource name
     // (simulating the orphaned registration scenario)
-    assert!(
-        !acp.is_doc_registered(&policy_v2.id, &policy_v2.resource_name, "doc1")
-            .await
-            .unwrap()
-    );
+    assert!(!acp
+        .is_doc_registered(&policy_v2.id, &policy_v2.resource_name, "doc1")
+        .await
+        .unwrap());
 
     // But the old registration still exists
-    assert!(
-        acp.is_doc_registered(&policy_v1.id, &policy_v1.resource_name, "doc1")
-            .await
-            .unwrap()
-    );
+    assert!(acp
+        .is_doc_registered(&policy_v1.id, &policy_v1.resource_name, "doc1")
+        .await
+        .unwrap());
 }
 
 /// Test that checking permissions uses the current collection's policy,

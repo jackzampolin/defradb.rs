@@ -112,12 +112,15 @@ pub fn public_key_to_did(public_key: &PublicKey) -> Result<Did, PeerIdentityErro
             ));
         }
         other => {
-            return Err(PeerIdentityError::UnsupportedKeyType(format!("{:?}", other)));
+            return Err(PeerIdentityError::UnsupportedKeyType(format!(
+                "{:?}",
+                other
+            )));
         }
     };
 
-    let did_string =
-        create_did_key(key_type, &key_bytes).map_err(|e| PeerIdentityError::DidCreation(e.to_string()))?;
+    let did_string = create_did_key(key_type, &key_bytes)
+        .map_err(|e| PeerIdentityError::DidCreation(e.to_string()))?;
 
     Did::new(did_string).map_err(PeerIdentityError::DidParse)
 }

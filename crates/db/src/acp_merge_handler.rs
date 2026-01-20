@@ -194,18 +194,16 @@ where
         }
 
         // For normal operations, metadata must be present
-        let (creator, collection_id, doc_id) = match (
-            metadata.creator,
-            metadata.collection_id,
-            metadata.doc_id,
-        ) {
-            (Some(c), Some(col), Some(d)) => (c, col, d),
-            _ => {
-                return Err(AcpMergeError::MissingMetadata(
-                    "creator, collection_id, and doc_id required for non-recovery merge".to_string(),
-                ));
-            }
-        };
+        let (creator, collection_id, doc_id) =
+            match (metadata.creator, metadata.collection_id, metadata.doc_id) {
+                (Some(c), Some(col), Some(d)) => (c, col, d),
+                _ => {
+                    return Err(AcpMergeError::MissingMetadata(
+                        "creator, collection_id, and doc_id required for non-recovery merge"
+                            .to_string(),
+                    ));
+                }
+            };
 
         // Check ACP permission before merging
         let permitted = self
@@ -299,15 +297,14 @@ mod tests {
             Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
         let did_clone = test_did.clone();
 
-        let handler = AcpMergeHandler::new(mock, local_acp, collections).with_peer_to_did(
-            move |peer_id| {
+        let handler =
+            AcpMergeHandler::new(mock, local_acp, collections).with_peer_to_did(move |peer_id| {
                 if peer_id == "12D3KooWTest" {
                     Some(did_clone.clone())
                 } else {
                     None
                 }
-            },
-        );
+            });
 
         // Should return authenticated identity for known peer
         let identity = handler.peer_to_identity("12D3KooWTest");

@@ -34,9 +34,7 @@ fn create_test_token() -> (String, Did) {
 async fn extract_from_request(
     auth_header: Option<&str>,
 ) -> Result<ExtractIdentity, IdentityExtractionError> {
-    let mut builder = Request::builder()
-        .uri("/test")
-        .header(HOST, TEST_HOST); // Add Host header for audience validation
+    let mut builder = Request::builder().uri("/test").header(HOST, TEST_HOST); // Add Host header for audience validation
     if let Some(header) = auth_header {
         builder = builder.header(AUTHORIZATION, header);
     }

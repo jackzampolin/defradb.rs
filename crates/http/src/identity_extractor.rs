@@ -74,9 +74,10 @@ impl IntoResponse for IdentityExtractionError {
                 (StatusCode::FORBIDDEN, format!("Invalid token: {}", msg))
             }
             // Token verification failures (expired, audience mismatch) also return 403
-            IdentityExtractionError::TokenVerificationFailed(msg) => {
-                (StatusCode::FORBIDDEN, format!("Token verification failed: {}", msg))
-            }
+            IdentityExtractionError::TokenVerificationFailed(msg) => (
+                StatusCode::FORBIDDEN,
+                format!("Token verification failed: {}", msg),
+            ),
         };
 
         (status, Json(ErrorResponse { error: message })).into_response()

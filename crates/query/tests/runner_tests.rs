@@ -2689,6 +2689,98 @@ async fn test_nested_query_allowed_when_no_acp_configured() {
     assert_eq!(users.len(), 1);
 }
 
+#[tokio::test]
+async fn test_nested_query_blocked_when_deeply_nested_collection_has_acp() {
+    // Test 3-level deep nesting where only the deepest level has ACP:
+    // Authors (no ACP) → Books (no ACP) → Reviews (has ACP)
+    // Query: { Authors { books { reviews { ... } } } }
+    // Should be blocked because Reviews has ACP policy
+
+    let fetcher = MockFetcher::new();
+
+    // Authors collection (no ACP) - has relation to Books
+    let authors = CollectionVersion::new(
+        "Authors",
+        "v1",
+        "coll-authors",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "books", FieldKind::relation("Books", true))
+                .with_relation_name("author_books"),
+        ],
+    );
+
+    // Books collection (no ACP) - has relation to Reviews
+    let books = CollectionVersion::new(
+        "Books",
+        "v1",
+        "coll-books",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            FieldDescription::new("3", "author", FieldKind::relation("Authors", false))
+                .with_relation_name("author_books")
+                .as_primary(),
+            FieldDescription::new("4", "author_id", FieldKind::doc_id())
+                .with_relation_name("author_books")
+                .as_primary(),
+            FieldDescription::new(
+                "5",
+                "reviews",
+                FieldKind::relation("ProtectedReviews", true),
+            )
+            .with_relation_name("book_reviews"),
+        ],
+    );
+
+    // Reviews collection (HAS ACP) - the deepest level
+    let protected_reviews = CollectionVersion::new(
+        "ProtectedReviews",
+        "v1",
+        "coll-protected-reviews",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "content", FieldKind::string()),
+            FieldDescription::new("3", "rating", FieldKind::int()),
+            FieldDescription::new("4", "book", FieldKind::relation("Books", false))
+                .with_relation_name("book_reviews")
+                .as_primary(),
+            FieldDescription::new("5", "book_id", FieldKind::doc_id())
+                .with_relation_name("book_reviews")
+                .as_primary(),
+        ],
+    )
+    .with_policy(PolicyDescription {
+        id: "policy-reviews".to_string(),
+        resource_name: "protected_reviews".to_string(),
+    });
+
+    let runner = QueryRunner::new(fetcher, vec![authors, books, protected_reviews])
+        .with_acp(Arc::new(MockAcp));
+
+    // Query 3 levels deep: Authors → Books → Reviews (protected)
+    let result = runner
+        .execute_query("{ Authors { name books { title reviews { content rating } } } }")
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Expected error for deeply nested query touching ACP-protected collection"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ACP") && err.contains("not yet supported"),
+        "Error should mention ACP not supported. Got: {}",
+        err
+    );
+    assert!(
+        err.contains("ProtectedReviews"),
+        "Error should identify the ACP-protected collection 'ProtectedReviews'. Got: {}",
+        err
+    );
+}
+
 // =============================================================================
 // Complex Filter Tests on Nested Selections
 // =============================================================================

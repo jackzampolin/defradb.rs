@@ -174,7 +174,11 @@ async fn test_update_document() {
     assert_eq!(updated.get("age").unwrap(), 41);
 
     // Fetch and verify
-    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let fetched = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.get("age").unwrap(), 41);
 }
 
@@ -250,7 +254,11 @@ async fn test_full_crud_lifecycle() {
     assert_eq!(created.get("name").unwrap(), "Grace");
 
     // READ
-    let read = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let read = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(read.get("name").unwrap(), "Grace");
     assert_eq!(read.get("age").unwrap(), 50);
 
@@ -262,7 +270,11 @@ async fn test_full_crud_lifecycle() {
     assert_eq!(updated.get("age").unwrap(), 51);
 
     // READ again to verify update
-    let read_after_update = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let read_after_update = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(read_after_update.get("age").unwrap(), 51);
 
     // DELETE
@@ -300,7 +312,11 @@ async fn test_create_document_with_special_characters() {
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let fetched = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "Alice \"The Great\"\nSmith"
@@ -324,7 +340,11 @@ async fn test_create_document_with_tabs_and_carriage_returns() {
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let fetched = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "Name\twith\ttabs\rand\rreturns"
@@ -348,7 +368,11 @@ async fn test_create_document_with_unicode() {
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let fetched = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "héllo 世界 🌍"
@@ -372,7 +396,11 @@ async fn test_create_document_with_backslashes() {
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let fetched = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "path\\to\\file"
@@ -439,7 +467,11 @@ async fn test_delete_document_collection_not_found() {
     let rest = create_rest_ops().await;
 
     let result = rest
-        .delete_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000", None)
+        .delete_document(
+            "NonExistent",
+            "bae-00000000-0000-0000-0000-000000000000",
+            None,
+        )
         .await;
 
     assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
@@ -450,7 +482,11 @@ async fn test_get_document_collection_not_found() {
     let rest = create_rest_ops().await;
 
     let result = rest
-        .get_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000", None)
+        .get_document(
+            "NonExistent",
+            "bae-00000000-0000-0000-0000-000000000000",
+            None,
+        )
         .await;
 
     assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
@@ -466,7 +502,11 @@ async fn test_create_document_with_empty_string() {
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
+    let fetched = rest
+        .get_document("Users", doc_id, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.get("name").unwrap().as_str().unwrap(), "");
     assert_eq!(fetched.get("age").unwrap().as_i64().unwrap(), 0);
 }

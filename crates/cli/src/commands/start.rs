@@ -430,19 +430,17 @@ impl Node {
         S: storage::corekv::Store + 'static,
     {
         // Extract DID from user identity for query runner (before consuming it)
+        // SECURITY: If user explicitly provides --identity, DID derivation MUST succeed.
+        // Failing silently to anonymous would violate user's security expectations.
         let user_did = match &user_identity {
-            Some(identity) => match identity.did() {
-                Ok(did) => Some(did),
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Failed to extract DID from --identity flag. \
-                         ACP will treat all requests as anonymous. \
-                         Check that your identity key is valid and matches the --identity-key-type."
-                    );
-                    None
-                }
-            },
+            Some(identity) => Some(identity.did().map_err(|e| {
+                Error::InvalidIdentity(format!(
+                    "failed to derive DID from --identity flag: {}. \
+                     Verify your key is valid and matches --identity-key-type. \
+                     Remove --identity flag to run without authentication.",
+                    e
+                ))
+            })?),
             None => None,
         };
 
