@@ -10,7 +10,9 @@
 
 //! Tests for the HTTP client
 
-use cli::commands::client::http_client::{GraphQLRequest, GraphQLResponse, GraphQLError, HttpClient};
+use cli::commands::client::http_client::{
+    GraphQLError, GraphQLRequest, GraphQLResponse, HttpClient,
+};
 use reqwest::StatusCode;
 
 #[test]

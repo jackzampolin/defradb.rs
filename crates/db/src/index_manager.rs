@@ -382,4 +382,3 @@ impl IndexManager {
         self.indexes.len()
     }
 }
-

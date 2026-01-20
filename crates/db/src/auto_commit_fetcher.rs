@@ -193,4 +193,3 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         Ok(matching_docs)
     }
 }
-

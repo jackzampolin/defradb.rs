@@ -798,4 +798,3 @@ impl<S: Store> DB<S> {
         }
     }
 }
-

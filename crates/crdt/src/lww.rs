@@ -332,4 +332,3 @@ impl PriorityReader for Lww {
         self.get_priority_internal(reader).await
     }
 }
-

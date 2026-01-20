@@ -97,4 +97,3 @@ pub trait AcpStore: Send + Sync {
     /// [`RelationTuple::validate_prefix`] before constructing storage keys.
     async fn is_doc_registered(&self, collection_id: &str, doc_id: &str) -> Result<bool>;
 }
-

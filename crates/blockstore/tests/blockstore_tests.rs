@@ -483,10 +483,7 @@ async fn test_operations_with_cidv0() {
     blockstore.put(&cidv0, data).await.unwrap();
     assert!(blockstore.has(&cidv0).await.unwrap());
     assert_eq!(blockstore.get(&cidv0).await.unwrap(), Some(data.to_vec()));
-    assert_eq!(
-        blockstore.get_size(&cidv0).await.unwrap(),
-        Some(data.len())
-    );
+    assert_eq!(blockstore.get_size(&cidv0).await.unwrap(), Some(data.len()));
 
     let cids = blockstore.all_cids().await.unwrap();
     assert!(cids.contains(&cidv0));

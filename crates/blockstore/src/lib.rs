@@ -85,10 +85,7 @@ impl<S: Store + 'static> DefraBlockstore<S> {
     }
 
     /// Create a new transaction on the underlying store (for testing)
-    pub async fn new_store_txn(
-        &self,
-        read_only: bool,
-    ) -> Result<Box<dyn storage::corekv::Txn>> {
+    pub async fn new_store_txn(&self, read_only: bool) -> Result<Box<dyn storage::corekv::Txn>> {
         Ok(self.store.new_txn(read_only).await?)
     }
 

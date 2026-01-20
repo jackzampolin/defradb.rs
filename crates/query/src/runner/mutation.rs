@@ -9,7 +9,9 @@ use crate::document::{document_to_plan_doc, DocumentMapping};
 use crate::error::{QueryError, Result};
 use crate::mapper::{Mutation, MutationType};
 use crate::mutator::DocMutator;
-use crate::plan::{CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertInput, UpsertNode};
+use crate::plan::{
+    CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertInput, UpsertNode,
+};
 use crate::planner::PlanNode;
 use crate::query_parse::parse_mutations;
 use crate::txn::TransactionRegistry;

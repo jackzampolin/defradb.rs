@@ -1,12 +1,12 @@
 //! Integration tests for merkle proof generation and verification
 
 use cid::Cid;
+use crypto::keys::generation::{generate_ed25519, generate_secp256k1};
+use crypto::keys::PrivateKey;
 use crypto::merkle_proof::{
     extract_proof, verify_proof, verify_signed_proof, MerkleProof, ProofBlockstore, ProofNode,
     SignedMerkleProof,
 };
-use crypto::keys::generation::{generate_ed25519, generate_secp256k1};
-use crypto::keys::PrivateKey;
 use defra_core::block::{Block, CrdtDelta, LwwDeltaPayload};
 use defra_core::Result;
 use std::collections::HashMap;

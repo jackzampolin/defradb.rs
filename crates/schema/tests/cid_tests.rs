@@ -13,10 +13,8 @@ use schema::{generate_collection_cid, generate_field_cid, CType, FieldDescriptio
 const GO_CID_FIELD_DOCID: &str = "bafyreibmf7lqchqcal3j6zupiwo5fkn2ax7n25wszdygsibv7ybgdi6cny";
 const GO_CID_FIELD_STRING: &str = "bafyreiaezc5g33yzhyzcgbyiv476lovyztyoliotzksdfogoep5ktgpedq";
 const GO_CID_FIELD_INT: &str = "bafyreiefugdbpc563kqcjoe4pjrgavtv3ysbhpzp5smdwb4stxeldmronm";
-const GO_CID_FIELD_RELATION: &str =
-    "bafyreibzyoyhnkjp3byipqvvpplbgxq5c5aeiy5zdu773gb7zbxdmsvlym";
-const GO_CID_COLLECTION_USERS: &str =
-    "bafyreiazcyzp3lzapqxuf3b6pw6himmcun65ljkaxmgsbxngdfrcbcfg7e";
+const GO_CID_FIELD_RELATION: &str = "bafyreibzyoyhnkjp3byipqvvpplbgxq5c5aeiy5zdu773gb7zbxdmsvlym";
+const GO_CID_COLLECTION_USERS: &str = "bafyreiazcyzp3lzapqxuf3b6pw6himmcun65ljkaxmgsbxngdfrcbcfg7e";
 
 // ============================================================================
 // Go Compatibility Tests
@@ -57,9 +55,8 @@ fn test_field_int_cid_matches_go() {
 
 #[test]
 fn test_field_relation_cid_matches_go() {
-    let field =
-        FieldDescription::new("1", "author", FieldKind::relation("bafkreiusers123", false))
-            .with_crdt_type(CType::Object);
+    let field = FieldDescription::new("1", "author", FieldKind::relation("bafkreiusers123", false))
+        .with_crdt_type(CType::Object);
     let cid = generate_field_cid(&field).unwrap();
     assert_eq!(
         cid.to_string(),

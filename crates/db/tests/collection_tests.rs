@@ -4,7 +4,9 @@ use db::collection::Collection;
 use db::database::DB;
 use db::index_manager::IndexManager;
 use document::{Document, NormalValue};
-use schema::{CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription};
+use schema::{
+    CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription,
+};
 use storage::backends::MemoryStore;
 
 fn test_collection() -> Collection {
@@ -177,7 +179,10 @@ async fn test_collection_update_nonexistent_returns_error() {
     let result = col.update(&txn, &doc).await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), db::Error::DocumentNotFound(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        db::Error::DocumentNotFound(_)
+    ));
 }
 
 #[tokio::test]
@@ -235,9 +240,8 @@ async fn test_collection_get_all_multiple() {
     // Create multiple documents
     let txn = db.new_txn(false).await.unwrap();
     for i in 0..5 {
-        let doc =
-            Document::from_json_str(&format!(r#"{{"name": "User{}", "index": {}}}"#, i, i))
-                .unwrap();
+        let doc = Document::from_json_str(&format!(r#"{{"name": "User{}", "index": {}}}"#, i, i))
+            .unwrap();
         doc.generate_doc_id().unwrap();
         col.create(&txn, &doc).await.unwrap();
     }

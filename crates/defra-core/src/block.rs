@@ -646,4 +646,3 @@ fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     // Create CIDv1 with DAG-CBOR codec
     Ok(Cid::new_v1(DAG_CBOR_CODEC, mh))
 }
-

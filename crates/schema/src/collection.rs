@@ -345,4 +345,3 @@ impl CollectionBuilder {
         format!("v{:x}", hasher.finish())
     }
 }
-

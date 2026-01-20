@@ -150,7 +150,8 @@ fn test_generate_auth_token_ed25519_64_bytes() {
 
 #[test]
 fn test_generate_auth_token_invalid_hex() {
-    let result = cli::commands::client::generate_auth_token("not-valid-hex!", "http://localhost:9181");
+    let result =
+        cli::commands::client::generate_auth_token("not-valid-hex!", "http://localhost:9181");
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -188,8 +189,10 @@ fn test_generate_auth_token_tokens_are_unique() {
     let private_key = crypto::generate_secp256k1().unwrap();
     let hex_key = hex::encode(private_key.raw());
 
-    let token1 = cli::commands::client::generate_auth_token(&hex_key, "http://localhost:9181").unwrap();
-    let token2 = cli::commands::client::generate_auth_token(&hex_key, "http://localhost:9181").unwrap();
+    let token1 =
+        cli::commands::client::generate_auth_token(&hex_key, "http://localhost:9181").unwrap();
+    let token2 =
+        cli::commands::client::generate_auth_token(&hex_key, "http://localhost:9181").unwrap();
 
     // The tokens may or may not be identical depending on timing,
     // but they should both be valid

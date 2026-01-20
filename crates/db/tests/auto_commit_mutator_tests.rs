@@ -112,8 +112,7 @@ async fn test_delete_nonexistent_document() {
     let mutator = AutoCommitMutator::new(db);
 
     // Try to delete a document that doesn't exist
-    let nonexistent_id =
-        DocID::from_string("bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc").unwrap();
+    let nonexistent_id = DocID::from_string("bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc").unwrap();
     let delete_result = mutator.delete("Users", &nonexistent_id).await.unwrap();
     assert!(!delete_result.existed);
 }
@@ -126,8 +125,7 @@ async fn test_get_for_update_nonexistent() {
 
     let mutator = AutoCommitMutator::new(db);
 
-    let nonexistent_id =
-        DocID::from_string("bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc").unwrap();
+    let nonexistent_id = DocID::from_string("bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc").unwrap();
     let result = mutator
         .get_for_update("Users", &nonexistent_id)
         .await

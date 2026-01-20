@@ -17,8 +17,7 @@ async fn test_persistent_store_put_and_has() {
     let tmp_dir = TempDir::new().unwrap();
     let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
 
-    let tuple =
-        RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
+    let tuple = RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
 
     assert!(!store.has_tuple(&tuple).await.unwrap());
     store.put_tuple(&tuple).await.unwrap();
@@ -30,8 +29,7 @@ async fn test_persistent_store_delete() {
     let tmp_dir = TempDir::new().unwrap();
     let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
 
-    let tuple =
-        RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
+    let tuple = RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
 
     store.put_tuple(&tuple).await.unwrap();
     assert!(store.has_tuple(&tuple).await.unwrap());
@@ -71,8 +69,7 @@ async fn test_persistent_store_is_doc_registered() {
     let tmp_dir = TempDir::new().unwrap();
     let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
 
-    let tuple =
-        RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
+    let tuple = RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
 
     assert!(!store.is_doc_registered("users", "doc1").await.unwrap());
     store.put_tuple(&tuple).await.unwrap();
@@ -147,8 +144,7 @@ async fn test_persistent_store_unicode_identifiers() {
     let store = PersistentAcpStore::open(tmp_dir.path()).unwrap();
 
     // Unicode characters in collection_id and doc_id should work
-    let tuple =
-        RelationTuple::try_new(test_did(), "owner", "users", "文档1").expect("valid tuple");
+    let tuple = RelationTuple::try_new(test_did(), "owner", "users", "文档1").expect("valid tuple");
     store.put_tuple(&tuple).await.unwrap();
     assert!(
         store.has_tuple(&tuple).await.unwrap(),
