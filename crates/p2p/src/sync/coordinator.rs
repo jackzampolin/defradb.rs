@@ -68,7 +68,8 @@ use blockstore::Blockstore;
 use cid::Cid;
 use libp2p::PeerId;
 
-use crate::error::Result;
+use crate::bitswap::{AccessMode, ReplicatorRegistry};
+use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
 use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::replicator::ReplicatorInfo;
@@ -129,16 +130,58 @@ pub struct SyncCoordinator<B: Blockstore> {
 
     /// Local peer ID (for creator field in broadcasts)
     local_peer_id: String,
+
+    /// Access control mode
+    access_mode: AccessMode,
+
+    /// Replicator registry for access control checks
+    replicators: Arc<ReplicatorRegistry>,
 }
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
-    /// Create a new sync coordinator.
+    /// Create a new sync coordinator with default Open access mode.
     ///
     /// Returns the coordinator and a receiver for sync events.
+    ///
+    /// This constructor creates the coordinator without access control
+    /// (AccessMode::Open). Use `with_access_control` for production deployments
+    /// where access control is required.
     pub async fn new(
         host: P2PHostHandle,
         blockstore: Arc<B>,
         config: SyncConfig,
+    ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
+        Self::with_access_control(
+            host,
+            blockstore,
+            config,
+            AccessMode::Open,
+            Arc::new(ReplicatorRegistry::new()),
+        )
+        .await
+    }
+
+    /// Create a new sync coordinator with access control.
+    ///
+    /// Returns the coordinator and a receiver for sync events.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - Handle to the P2P host
+    /// * `blockstore` - Shared blockstore for storing blocks
+    /// * `config` - Sync configuration
+    /// * `access_mode` - Access control mode (Open or Controlled)
+    /// * `replicators` - Registry of authorized replicator peers
+    ///
+    /// When `access_mode` is `AccessMode::Controlled`, incoming PushLog requests
+    /// and GossipSub messages are checked against the replicator registry. Only
+    /// peers registered as replicators for the collection can sync documents.
+    pub async fn with_access_control(
+        host: P2PHostHandle,
+        blockstore: Arc<B>,
+        config: SyncConfig,
+        access_mode: AccessMode,
+        replicators: Arc<ReplicatorRegistry>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = host.local_peer_id().await?.to_string();
         let broadcaster = Broadcaster::new(host.clone());
@@ -152,9 +195,63 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 manager,
                 peer_state,
                 local_peer_id,
+                access_mode,
+                replicators,
             },
             events,
         ))
+    }
+
+    /// Check if a peer has access to sync a collection.
+    ///
+    /// Returns `Ok(())` if access is granted, or `Err(Error::AccessDenied)` if denied.
+    ///
+    /// Access rules:
+    /// 1. If mode is Open → allow all
+    /// 2. If peer is a replicator for the collection → allow
+    /// 3. Otherwise → deny
+    fn check_access(&self, peer_id: &PeerId, collection_id: &str) -> Result<()> {
+        // Fast path: Open mode allows all access
+        if self.access_mode.is_open() {
+            return Ok(());
+        }
+
+        // Check if peer is a replicator for this collection
+        if self.replicators.is_replicator(collection_id, peer_id) {
+            return Ok(());
+        }
+
+        // Check if peer is a replicator for any collection (more permissive fallback)
+        // This handles the case where the peer might be syncing across collections
+        if self.replicators.is_any_replicator(peer_id) {
+            tracing::debug!(
+                peer_id = %peer_id,
+                collection_id = %collection_id,
+                "Peer is replicator for other collections, allowing access"
+            );
+            return Ok(());
+        }
+
+        // Access denied
+        tracing::warn!(
+            peer_id = %peer_id,
+            collection_id = %collection_id,
+            "Access denied: peer is not a replicator for this collection"
+        );
+        Err(Error::AccessDenied {
+            peer_id: peer_id.to_string(),
+            collection_id: collection_id.to_string(),
+        })
+    }
+
+    /// Get the current access mode.
+    pub fn access_mode(&self) -> AccessMode {
+        self.access_mode
+    }
+
+    /// Get the replicator registry.
+    pub fn replicators(&self) -> &Arc<ReplicatorRegistry> {
+        &self.replicators
     }
 
     /// Handle an event from the P2P host.
@@ -191,6 +288,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     "Received GossipSub message"
                 );
 
+                // Access control check
+                if let Err(e) = self.check_access(&propagation_source, &message.collection_id) {
+                    tracing::warn!(
+                        peer_id = %propagation_source,
+                        collection_id = %message.collection_id,
+                        doc_id = %message.doc_id,
+                        "Dropping GossipSub message from unauthorized peer"
+                    );
+                    return Err(e);
+                }
+
                 // Parse CID - if invalid, return error early (don't call process_pushlog
                 // which will also fail with the same invalid CID)
                 match Cid::try_from(message.cid.as_slice()) {
@@ -223,6 +331,28 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     doc_id = %request.doc_id,
                     "Received PushLog request"
                 );
+
+                // Access control check
+                if let Err(e) = self.check_access(&peer_id, &request.collection_id) {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        collection_id = %request.collection_id,
+                        doc_id = %request.doc_id,
+                        "Rejecting PushLog request from unauthorized peer"
+                    );
+                    let reply = PushLogReply::error(
+                        &request.metadata.message_id,
+                        &format!("access denied: not authorized for collection {}", request.collection_id),
+                    );
+                    if let Err(send_err) = self.host.send_pushlog_response(channel, reply).await {
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            error = %send_err,
+                            "Failed to send access denied response"
+                        );
+                    }
+                    return Err(e);
+                }
 
                 // Parse CID - if invalid, send error response and return early
                 let cid = match Cid::try_from(request.cid.as_slice()) {
