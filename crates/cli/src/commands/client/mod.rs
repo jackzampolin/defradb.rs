@@ -10,6 +10,7 @@
 
 //! Client commands for interacting with a running DefraDB node
 
+mod acp;
 mod collection;
 mod document;
 pub mod http_client;
@@ -22,6 +23,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
+pub use acp::AcpArgs;
 pub use collection::CollectionArgs;
 pub use document::DocumentArgs;
 pub use query::QueryArgs;
@@ -86,16 +88,18 @@ pub struct ClientArgs {
 /// Client subcommands
 #[derive(Subcommand, Debug)]
 pub enum ClientCommand {
+    /// Interact with Access Control Policies
+    Acp(AcpArgs),
+    /// Interact with collections
+    Collection(CollectionArgs),
+    /// Interact with documents
+    Document(DocumentArgs),
     /// Execute a GraphQL query
     Query(QueryArgs),
     /// Interact with schema
     Schema(SchemaArgs),
     /// Manage transactions
     Tx(TxArgs),
-    /// Interact with collections
-    Collection(CollectionArgs),
-    /// Interact with documents
-    Document(DocumentArgs),
 }
 
 impl ClientArgs {
@@ -118,11 +122,12 @@ impl ClientArgs {
         };
 
         match &self.command {
+            ClientCommand::Acp(args) => args.execute(&ctx).await,
+            ClientCommand::Collection(args) => args.execute(&ctx).await,
+            ClientCommand::Document(args) => args.execute(&ctx).await,
             ClientCommand::Query(args) => args.execute(&ctx).await,
             ClientCommand::Schema(args) => args.execute(&ctx).await,
             ClientCommand::Tx(args) => args.execute(&ctx).await,
-            ClientCommand::Collection(args) => args.execute(&ctx).await,
-            ClientCommand::Document(args) => args.execute(&ctx).await,
         }
     }
 }

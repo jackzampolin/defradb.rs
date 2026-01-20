@@ -393,3 +393,97 @@ impl GraphQLResponse {
             .join("; ")
     }
 }
+
+/// ACP policy add request
+#[derive(Debug, Serialize)]
+pub struct AcpAddPolicyRequest {
+    pub policy: String,
+}
+
+/// ACP policy add response
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AcpAddPolicyResponse {
+    #[serde(rename = "PolicyID")]
+    pub policy_id: String,
+}
+
+/// ACP policy info from list/describe
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AcpPolicy {
+    /// Policy ID
+    #[serde(rename = "id", alias = "ID")]
+    pub id: String,
+
+    /// Policy name (if available)
+    #[serde(rename = "name", alias = "Name", default)]
+    pub name: Option<String>,
+
+    /// Policy description (if available)
+    #[serde(rename = "description", alias = "Description", default)]
+    pub description: Option<String>,
+
+    /// Resources defined in the policy
+    #[serde(rename = "resources", alias = "Resources", default)]
+    pub resources: Option<JsonValue>,
+
+    /// Actor definitions
+    #[serde(rename = "actor", alias = "Actor", default)]
+    pub actor: Option<JsonValue>,
+
+    /// Creation time (if available)
+    #[serde(rename = "creationTime", alias = "CreationTime", default)]
+    pub creation_time: Option<String>,
+}
+
+impl HttpClient {
+    /// Add a new ACP policy
+    pub async fn acp_add_policy(&self, policy: &str) -> Result<AcpAddPolicyResponse> {
+        let url = format!("{}/api/v0/acp/policy", self.base_url);
+        let request = AcpAddPolicyRequest {
+            policy: policy.to_string(),
+        };
+        self.post_json(&url, &request).await
+    }
+
+    /// List all ACP policies
+    pub async fn acp_list_policies(&self) -> Result<Vec<AcpPolicy>> {
+        let url = format!("{}/api/v0/acp/policy", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read error response body: {}", e);
+                    String::new()
+                }
+            };
+            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+        }
+
+        let policies: Vec<AcpPolicy> = response.json().await?;
+        Ok(policies)
+    }
+
+    /// Get a specific ACP policy by ID
+    pub async fn acp_get_policy(&self, policy_id: &str) -> Result<AcpPolicy> {
+        let url = format!("{}/api/v0/acp/policy/{}", self.base_url, policy_id);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read error response body: {}", e);
+                    String::new()
+                }
+            };
+            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+        }
+
+        let policy: AcpPolicy = response.json().await?;
+        Ok(policy)
+    }
+}
