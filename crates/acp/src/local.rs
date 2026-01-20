@@ -2,6 +2,14 @@
 //!
 //! This implementation stores relation tuples locally and evaluates
 //! permission checks against them. SourceHub integration is deferred.
+//!
+//! # Audit Logging
+//!
+//! All ACP operations are logged for security auditing:
+//! - Permission grants (debug level)
+//! - Permission denials (info level)
+//! - Document registrations (info level)
+//! - Relationship changes (info level)
 
 use async_trait::async_trait;
 use identity::Did;
@@ -77,11 +85,32 @@ impl DocumentACP for LocalDocumentACP {
             .register_doc_atomic(identity, resource_name, doc_id)
             .await?
         {
-            true => Ok(()), // Successfully registered
-            false => Err(Error::DocumentAlreadyRegistered(format!(
-                "{}:{}",
-                resource_name, doc_id
-            ))),
+            true => {
+                tracing::info!(
+                    target: "acp::audit",
+                    event = "document_registered",
+                    owner = %identity,
+                    collection = %resource_name,
+                    doc_id = %doc_id,
+                    "Document registered with ACP"
+                );
+                Ok(())
+            }
+            false => {
+                tracing::warn!(
+                    target: "acp::audit",
+                    event = "document_registration_failed",
+                    owner = %identity,
+                    collection = %resource_name,
+                    doc_id = %doc_id,
+                    reason = "already_registered",
+                    "Document registration failed: already registered"
+                );
+                Err(Error::DocumentAlreadyRegistered(format!(
+                    "{}:{}",
+                    resource_name, doc_id
+                )))
+            }
         }
     }
 
@@ -121,30 +150,53 @@ impl DocumentACP for LocalDocumentACP {
 
         // Check specific relations based on permission
         // DPI rule: permissions are unions (owner + relation)
-        match permission {
+        let granted = match permission {
             DocumentPermission::Read => {
                 // reader OR updater OR deleter grants read (implied read)
-                Ok(self
-                    .has_relation(did, resource_name, doc_id, READER_RELATION)
+                self.has_relation(did, resource_name, doc_id, READER_RELATION)
                     .await?
                     || self
                         .has_relation(did, resource_name, doc_id, UPDATER_RELATION)
                         .await?
                     || self
                         .has_relation(did, resource_name, doc_id, DELETER_RELATION)
-                        .await?)
+                        .await?
             }
             DocumentPermission::Update => {
                 // updater grants update
                 self.has_relation(did, resource_name, doc_id, UPDATER_RELATION)
-                    .await
+                    .await?
             }
             DocumentPermission::Delete => {
                 // deleter grants delete
                 self.has_relation(did, resource_name, doc_id, DELETER_RELATION)
-                    .await
+                    .await?
             }
+        };
+
+        if granted {
+            tracing::debug!(
+                target: "acp::audit",
+                event = "permission_granted",
+                subject = %did,
+                permission = ?permission,
+                collection = %resource_name,
+                doc_id = %doc_id,
+                "Permission granted via relation"
+            );
+        } else {
+            tracing::info!(
+                target: "acp::audit",
+                event = "permission_denied",
+                subject = %did,
+                permission = ?permission,
+                collection = %resource_name,
+                doc_id = %doc_id,
+                "Permission denied: no matching relation"
+            );
         }
+
+        Ok(granted)
     }
 
     async fn add_actor_relationship(
@@ -181,10 +233,30 @@ impl DocumentACP for LocalDocumentACP {
 
         // Check if already exists
         if self.store.has_tuple(&tuple).await? {
+            tracing::debug!(
+                target: "acp::audit",
+                event = "relationship_exists",
+                requestor = %requestor,
+                target = %target,
+                relation = %relation,
+                collection = %collection_id,
+                doc_id = %doc_id,
+                "Relationship already exists"
+            );
             return Ok(false);
         }
 
         self.store.put_tuple(&tuple).await?;
+        tracing::info!(
+            target: "acp::audit",
+            event = "relationship_added",
+            requestor = %requestor,
+            target = %target,
+            relation = %relation,
+            collection = %collection_id,
+            doc_id = %doc_id,
+            "Actor relationship added"
+        );
         Ok(true)
     }
 
@@ -214,10 +286,30 @@ impl DocumentACP for LocalDocumentACP {
 
         // Check if exists
         if !self.store.has_tuple(&tuple).await? {
+            tracing::debug!(
+                target: "acp::audit",
+                event = "relationship_not_found",
+                requestor = %requestor,
+                target = %target,
+                relation = %relation,
+                collection = %collection_id,
+                doc_id = %doc_id,
+                "Relationship does not exist"
+            );
             return Ok(false);
         }
 
         self.store.delete_tuple(&tuple).await?;
+        tracing::info!(
+            target: "acp::audit",
+            event = "relationship_deleted",
+            requestor = %requestor,
+            target = %target,
+            relation = %relation,
+            collection = %collection_id,
+            doc_id = %doc_id,
+            "Actor relationship deleted"
+        );
         Ok(true)
     }
 
@@ -228,7 +320,15 @@ impl DocumentACP for LocalDocumentACP {
         doc_id: &str,
     ) -> Result<()> {
         // Delete all tuples for this document (owner, reader, updater, deleter, etc.)
-        self.store.delete_doc_tuples(resource_name, doc_id).await
+        self.store.delete_doc_tuples(resource_name, doc_id).await?;
+        tracing::info!(
+            target: "acp::audit",
+            event = "document_unregistered",
+            collection = %resource_name,
+            doc_id = %doc_id,
+            "Document unregistered from ACP"
+        );
+        Ok(())
     }
 }
 

@@ -39,6 +39,7 @@ crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
+p2p = { path = "../p2p" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

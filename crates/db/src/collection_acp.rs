@@ -304,4 +304,68 @@ pub fn warn_on_unsafe_policy_transition(
     check
 }
 
+/// Block unsafe policy transitions by returning an error.
+///
+/// This function should be called before changing a collection's policy
+/// to prevent dangerous transitions that could expose previously protected
+/// documents.
+///
+/// # Arguments
+///
+/// * `collection_name` - Name of the collection being modified
+/// * `old_policy` - The current policy
+/// * `new_policy` - The new policy
+/// * `force` - If true, allows unsafe transitions (with warning logged)
+///
+/// # Returns
+///
+/// `Ok(())` if the transition is safe or forced.
+/// `Err(UnsafePolicyTransition)` if the transition is unsafe and not forced.
+///
+/// # Examples
+///
+/// ```ignore
+/// // This will fail if collection has a policy that would be removed
+/// block_unsafe_policy_transition("users", Some(&old_policy), None, false)?;
+///
+/// // Force allows the transition with a warning
+/// block_unsafe_policy_transition("users", Some(&old_policy), None, true)?;
+/// ```
+pub fn block_unsafe_policy_transition(
+    collection_name: &str,
+    old_policy: Option<&schema::PolicyDescription>,
+    new_policy: Option<&schema::PolicyDescription>,
+    force: bool,
+) -> crate::Result<()> {
+    let check = check_policy_transition(old_policy, new_policy);
+
+    match check {
+        PolicyTransitionCheck::Safe => Ok(()),
+        PolicyTransitionCheck::Warning { ref message, .. } => {
+            if force {
+                tracing::warn!(
+                    target: "acp::audit",
+                    event = "unsafe_policy_transition_forced",
+                    collection = %collection_name,
+                    "SECURITY WARNING - Unsafe policy transition forced: {}",
+                    message
+                );
+                Ok(())
+            } else {
+                tracing::error!(
+                    target: "acp::audit",
+                    event = "unsafe_policy_transition_blocked",
+                    collection = %collection_name,
+                    "Unsafe policy transition blocked: {}",
+                    message
+                );
+                Err(crate::Error::UnsafePolicyTransition(format!(
+                    "Collection '{}': {}. Use force=true to override.",
+                    collection_name, message
+                )))
+            }
+        }
+    }
+}
+
 // Tests extracted to crates/db/tests/collection_acp_tests.rs

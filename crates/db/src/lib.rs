@@ -42,6 +42,7 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
+pub mod acp_merge_handler;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod collection;
@@ -61,11 +62,14 @@ pub mod txn_context;
 pub mod txn_registry;
 
 // Re-export commonly used types
+pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
 pub use collection::Collection;
 pub use collection_acp::{
-    check_doc_permission, register_doc_if_needed, unregister_doc_if_needed, AcpContext,
+    block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
+    register_doc_if_needed, unregister_doc_if_needed, warn_on_unsafe_policy_transition,
+    AcpContext, PolicyTransitionCheck,
 };
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;

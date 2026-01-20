@@ -1,6 +1,7 @@
 //! Mock executors for testing HTTP routes.
 
 use async_trait::async_trait;
+use identity::Did;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -295,7 +296,11 @@ impl RestOperations for MockRestOperations {
         Ok(names)
     }
 
-    async fn get_collection_doc_ids(&self, collection: &str) -> RestResult<Vec<String>> {
+    async fn get_collection_doc_ids(
+        &self,
+        collection: &str,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
         let collections = self.collections.read().unwrap();
         match collections.get(collection) {
             Some(docs) => Ok(docs.iter().map(|d| d.doc_id.clone()).collect()),
@@ -303,7 +308,12 @@ impl RestOperations for MockRestOperations {
         }
     }
 
-    async fn get_document(&self, collection: &str, doc_id: &str) -> RestResult<Option<JsonValue>> {
+    async fn get_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        _identity: Option<&Did>,
+    ) -> RestResult<Option<JsonValue>> {
         let collections = self.collections.read().unwrap();
         match collections.get(collection) {
             Some(docs) => {
@@ -323,7 +333,12 @@ impl RestOperations for MockRestOperations {
         }
     }
 
-    async fn create_document(&self, collection: &str, data: JsonValue) -> RestResult<JsonValue> {
+    async fn create_document(
+        &self,
+        collection: &str,
+        data: JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<JsonValue> {
         let mut collections = self.collections.write().unwrap();
         match collections.get_mut(collection) {
             Some(docs) => {
@@ -348,10 +363,11 @@ impl RestOperations for MockRestOperations {
         &self,
         collection: &str,
         data: Vec<JsonValue>,
+        identity: Option<&Did>,
     ) -> RestResult<Vec<JsonValue>> {
         let mut results = Vec::with_capacity(data.len());
         for item in data {
-            let result = self.create_document(collection, item).await?;
+            let result = self.create_document(collection, item, identity).await?;
             results.push(result);
         }
         Ok(results)
@@ -362,6 +378,7 @@ impl RestOperations for MockRestOperations {
         collection: &str,
         doc_id: &str,
         patch: JsonValue,
+        _identity: Option<&Did>,
     ) -> RestResult<JsonValue> {
         let mut collections = self.collections.write().unwrap();
         match collections.get_mut(collection) {
@@ -391,7 +408,12 @@ impl RestOperations for MockRestOperations {
         }
     }
 
-    async fn delete_document(&self, collection: &str, doc_id: &str) -> RestResult<bool> {
+    async fn delete_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        _identity: Option<&Did>,
+    ) -> RestResult<bool> {
         let mut collections = self.collections.write().unwrap();
         match collections.get_mut(collection) {
             Some(docs) => {
@@ -453,7 +475,11 @@ impl RestOperations for FailingMockRestOperations {
         Err(self.error.clone())
     }
 
-    async fn get_collection_doc_ids(&self, _collection: &str) -> RestResult<Vec<String>> {
+    async fn get_collection_doc_ids(
+        &self,
+        _collection: &str,
+        _identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
         Err(self.error.clone())
     }
 
@@ -461,11 +487,17 @@ impl RestOperations for FailingMockRestOperations {
         &self,
         _collection: &str,
         _doc_id: &str,
+        _identity: Option<&Did>,
     ) -> RestResult<Option<JsonValue>> {
         Err(self.error.clone())
     }
 
-    async fn create_document(&self, _collection: &str, _data: JsonValue) -> RestResult<JsonValue> {
+    async fn create_document(
+        &self,
+        _collection: &str,
+        _data: JsonValue,
+        _identity: Option<&Did>,
+    ) -> RestResult<JsonValue> {
         Err(self.error.clone())
     }
 
@@ -473,6 +505,7 @@ impl RestOperations for FailingMockRestOperations {
         &self,
         _collection: &str,
         _data: Vec<JsonValue>,
+        _identity: Option<&Did>,
     ) -> RestResult<Vec<JsonValue>> {
         Err(self.error.clone())
     }
@@ -482,11 +515,17 @@ impl RestOperations for FailingMockRestOperations {
         _collection: &str,
         _doc_id: &str,
         _patch: JsonValue,
+        _identity: Option<&Did>,
     ) -> RestResult<JsonValue> {
         Err(self.error.clone())
     }
 
-    async fn delete_document(&self, _collection: &str, _doc_id: &str) -> RestResult<bool> {
+    async fn delete_document(
+        &self,
+        _collection: &str,
+        _doc_id: &str,
+        _identity: Option<&Did>,
+    ) -> RestResult<bool> {
         Err(self.error.clone())
     }
 }

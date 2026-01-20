@@ -4,6 +4,7 @@
 //! It provides collection listing and document CRUD operations separate from GraphQL.
 
 use async_trait::async_trait;
+use identity::Did;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
@@ -121,6 +122,14 @@ impl From<QueryError> for RestError {
 /// This trait provides REST-specific operations separate from GraphQL execution.
 /// Each operation runs with auto-commit semantics (one transaction per operation).
 ///
+/// # Identity and ACP
+///
+/// All document operations accept an optional `identity` parameter for access control.
+/// When provided, the identity is used for ACP (Access Control Policy) permission checks:
+/// - Read operations check read permission on protected documents
+/// - Create operations register the document with the identity as owner
+/// - Update/Delete operations check the corresponding permissions
+///
 /// # Example
 ///
 /// ```ignore
@@ -131,7 +140,7 @@ impl From<QueryError> for RestError {
 ///     rest.create_document("Users", json!({
 ///         "name": "Alice",
 ///         "age": 30
-///     })).await
+///     }), None).await
 /// }
 /// ```
 #[async_trait]
@@ -144,42 +153,71 @@ pub trait RestOperations: Send + Sync {
     /// Get all document IDs in a collection.
     ///
     /// Returns a list of document IDs (bae-...) for all documents in the collection.
-    async fn get_collection_doc_ids(&self, collection: &str) -> RestResult<Vec<String>>;
+    /// Identity is used to filter documents based on read permissions.
+    async fn get_collection_doc_ids(
+        &self,
+        collection: &str,
+        identity: Option<&Did>,
+    ) -> RestResult<Vec<String>>;
 
     /// Get a single document by ID.
     ///
     /// Returns the document as JSON if found, or None if the document doesn't exist.
-    async fn get_document(&self, collection: &str, doc_id: &str) -> RestResult<Option<JsonValue>>;
+    /// Identity is used to check read permission on protected documents.
+    async fn get_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        identity: Option<&Did>,
+    ) -> RestResult<Option<JsonValue>>;
 
     /// Create a single document.
     ///
     /// Returns the created document with its generated `_docID`.
-    async fn create_document(&self, collection: &str, data: JsonValue) -> RestResult<JsonValue>;
+    /// If identity is provided and the collection has a policy, the document
+    /// is registered with ACP and the identity becomes the owner.
+    async fn create_document(
+        &self,
+        collection: &str,
+        data: JsonValue,
+        identity: Option<&Did>,
+    ) -> RestResult<JsonValue>;
 
     /// Create multiple documents.
     ///
     /// Returns all created documents with their generated `_docID`s.
+    /// If identity is provided and the collection has a policy, documents
+    /// are registered with ACP and the identity becomes the owner.
     async fn create_documents(
         &self,
         collection: &str,
         data: Vec<JsonValue>,
+        identity: Option<&Did>,
     ) -> RestResult<Vec<JsonValue>>;
 
     /// Update a single document.
     ///
     /// Applies a partial update (patch) to the document.
     /// Returns the updated document.
+    /// Identity is used to check update permission on protected documents.
     async fn update_document(
         &self,
         collection: &str,
         doc_id: &str,
         patch: JsonValue,
+        identity: Option<&Did>,
     ) -> RestResult<JsonValue>;
 
     /// Delete a single document.
     ///
     /// Returns true if the document was deleted, false if it didn't exist.
-    async fn delete_document(&self, collection: &str, doc_id: &str) -> RestResult<bool>;
+    /// Identity is used to check delete permission on protected documents.
+    async fn delete_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        identity: Option<&Did>,
+    ) -> RestResult<bool>;
 }
 
 /// Production implementation of REST operations using QueryRunner.
@@ -313,6 +351,7 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
         &self,
         collection: &str,
         doc_id: &str,
+        identity: Option<&Did>,
     ) -> RestResult<Option<JsonValue>> {
         // Query all fields by not specifying a selection (the runner returns all fields)
         let query = format!(
@@ -321,7 +360,10 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
             doc_id = doc_id
         );
 
-        let result = self.runner.execute_query(&query).await?;
+        let result = self
+            .runner
+            .execute_query_with_identity(&query, identity.cloned())
+            .await?;
 
         // Extract the document from the result
         let doc = result
@@ -340,31 +382,51 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         Ok(self.runner.collection_names())
     }
 
-    async fn get_collection_doc_ids(&self, collection: &str) -> RestResult<Vec<String>> {
+    async fn get_collection_doc_ids(
+        &self,
+        collection: &str,
+        identity: Option<&Did>,
+    ) -> RestResult<Vec<String>> {
         if !self.runner.has_collection(collection) {
             return Err(RestError::collection_not_found(collection));
         }
 
         let query = self.build_list_ids_query(collection);
-        let result = self.runner.execute_query(&query).await?;
+        let result = self
+            .runner
+            .execute_query_with_identity(&query, identity.cloned())
+            .await?;
         self.extract_doc_ids(&result, collection)
     }
 
-    async fn get_document(&self, collection: &str, doc_id: &str) -> RestResult<Option<JsonValue>> {
+    async fn get_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        identity: Option<&Did>,
+    ) -> RestResult<Option<JsonValue>> {
         if !self.runner.has_collection(collection) {
             return Err(RestError::collection_not_found(collection));
         }
 
-        self.fetch_full_document(collection, doc_id).await
+        self.fetch_full_document(collection, doc_id, identity).await
     }
 
-    async fn create_document(&self, collection: &str, data: JsonValue) -> RestResult<JsonValue> {
+    async fn create_document(
+        &self,
+        collection: &str,
+        data: JsonValue,
+        identity: Option<&Did>,
+    ) -> RestResult<JsonValue> {
         if !self.runner.has_collection(collection) {
             return Err(RestError::collection_not_found(collection));
         }
 
         let mutation = self.build_create_mutation(collection, &data);
-        let result = self.runner.execute_mutation(&mutation).await?;
+        let result = self
+            .runner
+            .execute_mutation_with_identity(&mutation, identity.cloned())
+            .await?;
 
         // Extract the created document's ID and fetch the full document
         let doc_id = result
@@ -377,7 +439,7 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
             .ok_or_else(|| RestError::internal("failed to get created document ID"))?;
 
         // Fetch and return the full document
-        self.fetch_full_document(collection, doc_id)
+        self.fetch_full_document(collection, doc_id, identity)
             .await?
             .ok_or_else(|| RestError::internal("created document not found"))
     }
@@ -386,10 +448,11 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         &self,
         collection: &str,
         data: Vec<JsonValue>,
+        identity: Option<&Did>,
     ) -> RestResult<Vec<JsonValue>> {
         let mut results = Vec::with_capacity(data.len());
         for item in data {
-            let result = self.create_document(collection, item).await?;
+            let result = self.create_document(collection, item.clone(), identity).await?;
             results.push(result);
         }
         Ok(results)
@@ -400,38 +463,49 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         collection: &str,
         doc_id: &str,
         patch: JsonValue,
+        identity: Option<&Did>,
     ) -> RestResult<JsonValue> {
         if !self.runner.has_collection(collection) {
             return Err(RestError::collection_not_found(collection));
         }
 
-        // Check if document exists first
-        let existing = self.fetch_full_document(collection, doc_id).await?;
+        // Check if document exists first (with identity for permission check)
+        let existing = self.fetch_full_document(collection, doc_id, identity).await?;
         if existing.is_none() {
             return Err(RestError::document_not_found(doc_id));
         }
 
         let mutation = self.build_update_mutation(collection, doc_id, &patch);
-        self.runner.execute_mutation(&mutation).await?;
+        self.runner
+            .execute_mutation_with_identity(&mutation, identity.cloned())
+            .await?;
 
         // Fetch and return the updated document
-        self.fetch_full_document(collection, doc_id)
+        self.fetch_full_document(collection, doc_id, identity)
             .await?
             .ok_or_else(|| RestError::internal("updated document not found"))
     }
 
-    async fn delete_document(&self, collection: &str, doc_id: &str) -> RestResult<bool> {
+    async fn delete_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        identity: Option<&Did>,
+    ) -> RestResult<bool> {
         if !self.runner.has_collection(collection) {
             return Err(RestError::collection_not_found(collection));
         }
 
-        let existing = self.fetch_full_document(collection, doc_id).await?;
+        let existing = self.fetch_full_document(collection, doc_id, identity).await?;
         if existing.is_none() {
             return Ok(false);
         }
 
         let mutation = self.build_delete_mutation(collection, doc_id);
-        let result = self.runner.execute_mutation(&mutation).await?;
+        let result = self
+            .runner
+            .execute_mutation_with_identity(&mutation, identity.cloned())
+            .await?;
 
         // Extract deletion result, returning error if format is unexpected
         let delete_key = format!("delete_{}", collection);
