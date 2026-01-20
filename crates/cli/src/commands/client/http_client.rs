@@ -486,4 +486,64 @@ impl HttpClient {
         let policy: AcpPolicy = response.json().await?;
         Ok(policy)
     }
+
+    /// Export database backup
+    pub async fn backup_export(
+        &self,
+        collections: Option<&[String]>,
+        pretty: bool,
+    ) -> Result<String> {
+        let mut url = format!("{}/api/v0/backup/export", self.base_url);
+
+        // Build query parameters
+        let mut params = Vec::new();
+        if let Some(cols) = collections {
+            for col in cols {
+                params.push(format!("collections={}", col));
+            }
+        }
+        if pretty {
+            params.push("pretty=true".to_string());
+        }
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read error response body: {}", e);
+                    String::new()
+                }
+            };
+            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+        }
+
+        let data = response.text().await?;
+        Ok(data)
+    }
+
+    /// Import database backup
+    pub async fn backup_import(&self, data: &str) -> Result<()> {
+        let url = format!("{}/api/v0/backup/import", self.base_url);
+        let response = self.send_with_retry("POST", &url, Some(data)).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("Warning: Failed to read error response body: {}", e);
+                    String::new()
+                }
+            };
+            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+        }
+
+        Ok(())
+    }
 }
