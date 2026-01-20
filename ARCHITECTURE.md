@@ -6,13 +6,17 @@
 
 This document only describes what's different in the Rust implementation.
 
+## Core Vision
+
+defradb.rs aims to be a **fully interoperable Rust implementation** targeting embedded, edge, and WASM deployments. See [Issue #18](https://github.com/sourcenetwork/defradb.rs/issues/18) for the full roadmap.
+
 ## Crate Organization
 
 ```
 defra-core       # Core types, traits, errors (no dependencies)
     ↓
 crdt             # CRDT implementations (depends: defra-core)
-storage          # Multi-store with RocksDB (depends: defra-core)
+storage          # Multi-store with pluggable backends (depends: defra-core)
 crypto           # Signing/encryption (depends: defra-core)
 schema           # Schema validation (depends: defra-core)
     ↓
@@ -25,9 +29,10 @@ p2p              # libp2p networking (depends: crypto, blockstore, crdt)
 ## Key Differences from Go
 
 ### Storage Backend
-- **Go**: Badger
-- **Rust**: RocksDB
-- **Reason**: Mature Rust bindings, proven production reliability
+- **Go**: LevelDB (migrating for WASM compatibility)
+- **Rust**: redb (primary), rusty-leveldb (Go interop)
+- **Reason**: Pure Rust, WASM-compatible, no C/C++ dependencies
+- Both use single-writer model matching Go's transaction semantics
 
 ### HTTP Server
 - **Go**: Chi

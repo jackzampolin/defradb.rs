@@ -102,9 +102,9 @@ crates/
 │   └── Cargo.toml
 └── storage/
     ├── src/
-    │   ├── store.rs        # Store trait + RocksDB impl
-    │   ├── transaction.rs  # Transaction management
-    │   ├── multistore.rs   # Multi-store coordination
+    │   ├── backends/       # redb, leveldb, memory backends
+    │   ├── corekv/         # Core KV traits (Store, Txn, Reader, Writer)
+    │   ├── stores/         # Multi-store coordination
     │   └── lib.rs
     └── Cargo.toml
 ```

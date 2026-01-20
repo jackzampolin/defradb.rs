@@ -4,7 +4,9 @@ Rust implementation of [DefraDB](https://github.com/sourcenetwork/defradb).
 
 ## Status
 
-🚧 **Early exploration** - Implementing CRDT subsystem, testing against Go implementation.
+🔧 **~72% feature complete** - Query engine, P2P sync, indexing, and identity systems working. See [Issue #18](https://github.com/sourcenetwork/defradb.rs/issues/18) for full roadmap.
+
+**Target:** Embedded, edge, and WASM deployments with full Go DefraDB network interoperability.
 
 ## Documentation
 
