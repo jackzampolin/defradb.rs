@@ -183,31 +183,35 @@ impl RedbStore {
 #[async_trait]
 impl Store for RedbStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
-        if self.is_closed().await {
-            return Err(Error::DBClosed);
+        // Check closed status and increment count atomically to prevent TOCTOU race.
+        // By holding the read lock while incrementing, we ensure close() will see
+        // our incremented count if it runs concurrently.
+        {
+            let closed = self.closed.read().await;
+            if *closed {
+                return Err(Error::DBClosed);
+            }
+            self.active_txn_count.fetch_add(1, Ordering::SeqCst);
         }
 
-        // Increment active transaction count
-        self.active_txn_count.fetch_add(1, Ordering::SeqCst);
+        // Use a local guard to ensure count is decremented on panic or early return.
+        // The guard is defused (set to true) only when the transaction is fully constructed.
+        struct NewTxnGuard<'a>(&'a AtomicUsize, bool);
+        impl Drop for NewTxnGuard<'_> {
+            fn drop(&mut self) {
+                if !self.1 {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
         // Capture a snapshot for read isolation
-        let read_txn = match self.db.begin_read() {
-            Ok(txn) => txn,
-            Err(e) => {
-                // Decrement count on failure
-                self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
-                return Err(e.into());
-            }
-        };
+        let read_txn = self.db.begin_read()?;
+        let snapshot = capture_snapshot(&read_txn)?;
 
-        let snapshot = match capture_snapshot(&read_txn) {
-            Ok(s) => s,
-            Err(e) => {
-                // Decrement count on failure
-                self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        // Defuse the guard - transaction will manage its own count via its Drop impl
+        guard.1 = true;
 
         Ok(Box::new(RedbTxn {
             db: Arc::clone(&self.db),
@@ -227,9 +231,13 @@ impl Store for RedbStore {
     }
 
     async fn close(&self) -> Result<()> {
-        // Mark as closed first to prevent new transactions
+        // Mark as closed first to prevent new transactions.
+        // If already closed, return early (idempotent behavior).
         {
             let mut closed = self.closed.write().await;
+            if *closed {
+                return Ok(());
+            }
             *closed = true;
         }
 
@@ -294,17 +302,6 @@ impl Dropable for RedbStore {
     }
 }
 
-/// Guard to decrement active transaction count on drop.
-///
-/// Used in commit() to ensure the count is decremented even on early returns.
-struct TxnCountGuard(Arc<AtomicUsize>);
-
-impl Drop for TxnCountGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
 /// Compute the start and end bounds for a BTreeMap range query from IterOptions.
 ///
 /// This optimizes iteration by using the underlying data structure's range
@@ -357,8 +354,13 @@ fn compute_range_bounds(opts: &IterOptions) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) 
 /// Compute the exclusive end bound for a prefix.
 ///
 /// Given a prefix like "foo", returns "fop" (the first key that doesn't match the prefix).
-/// Returns None if the prefix is all 0xFF bytes (meaning iteration should go to the end).
+/// Returns None if the prefix is empty or all 0xFF bytes (meaning iteration should go to the end).
 fn prefix_to_end_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    // Empty prefix matches all keys - no end bound needed
+    if prefix.is_empty() {
+        return None;
+    }
+
     let mut end = prefix.to_vec();
     // Increment the last byte, handling overflow
     while let Some(last) = end.pop() {
@@ -395,6 +397,15 @@ fn capture_snapshot(read_txn: &ReadTransaction) -> Result<BTreeMap<Vec<u8>, Vec<
 ///
 /// Transactions maintain a snapshot of the store at creation time and track
 /// pending changes. Changes are applied atomically on commit.
+///
+/// # Drop Safety
+///
+/// If a transaction is dropped without calling `commit()` or `discard()`,
+/// the Drop implementation will:
+/// - Decrement the active transaction count (preventing store close hangs)
+/// - Log a warning about the improper cleanup
+///
+/// This is a safety net - callers should always explicitly commit or discard.
 struct RedbTxn {
     /// Reference to the redb database
     db: Arc<Database>,
@@ -428,6 +439,23 @@ struct RedbTxn {
     /// Callbacks for discard
     on_discard: Mutex<Vec<TxnCallback>>,
     on_discard_async: Mutex<Vec<AsyncTxnCallback>>,
+}
+
+impl Drop for RedbTxn {
+    fn drop(&mut self) {
+        // Always decrement the active transaction count
+        self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+
+        // Log warning if dropped without explicit commit/discard
+        let was_committed = *self.committed.lock();
+        let was_discarded = *self.discarded.lock();
+        if !was_committed && !was_discarded {
+            tracing::warn!(
+                "Transaction dropped without commit() or discard() - \
+                 this may indicate a bug. Pending changes were lost."
+            );
+        }
+    }
 }
 
 impl RedbTxn {
@@ -603,8 +631,8 @@ impl Writer for RedbTxn {
 #[async_trait]
 impl Txn for RedbTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
-        // Helper to decrement count on all exit paths
-        let _guard = TxnCountGuard(Arc::clone(&self.active_txn_count));
+        // Note: active_txn_count is decremented by Drop impl when self is dropped
+        // at the end of this function (on any exit path).
 
         if *self.discarded.lock() {
             tracing::warn!("Attempted to commit a discarded transaction");
@@ -720,8 +748,8 @@ impl Txn for RedbTxn {
     }
 
     fn discard(self: Box<Self>) {
-        // Decrement active transaction count
-        self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+        // Note: active_txn_count is decremented by Drop impl when self is dropped
+        // at the end of this function.
 
         *self.discarded.lock() = true;
 
@@ -782,10 +810,12 @@ impl Txn for RedbTxn {
     }
 }
 
-/// Merging iterator that lazily combines snapshot and pending changes.
+/// Merging iterator that combines pre-materialized snapshot and pending changes.
 ///
-/// Instead of materializing the full merged result upfront, this iterator
-/// holds both sorted Vecs and merges on-demand during iteration.
+/// Snapshot and pending items matching the query are materialized into Vecs at
+/// iterator creation. The merge itself happens on-demand during iteration via
+/// `next_merged()`. For large result sets, memory usage scales with the number
+/// of matching keys in the queried range.
 struct MergingIterator {
     /// Items from snapshot (sorted ascending)
     snapshot_items: Vec<(Vec<u8>, Vec<u8>)>,
@@ -936,11 +966,16 @@ impl Iterator for MergingIterator {
         self.snapshot_pos = Self::binary_search_position(&self.snapshot_items, key, self.reverse);
         self.pending_pos = Self::binary_search_position(&self.pending_items, key, self.reverse);
 
-        // Check if there's any data at or after the seek position
-        let has_snapshot = self.snapshot_pos < self.snapshot_items.len();
-        let has_pending = self.pending_pos < self.pending_items.len();
+        // Check if there's actual visible data at or after the seek position.
+        // This accounts for pending deletions that might mask snapshot data.
+        // We do this by peeking at next_merged() without advancing the iterator.
+        let saved_snapshot_pos = self.snapshot_pos;
+        let saved_pending_pos = self.pending_pos;
+        let has_data = self.next_merged().is_some();
+        self.snapshot_pos = saved_snapshot_pos;
+        self.pending_pos = saved_pending_pos;
 
-        Ok(has_snapshot || has_pending)
+        Ok(has_data)
     }
 
     async fn reset(&mut self) -> Result<()> {
