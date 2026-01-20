@@ -79,12 +79,18 @@ impl TypeJoinMany {
         document_mapping: DocumentMapping,
     ) -> Result<Self> {
         // Validate and extract child FK field index - required for one-to-many joins
+        let expected_fk_name = schema::CollectionVersion::relation_id_field_name(
+            child_side.relation_field().name.as_str(),
+        );
         let child_fk_index = child_side.relation_id_field_index().ok_or_else(|| {
             QueryError::internal(format!(
                 "TypeJoinMany requires child side to have FK field. \
-                 Child collection '{}' relation field '{}' has no FK field.",
+                 Child collection '{}' relation field '{}' is missing expected FK field '{}'. \
+                 Ensure the schema includes a '{}: DocID' field on the 'many' side of the relation.",
                 child_side.collection().name,
-                child_side.relation_field().name
+                child_side.relation_field().name,
+                expected_fk_name,
+                expected_fk_name
             ))
         })?;
 

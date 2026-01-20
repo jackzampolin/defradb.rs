@@ -159,12 +159,18 @@ impl DocumentMapping {
     ///
     /// Iterates over render_keys and extracts the corresponding values from the document
     /// to build a JSON object suitable for output.
+    ///
+    /// Missing fields are rendered as `null` to match GraphQL conventions and provide
+    /// consistent output structure regardless of data presence.
     pub fn render_doc_to_json(&self, doc: &Doc) -> JsonValue {
         let mut obj = serde_json::Map::new();
         for render_key in &self.render_keys {
-            if let Some(value) = doc.get(render_key.index) {
-                obj.insert(render_key.key.clone(), value.clone());
-            }
+            // Use null for missing fields to match GraphQL conventions
+            let value = doc
+                .get(render_key.index)
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            obj.insert(render_key.key.clone(), value);
         }
         JsonValue::Object(obj)
     }

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -111,15 +111,35 @@ impl TypeJoinOne {
     /// For inverted joins, extracts the parent's `_docID`.
     ///
     /// Logs a warning if the FK field exists but has an unexpected type.
+    /// Logs a debug message if the FK field is missing from the document.
     fn extract_fk(&self, parent_doc: &Doc) -> Option<String> {
         match &self.direction {
             JoinDirection::Inverted => {
                 // Secondary side: use parent's _docID as the lookup key
-                parent_doc.doc_id().map(String::from)
+                let doc_id = parent_doc.doc_id();
+                if doc_id.is_none() {
+                    debug!(
+                        parent_collection = %self.parent_side.collection().name,
+                        "Parent document missing _docID for inverted join lookup"
+                    );
+                }
+                doc_id.map(String::from)
             }
             JoinDirection::Primary { parent_fk_index } => {
                 // Primary side: extract from the FK field (e.g., author_id)
-                let value = parent_doc.get(*parent_fk_index)?;
+                let value = match parent_doc.get(*parent_fk_index) {
+                    Some(v) => v,
+                    None => {
+                        debug!(
+                            parent_collection = %self.parent_side.collection().name,
+                            relation_field = %self.parent_side.relation_field().name,
+                            fk_index = parent_fk_index,
+                            doc_id = ?parent_doc.doc_id(),
+                            "FK field not found at expected index in document"
+                        );
+                        return None;
+                    }
+                };
 
                 // Check for type mismatch (FK should be string or null)
                 if !value.is_null() && !value.is_string() {

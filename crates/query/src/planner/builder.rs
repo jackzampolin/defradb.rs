@@ -3,9 +3,13 @@
 //! Converts Select operations into executable plan trees.
 
 use schema::CollectionVersion;
+
+/// Maximum allowed nesting depth for nested queries.
+/// Prevents stack overflow from deeply nested or circular query structures.
+const MAX_NESTING_DEPTH: usize = 10;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -157,7 +161,7 @@ impl Planner {
         }
 
         // 3. Apply join nodes for relation fields
-        plan = self.apply_joins(plan, select, &collection, scan_mapping.clone())?;
+        plan = self.apply_joins(plan, select, &collection, scan_mapping.clone(), 0)?;
 
         // 4. Apply limit/offset if present
         if let Some(ref limit) = select.limit {
@@ -191,13 +195,26 @@ impl Planner {
     }
 
     /// Apply join nodes for nested selects (relation fields)
+    ///
+    /// The `depth` parameter tracks recursion depth to prevent stack overflow
+    /// from deeply nested or circular query structures.
     fn apply_joins(
         &self,
         mut plan: Box<dyn PlanNode>,
         select: &Select,
         parent_collection: &CollectionVersion,
         mut mapping: DocumentMapping,
+        depth: usize,
     ) -> Result<Box<dyn PlanNode>> {
+        // Check recursion depth to prevent stack overflow
+        if depth > MAX_NESTING_DEPTH {
+            return Err(QueryError::execution(format!(
+                "Query nesting depth {} exceeds maximum allowed depth of {}. \
+                 Consider simplifying the query or using separate queries for deeply nested data.",
+                depth, MAX_NESTING_DEPTH
+            )));
+        }
+
         for requestable in &select.fields {
             if let Requestable::Select(nested_select) = requestable {
                 let relation_field_name = &nested_select.field.name;
@@ -210,8 +227,11 @@ impl Planner {
                 // Verify it's a relation field
                 if !relation_field.kind.is_relation() {
                     return Err(QueryError::execution(format!(
-                        "field '{}' is not a relation",
-                        relation_field_name
+                        "field '{}' on collection '{}' is not a relation (type: {}). \
+                         Only relation fields can have nested selections.",
+                        relation_field_name,
+                        parent_collection.name,
+                        relation_field.kind.graphql_type_name()
                     )));
                 }
 
@@ -288,6 +308,7 @@ impl Planner {
                     nested_select,
                     &target_collection,
                     child_scan_mapping.clone(),
+                    depth + 1,
                 )?;
 
                 // Find the other side of the relation
@@ -314,7 +335,16 @@ impl Planner {
                             .iter()
                             .position(|tf| tf.name == f.name)
                     })
-                    .unwrap_or(0);
+                    .unwrap_or_else(|| {
+                        warn!(
+                            parent_collection = %parent_collection.name,
+                            target_collection = %target_collection.name,
+                            relation_field = %relation_field_name,
+                            "No back-reference field found for relation, using default index 0. \
+                             This may indicate a unidirectional relation or schema misconfiguration."
+                        );
+                        0
+                    });
 
                 // Create join sides
                 let parent_side = JoinSide::new(
@@ -380,10 +410,18 @@ impl Planner {
         // Map render_keys from render_mapping to schema indices.
         // render_mapping uses sparse indices (0, 1, 2, ...) for only selected fields,
         // but scan_mapping uses schema indices which may differ.
+        //
+        // IMPORTANT: render_key.key may be an alias (e.g., "headline" for field "title").
+        // We must look up the *field name* from render_mapping to find the schema index,
+        // then use render_key.key (the alias) as the output key.
         for render_key in &render_mapping.render_keys {
-            // Find the schema index for this field name
-            if let Some(schema_index) = mapping.first_index_of_name(&render_key.key) {
-                mapping.add_render_key(schema_index, &render_key.key);
+            // Find the field name that corresponds to this render_key's index in render_mapping
+            if let Some(field_name) = render_mapping.try_find_name_from_index(render_key.index) {
+                // Look up the schema index for this field name in the new mapping
+                if let Some(schema_index) = mapping.first_index_of_name(field_name) {
+                    // Add render key with the alias/output name at the schema index
+                    mapping.add_render_key(schema_index, &render_key.key);
+                }
             }
         }
 

@@ -223,6 +223,13 @@ fn parse_selection_set(
                 } else if !field.selection_set.items.is_empty() {
                     // This is a nested select (relation)
                     let nested = parse_field_to_select(field)?;
+
+                    // Add nested select to document mapping
+                    // Use field name for internal indexing, output_name (alias) for rendering
+                    let index = mapping.next_index();
+                    mapping.add(index, &field_name);
+                    mapping.add_render_key(index, nested.field.output_name());
+
                     fields.push(Requestable::Select(Box::new(nested)));
                 } else {
                     // Simple field

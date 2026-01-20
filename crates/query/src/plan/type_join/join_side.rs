@@ -1,6 +1,7 @@
 //! JoinSide - encapsulates one side of a join operation
 
 use schema::{CollectionVersion, FieldDescription};
+use tracing::warn;
 
 use crate::error::{QueryError, Result};
 
@@ -69,6 +70,18 @@ impl JoinSide {
                      This indicates a schema misconfiguration.",
                     relation_field.name, collection.name, id_field_name
                 )));
+            }
+
+            // Log warning when FK field is missing (but not required)
+            // This helps diagnose schema misconfigurations that could cause silent failures
+            if !require_fk && idx.is_none() {
+                warn!(
+                    collection = %collection.name,
+                    relation_field = %relation_field.name,
+                    expected_fk_field = %id_field_name,
+                    "Non-array relation is missing its FK field. This may indicate a schema \
+                     misconfiguration. The join will use inverted lookup (by parent's _docID)."
+                );
             }
 
             idx
