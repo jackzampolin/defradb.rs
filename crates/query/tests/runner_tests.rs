@@ -1705,8 +1705,447 @@ async fn test_nested_query_with_limit_on_parent() {
 
     // The one returned user should have all their posts (not limited)
     let user = &users[0];
-    let posts = user.get("posts").unwrap().as_array().unwrap();
+    let _posts = user.get("posts").unwrap().as_array().unwrap();
     // If Alice was returned, she should have 3 posts
     // If Bob was returned, he should have 0 posts
     // The exact user depends on iteration order
+}
+
+#[tokio::test]
+async fn test_nested_query_with_aliased_field() {
+    // Query: { Users { name posts { headline: title } } }
+    // Tests that aliased fields in nested selections render correctly.
+    // This test demonstrates a bug where aliases in nested queries are lost
+    // because build_scan_mapping_for_join searches by alias name instead of field name.
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add post
+    let mut post = Document::new();
+    post.set("_docID", "post-1");
+    post.set("title", "My First Post");
+    post.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query("{ Users { name posts { headline: title } } }")
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert_eq!(users.len(), 1);
+
+    let alice = &users[0];
+    let posts = alice.get("posts").unwrap().as_array().unwrap();
+    assert_eq!(posts.len(), 1);
+
+    // The aliased field should appear as "headline", not "title"
+    let post = &posts[0];
+    assert!(
+        post.get("headline").is_some(),
+        "Aliased field 'headline' should exist in output. Got: {:?}",
+        post
+    );
+    assert_eq!(post.get("headline").unwrap(), "My First Post");
+    assert!(
+        post.get("title").is_none(),
+        "Original field name 'title' should not appear when aliased"
+    );
+}
+
+// Helper for 4-level nesting test
+fn make_reactions_collection() -> CollectionVersion {
+    CollectionVersion::new(
+        "Reactions",
+        "v1",
+        "coll-reactions",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "emoji", FieldKind::string()),
+            // Many-to-one relation to comments
+            FieldDescription::new("3", "comment", FieldKind::relation("Comments", false))
+                .with_relation_name("comment_reactions")
+                .as_primary(),
+            // FK field
+            FieldDescription::new("4", "comment_id", FieldKind::doc_id())
+                .with_relation_name("comment_reactions")
+                .as_primary(),
+        ],
+    )
+}
+
+fn make_comments_with_reactions_collection() -> CollectionVersion {
+    CollectionVersion::new(
+        "Comments",
+        "v1",
+        "coll-comments",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "body", FieldKind::string()),
+            // Many-to-one relation to posts
+            FieldDescription::new("3", "post", FieldKind::relation("Posts", false))
+                .with_relation_name("post_comments")
+                .as_primary(),
+            // FK field
+            FieldDescription::new("4", "post_id", FieldKind::doc_id())
+                .with_relation_name("post_comments")
+                .as_primary(),
+            // One-to-many relation to reactions
+            FieldDescription::new("5", "reactions", FieldKind::relation("Reactions", true))
+                .with_relation_name("comment_reactions"),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn test_nested_query_four_levels_deep() {
+    // Query: { Users { name posts { title comments { body reactions { emoji } } } } }
+    // Four levels of nesting: Users -> Posts -> Comments -> Reactions
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add post
+    let mut post = Document::new();
+    post.set("_docID", "post-1");
+    post.set("title", "Alice's Post");
+    post.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post);
+
+    // Add comment
+    let mut comment = Document::new();
+    comment.set("_docID", "comment-1");
+    comment.set("body", "Great post!");
+    comment.set("post_id", "post-1");
+    fetcher.add_doc("Comments", comment);
+
+    // Add reactions
+    let mut reaction1 = Document::new();
+    reaction1.set("_docID", "reaction-1");
+    reaction1.set("emoji", "👍");
+    reaction1.set("comment_id", "comment-1");
+    fetcher.add_doc("Reactions", reaction1);
+
+    let mut reaction2 = Document::new();
+    reaction2.set("_docID", "reaction-2");
+    reaction2.set("emoji", "❤️");
+    reaction2.set("comment_id", "comment-1");
+    fetcher.add_doc("Reactions", reaction2);
+
+    // Create users collection with posts relation
+    let users_collection = CollectionVersion::new(
+        "Users",
+        "v1",
+        "coll-users",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "posts", FieldKind::relation("Posts", true))
+                .with_relation_name("author_posts"),
+        ],
+    );
+
+    // Create posts collection with comments relation
+    let posts_collection = CollectionVersion::new(
+        "Posts",
+        "v1",
+        "coll-posts",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            FieldDescription::new("3", "author", FieldKind::relation("Users", false))
+                .with_relation_name("author_posts")
+                .as_primary(),
+            FieldDescription::new("4", "author_id", FieldKind::doc_id())
+                .with_relation_name("author_posts")
+                .as_primary(),
+            FieldDescription::new("5", "comments", FieldKind::relation("Comments", true))
+                .with_relation_name("post_comments"),
+        ],
+    );
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            users_collection,
+            posts_collection,
+            make_comments_with_reactions_collection(),
+            make_reactions_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query("{ Users { name posts { title comments { body reactions { emoji } } } } }")
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert_eq!(users.len(), 1);
+
+    let alice = &users[0];
+    assert_eq!(alice.get("name").unwrap(), "Alice");
+
+    let posts = alice.get("posts").unwrap().as_array().unwrap();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].get("title").unwrap(), "Alice's Post");
+
+    let comments = posts[0].get("comments").unwrap().as_array().unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].get("body").unwrap(), "Great post!");
+
+    let reactions = comments[0].get("reactions").unwrap().as_array().unwrap();
+    assert_eq!(reactions.len(), 2);
+
+    let emojis: Vec<&str> = reactions
+        .iter()
+        .map(|r| r.get("emoji").unwrap().as_str().unwrap())
+        .collect();
+    assert!(emojis.contains(&"👍"));
+    assert!(emojis.contains(&"❤️"));
+}
+
+// Helper for self-referential test
+fn make_employees_collection() -> CollectionVersion {
+    CollectionVersion::new(
+        "Employees",
+        "v1",
+        "coll-employees",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // Self-referential: many-to-one relation to manager (another Employee)
+            FieldDescription::new("3", "manager", FieldKind::relation("Employees", false))
+                .with_relation_name("manager_reports")
+                .as_primary(),
+            // FK field for manager
+            FieldDescription::new("4", "manager_id", FieldKind::doc_id())
+                .with_relation_name("manager_reports")
+                .as_primary(),
+            // One-to-many: direct reports (array of Employees)
+            FieldDescription::new("5", "reports", FieldKind::relation("Employees", true))
+                .with_relation_name("manager_reports"),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn test_nested_query_self_referential_relation() {
+    // Query: { Employees { name manager { name } reports { name } } }
+    // Self-referential relation: Employee.manager -> Employee
+
+    let fetcher = MockFetcher::new();
+
+    // Add CEO (no manager)
+    let mut ceo = Document::new();
+    ceo.set("_docID", "emp-ceo");
+    ceo.set("name", "CEO Carol");
+    // No manager_id for CEO
+    fetcher.add_doc("Employees", ceo);
+
+    // Add manager who reports to CEO
+    let mut manager = Document::new();
+    manager.set("_docID", "emp-manager");
+    manager.set("name", "Manager Mike");
+    manager.set("manager_id", "emp-ceo");
+    fetcher.add_doc("Employees", manager);
+
+    // Add employee who reports to manager
+    let mut employee = Document::new();
+    employee.set("_docID", "emp-dev");
+    employee.set("name", "Developer Dave");
+    employee.set("manager_id", "emp-manager");
+    fetcher.add_doc("Employees", employee);
+
+    let runner = QueryRunner::new(fetcher, vec![make_employees_collection()]);
+
+    let result = runner
+        .execute_query("{ Employees { name manager { name } reports { name } } }")
+        .await
+        .unwrap();
+
+    let employees = result.get("Employees").unwrap().as_array().unwrap();
+    assert_eq!(employees.len(), 3);
+
+    // Find CEO - should have null manager and 1 report
+    let ceo = employees
+        .iter()
+        .find(|e| e.get("name").unwrap() == "CEO Carol")
+        .expect("CEO should exist");
+    assert!(
+        ceo.get("manager").unwrap().is_null(),
+        "CEO should have null manager"
+    );
+    let ceo_reports = ceo.get("reports").unwrap().as_array().unwrap();
+    assert_eq!(ceo_reports.len(), 1);
+    assert_eq!(ceo_reports[0].get("name").unwrap(), "Manager Mike");
+
+    // Find Manager - should have CEO as manager and 1 report
+    let manager = employees
+        .iter()
+        .find(|e| e.get("name").unwrap() == "Manager Mike")
+        .expect("Manager should exist");
+    assert_eq!(
+        manager.get("manager").unwrap().get("name").unwrap(),
+        "CEO Carol"
+    );
+    let manager_reports = manager.get("reports").unwrap().as_array().unwrap();
+    assert_eq!(manager_reports.len(), 1);
+    assert_eq!(manager_reports[0].get("name").unwrap(), "Developer Dave");
+
+    // Find Developer - should have Manager as manager and no reports
+    let dev = employees
+        .iter()
+        .find(|e| e.get("name").unwrap() == "Developer Dave")
+        .expect("Developer should exist");
+    assert_eq!(
+        dev.get("manager").unwrap().get("name").unwrap(),
+        "Manager Mike"
+    );
+    let dev_reports = dev.get("reports").unwrap().as_array().unwrap();
+    assert!(dev_reports.is_empty(), "Developer should have no reports");
+}
+
+#[tokio::test]
+async fn test_nested_query_with_aliased_doc_id() {
+    // Query: { Users { name posts { id: _docID title } } }
+    // Tests that _docID can be aliased in nested selections
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add post
+    let mut post = Document::new();
+    post.set("_docID", "post-1");
+    post.set("title", "Test Post");
+    post.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query("{ Users { name posts { id: _docID title } } }")
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert_eq!(users.len(), 1);
+
+    let posts = users[0].get("posts").unwrap().as_array().unwrap();
+    assert_eq!(posts.len(), 1);
+
+    let post = &posts[0];
+    // _docID should appear as "id" due to alias
+    assert!(
+        post.get("id").is_some(),
+        "Aliased _docID should appear as 'id'. Got: {:?}",
+        post
+    );
+    assert_eq!(post.get("id").unwrap(), "post-1");
+    assert!(
+        post.get("_docID").is_none(),
+        "_docID should not appear when aliased to 'id'"
+    );
+    assert_eq!(post.get("title").unwrap(), "Test Post");
+}
+
+#[tokio::test]
+async fn test_nested_query_filter_on_fk_field_included_in_select() {
+    // Query: { Users { name posts(filter: { author_id: { _eq: "user-1" } }) { title author_id } } }
+    // Filter on FK field that IS in the select list (should succeed)
+
+    let fetcher = MockFetcher::new();
+
+    // Add users
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    let mut bob = Document::new();
+    bob.set("_docID", "user-2");
+    bob.set("name", "Bob");
+    fetcher.add_doc("Users", bob);
+
+    // Add posts - some by Alice, some by Bob
+    let mut post1 = Document::new();
+    post1.set("_docID", "post-1");
+    post1.set("title", "Alice's Post");
+    post1.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post1);
+
+    let mut post2 = Document::new();
+    post2.set("_docID", "post-2");
+    post2.set("title", "Bob's Post");
+    post2.set("author_id", "user-2");
+    fetcher.add_doc("Posts", post2);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    // Filter posts by author_id, and include author_id in select
+    let result = runner
+        .execute_query(
+            r#"{ Users { name posts(filter: { author_id: { _eq: "user-1" } }) { title author_id } } }"#,
+        )
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+
+    // Find Alice - should have her post (filter matches)
+    let alice = users
+        .iter()
+        .find(|u| u.get("name").unwrap() == "Alice")
+        .expect("Alice should exist");
+    let alice_posts = alice.get("posts").unwrap().as_array().unwrap();
+    assert_eq!(alice_posts.len(), 1);
+    assert_eq!(alice_posts[0].get("title").unwrap(), "Alice's Post");
+    assert_eq!(alice_posts[0].get("author_id").unwrap(), "user-1");
+
+    // Find Bob - his posts are filtered out (author_id doesn't match)
+    let bob = users
+        .iter()
+        .find(|u| u.get("name").unwrap() == "Bob")
+        .expect("Bob should exist");
+    let bob_posts = bob.get("posts").unwrap().as_array().unwrap();
+    assert!(
+        bob_posts.is_empty(),
+        "Bob's posts should be filtered out. Got: {:?}",
+        bob_posts
+    );
 }
