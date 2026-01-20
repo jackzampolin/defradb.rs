@@ -54,7 +54,7 @@ mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};
 pub use coordinator::{LoadReplicatorsResult, SetReplicatorResult, SyncCoordinator};
-pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, SyncPlan};
+pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use manager::{SyncConfig, SyncEvent, SyncManager};
 pub use merge::{BlockMetadata, MergeHandler, MergeOutcome};
 pub use peer_state::{PeerStateTracker, PeerStats};
