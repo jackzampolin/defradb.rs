@@ -338,9 +338,8 @@ fn test_concurrent_peer_operations() {
         let tracker_clone = Arc::clone(&tracker);
         let handle = thread::spawn(move || {
             let peer = PeerId::random();
-            let cid =
-                Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
-                    .unwrap();
+            let cid = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+                .unwrap();
 
             // Perform various operations
             tracker_clone.peer_connected(peer);
@@ -385,10 +384,9 @@ fn test_concurrent_cid_tracking() {
             // Each thread adds the same CID multiple times
             for _ in 0..10 {
                 // Use a valid CID for testing
-                let cid = Cid::from_str(
-                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-                )
-                .unwrap();
+                let cid =
+                    Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+                        .unwrap();
                 tracker_clone.peer_has_cid(&peer, cid);
             }
         });

@@ -28,7 +28,13 @@ async fn test_unregistered_doc_allows_all_access() {
 
     // Anonymous can access unregistered doc
     let access = acp
-        .check_doc_access(&Identity::Anonymous, DocumentPermission::Read, "policy1", "users", "doc1")
+        .check_doc_access(
+            &Identity::Anonymous,
+            DocumentPermission::Read,
+            "policy1",
+            "users",
+            "doc1",
+        )
         .await
         .unwrap();
     assert!(access, "unregistered doc should allow anonymous read");
@@ -130,7 +136,13 @@ async fn test_anonymous_cannot_access_registered_doc() {
         .unwrap();
 
     let access = acp
-        .check_doc_access(&Identity::Anonymous, DocumentPermission::Read, "policy1", "users", "doc1")
+        .check_doc_access(
+            &Identity::Anonymous,
+            DocumentPermission::Read,
+            "policy1",
+            "users",
+            "doc1",
+        )
         .await
         .unwrap();
     assert!(!access, "anonymous should not read registered doc");

@@ -5,7 +5,6 @@ use std::time::Duration;
 use cli::commands::start::Node;
 use cli::config::{Config, DatastoreType};
 
-
 /// Wait for server to be ready by polling health endpoint with retries.
 async fn wait_for_server(api_url: &str, max_attempts: u32) {
     let client = reqwest::Client::new();

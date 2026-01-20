@@ -84,4 +84,3 @@ fn field_to_delta(field: &FieldDescription) -> crate::Result<FieldDefinitionDelt
 
     Ok(delta)
 }
-

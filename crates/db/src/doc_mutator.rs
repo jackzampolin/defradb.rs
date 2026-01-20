@@ -166,4 +166,3 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })
     }
 }
-

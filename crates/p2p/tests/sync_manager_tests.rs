@@ -158,8 +158,7 @@ async fn test_get_unmerged() {
 async fn test_process_pushlog_invalid_cid_returns_error() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let (manager, _events) =
-        SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+    let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
     // Create a broadcast with invalid CID bytes
     let msg = PushLogBroadcast::new(
@@ -298,8 +297,7 @@ async fn test_already_merged_returns_error_when_receiver_dropped() {
 async fn test_pending_dag_count_initially_zero() {
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let (manager, _events) =
-        SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+    let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
 
     assert_eq!(manager.pending_dag_count(), 0);
 }

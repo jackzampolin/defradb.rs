@@ -83,10 +83,7 @@ fn test_cbor_roundtrip_string() {
     doc.set("value", "hello");
     let cbor = doc.to_cbor().unwrap();
     let decoded = document::Document::from_cbor(&cbor).unwrap();
-    assert_eq!(
-        decoded.get("value").and_then(|v| v.as_str()),
-        Some("hello")
-    );
+    assert_eq!(decoded.get("value").and_then(|v| v.as_str()), Some("hello"));
 }
 
 // === Mixed-type array tests (Go compatibility) ===
@@ -168,7 +165,10 @@ fn test_to_map_neg_infinity_error() {
 #[test]
 fn test_to_map_float_array_nan_error() {
     let mut doc = document::Document::new();
-    doc.set("values", NormalValue::Float64Array(vec![1.0, f64::NAN, 3.0]));
+    doc.set(
+        "values",
+        NormalValue::Float64Array(vec![1.0, f64::NAN, 3.0]),
+    );
     let result = doc.to_map();
     assert!(result.is_err());
 }

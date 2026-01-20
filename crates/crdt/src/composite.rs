@@ -450,4 +450,3 @@ impl ReplicatedData for CompositeDAG {
         prefix
     }
 }
-

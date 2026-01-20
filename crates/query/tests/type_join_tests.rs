@@ -4,12 +4,11 @@ use async_trait::async_trait;
 use query::document::DocumentMapping;
 use query::error::{QueryError, Result};
 use query::mapper::Filter;
-use query::{JoinDirection, JoinSide, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne};
 use query::{Doc, PlanNode};
+use query::{JoinDirection, JoinSide, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
-
 
 /// Mock PlanNode that can be configured to return errors at different stages
 struct MockErrorPlanNode {
@@ -616,8 +615,8 @@ async fn test_type_join_one_inverted_secondary_side() {
             None,
         ]),
     ];
-    let parent_scan = ScanNode::new(authors_collection.clone(), authors_mapping.clone())
-        .with_docs(author_docs);
+    let parent_scan =
+        ScanNode::new(authors_collection.clone(), authors_mapping.clone()).with_docs(author_docs);
 
     // Child: Books scan (for lookups)
     let book_docs = vec![
@@ -1274,8 +1273,8 @@ async fn test_type_join_one_inverted_no_match() {
         Some(json!("Orphan Author")),
         None, // book will be filled by join
     ])];
-    let parent_scan = ScanNode::new(authors_collection.clone(), authors_mapping.clone())
-        .with_docs(author_docs);
+    let parent_scan =
+        ScanNode::new(authors_collection.clone(), authors_mapping.clone()).with_docs(author_docs);
 
     // Child: Books that point to different authors
     let book_docs = vec![Doc::with_fields(vec![
@@ -1511,10 +1510,8 @@ fn test_join_direction_enum() {
     let parent_relation = posts_collection.field_by_name("author").unwrap().clone();
     let child_relation = users_collection.field_by_name("posts").unwrap().clone();
 
-    let parent_side =
-        JoinSide::new(posts_collection.clone(), parent_relation.clone(), 2).unwrap();
-    let child_side =
-        JoinSide::new(users_collection.clone(), child_relation.clone(), 2).unwrap();
+    let parent_side = JoinSide::new(posts_collection.clone(), parent_relation.clone(), 2).unwrap();
+    let child_side = JoinSide::new(users_collection.clone(), child_relation.clone(), 2).unwrap();
 
     let parent_scan =
         ScanNode::new(posts_collection.clone(), posts_mapping.clone()).with_docs(vec![]);
@@ -2053,8 +2050,8 @@ async fn test_type_join_many_with_child_filter_excludes_non_matching() {
     // Child: Posts scan wrapped in SelectNode with filter
     let post_docs = make_post_docs();
     let posts_child_mapping = make_posts_child_mapping();
-    let child_scan = ScanNode::new(posts_collection.clone(), posts_child_mapping.clone())
-        .with_docs(post_docs);
+    let child_scan =
+        ScanNode::new(posts_collection.clone(), posts_child_mapping.clone()).with_docs(post_docs);
 
     // Filter: title starts with "Alice"
     let filter = Filter::from_conditions(HashMap::from([(
@@ -2147,8 +2144,8 @@ async fn test_type_join_one_with_child_filter_returns_null_when_no_match() {
     users_child_mapping.add_render_key(0, "_docID");
     users_child_mapping.add_render_key(1, "name");
 
-    let child_scan = ScanNode::new(users_collection.clone(), users_child_mapping.clone())
-        .with_docs(user_docs);
+    let child_scan =
+        ScanNode::new(users_collection.clone(), users_child_mapping.clone()).with_docs(user_docs);
 
     // Filter: name equals "Charlie" (doesn't exist)
     let filter = Filter::from_conditions(HashMap::from([(
@@ -2225,8 +2222,8 @@ async fn test_type_join_one_with_child_filter_returns_match() {
     users_child_mapping.add_render_key(0, "_docID");
     users_child_mapping.add_render_key(1, "name");
 
-    let child_scan = ScanNode::new(users_collection.clone(), users_child_mapping.clone())
-        .with_docs(user_docs);
+    let child_scan =
+        ScanNode::new(users_collection.clone(), users_child_mapping.clone()).with_docs(user_docs);
 
     // Filter: name equals "Alice"
     let filter = Filter::from_conditions(HashMap::from([(

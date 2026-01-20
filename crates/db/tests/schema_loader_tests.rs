@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
+use datastore::BasicTxn;
 use db::database::DB;
 use db::schema_loader::load_active_collections;
 use db::txn::DbTxn;
-use datastore::BasicTxn;
 use schema::CollectionVersion;
 use storage::backends::MemoryStore;
 use storage::corekv::Key;

@@ -105,4 +105,3 @@ pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<Collect
 
     Ok(collections)
 }
-

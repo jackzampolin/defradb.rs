@@ -23,6 +23,14 @@ use super::JoinSide;
 ///
 /// Child documents are pre-loaded and indexed during `init()` to avoid
 /// O(N * M) nested loop scans. Lookups are O(1) via HashMap.
+///
+/// # Memory Considerations
+///
+/// The child cache is unbounded - all child documents matching the query are loaded
+/// into memory during `init()`. For collections with very large numbers of documents
+/// (e.g., millions of posts for a popular author), this may cause significant memory
+/// usage. Consider using pagination or separate queries for large datasets. Future
+/// versions may implement LRU caching or streaming lookups to address this limitation.
 pub struct TypeJoinMany {
     /// Parent side of the join (the "one" side)
     parent_side: JoinSide,
@@ -79,12 +87,18 @@ impl TypeJoinMany {
         document_mapping: DocumentMapping,
     ) -> Result<Self> {
         // Validate and extract child FK field index - required for one-to-many joins
+        let expected_fk_name = schema::CollectionVersion::relation_id_field_name(
+            child_side.relation_field().name.as_str(),
+        );
         let child_fk_index = child_side.relation_id_field_index().ok_or_else(|| {
             QueryError::internal(format!(
                 "TypeJoinMany requires child side to have FK field. \
-                 Child collection '{}' relation field '{}' has no FK field.",
+                 Child collection '{}' relation field '{}' is missing expected FK field '{}'. \
+                 Ensure the schema includes a '{}: DocID' field on the 'many' side of the relation.",
                 child_side.collection().name,
-                child_side.relation_field().name
+                child_side.relation_field().name,
+                expected_fk_name,
+                expected_fk_name
             ))
         })?;
 
@@ -205,10 +219,18 @@ impl PlanNode for TypeJoinMany {
         let mut parent_doc = self.parent_plan.value().deep_clone();
 
         // Get parent's _docID for the lookup (O(1) cache lookup)
-        let children = parent_doc
-            .doc_id()
-            .map(|id| self.find_child_docs(id))
-            .unwrap_or_default();
+        let children = match parent_doc.doc_id() {
+            Some(id) => self.find_child_docs(id),
+            None => {
+                warn!(
+                    parent_collection = %self.parent_side.collection().name,
+                    relation_field = %self.parent_side.relation_field().name,
+                    "Parent document missing _docID - returning empty children array. \
+                     This may indicate data corruption or a schema mismatch."
+                );
+                Vec::new()
+            }
+        };
 
         // Merge children array into parent
         self.merge_children(&mut parent_doc, children);

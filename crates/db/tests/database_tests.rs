@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use db::database::{DB, DbOptions};
+use db::database::{DbOptions, DB};
 use db::Error;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::backends::MemoryStore;
@@ -455,8 +455,7 @@ async fn test_delete_collection_removes_all_documents_from_store() {
     let count = {
         let txn = db.new_txn(true).await.unwrap();
         let doc_prefix = "/d/col-users/";
-        let opts =
-            storage::corekv::IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
+        let opts = storage::corekv::IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
 
         let count = {
             let datastore = txn.datastore().unwrap();

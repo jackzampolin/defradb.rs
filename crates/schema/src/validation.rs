@@ -78,4 +78,3 @@ impl<'a> SchemaValidator<'a> {
 pub fn validate_schema(collections: &HashMap<String, CollectionVersion>) -> Result<()> {
     SchemaValidator::new(collections).validate_all()
 }
-

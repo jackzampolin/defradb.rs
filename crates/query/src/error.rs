@@ -155,6 +155,18 @@ pub enum QueryError {
     /// ACP registration failed during document creation
     #[error("ACP registration failed for document '{doc_id}': {message}")]
     AcpRegistrationFailed { doc_id: String, message: String },
+
+    /// ACP permission check failed (unable to verify access)
+    #[error("ACP {operation} permission check failed for document '{doc_id}': {message}")]
+    AcpCheckFailed {
+        operation: String,
+        doc_id: String,
+        message: String,
+    },
+
+    /// ACP registration status check failed
+    #[error("failed to check ACP registration status for document '{doc_id}': {message}")]
+    AcpRegistrationCheckFailed { doc_id: String, message: String },
 }
 
 impl QueryError {
@@ -210,6 +222,30 @@ impl QueryError {
         error: impl std::fmt::Display,
     ) -> Self {
         Self::AcpRegistrationFailed {
+            doc_id: doc_id.into(),
+            message: error.to_string(),
+        }
+    }
+
+    /// Create an ACP permission check failed error
+    pub fn acp_check_failed(
+        operation: impl Into<String>,
+        doc_id: impl Into<String>,
+        error: impl std::fmt::Display,
+    ) -> Self {
+        Self::AcpCheckFailed {
+            operation: operation.into(),
+            doc_id: doc_id.into(),
+            message: error.to_string(),
+        }
+    }
+
+    /// Create an ACP registration status check failed error
+    pub fn acp_registration_check_failed(
+        doc_id: impl Into<String>,
+        error: impl std::fmt::Display,
+    ) -> Self {
+        Self::AcpRegistrationCheckFailed {
             doc_id: doc_id.into(),
             message: error.to_string(),
         }

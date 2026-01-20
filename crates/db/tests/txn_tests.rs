@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use datastore::BasicTxn;
 use db::txn::DbTxn;
 use db::Error;
-use datastore::BasicTxn;
 use storage::backends::MemoryStore;
 
 #[tokio::test]

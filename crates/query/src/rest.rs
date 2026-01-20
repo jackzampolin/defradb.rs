@@ -435,9 +435,7 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
 
         // Extract deletion result, returning error if format is unexpected
         let delete_key = format!("delete_{}", collection);
-        let delete_result = result
-            .get(&delete_key)
-            .or_else(|| result.get(collection));
+        let delete_result = result.get(&delete_key).or_else(|| result.get(collection));
 
         let deleted = match delete_result {
             Some(v) => match v.as_array() {
@@ -549,26 +547,17 @@ mod tests {
 
     #[test]
     fn test_json_to_graphql_string_with_newlines() {
-        assert_eq!(
-            json_to_graphql(&json!("line1\nline2")),
-            "\"line1\\nline2\""
-        );
+        assert_eq!(json_to_graphql(&json!("line1\nline2")), "\"line1\\nline2\"");
     }
 
     #[test]
     fn test_json_to_graphql_string_with_carriage_return() {
-        assert_eq!(
-            json_to_graphql(&json!("line1\rline2")),
-            "\"line1\\rline2\""
-        );
+        assert_eq!(json_to_graphql(&json!("line1\rline2")), "\"line1\\rline2\"");
     }
 
     #[test]
     fn test_json_to_graphql_string_with_tabs() {
-        assert_eq!(
-            json_to_graphql(&json!("col1\tcol2")),
-            "\"col1\\tcol2\""
-        );
+        assert_eq!(json_to_graphql(&json!("col1\tcol2")), "\"col1\\tcol2\"");
     }
 
     #[test]

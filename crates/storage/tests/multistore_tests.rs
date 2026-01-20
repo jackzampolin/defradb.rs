@@ -30,8 +30,7 @@ async fn test_multistore_all_stores_isolated() {
     txn.commit().await.unwrap();
 
     // Blockstore
-    let cid =
-        Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+    let cid = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
     let bs_key = BlockstoreKey::new(cid);
     let mut txn = ms.blockstore.new_txn(false).await.unwrap();
     txn.set(&bs_key.bytes(), b"blockstore_value").await.unwrap();

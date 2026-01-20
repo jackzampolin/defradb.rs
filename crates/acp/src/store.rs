@@ -24,11 +24,18 @@ use crate::relation::RelationTuple;
 ///
 /// # Security: Error Handling
 ///
-/// All operations that check permissions MUST follow a fail-closed pattern:
+/// All operations that check permissions MUST follow a fail-fast pattern:
 /// - On success: return the actual result
-/// - On error: callers MUST treat the error as "access denied"
+/// - On error: propagate the error (do NOT silently convert to "access denied")
 ///
-/// Never allow errors to result in unauthorized access.
+/// Callers receiving an error MUST:
+/// 1. Deny the requested operation (fail-closed behavior)
+/// 2. Propagate the actual error to enable debugging and monitoring
+/// 3. Log the error for audit purposes
+///
+/// This approach maintains security (operation is denied) while providing
+/// actionable error information. Silently converting errors to "permission denied"
+/// masks infrastructure failures and makes debugging impossible.
 #[async_trait]
 pub trait AcpStore: Send + Sync {
     /// Store a relation tuple.
@@ -97,4 +104,3 @@ pub trait AcpStore: Send + Sync {
     /// [`RelationTuple::validate_prefix`] before constructing storage keys.
     async fn is_doc_registered(&self, collection_id: &str, doc_id: &str) -> Result<bool>;
 }
-

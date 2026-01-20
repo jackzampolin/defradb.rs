@@ -531,9 +531,10 @@ impl Node {
             info!("Document ACP configured");
 
             // Create query runner with transaction, mutation, and ACP support
-            let mut query_runner = query::QueryRunner::with_registry(fetcher, collections, registry)
-                .with_mutator(mutator)
-                .with_acp(document_acp);
+            let mut query_runner =
+                query::QueryRunner::with_registry(fetcher, collections, registry)
+                    .with_mutator(mutator)
+                    .with_acp(document_acp);
 
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {
@@ -764,6 +765,5 @@ impl Node {
         Ok(())
     }
 }
-
 
 // Tests extracted to crates/cli/tests/http_integration_tests.rs

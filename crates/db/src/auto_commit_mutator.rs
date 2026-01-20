@@ -323,4 +323,3 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         result
     }
 }
-

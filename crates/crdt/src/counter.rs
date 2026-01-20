@@ -540,4 +540,3 @@ impl ValueReader for Counter {
         self.get_value_internal(reader).await
     }
 }
-

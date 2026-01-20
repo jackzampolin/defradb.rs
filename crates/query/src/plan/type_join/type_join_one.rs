@@ -28,6 +28,14 @@ use super::{JoinDirection, JoinSide};
 ///
 /// Child documents are pre-loaded and indexed during `init()` to avoid
 /// O(N * M) nested loop scans. Lookups are O(1) via HashMap.
+///
+/// # Memory Considerations
+///
+/// The child cache is unbounded - all child documents matching the query are loaded
+/// into memory during `init()`. For collections with very large numbers of documents,
+/// this may cause significant memory usage. Consider using pagination or separate
+/// queries for large datasets. Future versions may implement LRU caching or streaming
+/// lookups to address this limitation.
 pub struct TypeJoinOne {
     /// Parent side of the join (outer loop)
     parent_side: JoinSide,
@@ -110,16 +118,37 @@ impl TypeJoinOne {
     /// For primary joins, extracts the FK field value.
     /// For inverted joins, extracts the parent's `_docID`.
     ///
-    /// Logs a warning if the FK field exists but has an unexpected type.
+    /// Logs a warning if the FK field has an unexpected type or is missing.
     fn extract_fk(&self, parent_doc: &Doc) -> Option<String> {
         match &self.direction {
             JoinDirection::Inverted => {
                 // Secondary side: use parent's _docID as the lookup key
-                parent_doc.doc_id().map(String::from)
+                let doc_id = parent_doc.doc_id();
+                if doc_id.is_none() {
+                    warn!(
+                        parent_collection = %self.parent_side.collection().name,
+                        "Parent document missing _docID for inverted join lookup. \
+                         This may indicate data corruption or a schema mismatch."
+                    );
+                }
+                doc_id.map(String::from)
             }
             JoinDirection::Primary { parent_fk_index } => {
                 // Primary side: extract from the FK field (e.g., author_id)
-                let value = parent_doc.get(*parent_fk_index)?;
+                let value = match parent_doc.get(*parent_fk_index) {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            parent_collection = %self.parent_side.collection().name,
+                            relation_field = %self.parent_side.relation_field().name,
+                            fk_index = parent_fk_index,
+                            doc_id = ?parent_doc.doc_id(),
+                            "FK field not found at expected index in document. \
+                             This may indicate a schema migration issue or document corruption."
+                        );
+                        return None;
+                    }
+                };
 
                 // Check for type mismatch (FK should be string or null)
                 if !value.is_null() && !value.is_string() {

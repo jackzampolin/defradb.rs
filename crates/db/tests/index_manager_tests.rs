@@ -4,7 +4,9 @@ use db::database::DB;
 use db::index_manager::IndexManager;
 use db::Error;
 use document::{Document, NormalValue};
-use schema::{CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription};
+use schema::{
+    CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription,
+};
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
 

@@ -703,4 +703,3 @@ fn is_value_compatible_with_array(value: &NormalValue, array: ScalarArrayKind) -
         }
     }
 }
-

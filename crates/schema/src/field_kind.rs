@@ -581,4 +581,3 @@ fn parse_string_kind(s: &str) -> Result<FieldKind, String> {
         }
     }
 }
-

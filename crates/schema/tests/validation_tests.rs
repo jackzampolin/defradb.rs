@@ -5,9 +5,7 @@
 //! - Duplicate collection name detection
 //! - Relation primary side validation
 
-use schema::{
-    validate_schema, CollectionVersion, FieldDescription, FieldKind, SchemaError,
-};
+use schema::{validate_schema, CollectionVersion, FieldDescription, FieldKind, SchemaError};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -47,9 +45,8 @@ fn post_collection_with_author(is_primary: bool) -> CollectionVersion {
 }
 
 fn user_collection_with_posts(is_primary: bool) -> CollectionVersion {
-    let mut posts_field =
-        FieldDescription::new("3", "posts", FieldKind::relation("posts", true))
-            .with_relation_name("user_posts");
+    let mut posts_field = FieldDescription::new("3", "posts", FieldKind::relation("posts", true))
+        .with_relation_name("user_posts");
 
     if is_primary {
         posts_field = posts_field.as_primary();

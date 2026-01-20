@@ -129,8 +129,9 @@ fn test_validate_duplicate_names_fails() {
 
 #[test]
 fn test_validate_invalid_crdt_fails() {
-    let fields = vec![FieldDescription::new("1", "title", FieldKind::string())
-        .with_crdt_type(CType::PnCounter)];
+    let fields =
+        vec![FieldDescription::new("1", "title", FieldKind::string())
+            .with_crdt_type(CType::PnCounter)];
     let coll = CollectionVersion::new("posts", "v1", "coll-1", fields);
 
     let result = coll.validate();

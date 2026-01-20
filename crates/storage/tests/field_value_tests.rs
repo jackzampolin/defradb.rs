@@ -6,7 +6,9 @@
 use chrono::{TimeZone, Utc};
 use document::NormalValue;
 use schema::FieldKind;
-use storage::field_value::{decode_field_value, encode_field_value, encode_indexed_field, IndexedField};
+use storage::field_value::{
+    decode_field_value, encode_field_value, encode_indexed_field, IndexedField,
+};
 
 #[test]
 fn test_encode_decode_bool() {
@@ -137,9 +139,7 @@ fn test_sort_order_string_ascending() {
     let values = vec!["", "a", "aa", "ab", "b", "ba"];
     let encoded: Vec<Vec<u8>> = values
         .iter()
-        .map(|v| {
-            encode_field_value(vec![], &NormalValue::String(v.to_string()), false).unwrap()
-        })
+        .map(|v| encode_field_value(vec![], &NormalValue::String(v.to_string()), false).unwrap())
         .collect();
 
     for i in 0..encoded.len() - 1 {
