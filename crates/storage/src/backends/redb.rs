@@ -41,8 +41,9 @@
 ///
 /// **Important**: Async discard callbacks may not complete if the process exits
 /// before they finish. Callers requiring completion guarantees should use
-/// `sync::WaitGroup` or similar synchronization, or prefer `commit()` over
-/// `discard()` when async cleanup is critical.
+/// `tokio::task::JoinSet`, `tokio_util::task::TaskTracker`, or similar
+/// synchronization, or prefer `commit()` over `discard()` when async cleanup
+/// is critical.
 ///
 /// # Use Cases
 ///
@@ -380,7 +381,9 @@ impl Store for RedbStore {
                         "Failed to close store - transactions still active after timeout"
                     );
                     return Err(Error::Other(format!(
-                        "Close timeout: {} transactions still active after {}s (db: {})",
+                        "Close timeout: {} transaction(s) still active after {}s (db: {}). \
+                         Ensure all transactions call commit() or discard() before closing the store. \
+                         Use RedbStoreOptions::with_close_timeout() to increase timeout if needed.",
                         remaining,
                         timeout.as_secs(),
                         self.db_path.display()
@@ -571,10 +574,25 @@ impl Drop for RedbTxn {
         let was_committed = *self.committed.lock();
         let was_discarded = *self.discarded.lock();
         if !was_committed && !was_discarded {
-            tracing::warn!(
-                "Transaction dropped without commit() or discard() - \
-                 this may indicate a bug. Pending changes were lost."
-            );
+            // Count skipped callbacks to include in warning
+            let skipped_discard = self.on_discard.lock().len();
+            let skipped_discard_async = self.on_discard_async.lock().len();
+            let total_skipped = skipped_discard + skipped_discard_async;
+
+            if total_skipped > 0 {
+                tracing::warn!(
+                    skipped_callbacks = total_skipped,
+                    "Transaction dropped without commit() or discard() - \
+                     this may indicate a bug. Pending changes were lost and \
+                     {} registered discard callback(s) were NOT executed.",
+                    total_skipped
+                );
+            } else {
+                tracing::warn!(
+                    "Transaction dropped without commit() or discard() - \
+                     this may indicate a bug. Pending changes were lost."
+                );
+            }
         }
     }
 }
@@ -1187,8 +1205,12 @@ impl From<redb::Error> for Error {
             redb::Error::Corrupted(ref msg) => {
                 tracing::error!(message = %msg, "Database corruption detected");
                 Error::Backend(format!(
-                    "database corrupted: {}. Recovery options: (1) restore from backup, \
-                     (2) delete database and resync from peers, (3) check disk for errors",
+                    "database corrupted: {}. Recovery options: \
+                     (1) restore from backup, \
+                     (2) run check_integrity() to assess damage extent, \
+                     (3) delete database and resync from network peers (if available), \
+                     (4) check disk for hardware errors. \
+                     Consider preserving the corrupted file for forensic analysis before deletion.",
                     msg
                 ))
             }
@@ -1335,8 +1357,12 @@ impl From<redb::StorageError> for Error {
             redb::StorageError::Corrupted(ref msg) => {
                 tracing::error!(message = %msg, "Database corruption detected");
                 Error::Backend(format!(
-                    "database corrupted: {}. Recovery options: (1) restore from backup, \
-                     (2) delete database and resync from peers, (3) check disk for errors",
+                    "database corrupted: {}. Recovery options: \
+                     (1) restore from backup, \
+                     (2) run check_integrity() to assess damage extent, \
+                     (3) delete database and resync from network peers (if available), \
+                     (4) check disk for hardware errors. \
+                     Consider preserving the corrupted file for forensic analysis before deletion.",
                     msg
                 ))
             }
@@ -2308,7 +2334,7 @@ mod redb_specific_tests {
             err_msg
         );
         assert!(
-            err_msg.contains("transactions still active"),
+            err_msg.contains("still active"),
             "Error should mention active transactions: {}",
             err_msg
         );
@@ -2374,15 +2400,24 @@ mod redb_specific_tests {
         let completed = Arc::new(AtomicUsize::new(0));
         let rejected = Arc::new(AtomicUsize::new(0));
 
+        // Use a barrier to synchronize all tasks to start simultaneously
+        // This ensures close() actually races with transaction creation
+        let num_txn_tasks = 50;
+        let barrier = Arc::new(tokio::sync::Barrier::new(num_txn_tasks + 1)); // +1 for close task
+
         let mut handles = vec![];
 
-        // Spawn 50 tasks that continuously create and complete transactions
-        for _ in 0..50 {
+        // Spawn tasks that continuously create and complete transactions
+        for _ in 0..num_txn_tasks {
             let store = Arc::clone(&store);
             let completed = Arc::clone(&completed);
             let rejected = Arc::clone(&rejected);
+            let barrier = Arc::clone(&barrier);
 
             handles.push(tokio::spawn(async move {
+                // Wait for all tasks to be ready
+                barrier.wait().await;
+
                 for _ in 0..10 {
                     match store.new_txn(true).await {
                         Ok(txn) => {
@@ -2401,14 +2436,16 @@ mod redb_specific_tests {
             }));
         }
 
-        // After a small delay, initiate close
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
-        // Close in background - may timeout if transactions are still active
+        // Spawn the close task that also waits at the barrier
         let store_clone = Arc::clone(&store);
-        let close_handle = tokio::spawn(async move { store_clone.close().await });
+        let barrier_clone = Arc::clone(&barrier);
+        let close_handle = tokio::spawn(async move {
+            // Wait for all tasks to be ready, then immediately close
+            barrier_clone.wait().await;
+            store_clone.close().await
+        });
 
-        // Wait for all spawned tasks
+        // Wait for all transaction tasks
         for handle in handles {
             handle.await.unwrap();
         }
@@ -2417,17 +2454,28 @@ mod redb_specific_tests {
         let _close_result =
             tokio::time::timeout(std::time::Duration::from_secs(10), close_handle).await;
 
-        // Verify count is 0 regardless of close result
+        // CRITICAL: Verify count is 0 regardless of close result
+        // This catches TOCTOU bugs where count goes negative or leaks
         assert_eq!(
             store.active_transaction_count(),
             0,
             "Transaction count should be 0 after all tasks complete"
         );
 
-        // At least some transactions should have completed
+        // The test verifies correct behavior regardless of race outcome:
+        // - If close wins the race: many transactions will be rejected (DBClosed)
+        // - If transactions win: they complete successfully
+        // Either outcome is valid - the key invariant is that the count is 0 at the end
+        let completed_count = completed.load(Ordering::SeqCst);
+        let rejected_count = rejected.load(Ordering::SeqCst);
+        let total = completed_count + rejected_count;
+
+        // At least some activity should have happened
         assert!(
-            completed.load(Ordering::SeqCst) > 0,
-            "Some transactions should have completed"
+            total > 0,
+            "Some transactions should have been attempted (completed: {}, rejected: {})",
+            completed_count,
+            rejected_count
         );
     }
 

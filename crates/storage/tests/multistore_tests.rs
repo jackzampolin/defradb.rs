@@ -726,4 +726,124 @@ mod redb_multistore_tests {
             ms.close().await.unwrap();
         }
     }
+
+    #[tokio::test]
+    async fn test_redb_multistore_concurrent_store_access() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ms = Arc::new(RedbMultistore::new_redb(temp_dir.path()).unwrap());
+
+        let datastore_writes = Arc::new(AtomicUsize::new(0));
+        let blockstore_writes = Arc::new(AtomicUsize::new(0));
+        let systemstore_writes = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+
+        // Spawn concurrent writers to different stores
+        for i in 0..10 {
+            // Datastore writers
+            {
+                let ms = Arc::clone(&ms);
+                let count = Arc::clone(&datastore_writes);
+                handles.push(tokio::spawn(async move {
+                    let mut txn = ms.datastore.new_txn(false).await.unwrap();
+                    txn.set(format!("ds_key_{}", i).as_bytes(), b"datastore_value")
+                        .await
+                        .unwrap();
+                    txn.commit().await.unwrap();
+                    count.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+
+            // Blockstore writers
+            {
+                let ms = Arc::clone(&ms);
+                let count = Arc::clone(&blockstore_writes);
+                handles.push(tokio::spawn(async move {
+                    let mut txn = ms.blockstore.new_txn(false).await.unwrap();
+                    txn.set(format!("bs_key_{}", i).as_bytes(), b"blockstore_value")
+                        .await
+                        .unwrap();
+                    txn.commit().await.unwrap();
+                    count.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+
+            // Systemstore writers
+            {
+                let ms = Arc::clone(&ms);
+                let count = Arc::clone(&systemstore_writes);
+                handles.push(tokio::spawn(async move {
+                    let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+                    txn.set(format!("ss_key_{}", i).as_bytes(), b"systemstore_value")
+                        .await
+                        .unwrap();
+                    txn.commit().await.unwrap();
+                    count.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+        }
+
+        // Wait for all writers to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all writes completed
+        assert_eq!(
+            datastore_writes.load(Ordering::SeqCst),
+            10,
+            "All datastore writes should complete"
+        );
+        assert_eq!(
+            blockstore_writes.load(Ordering::SeqCst),
+            10,
+            "All blockstore writes should complete"
+        );
+        assert_eq!(
+            systemstore_writes.load(Ordering::SeqCst),
+            10,
+            "All systemstore writes should complete"
+        );
+
+        // Verify namespace isolation - each store only sees its own keys
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        for i in 0..10 {
+            assert!(
+                txn.has(format!("ds_key_{}", i).as_bytes()).await.unwrap(),
+                "Datastore should have ds_key_{}", i
+            );
+            assert!(
+                !txn.has(format!("bs_key_{}", i).as_bytes()).await.unwrap(),
+                "Datastore should NOT have bs_key_{}", i
+            );
+            assert!(
+                !txn.has(format!("ss_key_{}", i).as_bytes()).await.unwrap(),
+                "Datastore should NOT have ss_key_{}", i
+            );
+        }
+        txn.discard();
+
+        let txn = ms.blockstore.new_txn(true).await.unwrap();
+        for i in 0..10 {
+            assert!(
+                txn.has(format!("bs_key_{}", i).as_bytes()).await.unwrap(),
+                "Blockstore should have bs_key_{}", i
+            );
+        }
+        txn.discard();
+
+        let txn = ms.systemstore.new_txn(true).await.unwrap();
+        for i in 0..10 {
+            assert!(
+                txn.has(format!("ss_key_{}", i).as_bytes()).await.unwrap(),
+                "Systemstore should have ss_key_{}", i
+            );
+        }
+        txn.discard();
+
+        ms.close().await.unwrap();
+    }
 }

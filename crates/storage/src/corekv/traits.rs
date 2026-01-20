@@ -302,7 +302,8 @@ pub trait Txn: ReaderWriter {
     /// If you need completion guarantees for async cleanup:
     /// - Use `on_discard` (synchronous) instead
     /// - Use `commit()` with `on_success_async` when possible
-    /// - Implement your own synchronization (e.g., `tokio::sync::WaitGroup`)
+    /// - Implement your own synchronization using `tokio::task::JoinSet`,
+    ///   `tokio_util::task::TaskTracker`, or third-party crates like `awaitgroup`
     fn on_discard_async(&mut self, callback: AsyncTxnCallback);
 
     /// Downcast to concrete type (for internal use in tests)
