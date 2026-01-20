@@ -15,6 +15,7 @@ mod backup;
 mod collection;
 mod document;
 pub mod http_client;
+mod index;
 mod query;
 mod schema;
 mod tx;
@@ -28,6 +29,7 @@ pub use acp::AcpArgs;
 pub use backup::BackupArgs;
 pub use collection::CollectionArgs;
 pub use document::DocumentArgs;
+pub use index::IndexArgs;
 pub use query::QueryArgs;
 pub use schema::SchemaArgs;
 pub use tx::TxArgs;
@@ -98,6 +100,8 @@ pub enum ClientCommand {
     Collection(CollectionArgs),
     /// Interact with documents
     Document(DocumentArgs),
+    /// Manage database indexes
+    Index(IndexArgs),
     /// Execute a GraphQL query
     Query(QueryArgs),
     /// Interact with schema
@@ -130,6 +134,7 @@ impl ClientArgs {
             ClientCommand::Backup(args) => args.execute(&ctx).await,
             ClientCommand::Collection(args) => args.execute(&ctx).await,
             ClientCommand::Document(args) => args.execute(&ctx).await,
+            ClientCommand::Index(args) => args.execute(&ctx).await,
             ClientCommand::Query(args) => args.execute(&ctx).await,
             ClientCommand::Schema(args) => args.execute(&ctx).await,
             ClientCommand::Tx(args) => args.execute(&ctx).await,
