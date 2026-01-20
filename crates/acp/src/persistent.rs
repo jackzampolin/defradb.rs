@@ -314,6 +314,58 @@ impl AcpStore for PersistentAcpStore {
             .map_err(|e| Error::Storage(e.to_string()))?
             .is_some())
     }
+
+    async fn register_doc_atomic(
+        &self,
+        owner: &Did,
+        collection_id: &str,
+        doc_id: &str,
+    ) -> Result<bool> {
+        // Validate inputs to prevent path traversal
+        RelationTuple::validate_prefix(collection_id, doc_id)?;
+
+        // Use a single write transaction for both check and write
+        // RocksDB transactions provide atomicity and isolation
+        let mut txn = self
+            .store
+            .new_txn(false)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
+        let iter_opts = IterOptions::new().with_prefix(prefix.into_bytes());
+
+        // Check if document is already registered within this transaction
+        let mut iter = txn
+            .iterator(iter_opts)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        if iter
+            .next()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .is_some()
+        {
+            // Document already registered, transaction discards
+            return Ok(false);
+        }
+
+        // Document not registered, insert owner tuple
+        let tuple = RelationTuple::owner(owner.clone(), collection_id, doc_id);
+        let key = tuple.storage_key();
+        let value = serde_json::to_vec(&tuple).map_err(|e| Error::Storage(e.to_string()))?;
+
+        txn.set(key.as_bytes(), &value)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        txn.commit()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(true)
+    }
 }
 
 // Tests extracted to crates/acp/tests/persistent_tests.rs

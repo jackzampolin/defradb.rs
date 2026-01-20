@@ -70,17 +70,19 @@ impl DocumentACP for LocalDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
-        // Check if document is already registered
-        if self.store.is_doc_registered(resource_name, doc_id).await? {
-            return Err(Error::DocumentAlreadyRegistered(format!(
+        // Use atomic registration to prevent TOCTOU race conditions
+        // where concurrent registrations could overwrite each other
+        match self
+            .store
+            .register_doc_atomic(identity, resource_name, doc_id)
+            .await?
+        {
+            true => Ok(()), // Successfully registered
+            false => Err(Error::DocumentAlreadyRegistered(format!(
                 "{}:{}",
                 resource_name, doc_id
-            )));
+            ))),
         }
-
-        // Register owner relation
-        let tuple = RelationTuple::owner(identity.clone(), resource_name, doc_id);
-        self.store.put_tuple(&tuple).await
     }
 
     async fn is_doc_registered(
@@ -342,6 +344,32 @@ impl AcpStore for MemoryAcpStore {
 
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         Ok(self.tuples.read().keys().any(|k| k.starts_with(&prefix)))
+    }
+
+    async fn register_doc_atomic(
+        &self,
+        owner: &Did,
+        collection_id: &str,
+        doc_id: &str,
+    ) -> Result<bool> {
+        // Validate inputs to prevent path traversal
+        RelationTuple::validate_prefix(collection_id, doc_id)?;
+
+        let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
+        let tuple = RelationTuple::owner(owner.clone(), collection_id, doc_id);
+        let key = tuple.storage_key();
+
+        // Hold write lock for entire operation - this is the atomic guarantee
+        let mut guard = self.tuples.write();
+
+        // Check if document is already registered (any tuple with this prefix)
+        if guard.keys().any(|k| k.starts_with(&prefix)) {
+            return Ok(false); // Already registered, no change
+        }
+
+        // Document not registered, insert owner tuple
+        guard.insert(key, tuple);
+        Ok(true)
     }
 }
 // Tests extracted to crates/acp/tests/local_tests.rs

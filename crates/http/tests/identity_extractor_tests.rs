@@ -4,18 +4,28 @@ use std::time::Duration;
 
 use axum::{
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, Request},
+    http::{header::AUTHORIZATION, header::HOST, Request},
 };
 use identity::{new_token, Did, Identity, RawIdentity};
 
 use defra_http::{ExtractIdentity, ExtractTokenIdentity, IdentityExtractionError};
+
+/// Test host used for audience validation
+const TEST_HOST: &str = "localhost:9181";
 
 fn create_test_token() -> (String, Did) {
     let private_key = crypto::generate_ed25519().unwrap();
     let identity = RawIdentity::from_private_key(private_key).unwrap();
     let did = identity.did().unwrap();
 
-    let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
+    // Create token with audience matching TEST_HOST (lowercased as per Go behavior)
+    let token = new_token(
+        &identity,
+        Duration::from_secs(3600),
+        Some(TEST_HOST.to_lowercase()),
+        None,
+    )
+    .unwrap();
     let token_str = String::from_utf8(token).unwrap();
 
     (token_str, did)
@@ -24,7 +34,9 @@ fn create_test_token() -> (String, Did) {
 async fn extract_from_request(
     auth_header: Option<&str>,
 ) -> Result<ExtractIdentity, IdentityExtractionError> {
-    let mut builder = Request::builder().uri("/test");
+    let mut builder = Request::builder()
+        .uri("/test")
+        .header(HOST, TEST_HOST); // Add Host header for audience validation
     if let Some(header) = auth_header {
         builder = builder.header(AUTHORIZATION, header);
     }
@@ -99,6 +111,7 @@ async fn test_extract_token_identity_full() {
 
     let builder = Request::builder()
         .uri("/test")
+        .header(HOST, TEST_HOST) // Add Host header for audience validation
         .header(AUTHORIZATION, auth_header);
     let request = builder.body(()).unwrap();
     let (mut parts, _body) = request.into_parts();

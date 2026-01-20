@@ -11,6 +11,7 @@ use serde_json::Value as JsonValue;
 
 use query::executor::{QueryRequest, QueryResponse};
 
+use crate::identity_extractor::ExtractIdentity;
 use crate::router::AppState;
 
 /// Health check response.
@@ -36,10 +37,14 @@ pub async fn version() -> Json<VersionResponse> {
 /// GraphQL POST request handler.
 ///
 /// Accepts JSON body: { query, operationName?, variables? }
+/// Identity is extracted from the Authorization header and used for ACP checks.
 pub async fn graphql(
     State(state): State<AppState>,
-    Json(request): Json<QueryRequest>,
+    identity: ExtractIdentity,
+    Json(mut request): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
+    // Wire identity from Authorization header into the request
+    request.identity = identity.into_did();
     let response = state.executor.execute(request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
@@ -59,8 +64,10 @@ pub struct GraphqlQueryParams {
 /// GraphQL GET request handler.
 ///
 /// Accepts query parameters: ?query=...&operationName=...&variables=...
+/// Identity is extracted from the Authorization header and used for ACP checks.
 pub async fn graphql_get(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Query(params): Query<GraphqlQueryParams>,
 ) -> Json<QueryResponse> {
     let variables: Option<JsonValue> = match params.variables {
@@ -81,7 +88,7 @@ pub async fn graphql_get(
         query: params.query,
         operation_name: params.operation_name,
         variables,
-        identity: None,
+        identity: identity.into_did(),
     };
 
     let response = state.executor.execute(request).await;
@@ -276,15 +283,17 @@ pub struct TransactionalQueryRequest {
 }
 
 /// GraphQL POST request handler with optional transaction support.
+/// Identity is extracted from the Authorization header and used for ACP checks.
 pub async fn graphql_transactional(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<TransactionalQueryRequest>,
 ) -> Json<QueryResponse> {
     let query_request = QueryRequest {
         query: request.query,
         operation_name: request.operation_name,
         variables: request.variables,
-        identity: None,
+        identity: identity.into_did(),
     };
 
     let response = match request.txn_id {

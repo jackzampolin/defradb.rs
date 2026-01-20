@@ -28,6 +28,30 @@
 //! P2PHost (network)
 //! ```
 //!
+//! # Security Model: Two-Level Access Control
+//!
+//! The P2P sync layer implements **collection-level** access control only.
+//! **Document-level** ACP is the responsibility of the database merge layer.
+//!
+//! ## Collection-Level (P2P Layer)
+//!
+//! - Enforced via `check_access()` before processing any sync message
+//! - A peer must be registered as a replicator for a collection
+//! - Unauthorized peers cannot push documents to collections they don't replicate
+//!
+//! ## Document-Level (Database Merge Layer)
+//!
+//! - The P2P layer provides creator/doc_id/collection_id in `SyncEvent::BlockReceived`
+//! - The database merge handler should:
+//!   1. Identify the creator's DID (from the signed block or peer mapping)
+//!   2. Check if the creator has UPDATE permission on the document
+//!   3. If permission denied, log and skip the merge (don't crash)
+//!
+//! This two-level model allows:
+//! - Fast collection-level filtering at the network layer
+//! - Fine-grained document-level checks at the merge layer
+//! - CRDT convergence (eventually consistent merge, possibly with rejected updates)
+//!
 //! # Usage
 //!
 //! ```ignore
