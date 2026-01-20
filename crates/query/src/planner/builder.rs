@@ -85,8 +85,23 @@ impl Planner {
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?
             .clone();
 
-        // Build the document mapping for this query
-        let mapping = self.build_mapping(select, &collection)?;
+        // Build the document mapping for this query (controls which fields appear in output)
+        let render_mapping = self.build_mapping(select, &collection)?;
+
+        // Check if this query has nested selections that require joins
+        let has_nested = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
+
+        // Build scan mapping: for queries with nested selections, use full schema mapping
+        // so that FK fields (like author_id) are available for TypeJoin lookups.
+        // For simple queries, use the render_mapping directly.
+        let scan_mapping = if has_nested {
+            self.build_scan_mapping_for_join(&collection, &render_mapping)
+        } else {
+            render_mapping.clone()
+        };
 
         // Check if an index can be used for the filter.
         // Note: Index selection is disabled when a fetcher is attached because:
@@ -113,11 +128,11 @@ impl Planner {
         // 1. Choose between IndexScanNode and ScanNode based on index availability
         let mut plan: Box<dyn PlanNode> = if let Some(ref params) = index_scan {
             Box::new(
-                IndexScanNode::new((*collection).clone(), mapping.clone(), params.clone())
+                IndexScanNode::new((*collection).clone(), scan_mapping.clone(), params.clone())
                     .with_show_deleted(select.show_deleted),
             )
         } else {
-            let mut scan = ScanNode::new((*collection).clone(), mapping.clone())
+            let mut scan = ScanNode::new((*collection).clone(), scan_mapping.clone())
                 .with_show_deleted(select.show_deleted);
             // Attach fetcher if available for on-demand data loading
             if let Some(ref fetcher) = self.fetcher {
@@ -131,7 +146,7 @@ impl Planner {
         //   - Field projection
         //   - Conditions not covered by the index
         if select.filter.is_some() || !select.fields.is_empty() {
-            let mut select_node = SelectNode::new(plan, mapping.clone());
+            let mut select_node = SelectNode::new(plan, scan_mapping.clone());
             if let Some(ref filter) = select.filter {
                 // If using index scan, the index handles the primary filter condition
                 // but we still apply the full filter in SelectNode for conditions
@@ -142,7 +157,7 @@ impl Planner {
         }
 
         // 3. Apply join nodes for relation fields
-        plan = self.apply_joins(plan, select, &collection, mapping.clone())?;
+        plan = self.apply_joins(plan, select, &collection, scan_mapping.clone())?;
 
         // 4. Apply limit/offset if present
         if let Some(ref limit) = select.limit {
@@ -217,43 +232,63 @@ impl Planner {
                     .ok_or_else(|| QueryError::collection_not_found(target_collection_name))?
                     .clone();
 
-                // Build the child mapping for the nested select
-                let child_mapping = self.build_mapping(nested_select, &target_collection)?;
+                // Build child mapping for rendering (only selected fields)
+                let child_render_mapping = self.build_mapping(nested_select, &target_collection)?;
+
+                // Build scan mapping that includes ALL fields at schema indices.
+                // This is required because JoinSide derives FK field indices from the schema,
+                // so the doc fields must be at their schema positions for FK lookups to work.
+                let child_scan_mapping =
+                    self.build_scan_mapping_for_join(&target_collection, &child_render_mapping);
 
                 // Get the relation field index in the parent mapping
                 let relation_field_index = mapping
                     .first_index_of_name(relation_field_name)
                     .ok_or_else(|| QueryError::internal("relation field not in mapping"))?;
 
-                // Set up child mapping in parent
-                mapping.set_child_at(relation_field_index, child_mapping.clone());
+                // Set up child scan mapping in parent (for TypeJoin to render children).
+                // We use child_scan_mapping (not child_render_mapping) because child docs
+                // have fields at schema indices, and render_keys need to match those indices.
+                mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
 
-                // Create the child scan plan with fetcher for on-demand loading
+                // Create the child scan plan with scan_mapping (includes FK fields for joins)
                 let mut child_scan =
-                    ScanNode::new((*target_collection).clone(), child_mapping.clone());
+                    ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
                 if let Some(ref fetcher) = self.fetcher {
                     child_scan = child_scan.with_fetcher(fetcher.clone());
                 }
 
                 // Wrap in SelectNode if there's a filter on the nested select
-                let child_plan: Box<dyn PlanNode> = if let Some(ref filter) = nested_select.filter {
-                    // Validate that all filter-referenced fields exist in the child mapping
-                    for field in filter.referenced_fields() {
-                        if !child_mapping.has_field(&field) {
-                            return Err(QueryError::filter_field_not_selected(
-                                &field,
-                                &target_collection.name,
-                            ));
+                let mut child_plan: Box<dyn PlanNode> =
+                    if let Some(ref filter) = nested_select.filter {
+                        // Validate that all filter-referenced fields exist in the render mapping.
+                        // We validate against render_mapping (user-selected fields), not scan_mapping,
+                        // because filtering on unselected fields is likely a user error.
+                        for field in filter.referenced_fields() {
+                            if !child_render_mapping.has_field(&field) {
+                                return Err(QueryError::filter_field_not_selected(
+                                    &field,
+                                    &target_collection.name,
+                                ));
+                            }
                         }
-                    }
 
-                    Box::new(
-                        SelectNode::new(Box::new(child_scan), child_mapping.clone())
-                            .with_filter(filter.clone()),
-                    )
-                } else {
-                    Box::new(child_scan)
-                };
+                        Box::new(
+                            SelectNode::new(Box::new(child_scan), child_scan_mapping.clone())
+                                .with_filter(filter.clone()),
+                        )
+                    } else {
+                        Box::new(child_scan)
+                    };
+
+                // Recursively apply joins for any nested selections within this nested select.
+                // This handles multi-level nesting like Users -> Posts -> Comments.
+                child_plan = self.apply_joins(
+                    child_plan,
+                    nested_select,
+                    &target_collection,
+                    child_scan_mapping.clone(),
+                )?;
 
                 // Find the other side of the relation
                 let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
@@ -297,6 +332,8 @@ impl Planner {
                 )?;
 
                 // Create the appropriate join node
+                // Note: We pass child_render_mapping as the output mapping (for TypeJoin to render children)
+                // but the child_plan uses child_scan_mapping internally (for FK lookups)
                 if relation_field.kind.is_array() {
                     // One-to-many: TypeJoinMany
                     plan = Box::new(TypeJoinMany::new(
@@ -322,7 +359,41 @@ impl Planner {
         Ok(plan)
     }
 
+    /// Build a scan mapping for join child plans that includes ALL fields at schema indices.
+    ///
+    /// TypeJoin nodes use `JoinSide::relation_id_field_index()` which returns the FK field's
+    /// position in the collection schema. For FK lookups to work correctly, documents must
+    /// have fields at their schema positions. This method ensures the mapping includes all
+    /// schema fields, while render_keys only include the user-selected fields.
+    fn build_scan_mapping_for_join(
+        &self,
+        collection: &CollectionVersion,
+        render_mapping: &DocumentMapping,
+    ) -> DocumentMapping {
+        let mut mapping = DocumentMapping::new();
+
+        // Add ALL fields from the schema at their schema indices
+        for (i, field) in collection.fields.iter().enumerate() {
+            mapping.add(i, &field.name);
+        }
+
+        // Map render_keys from render_mapping to schema indices.
+        // render_mapping uses sparse indices (0, 1, 2, ...) for only selected fields,
+        // but scan_mapping uses schema indices which may differ.
+        for render_key in &render_mapping.render_keys {
+            // Find the schema index for this field name
+            if let Some(schema_index) = mapping.first_index_of_name(&render_key.key) {
+                mapping.add_render_key(schema_index, &render_key.key);
+            }
+        }
+
+        mapping
+    }
+
     /// Build the document mapping for a Select operation.
+    ///
+    /// IMPORTANT: _docID is ALWAYS placed at index 0 because Doc::doc_id() expects it there.
+    /// TypeJoinOne/TypeJoinMany use doc_id() to match related documents.
     fn build_mapping(
         &self,
         select: &Select,
@@ -330,12 +401,38 @@ impl Planner {
     ) -> Result<DocumentMapping> {
         let mut mapping = DocumentMapping::new();
 
-        // Add all requested fields
+        // Track whether _docID was explicitly requested (for render_keys)
+        let mut doc_id_requested = false;
+        let mut doc_id_alias: Option<String> = None;
+
+        // Check if _docID is explicitly selected
+        for requestable in &select.fields {
+            if let Requestable::Field(field) = requestable {
+                if field.name == "_docID" {
+                    doc_id_requested = true;
+                    doc_id_alias = Some(field.output_name().to_string());
+                    break;
+                }
+            }
+        }
+
+        // ALWAYS add _docID at index 0 (required for Doc::doc_id() to work)
+        mapping.add(0, "_docID");
+        // Only add to render_keys if explicitly selected
+        if doc_id_requested {
+            mapping.add_render_key(0, doc_id_alias.as_deref().unwrap_or("_docID"));
+        }
+
+        // Add remaining requested fields (starting from index 1)
         for requestable in &select.fields {
             match requestable {
                 Requestable::Field(field) => {
-                    // Validate field exists in schema (skip _docID which is always valid)
-                    if field.name != "_docID" && collection.field_by_name(&field.name).is_none() {
+                    // Skip _docID (already handled at index 0)
+                    if field.name == "_docID" {
+                        continue;
+                    }
+                    // Validate field exists in schema
+                    if collection.field_by_name(&field.name).is_none() {
                         return Err(QueryError::unknown_field(&field.name));
                     }
                     let index = mapping.next_index();
@@ -359,11 +456,17 @@ impl Planner {
             }
         }
 
-        // If no fields specified, add all collection fields
-        if mapping.next_index() == 0 {
+        // If no fields specified (besides _docID), add all collection fields
+        if mapping.next_index() == 1 {
+            // Only _docID was added; add all collection fields at schema indices
             for (i, field) in collection.fields.iter().enumerate() {
-                mapping.add(i, &field.name);
-                mapping.add_render_key(i, &field.name);
+                if field.name != "_docID" {
+                    mapping.add(i, &field.name);
+                    mapping.add_render_key(i, &field.name);
+                } else if !doc_id_requested {
+                    // Add _docID to render_keys since we're returning all fields
+                    mapping.add_render_key(0, "_docID");
+                }
             }
         }
 
