@@ -58,6 +58,9 @@ pub enum Error {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("unsafe policy transition blocked: {0}")]
+    UnsafePolicyTransition(String),
 }
 
 /// Result type for database operations.

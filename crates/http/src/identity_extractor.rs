@@ -2,16 +2,21 @@
 //!
 //! This module provides an Axum extractor for parsing JWT bearer tokens
 //! from the Authorization header and extracting the identity.
+//!
+//! Token verification follows Go DefraDB behavior:
+//! - Tokens are verified using the request Host header as the expected audience
+//! - Token expiration and not-before claims are validated
+//! - Invalid or expired tokens return 403 Forbidden
 
 use axum::{
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts, StatusCode},
+    http::{header::AUTHORIZATION, header::HOST, request::Parts, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use std::future::Future;
 
-use identity::{from_token, Did, Identity, TokenIdentity};
+use identity::{from_token, verify_auth_token, Did, Identity, TokenIdentity};
 
 use crate::error::ErrorResponse;
 
@@ -56,6 +61,9 @@ pub enum IdentityExtractionError {
     /// Invalid token format or signature.
     /// Returns 403 Forbidden to match Go DefraDB behavior.
     InvalidToken(String),
+    /// Token verification failed (expired, not yet valid, or audience mismatch).
+    /// Returns 403 Forbidden to match Go DefraDB behavior.
+    TokenVerificationFailed(String),
 }
 
 impl IntoResponse for IdentityExtractionError {
@@ -64,6 +72,10 @@ impl IntoResponse for IdentityExtractionError {
             // Go DefraDB returns 403 Forbidden for invalid tokens, not 401 Unauthorized
             IdentityExtractionError::InvalidToken(msg) => {
                 (StatusCode::FORBIDDEN, format!("Invalid token: {}", msg))
+            }
+            // Token verification failures (expired, audience mismatch) also return 403
+            IdentityExtractionError::TokenVerificationFailed(msg) => {
+                (StatusCode::FORBIDDEN, format!("Token verification failed: {}", msg))
             }
         };
 
@@ -76,10 +88,16 @@ impl IntoResponse for IdentityExtractionError {
 /// Behavior matches Go DefraDB:
 /// - No Authorization header → anonymous
 /// - "Bearer " with empty token → anonymous
-/// - "Bearer <token>" → parse token, 403 on failure
+/// - "Bearer <token>" → parse and verify token, 403 on failure
 /// - Non-Bearer auth → 403 Forbidden (treated as invalid token)
+///
+/// Token verification includes:
+/// - Expiration check (exp claim)
+/// - Not-before check (nbf claim)
+/// - Audience check (aud claim must contain expected_audience)
 fn extract_identity_from_auth_header(
     auth_value: Option<&str>,
+    expected_audience: &str,
 ) -> Result<Option<Did>, IdentityExtractionError> {
     let Some(auth_value) = auth_value else {
         // No Authorization header = anonymous request
@@ -105,9 +123,14 @@ fn extract_identity_from_auth_header(
         return Ok(None);
     }
 
-    // Parse the token
+    // Parse the token (validates signature)
     let token_identity = from_token(token.as_bytes())
         .map_err(|e| IdentityExtractionError::InvalidToken(e.to_string()))?;
+
+    // Verify token (expiration, not-before, audience)
+    // Go DefraDB uses req.Host as expected audience
+    verify_auth_token(&token_identity, expected_audience)
+        .map_err(|e| IdentityExtractionError::TokenVerificationFailed(e.to_string()))?;
 
     // Extract DID
     let did = token_identity
@@ -144,9 +167,18 @@ where
                 None => Ok(None),
             };
 
+        // Get Host header for audience verification (matches Go DefraDB behavior)
+        // Go uses strings.ToLower(req.Host) as the expected audience
+        let host = parts
+            .headers
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
         Box::pin(async move {
             let auth_value = auth_result?;
-            let result = extract_identity_from_auth_header(auth_value.as_deref())?;
+            let result = extract_identity_from_auth_header(auth_value.as_deref(), &host)?;
             Ok(ExtractIdentity(result))
         })
     }
@@ -175,8 +207,14 @@ impl ExtractTokenIdentity {
 ///
 /// Same behavior as `extract_identity_from_auth_header` but returns
 /// the full `TokenIdentity` instead of just the DID.
+///
+/// Token verification includes:
+/// - Expiration check (exp claim)
+/// - Not-before check (nbf claim)
+/// - Audience check (aud claim must contain expected_audience)
 fn extract_token_identity_from_auth_header(
     auth_value: Option<&str>,
+    expected_audience: &str,
 ) -> Result<Option<TokenIdentity>, IdentityExtractionError> {
     let Some(auth_value) = auth_value else {
         return Ok(None);
@@ -198,9 +236,13 @@ fn extract_token_identity_from_auth_header(
         return Ok(None);
     }
 
-    // Parse the token
+    // Parse the token (validates signature)
     let token_identity = from_token(token.as_bytes())
         .map_err(|e| IdentityExtractionError::InvalidToken(e.to_string()))?;
+
+    // Verify token (expiration, not-before, audience)
+    verify_auth_token(&token_identity, expected_audience)
+        .map_err(|e| IdentityExtractionError::TokenVerificationFailed(e.to_string()))?;
 
     Ok(Some(token_identity))
 }
@@ -232,9 +274,17 @@ where
                 None => Ok(None),
             };
 
+        // Get Host header for audience verification (matches Go DefraDB behavior)
+        let host = parts
+            .headers
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
         Box::pin(async move {
             let auth_value = auth_result?;
-            let result = extract_token_identity_from_auth_header(auth_value.as_deref())?;
+            let result = extract_token_identity_from_auth_header(auth_value.as_deref(), &host)?;
             Ok(ExtractTokenIdentity(result))
         })
     }

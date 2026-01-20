@@ -315,6 +315,37 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // For DELETE operations: unregister deleted docs from ACP
+        // This cleans up ACP state to prevent orphaned registrations
+        if matches!(mutation.mutation_type, MutationType::Delete) {
+            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                for result in &results {
+                    if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
+                        // Best-effort unregistration - log failures but don't fail the delete
+                        // The document is already deleted from storage; ACP cleanup failure
+                        // leaves orphaned metadata but doesn't affect data integrity
+                        if let Err(e) = acp
+                            .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
+                            .await
+                        {
+                            tracing::warn!(
+                                doc_id = %doc_id,
+                                policy_id = %policy.id,
+                                error = %e,
+                                "Failed to unregister deleted document from ACP - orphaned registration may remain"
+                            );
+                        } else {
+                            tracing::debug!(
+                                doc_id = %doc_id,
+                                policy_id = %policy.id,
+                                "Document unregistered from ACP after deletion"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(JsonValue::Array(results))
     }
 

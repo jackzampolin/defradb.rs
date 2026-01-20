@@ -72,14 +72,14 @@ async fn test_list_collections() {
 #[tokio::test]
 async fn test_get_collection_doc_ids_empty() {
     let rest = create_rest_ops().await;
-    let doc_ids = rest.get_collection_doc_ids("Users").await.unwrap();
+    let doc_ids = rest.get_collection_doc_ids("Users", None).await.unwrap();
     assert!(doc_ids.is_empty());
 }
 
 #[tokio::test]
 async fn test_get_collection_not_found() {
     let rest = create_rest_ops().await;
-    let result = rest.get_collection_doc_ids("NonExistent").await;
+    let result = rest.get_collection_doc_ids("NonExistent", None).await;
     assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
 }
 
@@ -89,7 +89,7 @@ async fn test_create_and_get_document() {
 
     // Create a document
     let created = rest
-        .create_document("Users", json!({"name": "Alice", "age": 30}))
+        .create_document("Users", json!({"name": "Alice", "age": 30}), None)
         .await
         .unwrap();
 
@@ -98,7 +98,7 @@ async fn test_create_and_get_document() {
     assert!(doc_id.starts_with("bae-"));
 
     // Get the document
-    let fetched = rest.get_document("Users", doc_id).await.unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap();
     assert!(fetched.is_some());
     let doc = fetched.unwrap();
     assert_eq!(doc.get("name").unwrap(), "Alice");
@@ -111,11 +111,11 @@ async fn test_create_and_list_doc_ids() {
 
     // Create two documents
     let doc1 = rest
-        .create_document("Users", json!({"name": "Alice", "age": 30}))
+        .create_document("Users", json!({"name": "Alice", "age": 30}), None)
         .await
         .unwrap();
     let doc2 = rest
-        .create_document("Users", json!({"name": "Bob", "age": 25}))
+        .create_document("Users", json!({"name": "Bob", "age": 25}), None)
         .await
         .unwrap();
 
@@ -123,7 +123,7 @@ async fn test_create_and_list_doc_ids() {
     let doc_id2 = doc2.get("_docID").unwrap().as_str().unwrap();
 
     // List doc IDs
-    let doc_ids = rest.get_collection_doc_ids("Users").await.unwrap();
+    let doc_ids = rest.get_collection_doc_ids("Users", None).await.unwrap();
     assert_eq!(doc_ids.len(), 2);
     assert!(doc_ids.contains(&doc_id1.to_string()));
     assert!(doc_ids.contains(&doc_id2.to_string()));
@@ -140,6 +140,7 @@ async fn test_create_multiple_documents() {
                 json!({"name": "Charlie", "age": 35}),
                 json!({"name": "Diana", "age": 28}),
             ],
+            None,
         )
         .await
         .unwrap();
@@ -157,14 +158,14 @@ async fn test_update_document() {
 
     // Create a document
     let created = rest
-        .create_document("Users", json!({"name": "Eve", "age": 40}))
+        .create_document("Users", json!({"name": "Eve", "age": 40}), None)
         .await
         .unwrap();
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
 
     // Update the document
     let updated = rest
-        .update_document("Users", doc_id, json!({"age": 41}))
+        .update_document("Users", doc_id, json!({"age": 41}), None)
         .await
         .unwrap();
 
@@ -173,7 +174,7 @@ async fn test_update_document() {
     assert_eq!(updated.get("age").unwrap(), 41);
 
     // Fetch and verify
-    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(fetched.get("age").unwrap(), 41);
 }
 
@@ -186,6 +187,7 @@ async fn test_update_nonexistent_document() {
             "Users",
             "bae-00000000-0000-0000-0000-000000000000",
             json!({"age": 50}),
+            None,
         )
         .await;
 
@@ -198,17 +200,17 @@ async fn test_delete_document() {
 
     // Create a document
     let created = rest
-        .create_document("Users", json!({"name": "Frank", "age": 45}))
+        .create_document("Users", json!({"name": "Frank", "age": 45}), None)
         .await
         .unwrap();
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
 
     // Delete the document
-    let deleted = rest.delete_document("Users", doc_id).await.unwrap();
+    let deleted = rest.delete_document("Users", doc_id, None).await.unwrap();
     assert!(deleted);
 
     // Verify it's gone
-    let fetched = rest.get_document("Users", doc_id).await.unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap();
     assert!(fetched.is_none());
 }
 
@@ -217,7 +219,7 @@ async fn test_delete_nonexistent_document() {
     let rest = create_rest_ops().await;
 
     let deleted = rest
-        .delete_document("Users", "bae-00000000-0000-0000-0000-000000000000")
+        .delete_document("Users", "bae-00000000-0000-0000-0000-000000000000", None)
         .await
         .unwrap();
 
@@ -229,7 +231,7 @@ async fn test_get_nonexistent_document() {
     let rest = create_rest_ops().await;
 
     let result = rest
-        .get_document("Users", "bae-00000000-0000-0000-0000-000000000000")
+        .get_document("Users", "bae-00000000-0000-0000-0000-000000000000", None)
         .await
         .unwrap();
     assert!(result.is_none());
@@ -241,38 +243,38 @@ async fn test_full_crud_lifecycle() {
 
     // CREATE
     let created = rest
-        .create_document("Users", json!({"name": "Grace", "age": 50}))
+        .create_document("Users", json!({"name": "Grace", "age": 50}), None)
         .await
         .unwrap();
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
     assert_eq!(created.get("name").unwrap(), "Grace");
 
     // READ
-    let read = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let read = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(read.get("name").unwrap(), "Grace");
     assert_eq!(read.get("age").unwrap(), 50);
 
     // UPDATE
     let updated = rest
-        .update_document("Users", doc_id, json!({"age": 51}))
+        .update_document("Users", doc_id, json!({"age": 51}), None)
         .await
         .unwrap();
     assert_eq!(updated.get("age").unwrap(), 51);
 
     // READ again to verify update
-    let read_after_update = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let read_after_update = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(read_after_update.get("age").unwrap(), 51);
 
     // DELETE
-    let deleted = rest.delete_document("Users", doc_id).await.unwrap();
+    let deleted = rest.delete_document("Users", doc_id, None).await.unwrap();
     assert!(deleted);
 
     // READ should return None
-    let read_after_delete = rest.get_document("Users", doc_id).await.unwrap();
+    let read_after_delete = rest.get_document("Users", doc_id, None).await.unwrap();
     assert!(read_after_delete.is_none());
 
     // LIST should be empty
-    let doc_ids = rest.get_collection_doc_ids("Users").await.unwrap();
+    let doc_ids = rest.get_collection_doc_ids("Users", None).await.unwrap();
     assert!(!doc_ids.contains(&doc_id.to_string()));
 }
 
@@ -292,12 +294,13 @@ async fn test_create_document_with_special_characters() {
                 "name": "Alice \"The Great\"\nSmith",
                 "age": 30
             }),
+            None,
         )
         .await
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "Alice \"The Great\"\nSmith"
@@ -315,12 +318,13 @@ async fn test_create_document_with_tabs_and_carriage_returns() {
                 "name": "Name\twith\ttabs\rand\rreturns",
                 "age": 25
             }),
+            None,
         )
         .await
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "Name\twith\ttabs\rand\rreturns"
@@ -338,12 +342,13 @@ async fn test_create_document_with_unicode() {
                 "name": "héllo 世界 🌍",
                 "age": 42
             }),
+            None,
         )
         .await
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "héllo 世界 🌍"
@@ -361,12 +366,13 @@ async fn test_create_document_with_backslashes() {
                 "name": "path\\to\\file",
                 "age": 33
             }),
+            None,
         )
         .await
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(
         fetched.get("name").unwrap().as_str().unwrap(),
         "path\\to\\file"
@@ -379,7 +385,7 @@ async fn test_update_document_with_special_characters() {
 
     // Create a document
     let created = rest
-        .create_document("Users", json!({"name": "Original", "age": 20}))
+        .create_document("Users", json!({"name": "Original", "age": 20}), None)
         .await
         .unwrap();
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
@@ -390,6 +396,7 @@ async fn test_update_document_with_special_characters() {
             "Users",
             doc_id,
             json!({"name": "New \"Name\"\nwith\tspecials"}),
+            None,
         )
         .await
         .unwrap();
@@ -405,7 +412,7 @@ async fn test_create_document_collection_not_found() {
     let rest = create_rest_ops().await;
 
     let result = rest
-        .create_document("NonExistent", json!({"name": "Test", "age": 1}))
+        .create_document("NonExistent", json!({"name": "Test", "age": 1}), None)
         .await;
 
     assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
@@ -420,6 +427,7 @@ async fn test_update_document_collection_not_found() {
             "NonExistent",
             "bae-00000000-0000-0000-0000-000000000000",
             json!({"age": 50}),
+            None,
         )
         .await;
 
@@ -431,7 +439,7 @@ async fn test_delete_document_collection_not_found() {
     let rest = create_rest_ops().await;
 
     let result = rest
-        .delete_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000")
+        .delete_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000", None)
         .await;
 
     assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
@@ -442,7 +450,7 @@ async fn test_get_document_collection_not_found() {
     let rest = create_rest_ops().await;
 
     let result = rest
-        .get_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000")
+        .get_document("NonExistent", "bae-00000000-0000-0000-0000-000000000000", None)
         .await;
 
     assert!(matches!(result, Err(RestError::CollectionNotFound(_))));
@@ -453,12 +461,12 @@ async fn test_create_document_with_empty_string() {
     let rest = create_rest_ops().await;
 
     let created = rest
-        .create_document("Users", json!({"name": "", "age": 0}))
+        .create_document("Users", json!({"name": "", "age": 0}), None)
         .await
         .unwrap();
 
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
-    let fetched = rest.get_document("Users", doc_id).await.unwrap().unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap().unwrap();
     assert_eq!(fetched.get("name").unwrap().as_str().unwrap(), "");
     assert_eq!(fetched.get("age").unwrap().as_i64().unwrap(), 0);
 }
@@ -467,7 +475,7 @@ async fn test_create_document_with_empty_string() {
 async fn test_create_multiple_documents_empty_array() {
     let rest = create_rest_ops().await;
 
-    let results = rest.create_documents("Users", vec![]).await.unwrap();
+    let results = rest.create_documents("Users", vec![], None).await.unwrap();
     assert!(results.is_empty());
 }
 
@@ -477,22 +485,22 @@ async fn test_update_then_delete_document() {
 
     // Create
     let created = rest
-        .create_document("Users", json!({"name": "ToDelete", "age": 99}))
+        .create_document("Users", json!({"name": "ToDelete", "age": 99}), None)
         .await
         .unwrap();
     let doc_id = created.get("_docID").unwrap().as_str().unwrap();
 
     // Update
     let _updated = rest
-        .update_document("Users", doc_id, json!({"age": 100}))
+        .update_document("Users", doc_id, json!({"age": 100}), None)
         .await
         .unwrap();
 
     // Delete
-    let deleted = rest.delete_document("Users", doc_id).await.unwrap();
+    let deleted = rest.delete_document("Users", doc_id, None).await.unwrap();
     assert!(deleted);
 
     // Verify gone
-    let fetched = rest.get_document("Users", doc_id).await.unwrap();
+    let fetched = rest.get_document("Users", doc_id, None).await.unwrap();
     assert!(fetched.is_none());
 }

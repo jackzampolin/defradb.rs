@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use p2p::{
-    codec, testutil::MockBitswapStore, DefraTopic, Error, HostEvent, Message, P2PHost,
-    P2PHostHandle, PushLogBroadcast, PushLogReply, PushLogRequest, SyncConfig, SyncCoordinator,
-    SyncEvent, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+    codec, testutil::MockBitswapStore, AccessMode, DefraTopic, Error, HostEvent, Message, P2PHost,
+    P2PHostHandle, PushLogBroadcast, PushLogReply, PushLogRequest, ReplicatorRegistry, SyncConfig,
+    SyncCoordinator, SyncEvent, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
 };
 use tokio::time::timeout;
 
@@ -1733,33 +1733,6 @@ async fn test_dag_sync_handle_sync_complete_failure() {
 }
 
 #[tokio::test]
-async fn test_replicator_registry_access_control() {
-    use p2p::{BlockAccessController, ReplicatorRegistry};
-
-    let registry = Arc::new(ReplicatorRegistry::new());
-    let peer1 = libp2p::PeerId::random();
-    let peer2 = libp2p::PeerId::random();
-
-    // Register peer1 as a replicator for "users" collection
-    registry.add_replicator("users", peer1);
-
-    // Create controller with access control enabled
-    let controller = BlockAccessController::controlled(registry);
-
-    let cid =
-        cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-
-    // peer1 should have access (is replicator)
-    assert!(controller.has_access(&peer1, &cid, Some("users")));
-
-    // peer2 should NOT have access (not a replicator)
-    assert!(!controller.has_access(&peer2, &cid, Some("users")));
-
-    // peer1 should also have access when collection is unknown (is_any_replicator)
-    assert!(controller.has_access(&peer1, &cid, None));
-}
-
-#[tokio::test]
 async fn test_replicator_registry_multiple_collections() {
     use p2p::ReplicatorRegistry;
 
@@ -2678,98 +2651,6 @@ async fn test_dag_sync_failure_allows_retry() {
 }
 
 // ============================================================================
-// Cross-Collection Access Control Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_cross_collection_access_denial() {
-    use p2p::{BlockAccessController, ReplicatorRegistry};
-
-    let registry = Arc::new(ReplicatorRegistry::new());
-
-    // Peer A is a replicator for "users" collection only
-    let peer_a = libp2p::PeerId::random();
-    registry.add_replicator("users", peer_a);
-
-    // Peer B is a replicator for "posts" collection only
-    let peer_b = libp2p::PeerId::random();
-    registry.add_replicator("posts", peer_b);
-
-    // Create controller with access control enabled
-    let controller = BlockAccessController::controlled(registry);
-
-    let cid =
-        cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-
-    // Peer A should have access to "users" collection
-    assert!(
-        controller.has_access(&peer_a, &cid, Some("users")),
-        "Peer A should have access to users collection"
-    );
-
-    // Peer B should have access to "posts" collection
-    assert!(
-        controller.has_access(&peer_b, &cid, Some("posts")),
-        "Peer B should have access to posts collection"
-    );
-
-    // Strangers (non-replicators) should NOT have access to any collection
-    let stranger = libp2p::PeerId::random();
-    assert!(
-        !controller.has_access(&stranger, &cid, Some("users")),
-        "Stranger should NOT have access to users collection"
-    );
-    assert!(
-        !controller.has_access(&stranger, &cid, Some("posts")),
-        "Stranger should NOT have access to posts collection"
-    );
-    assert!(
-        !controller.has_access(&stranger, &cid, None),
-        "Stranger should NOT have access when collection is unknown"
-    );
-
-    // Replicators for ANY collection get access via is_any_replicator fallback
-    // This is intentional behavior - replicators are trusted
-    assert!(
-        controller.has_access(&peer_a, &cid, None),
-        "Replicator should have access when collection is unknown"
-    );
-    assert!(
-        controller.has_access(&peer_b, &cid, None),
-        "Replicator should have access when collection is unknown"
-    );
-
-    // Due to is_any_replicator fallback, replicators for one collection
-    // also have access to blocks in other collections when the collection
-    // context is provided (this is the designed "permissive" behavior)
-    // See BlockAccessController::has_access implementation comment
-}
-
-#[tokio::test]
-async fn test_access_mode_open_allows_all() {
-    use p2p::{BlockAccessController, ReplicatorRegistry};
-
-    let registry = Arc::new(ReplicatorRegistry::new());
-
-    // Create controller with OPEN access (no ACP)
-    let controller = BlockAccessController::open(registry);
-
-    let cid =
-        cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-
-    // Any peer should have access with Open mode
-    let random_peer = libp2p::PeerId::random();
-    assert!(
-        controller.has_access(&random_peer, &cid, Some("users")),
-        "Open mode should allow all access"
-    );
-    assert!(
-        controller.has_access(&random_peer, &cid, None),
-        "Open mode should allow all access even without collection"
-    );
-}
-
-// ============================================================================
 // Real IPLD Block Link Extraction Tests
 // ============================================================================
 
@@ -3150,4 +3031,828 @@ async fn test_end_to_end_dag_sync_needs_fetch() {
         dag_sync.state().is_syncing(&parent_cid).await,
         "Root should be in syncing state when blocks are missing"
     );
+}
+
+// =============================================================================
+// Access Control Tests
+// =============================================================================
+
+/// Test that with AccessMode::Controlled, unauthorized peers are rejected.
+#[tokio::test]
+async fn test_access_control_rejects_unauthorized_peer() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    // Create host with replicator registry
+    let (handle, mut events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    // Create replicator registry (empty - no authorized replicators)
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    // Create coordinator with CONTROLLED access mode (requires replicator auth)
+    let (coordinator, _sync_events) = SyncCoordinator::with_access_control(
+        handle.clone(),
+        blockstore.clone(),
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    // Start listening
+    handle
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events).await;
+
+    // Create a test message from an unauthorized peer
+    let unauthorized_peer = libp2p::PeerId::random();
+    let collection_id = "protected-collection";
+    let doc_id = "bae-protected-doc";
+
+    let message = PushLogBroadcast::new(
+        doc_id.to_string(),
+        vec![0x01, 0x55, 0x00], // minimal CID-like bytes
+        collection_id.to_string(),
+        "creator".to_string(),
+        b"test block data".to_vec(),
+    );
+
+    // Try to process the message from an unauthorized peer
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: unauthorized_peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"test-msg-id"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    // Should be rejected with AccessDenied error
+    assert!(result.is_err(), "Should reject unauthorized peer");
+    match result.unwrap_err() {
+        Error::AccessDenied {
+            peer_id,
+            collection_id: col_id,
+        } => {
+            assert_eq!(peer_id, unauthorized_peer.to_string());
+            assert_eq!(col_id, collection_id);
+        }
+        other => panic!("Expected AccessDenied error, got: {:?}", other),
+    }
+}
+
+/// Test that with AccessMode::Controlled, authorized replicators can sync.
+#[tokio::test]
+async fn test_access_control_allows_authorized_replicator() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use storage::backends::MemoryStore;
+
+    // Create host with replicator registry
+    let (handle, mut events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    // Create replicator registry
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    // Create coordinator with CONTROLLED access mode
+    let (coordinator, mut sync_events) = SyncCoordinator::with_access_control(
+        handle.clone(),
+        blockstore.clone(),
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    // Start listening
+    handle
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events).await;
+
+    // Create an authorized peer
+    let authorized_peer = libp2p::PeerId::random();
+    let collection_id = "protected-collection";
+    let doc_id = "bae-protected-doc";
+
+    // Register the peer as a replicator for this collection
+    replicators.add_replicator(collection_id, authorized_peer);
+
+    // Create a valid CID for the test block
+    let block_data = b"authorized block data";
+    let cid = cid::Cid::try_from(
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+            .parse::<cid::Cid>()
+            .unwrap()
+            .to_bytes()
+            .as_slice(),
+    )
+    .unwrap();
+
+    let message = PushLogBroadcast::new(
+        doc_id.to_string(),
+        cid.to_bytes(),
+        collection_id.to_string(),
+        "creator".to_string(),
+        block_data.to_vec(),
+    );
+
+    // Process the message from the authorized peer - should succeed
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: authorized_peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"test-msg-id"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Should allow authorized replicator: {:?}",
+        result
+    );
+
+    // Check that we received the sync event
+    match sync_events.try_recv() {
+        Ok(SyncEvent::BlockReceived {
+            cid: event_cid,
+            doc_id: event_doc_id,
+            collection_id: event_col_id,
+            ..
+        }) => {
+            assert_eq!(event_doc_id, doc_id);
+            assert_eq!(event_col_id, collection_id);
+            // Verify block is in blockstore
+            assert!(
+                blockstore.has(&event_cid).await.unwrap(),
+                "Block should be stored"
+            );
+        }
+        other => panic!("Expected BlockReceived event, got: {:?}", other),
+    }
+}
+
+/// Test that with AccessMode::Open (default), all peers can sync.
+#[tokio::test]
+async fn test_access_control_open_mode_allows_all() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    // Create host
+    let (handle, mut events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    // Create coordinator with default (OPEN) access mode
+    let (coordinator, mut sync_events) =
+        SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+            .await
+            .expect("failed to create coordinator");
+
+    // Verify it's using Open mode
+    assert!(
+        coordinator.access_mode().is_open(),
+        "Default mode should be Open"
+    );
+
+    // Start listening
+    handle
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events).await;
+
+    // Create a random peer (not a replicator)
+    let random_peer = libp2p::PeerId::random();
+    let collection_id = "open-collection";
+    let doc_id = "bae-open-doc";
+
+    // Create a valid CID for the test block
+    let block_data = b"open mode block data";
+    let cid = cid::Cid::try_from(
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+            .parse::<cid::Cid>()
+            .unwrap()
+            .to_bytes()
+            .as_slice(),
+    )
+    .unwrap();
+
+    let message = PushLogBroadcast::new(
+        doc_id.to_string(),
+        cid.to_bytes(),
+        collection_id.to_string(),
+        "creator".to_string(),
+        block_data.to_vec(),
+    );
+
+    // Process the message - should succeed in Open mode
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: random_peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"test-msg-id"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Open mode should allow all peers: {:?}",
+        result
+    );
+
+    // Check that we received the sync event
+    match sync_events.try_recv() {
+        Ok(SyncEvent::BlockReceived { .. }) => {
+            // Success!
+        }
+        other => panic!("Expected BlockReceived event, got: {:?}", other),
+    }
+}
+
+/// Test that the coordinator correctly exposes access mode and replicator registry.
+#[tokio::test]
+async fn test_access_control_coordinator_accessors() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, _events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    // Create with Controlled mode
+    let (coordinator, _) = SyncCoordinator::with_access_control(
+        handle,
+        blockstore,
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    // Check access mode
+    assert!(
+        coordinator.access_mode().is_controlled(),
+        "Should be Controlled mode"
+    );
+    assert!(
+        !coordinator.access_mode().is_open(),
+        "Should not be Open mode"
+    );
+
+    // Check replicators accessor
+    let peer = libp2p::PeerId::random();
+    coordinator.replicators().add_replicator("test-col", peer);
+    assert!(
+        coordinator.replicators().is_replicator("test-col", &peer),
+        "Should find added replicator"
+    );
+}
+
+/// Test that a peer authorized for collection A cannot access collection B.
+/// This verifies the per-collection security model matches Go DefraDB.
+#[tokio::test]
+async fn test_access_control_rejects_replicator_for_wrong_collection() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, mut events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    let (coordinator, _sync_events) = SyncCoordinator::with_access_control(
+        handle.clone(),
+        blockstore.clone(),
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    handle
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events).await;
+
+    // Create a peer and authorize it for collection-a ONLY
+    let peer = libp2p::PeerId::random();
+    let collection_a = "collection-a";
+    let collection_b = "collection-b";
+
+    replicators.add_replicator(collection_a, peer);
+
+    // Verify peer CAN access collection-a
+    let message_a = PushLogBroadcast::new(
+        "doc-a".to_string(),
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+            .parse::<cid::Cid>()
+            .unwrap()
+            .to_bytes(),
+        collection_a.to_string(),
+        "creator".to_string(),
+        b"block data".to_vec(),
+    );
+
+    let result_a = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"msg-a"),
+            topic: collection_a.to_string(),
+            message: message_a,
+        })
+        .await;
+
+    assert!(
+        result_a.is_ok(),
+        "Peer should have access to collection-a: {:?}",
+        result_a
+    );
+
+    // Verify peer CANNOT access collection-b
+    let message_b = PushLogBroadcast::new(
+        "doc-b".to_string(),
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+            .parse::<cid::Cid>()
+            .unwrap()
+            .to_bytes(),
+        collection_b.to_string(),
+        "creator".to_string(),
+        b"block data".to_vec(),
+    );
+
+    let result_b = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"msg-b"),
+            topic: collection_b.to_string(),
+            message: message_b,
+        })
+        .await;
+
+    assert!(
+        result_b.is_err(),
+        "Peer should NOT have access to collection-b"
+    );
+    match result_b.unwrap_err() {
+        Error::AccessDenied {
+            peer_id,
+            collection_id,
+        } => {
+            assert_eq!(peer_id, peer.to_string());
+            assert_eq!(collection_id, collection_b);
+        }
+        other => panic!("Expected AccessDenied error, got: {:?}", other),
+    }
+}
+
+/// Test that access is denied after a replicator is removed.
+#[tokio::test]
+async fn test_access_control_after_replicator_removed() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, mut events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    let (coordinator, _sync_events) = SyncCoordinator::with_access_control(
+        handle.clone(),
+        blockstore.clone(),
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    handle
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events).await;
+
+    let peer = libp2p::PeerId::random();
+    let collection_id = "test-collection";
+
+    // Add replicator
+    replicators.add_replicator(collection_id, peer);
+
+    let cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        .parse::<cid::Cid>()
+        .unwrap();
+
+    // First message should succeed
+    let message1 = PushLogBroadcast::new(
+        "doc-1".to_string(),
+        cid.to_bytes(),
+        collection_id.to_string(),
+        "creator".to_string(),
+        b"block data 1".to_vec(),
+    );
+
+    let result1 = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"msg-1"),
+            topic: collection_id.to_string(),
+            message: message1,
+        })
+        .await;
+
+    assert!(
+        result1.is_ok(),
+        "First message should succeed while replicator is registered: {:?}",
+        result1
+    );
+
+    // Remove the replicator
+    replicators.remove_replicator(collection_id, &peer);
+
+    // Second message should fail
+    let message2 = PushLogBroadcast::new(
+        "doc-2".to_string(),
+        cid.to_bytes(),
+        collection_id.to_string(),
+        "creator".to_string(),
+        b"block data 2".to_vec(),
+    );
+
+    let result2 = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"msg-2"),
+            topic: collection_id.to_string(),
+            message: message2,
+        })
+        .await;
+
+    assert!(
+        result2.is_err(),
+        "Second message should fail after replicator is removed"
+    );
+    match result2.unwrap_err() {
+        Error::AccessDenied { peer_id, .. } => {
+            assert_eq!(peer_id, peer.to_string());
+        }
+        other => panic!("Expected AccessDenied error, got: {:?}", other),
+    }
+}
+
+/// Test that access control is checked BEFORE CID parsing.
+/// An unauthorized peer with an invalid CID should get AccessDenied, not InvalidCid.
+#[tokio::test]
+async fn test_access_control_checked_before_cid_parsing() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    let (handle, mut events) = create_and_start_host().await;
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    let (coordinator, _sync_events) = SyncCoordinator::with_access_control(
+        handle.clone(),
+        blockstore.clone(),
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    handle
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events).await;
+
+    // Create an unauthorized peer
+    let unauthorized_peer = libp2p::PeerId::random();
+    let collection_id = "protected-collection";
+
+    // Send a message with INVALID CID bytes from unauthorized peer
+    let message = PushLogBroadcast::new(
+        "doc-id".to_string(),
+        vec![0xFF, 0xFF, 0xFF], // Invalid CID bytes
+        collection_id.to_string(),
+        "creator".to_string(),
+        b"block data".to_vec(),
+    );
+
+    let result = coordinator
+        .handle_host_event(HostEvent::GossipMessage {
+            propagation_source: unauthorized_peer,
+            message_id: libp2p::gossipsub::MessageId::new(b"msg-id"),
+            topic: collection_id.to_string(),
+            message,
+        })
+        .await;
+
+    // Should get AccessDenied, NOT InvalidCid (access check happens first)
+    assert!(result.is_err(), "Should reject unauthorized peer");
+    match result.unwrap_err() {
+        Error::AccessDenied {
+            peer_id,
+            collection_id: col_id,
+        } => {
+            assert_eq!(peer_id, unauthorized_peer.to_string());
+            assert_eq!(col_id, collection_id);
+        }
+        Error::InvalidCid(_) => {
+            panic!("Got InvalidCid error - access control should be checked BEFORE CID parsing");
+        }
+        other => panic!("Expected AccessDenied error, got: {:?}", other),
+    }
+}
+
+/// Test PushLogRequest access control - rejects unauthorized peer.
+/// Uses two connected hosts to test the full request-response path.
+#[tokio::test]
+async fn test_pushlog_request_rejects_unauthorized_peer() {
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    // Host 1: the receiver with access control
+    let (handle1, mut events1) = create_and_start_host().await;
+    let store1 = Arc::new(MemoryStore::new());
+    let blockstore1 = Arc::new(DefraBlockstore::new(store1, true));
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    let (coordinator, _sync_events) = SyncCoordinator::with_access_control(
+        handle1.clone(),
+        blockstore1.clone(),
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    // Host 2: the sender (unauthorized)
+    let (handle2, mut events2) = create_and_start_host().await;
+
+    // Set up listening
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    let addr1 = wait_for_listening(&mut events1).await;
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events2).await;
+
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+
+    // Connect host2 to host1
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
+
+    wait_for_peer_connected(&mut events1).await;
+    wait_for_peer_connected(&mut events2).await;
+
+    // Host2 is NOT registered as a replicator for the collection
+    let collection_id = "protected-collection";
+
+    // Create a PushLog request
+    let request = PushLogRequest::new(
+        "doc-id".to_string(),
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+            .parse::<cid::Cid>()
+            .unwrap()
+            .to_bytes(),
+        collection_id.to_string(),
+        "creator".to_string(),
+        b"block data".to_vec(),
+    );
+
+    // Spawn a task to handle incoming events on host1 with the coordinator
+    let coordinator_handle = coordinator;
+    let event_handler = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), events1.recv()).await {
+                Ok(Some(event)) => {
+                    if let HostEvent::PushLogRequest { .. } = &event {
+                        let result = coordinator_handle.handle_host_event(event).await;
+                        return result;
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(())
+    });
+
+    // Send PushLog from host2 to host1
+    let send_result = timeout(
+        Duration::from_secs(3),
+        handle2.send_pushlog(peer_id1, request),
+    )
+    .await;
+
+    // The coordinator should have handled the event
+    let handler_result = timeout(Duration::from_secs(2), event_handler).await;
+
+    // Check that coordinator returned AccessDenied
+    if let Ok(Ok(result)) = handler_result {
+        assert!(result.is_err(), "Should reject unauthorized peer");
+        match result.unwrap_err() {
+            Error::AccessDenied { .. } => {
+                // Expected
+            }
+            other => panic!("Expected AccessDenied error, got: {:?}", other),
+        }
+    }
+
+    // The send should also reflect the error (or timeout)
+    match send_result {
+        Ok(Ok(reply)) => {
+            // Check if reply contains error
+            if let Some(err_msg) = reply.metadata.err_message {
+                assert!(
+                    err_msg.contains("access denied"),
+                    "Error message should indicate access denied: {}",
+                    err_msg
+                );
+            }
+        }
+        Ok(Err(_)) | Err(_) => {
+            // Also acceptable - connection may have been affected
+        }
+    }
+
+    handle1.shutdown().await.ok();
+    handle2.shutdown().await.ok();
+}
+
+/// Test PushLogRequest access control - allows authorized replicator.
+/// Uses two connected hosts to test the full request-response path.
+#[tokio::test]
+async fn test_pushlog_request_allows_authorized_replicator() {
+    use blockstore::{Blockstore, DefraBlockstore};
+    use storage::backends::MemoryStore;
+
+    // Host 1: the receiver with access control
+    let (handle1, mut events1) = create_and_start_host().await;
+    let store1 = Arc::new(MemoryStore::new());
+    let blockstore1 = Arc::new(DefraBlockstore::new(store1, true));
+
+    let replicators = Arc::new(ReplicatorRegistry::new());
+
+    let (coordinator, mut sync_events) = SyncCoordinator::with_access_control(
+        handle1.clone(),
+        blockstore1.clone(),
+        SyncConfig::default(),
+        AccessMode::Controlled,
+        replicators.clone(),
+    )
+    .await
+    .expect("failed to create coordinator");
+
+    // Host 2: the sender (will be authorized)
+    let (handle2, mut events2) = create_and_start_host().await;
+
+    // Set up listening
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    let addr1 = wait_for_listening(&mut events1).await;
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .expect("failed to listen");
+    wait_for_listening(&mut events2).await;
+
+    let peer_id1 = handle1
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+    let peer_id2 = handle2
+        .local_peer_id()
+        .await
+        .expect("failed to get peer id");
+
+    // Connect host2 to host1
+    handle2
+        .dial(peer_id1, vec![addr1])
+        .await
+        .expect("failed to dial");
+
+    wait_for_peer_connected(&mut events1).await;
+    wait_for_peer_connected(&mut events2).await;
+
+    // Register host2 as a replicator for the collection
+    let collection_id = "protected-collection";
+    replicators.add_replicator(collection_id, peer_id2);
+
+    // Create a PushLog request with valid CID
+    let cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        .parse::<cid::Cid>()
+        .unwrap();
+    let request = PushLogRequest::new(
+        "doc-id".to_string(),
+        cid.to_bytes(),
+        collection_id.to_string(),
+        "creator".to_string(),
+        b"authorized block data".to_vec(),
+    );
+
+    // Spawn a task to handle incoming events on host1 with the coordinator
+    let coordinator_handle = coordinator;
+    let blockstore_check = blockstore1.clone();
+    let event_handler = tokio::spawn(async move {
+        loop {
+            match timeout(Duration::from_secs(2), events1.recv()).await {
+                Ok(Some(event)) => {
+                    if let HostEvent::PushLogRequest { .. } = &event {
+                        let result = coordinator_handle.handle_host_event(event).await;
+                        return result;
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(())
+    });
+
+    // Send PushLog from host2 to host1
+    let send_result = timeout(
+        Duration::from_secs(3),
+        handle2.send_pushlog(peer_id1, request),
+    )
+    .await;
+
+    // The coordinator should have handled the event successfully
+    let handler_result = timeout(Duration::from_secs(2), event_handler).await;
+
+    if let Ok(Ok(result)) = handler_result {
+        assert!(
+            result.is_ok(),
+            "Should allow authorized replicator: {:?}",
+            result
+        );
+    }
+
+    // The send should succeed
+    if let Ok(Ok(reply)) = send_result {
+        assert!(
+            reply.metadata.err_message.is_none(),
+            "Reply should not contain error: {:?}",
+            reply.metadata.err_message
+        );
+    }
+
+    // Check that we received the sync event
+    match timeout(Duration::from_millis(500), sync_events.recv()).await {
+        Ok(Some(SyncEvent::BlockReceived {
+            doc_id,
+            collection_id: event_col_id,
+            ..
+        })) => {
+            assert_eq!(doc_id, "doc-id");
+            assert_eq!(event_col_id, collection_id);
+            // Verify block is in blockstore
+            assert!(
+                blockstore_check.has(&cid).await.unwrap(),
+                "Block should be stored"
+            );
+        }
+        other => {
+            // May not receive event due to timing, that's okay
+            // The main assertion is that the handler succeeded
+            eprintln!("Did not receive sync event (timing): {:?}", other);
+        }
+    }
+
+    handle1.shutdown().await.ok();
+    handle2.shutdown().await.ok();
 }

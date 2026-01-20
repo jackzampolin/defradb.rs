@@ -6,6 +6,7 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::json;
 
+use defra_http::identity_extractor::ExtractIdentity;
 use defra_http::mock::{FailingMockRestOperations, MockQueryExecutor, MockRestOperations};
 use defra_http::{handlers, AppState, HttpError};
 use query::executor::QueryExecutor;
@@ -32,11 +33,16 @@ fn create_failing_state() -> AppState {
     }
 }
 
+fn anonymous() -> ExtractIdentity {
+    ExtractIdentity::anonymous()
+}
+
 #[tokio::test]
 async fn test_get_document() {
     let state = create_state();
     let result = handlers::get_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -51,6 +57,7 @@ async fn test_get_document_not_found() {
     let state = create_state();
     let result = handlers::get_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-nonexistent".to_string())),
     )
     .await;
@@ -66,6 +73,7 @@ async fn test_get_document_collection_not_found() {
     let state = create_state();
     let result = handlers::get_document(
         State(state),
+        anonymous(),
         Path(("NonExistent".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -81,6 +89,7 @@ async fn test_get_document_no_rest() {
     let state = create_state_without_rest();
     let result = handlers::get_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -92,6 +101,7 @@ async fn test_create_single_document() {
     let state = create_state();
     let result = handlers::create_document(
         State(state),
+        anonymous(),
         Path("Users".to_string()),
         Json(json!({"name": "Charlie", "age": 35})),
     )
@@ -107,6 +117,7 @@ async fn test_create_multiple_documents() {
     let state = create_state();
     let result = handlers::create_document(
         State(state),
+        anonymous(),
         Path("Users".to_string()),
         Json(json!([
             {"name": "Dave", "age": 40},
@@ -125,6 +136,7 @@ async fn test_create_document_collection_not_found() {
     let state = create_state();
     let result = handlers::create_document(
         State(state),
+        anonymous(),
         Path("NonExistent".to_string()),
         Json(json!({"name": "Charlie"})),
     )
@@ -141,6 +153,7 @@ async fn test_create_document_no_rest() {
     let state = create_state_without_rest();
     let result = handlers::create_document(
         State(state),
+        anonymous(),
         Path("Users".to_string()),
         Json(json!({"name": "Charlie"})),
     )
@@ -153,6 +166,7 @@ async fn test_update_document() {
     let state = create_state();
     let result = handlers::update_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
         Json(json!({"age": 31})),
     )
@@ -169,6 +183,7 @@ async fn test_update_document_not_found() {
     let state = create_state();
     let result = handlers::update_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-nonexistent".to_string())),
         Json(json!({"age": 31})),
     )
@@ -185,6 +200,7 @@ async fn test_update_document_collection_not_found() {
     let state = create_state();
     let result = handlers::update_document(
         State(state),
+        anonymous(),
         Path(("NonExistent".to_string(), "bae-123".to_string())),
         Json(json!({"age": 31})),
     )
@@ -201,6 +217,7 @@ async fn test_update_document_no_rest() {
     let state = create_state_without_rest();
     let result = handlers::update_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
         Json(json!({"age": 31})),
     )
@@ -213,6 +230,7 @@ async fn test_delete_document() {
     let state = create_state();
     let result = handlers::delete_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -226,6 +244,7 @@ async fn test_delete_document_not_found() {
     let state = create_state();
     let result = handlers::delete_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-nonexistent".to_string())),
     )
     .await;
@@ -239,6 +258,7 @@ async fn test_delete_document_collection_not_found() {
     let state = create_state();
     let result = handlers::delete_document(
         State(state),
+        anonymous(),
         Path(("NonExistent".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -254,6 +274,7 @@ async fn test_delete_document_no_rest() {
     let state = create_state_without_rest();
     let result = handlers::delete_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -266,6 +287,7 @@ async fn test_failing_rest_operations() {
 
     let result = handlers::get_document(
         State(state.clone()),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -273,6 +295,7 @@ async fn test_failing_rest_operations() {
 
     let result = handlers::create_document(
         State(state.clone()),
+        anonymous(),
         Path("Users".to_string()),
         Json(json!({"name": "Test"})),
     )
@@ -281,6 +304,7 @@ async fn test_failing_rest_operations() {
 
     let result = handlers::update_document(
         State(state.clone()),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
         Json(json!({"age": 31})),
     )
@@ -289,6 +313,7 @@ async fn test_failing_rest_operations() {
 
     let result = handlers::delete_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -302,8 +327,13 @@ async fn test_failing_rest_operations() {
 #[tokio::test]
 async fn test_create_empty_document_array() {
     let state = create_state();
-    let result =
-        handlers::create_document(State(state), Path("Users".to_string()), Json(json!([]))).await;
+    let result = handlers::create_document(
+        State(state),
+        anonymous(),
+        Path("Users".to_string()),
+        Json(json!([])),
+    )
+    .await;
     assert!(result.is_ok());
     let Json(docs) = result.unwrap();
     assert!(docs.is_array());
@@ -328,6 +358,7 @@ async fn test_get_document_invalid_doc_id() {
     let state = create_invalid_doc_id_state();
     let result = handlers::get_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bad-id".to_string())),
     )
     .await;
@@ -343,6 +374,7 @@ async fn test_update_document_invalid_doc_id() {
     let state = create_invalid_doc_id_state();
     let result = handlers::update_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bad-id".to_string())),
         Json(json!({"age": 31})),
     )
@@ -359,6 +391,7 @@ async fn test_delete_document_invalid_doc_id() {
     let state = create_invalid_doc_id_state();
     let result = handlers::delete_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bad-id".to_string())),
     )
     .await;
@@ -387,6 +420,7 @@ async fn test_create_document_invalid_input() {
     let state = create_invalid_input_state();
     let result = handlers::create_document(
         State(state),
+        anonymous(),
         Path("Users".to_string()),
         Json(json!({"name": 123})),
     )
@@ -403,6 +437,7 @@ async fn test_update_document_invalid_input() {
     let state = create_invalid_input_state();
     let result = handlers::update_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
         Json(json!({"age": "not-a-number"})),
     )
@@ -432,6 +467,7 @@ async fn test_get_document_permission_denied() {
     let state = create_permission_denied_state();
     let result = handlers::get_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;
@@ -447,6 +483,7 @@ async fn test_create_document_permission_denied() {
     let state = create_permission_denied_state();
     let result = handlers::create_document(
         State(state),
+        anonymous(),
         Path("Users".to_string()),
         Json(json!({"name": "Test"})),
     )
@@ -463,6 +500,7 @@ async fn test_update_document_permission_denied() {
     let state = create_permission_denied_state();
     let result = handlers::update_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
         Json(json!({"age": 31})),
     )
@@ -479,6 +517,7 @@ async fn test_delete_document_permission_denied() {
     let state = create_permission_denied_state();
     let result = handlers::delete_document(
         State(state),
+        anonymous(),
         Path(("Users".to_string(), "bae-123".to_string())),
     )
     .await;

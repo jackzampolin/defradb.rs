@@ -1,4 +1,7 @@
 //! Document REST endpoint handlers.
+//!
+//! These handlers extract identity from the Authorization header and pass it
+//! to the REST operations layer for ACP (Access Control Policy) enforcement.
 
 use axum::{
     extract::{Path, State},
@@ -8,6 +11,7 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::error::HttpError;
+use crate::identity_extractor::ExtractIdentity;
 use crate::router::AppState;
 
 /// Response for delete operations.
@@ -19,8 +23,12 @@ pub struct DeleteResponse {
 /// Get a single document by ID.
 ///
 /// GET /api/v0/collections/{name}/{docID}
+///
+/// Identity is extracted from the Authorization header and used for ACP checks.
+/// Protected documents require read permission.
 pub async fn get_document(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, HttpError> {
     let rest = state
@@ -28,7 +36,7 @@ pub async fn get_document(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.get_document(&collection, &doc_id).await {
+    match rest.get_document(&collection, &doc_id, identity.did()).await {
         Ok(Some(doc)) => Ok(Json(doc)),
         Ok(None) => Err(HttpError::NotFound(format!(
             "Document '{}' not found in collection '{}'",
@@ -51,8 +59,12 @@ pub async fn get_document(
 /// POST /api/v0/collections/{name}
 ///
 /// Accepts either a single document object or an array of documents.
+/// Identity is extracted from the Authorization header and used for ACP:
+/// - If the collection has a policy and identity is provided, the document
+///   is registered with ACP and the identity becomes the owner.
 pub async fn create_document(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Path(collection): Path<String>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, HttpError> {
@@ -66,9 +78,9 @@ pub async fn create_document(
             .as_array()
             .ok_or_else(|| HttpError::BadRequest("Expected array of documents".into()))?
             .clone();
-        rest.create_documents(&collection, docs).await
+        rest.create_documents(&collection, docs, identity.did()).await
     } else {
-        rest.create_document(&collection, body)
+        rest.create_document(&collection, body, identity.did())
             .await
             .map(|doc| vec![doc])
     };
@@ -100,8 +112,12 @@ pub async fn create_document(
 /// Update a single document.
 ///
 /// PATCH /api/v0/collections/{name}/{docID}
+///
+/// Identity is extracted from the Authorization header and used to check
+/// update permission on protected documents.
 pub async fn update_document(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
     Json(patch): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, HttpError> {
@@ -110,7 +126,7 @@ pub async fn update_document(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.update_document(&collection, &doc_id, patch).await {
+    match rest.update_document(&collection, &doc_id, patch, identity.did()).await {
         Ok(doc) => {
             tracing::info!(
                 collection = %collection,
@@ -134,8 +150,12 @@ pub async fn update_document(
 /// Delete a single document.
 ///
 /// DELETE /api/v0/collections/{name}/{docID}
+///
+/// Identity is extracted from the Authorization header and used to check
+/// delete permission on protected documents.
 pub async fn delete_document(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
 ) -> Result<Json<DeleteResponse>, HttpError> {
     let rest = state
@@ -143,7 +163,7 @@ pub async fn delete_document(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.delete_document(&collection, &doc_id).await {
+    match rest.delete_document(&collection, &doc_id, identity.did()).await {
         Ok(deleted) => {
             if deleted {
                 tracing::info!(

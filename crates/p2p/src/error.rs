@@ -185,6 +185,15 @@ pub enum Error {
     /// Invalid configuration value.
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+
+    /// Access denied for P2P operation.
+    #[error("access denied: peer {peer_id} not authorized for collection {collection_id}")]
+    AccessDenied {
+        /// The peer that was denied access
+        peer_id: String,
+        /// The collection they tried to access
+        collection_id: String,
+    },
 }
 
 impl From<serde_cbor::Error> for Error {

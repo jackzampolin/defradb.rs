@@ -28,6 +28,9 @@ tracing.workspace = true
 # IPLD
 cid.workspace = true
 
+# P2P
+libp2p.workspace = true
+
 # Internal crates
 storage = { path = "../storage" }
 datastore = { path = "../datastore" }
@@ -39,6 +42,7 @@ crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
+p2p = { path = "../p2p" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -103,10 +103,7 @@ pub use sync::{
 };
 
 // Re-export bitswap types
-pub use bitswap::{
-    AccessMode, BitswapStoreAdapter, BlockAccessController, BlockAccessFn, PeerIdentityRegistry,
-    ReplicatorRegistry,
-};
+pub use bitswap::{AccessMode, BitswapStoreAdapter, ReplicatorRegistry};
 pub use libp2p_bitswap_next::{BitswapStore, QueryId};
 
 // Re-export replicator types

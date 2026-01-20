@@ -103,4 +103,27 @@ pub trait AcpStore: Send + Sync {
     /// Implementations MUST validate `collection_id` and `doc_id` using
     /// [`RelationTuple::validate_prefix`] before constructing storage keys.
     async fn is_doc_registered(&self, collection_id: &str, doc_id: &str) -> Result<bool>;
+
+    /// Atomically register a document with an owner if not already registered.
+    ///
+    /// This method performs a check-and-set operation atomically, preventing
+    /// TOCTOU race conditions where concurrent registrations could overwrite
+    /// each other.
+    ///
+    /// # Returns
+    /// - `Ok(true)` if registration succeeded (document was not registered)
+    /// - `Ok(false)` if document was already registered (no change made)
+    /// - `Err(_)` on storage errors
+    ///
+    /// # Security
+    ///
+    /// This method is critical for ownership security. Implementations MUST
+    /// ensure atomicity - if two concurrent calls race, exactly one must succeed
+    /// and the other must return `Ok(false)`.
+    async fn register_doc_atomic(
+        &self,
+        owner: &Did,
+        collection_id: &str,
+        doc_id: &str,
+    ) -> Result<bool>;
 }

@@ -1,4 +1,7 @@
 //! Collection REST endpoint handlers.
+//!
+//! These handlers extract identity from the Authorization header and pass it
+//! to the REST operations layer for ACP (Access Control Policy) enforcement.
 
 use axum::{
     extract::{Path, State},
@@ -7,6 +10,7 @@ use axum::{
 use serde::Serialize;
 
 use crate::error::HttpError;
+use crate::identity_extractor::ExtractIdentity;
 use crate::router::AppState;
 
 /// Response for listing collections.
@@ -44,8 +48,13 @@ pub async fn list_collections(
 /// Get all document IDs in a collection.
 ///
 /// GET /api/v0/collections/{name}
+///
+/// Identity is extracted from the Authorization header and used to filter
+/// documents based on read permissions (protected documents will only be
+/// visible if the identity has read access).
 pub async fn get_collection_doc_ids(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Path(name): Path<String>,
 ) -> Result<Json<DocIdsResponse>, HttpError> {
     let rest = state
@@ -53,7 +62,7 @@ pub async fn get_collection_doc_ids(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.get_collection_doc_ids(&name).await {
+    match rest.get_collection_doc_ids(&name, identity.did()).await {
         Ok(doc_ids) => Ok(Json(DocIdsResponse { doc_ids })),
         Err(e) => {
             tracing::warn!(collection = %name, error = %e, "Failed to get collection doc IDs");
@@ -65,6 +74,7 @@ pub async fn get_collection_doc_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity_extractor::ExtractIdentity;
     use crate::mock::{FailingMockRestOperations, MockQueryExecutor, MockRestOperations};
     use query::executor::QueryExecutor;
     use query::rest::RestOperations;
@@ -118,7 +128,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_collection_doc_ids() {
         let state = create_state();
-        let result = get_collection_doc_ids(State(state), Path("Users".to_string())).await;
+        let identity = ExtractIdentity::anonymous();
+        let result =
+            get_collection_doc_ids(State(state), identity, Path("Users".to_string())).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.doc_ids.len(), 2);
@@ -129,7 +141,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_collection_doc_ids_not_found() {
         let state = create_state();
-        let result = get_collection_doc_ids(State(state), Path("NonExistent".to_string())).await;
+        let identity = ExtractIdentity::anonymous();
+        let result =
+            get_collection_doc_ids(State(state), identity, Path("NonExistent".to_string())).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             HttpError::NotFound(msg) => assert!(msg.contains("NonExistent")),
@@ -140,14 +154,18 @@ mod tests {
     #[tokio::test]
     async fn test_get_collection_doc_ids_no_rest() {
         let state = create_state_without_rest();
-        let result = get_collection_doc_ids(State(state), Path("Users".to_string())).await;
+        let identity = ExtractIdentity::anonymous();
+        let result =
+            get_collection_doc_ids(State(state), identity, Path("Users".to_string())).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_get_empty_collection() {
         let state = create_state();
-        let result = get_collection_doc_ids(State(state), Path("Books".to_string())).await;
+        let identity = ExtractIdentity::anonymous();
+        let result =
+            get_collection_doc_ids(State(state), identity, Path("Books".to_string())).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.doc_ids.is_empty());
