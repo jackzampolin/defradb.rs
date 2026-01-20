@@ -29,12 +29,18 @@ pub struct RedbStoreOptions {
     max_snapshot_keys: Option<usize>,
 }
 
+/// Default maximum snapshot keys (1 million).
+///
+/// This provides reasonable OOM protection while allowing most use cases.
+/// Can be increased via `with_max_snapshot_keys()` or removed with `with_max_snapshot_keys(usize::MAX)`.
+pub const DEFAULT_MAX_SNAPSHOT_KEYS: usize = 1_000_000;
+
 impl Default for RedbStoreOptions {
     fn default() -> Self {
         Self {
             cache_size: None,
             close_timeout: Duration::from_secs(DEFAULT_CLOSE_TIMEOUT_SECS),
-            max_snapshot_keys: None,
+            max_snapshot_keys: Some(DEFAULT_MAX_SNAPSHOT_KEYS),
         }
     }
 }
@@ -93,13 +99,14 @@ impl RedbStoreOptions {
     /// transaction, `new_txn()` will return an error instead of loading
     /// all keys into memory.
     ///
-    /// Default: None (no limit - use with caution on large databases)
+    /// Default: 1,000,000 keys (provides OOM protection)
     ///
     /// # Recommended Values
     ///
-    /// - Small databases (<100K keys): No limit needed
-    /// - Medium databases (100K-1M keys): 1_000_000
-    /// - Large databases: Consider a different storage backend
+    /// - Small databases (<100K keys): Default is fine
+    /// - Medium databases (100K-1M keys): Default is fine
+    /// - Large databases: Consider a different storage backend, or use
+    ///   `with_unlimited_snapshot_keys()` if you have sufficient RAM
     ///
     /// # Example
     ///
@@ -109,6 +116,20 @@ impl RedbStoreOptions {
     /// ```
     pub fn with_max_snapshot_keys(mut self, max_keys: usize) -> Self {
         self.max_snapshot_keys = Some(max_keys);
+        self
+    }
+
+    /// Remove the snapshot key limit (use with caution).
+    ///
+    /// This disables OOM protection and allows unlimited keys in snapshots.
+    /// Only use this if you have sufficient RAM for your database size
+    /// multiplied by the expected number of concurrent transactions.
+    ///
+    /// # Warning
+    ///
+    /// Memory usage = database_size × concurrent_transactions
+    pub fn with_unlimited_snapshot_keys(mut self) -> Self {
+        self.max_snapshot_keys = None;
         self
     }
 

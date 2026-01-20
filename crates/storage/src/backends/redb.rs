@@ -1,16 +1,21 @@
 /// Redb backend implementation with snapshot isolation and ACID transactions.
 ///
-/// This backend provides a pure Rust, WASM-compatible persistent key-value store
-/// using redb. It uses read snapshots for isolation and buffered writes for
-/// read-your-writes consistency within transactions.
+/// This backend provides a pure Rust persistent key-value store using redb.
+/// It uses read snapshots for isolation and buffered writes for read-your-writes
+/// consistency within transactions.
 ///
 /// # Features
 ///
 /// - Pure Rust implementation (no C/C++ dependencies)
-/// - WASM-compatible
 /// - ACID transactions with snapshot isolation
 /// - Persistent storage with crash recovery
 /// - Single-writer model (matches Go DefraDB's LevelDB semantics)
+///
+/// # Platform Support
+///
+/// **NOTE**: This backend is NOT WASM-compatible due to redb's use of memory-mapped
+/// files and native filesystem operations. For WASM environments, use `MemoryStore`
+/// instead, or implement a browser-specific backend using IndexedDB/OPFS.
 ///
 /// # MVCC Behavior
 ///
@@ -47,9 +52,9 @@
 ///
 /// # Use Cases
 ///
-/// - Production deployments requiring WASM compatibility
-/// - Embedded applications
-/// - Cross-platform storage
+/// - Production deployments on native platforms (Linux, macOS, Windows)
+/// - Embedded applications with filesystem access
+/// - Small to medium databases (< 1M keys recommended)
 ///
 /// # Example
 ///
@@ -408,7 +413,8 @@ impl Store for RedbStore {
                     );
                     return Err(Error::Other(format!(
                         "Close timeout: {} transaction(s) still active after {}s (db: {}). \
-                         Ensure all transactions call commit() or discard() before closing the store. \
+                         Possible causes: (1) Transactions not calling commit()/discard() - check for missing cleanup, \
+                         (2) Long-running I/O operations - transactions may still be processing large commits or snapshots. \
                          Use RedbStoreOptions::with_close_timeout() to increase timeout if needed.",
                         remaining,
                         timeout.as_secs(),
@@ -780,10 +786,16 @@ impl RedbTxn {
     }
 
     /// Execute sync callbacks with panic protection.
-    fn execute_callbacks(callbacks: Vec<TxnCallback>) {
+    ///
+    /// Returns the number of callbacks that panicked.
+    fn execute_callbacks(callbacks: Vec<TxnCallback>) -> usize {
+        let total = callbacks.len();
+        let mut failed = 0;
+
         for (i, callback) in callbacks.into_iter().enumerate() {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
             if let Err(panic_info) = result {
+                failed += 1;
                 tracing::error!(
                     callback_index = i,
                     panic = ?panic_info,
@@ -791,16 +803,32 @@ impl RedbTxn {
                 );
             }
         }
+
+        if failed > 0 {
+            tracing::warn!(
+                total_callbacks = total,
+                failed_callbacks = failed,
+                "Sync callback execution completed with failures"
+            );
+        }
+
+        failed
     }
 
     /// Execute async callbacks with panic protection.
-    async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) {
+    ///
+    /// Returns the number of callbacks that panicked.
+    async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) -> usize {
         use futures::FutureExt;
+
+        let total = callbacks.len();
+        let mut failed = 0;
 
         for (i, callback) in callbacks.into_iter().enumerate() {
             let future = callback();
             let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
             if let Err(panic_info) = result {
+                failed += 1;
                 tracing::error!(
                     callback_index = i,
                     panic = ?panic_info,
@@ -808,6 +836,16 @@ impl RedbTxn {
                 );
             }
         }
+
+        if failed > 0 {
+            tracing::warn!(
+                total_callbacks = total,
+                failed_callbacks = failed,
+                "Async callback execution completed with failures"
+            );
+        }
+
+        failed
     }
 }
 
@@ -957,8 +995,6 @@ impl Txn for RedbTxn {
             return Err(Error::Other("Transaction already committed".into()));
         }
 
-        *self.committed.lock() = true;
-
         // Clone pending changes before any async operations
         let pending = self.pending.lock().clone();
 
@@ -1004,7 +1040,12 @@ impl Txn for RedbTxn {
                                     error = %e,
                                     key_len = key.len(),
                                     value_len = v.len(),
-                                    "Failed to insert key during commit"
+                                    "Failed to insert key during commit - transaction will be rolled back"
+                                );
+                                // Note: write_txn is automatically rolled back when dropped (redb guarantee)
+                                tracing::debug!(
+                                    pending_changes = pending.len(),
+                                    "Write transaction aborted - no partial writes persisted"
                                 );
                                 let on_error = std::mem::take(&mut *self.on_error.lock());
                                 let on_error_async =
@@ -1019,7 +1060,12 @@ impl Txn for RedbTxn {
                                 tracing::error!(
                                     error = %e,
                                     key_len = key.len(),
-                                    "Failed to delete key during commit"
+                                    "Failed to delete key during commit - transaction will be rolled back"
+                                );
+                                // Note: write_txn is automatically rolled back when dropped (redb guarantee)
+                                tracing::debug!(
+                                    pending_changes = pending.len(),
+                                    "Write transaction aborted - no partial writes persisted"
                                 );
                                 let on_error = std::mem::take(&mut *self.on_error.lock());
                                 let on_error_async =
@@ -1037,7 +1083,11 @@ impl Txn for RedbTxn {
                 tracing::error!(
                     error = %e,
                     pending_changes = pending.len(),
-                    "Failed to finalize commit"
+                    "Failed to finalize commit - all changes rolled back"
+                );
+                // Note: redb guarantees atomicity - if commit fails, no changes are persisted
+                tracing::debug!(
+                    "Commit failed at finalization stage - database state unchanged"
                 );
                 let on_error = std::mem::take(&mut *self.on_error.lock());
                 let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
@@ -1046,6 +1096,10 @@ impl Txn for RedbTxn {
                 return Err(e.into());
             }
         }
+
+        // Mark as committed AFTER successful database commit
+        // This ensures the flag accurately reflects the transaction state
+        *self.committed.lock() = true;
 
         // Execute success callbacks
         let on_success = std::mem::take(&mut *self.on_success.lock());
@@ -2971,5 +3025,90 @@ mod redb_specific_tests {
         assert_eq!(txn.callback_count(), 3, "Should have 3 callbacks after on_discard");
 
         txn.discard();
+    }
+
+    // =========================================================================
+    // MEMORY PRESSURE STRESS TEST
+    // =========================================================================
+
+    /// Test that validates memory behavior under concurrent read transactions.
+    ///
+    /// This test creates a moderately-sized dataset and opens multiple concurrent
+    /// read transactions to verify that memory pressure is manageable.
+    ///
+    /// Memory calculation: 10K keys × 100 bytes × 20 concurrent txns = ~20MB
+    #[tokio::test]
+    async fn test_redb_memory_pressure_concurrent_snapshots() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Use a reasonable max_snapshot_keys limit for this test
+        let opts = RedbStoreOptions::new().with_max_snapshot_keys(100_000);
+        let store = Arc::new(RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap());
+
+        // Setup: Create 10K keys with 100-byte values (~1MB total)
+        let value = vec![0xAB; 100];
+        {
+            let mut txn = store.new_txn(false).await.unwrap();
+            for i in 0..10_000 {
+                let key = format!("memtest_{:06}", i);
+                txn.set(key.as_bytes(), &value).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+        }
+
+        // Open 20 concurrent read transactions (each snapshots the entire DB)
+        let concurrent_readers = 20;
+        let completed = Arc::new(AtomicUsize::new(0));
+        let errors = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+        for _ in 0..concurrent_readers {
+            let store = Arc::clone(&store);
+            let completed = Arc::clone(&completed);
+            let errors = Arc::clone(&errors);
+
+            handles.push(tokio::spawn(async move {
+                match store.new_txn(true).await {
+                    Ok(txn) => {
+                        // Verify we can read data
+                        let result = txn.get(b"memtest_005000").await;
+                        if result.is_ok() && result.unwrap().is_some() {
+                            completed.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            errors.fetch_add(1, Ordering::SeqCst);
+                        }
+                        txn.discard();
+                    }
+                    Err(_) => {
+                        errors.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            concurrent_readers,
+            "All concurrent read transactions should complete successfully"
+        );
+        assert_eq!(
+            errors.load(Ordering::SeqCst),
+            0,
+            "No errors should occur during concurrent reads"
+        );
+        assert_eq!(
+            store.active_transaction_count(),
+            0,
+            "All transactions should be cleaned up"
+        );
+
+        store.close().await.unwrap();
     }
 }

@@ -29,8 +29,8 @@
 ///     └── Iterator with filtering
 ///     ↓
 /// Backend Implementation
-///     ├── MemoryStore (testing)
-///     └── RedbStore (production, WASM-compatible)
+///     ├── MemoryStore (testing, WASM)
+///     └── RedbStore (production, native only)
 /// ```
 ///
 /// # Quick Start
@@ -61,8 +61,8 @@
 ///
 /// ## Phase 1: CoreKV Foundation ✅ (Complete)
 /// - CoreKV trait hierarchy
-/// - Memory backend
-/// - Redb backend (WASM-compatible)
+/// - Memory backend (WASM-compatible)
+/// - Redb backend (native platforms only)
 /// - Iterators with filtering
 /// - Transaction callbacks
 ///
@@ -109,7 +109,7 @@ pub mod stores;
 // Re-export commonly used types for convenience
 pub use backends::MemoryStore;
 
-#[cfg(feature = "redb")]
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use backends::RedbStore;
 
 pub use corekv::{

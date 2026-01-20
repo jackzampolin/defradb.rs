@@ -7,24 +7,26 @@
 /// # Available Backends
 ///
 /// - **Memory**: Fast in-memory storage using BTreeMap. Suitable for testing,
-///   development, and ephemeral caches. Data is lost when the process exits.
+///   development, ephemeral caches, and WASM environments. Data is lost when
+///   the process exits.
 ///
-/// - **Redb** (default): Pure Rust persistent storage using redb. WASM-compatible,
-///   ACID transactions with snapshot isolation. Suitable for production deployments.
+/// - **Redb** (default, native only): Pure Rust persistent storage using redb.
+///   ACID transactions with snapshot isolation. **NOT WASM-compatible** due to
+///   memory-mapped file usage. Suitable for native platform production deployments.
 ///
 /// # Choosing a Backend
 ///
 /// | Feature | Memory | Redb |
 /// |---------|--------|------|
 /// | Persistence | No | Yes |
-/// | WASM Support | Yes | Yes |
+/// | WASM Support | Yes | **No** |
 /// | Performance | Very Fast | Fast |
 /// | Memory Usage | High (all in RAM) | High (snapshot per txn) |
 /// | Crash Recovery | No | Yes |
 /// | Concurrent Access | Yes | Yes |
 /// | ACID Transactions | Yes | Yes |
 /// | Snapshot Isolation | Yes (MVCC) | Yes |
-/// | Use Case | Testing, Dev | Production (small DBs) |
+/// | Use Case | Testing, Dev, WASM | Production (native) |
 ///
 /// # Example
 ///
@@ -43,10 +45,12 @@
 /// ```
 pub mod memory;
 
-#[cfg(feature = "redb")]
+// Redb is only available on native platforms (not WASM)
+// because it requires memory-mapped files and native filesystem access
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub mod redb;
 
-#[cfg(feature = "redb")]
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub mod redb_config;
 
 #[cfg(test)]
@@ -54,8 +58,8 @@ pub mod test_suite;
 
 pub use memory::MemoryStore;
 
-#[cfg(feature = "redb")]
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use redb::{CallbackCounts, IntegrityReport, RedbStore};
 
-#[cfg(feature = "redb")]
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use redb_config::RedbStoreOptions;
