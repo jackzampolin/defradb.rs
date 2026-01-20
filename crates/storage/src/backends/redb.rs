@@ -961,89 +961,190 @@ impl Iterator for MergingIterator {
 // Convert redb errors to our error type with context and classification
 impl From<redb::Error> for Error {
     fn from(err: redb::Error) -> Self {
-        // Classify specific error types for better handling
-        match &err {
+        match err {
+            // I/O errors
             redb::Error::Io(io_err) => Error::Io(io_err.to_string()),
-            _ => Error::Backend(format!("redb error: {}", err)),
+            redb::Error::PreviousIo => {
+                tracing::error!("Previous I/O error - database must be closed and reopened");
+                Error::Io(
+                    "previous I/O error occurred - database must be closed and reopened".into(),
+                )
+            }
+
+            // Critical: Database corruption
+            redb::Error::Corrupted(ref msg) => {
+                tracing::error!(message = %msg, "Database corruption detected");
+                Error::Backend(format!("database corrupted: {}", msg))
+            }
+
+            // Lock poisoned: A thread panicked while holding a lock (fatal condition)
+            redb::Error::LockPoisoned(location) => {
+                tracing::error!(location = %location, "Lock poisoned - a thread panicked while holding a lock");
+                Error::Backend(format!(
+                    "internal error: lock poisoned at {} - database may be in undefined state",
+                    location
+                ))
+            }
+
+            // Database already open (useful for diagnosing lock issues)
+            redb::Error::DatabaseAlreadyOpen => {
+                tracing::warn!("Database is locked by another process");
+                Error::Backend("database already open - another process may be using it".into())
+            }
+
+            // Upgrade required (file format migration needed)
+            redb::Error::UpgradeRequired(version) => {
+                tracing::warn!(version = version, "Database file format upgrade required");
+                Error::Backend(format!(
+                    "database file format version {} requires upgrade",
+                    version
+                ))
+            }
+
+            // Transaction still in use (resource management issue, not a conflict)
+            redb::Error::ReadTransactionStillInUse(_) => {
+                tracing::warn!("Transaction still held by table or iterator");
+                Error::Backend(
+                    "transaction still in use - ensure all tables and iterators are dropped".into(),
+                )
+            }
+
+            // Table errors with useful context
+            redb::Error::TableDoesNotExist(ref name) => {
+                Error::Backend(format!("table '{}' does not exist", name))
+            }
+            redb::Error::TableTypeMismatch { ref table, .. } => {
+                tracing::error!(table = %table, "Table type mismatch - possible schema corruption");
+                Error::Backend(format!("table type mismatch for '{}': {}", table, err))
+            }
+            redb::Error::TableAlreadyOpen(ref name, location) => {
+                tracing::warn!(table = %name, location = %location, "Table already open");
+                Error::Backend(format!("table '{}' already open at {}", name, location))
+            }
+
+            // Value size limit
+            redb::Error::ValueTooLarge(size) => {
+                Error::Backend(format!("value too large: {} bytes exceeds maximum", size))
+            }
+
+            // Handle remaining variants (non-exhaustive enum)
+            other => Error::Backend(format!("redb error: {}", other)),
         }
     }
 }
 
 impl From<redb::DatabaseError> for Error {
     fn from(err: redb::DatabaseError) -> Self {
-        Error::Backend(format!("redb database error: {}", err))
+        match err {
+            redb::DatabaseError::DatabaseAlreadyOpen => {
+                tracing::warn!("Database is locked by another process");
+                Error::Backend("database already open - another process may be using it".into())
+            }
+            redb::DatabaseError::UpgradeRequired(version) => {
+                tracing::warn!(version = version, "Database file format upgrade required");
+                Error::Backend(format!(
+                    "database file format version {} requires upgrade",
+                    version
+                ))
+            }
+            redb::DatabaseError::RepairAborted => {
+                tracing::warn!("Database repair was aborted");
+                Error::Backend("database repair aborted".into())
+            }
+            redb::DatabaseError::Storage(storage_err) => storage_err.into(),
+            // Handle future variants (non-exhaustive enum)
+            other => Error::Backend(format!("redb database error: {}", other)),
+        }
     }
 }
 
 impl From<redb::TransactionError> for Error {
     fn from(err: redb::TransactionError) -> Self {
-        // Classify transaction errors for retriable handling
-        match &err {
+        match err {
+            // Resource management issue, NOT a transaction conflict
+            // This means a transaction is still held by a table or iterator
             redb::TransactionError::ReadTransactionStillInUse(_) => {
-                tracing::debug!("Classified redb error as transaction conflict");
-                Error::TxnConflict
+                tracing::warn!("Transaction still held by table or iterator");
+                Error::Backend(
+                    "transaction still in use - ensure all tables and iterators are dropped".into(),
+                )
             }
-            redb::TransactionError::Storage(storage_err) => {
-                // Check if it's an I/O error
-                if let redb::StorageError::Io(io_err) = storage_err {
-                    Error::Io(io_err.to_string())
-                } else {
-                    Error::Backend(format!("redb transaction storage error: {}", err))
-                }
-            }
+            redb::TransactionError::Storage(storage_err) => storage_err.into(),
             // Handle future variants (non-exhaustive enum)
-            _ => Error::Backend(format!("redb transaction error: {}", err)),
+            other => Error::Backend(format!("redb transaction error: {}", other)),
         }
     }
 }
 
 impl From<redb::TableError> for Error {
     fn from(err: redb::TableError) -> Self {
-        // Classify table errors
-        match &err {
-            redb::TableError::Storage(storage_err) => {
-                if let redb::StorageError::Io(io_err) = storage_err {
-                    Error::Io(io_err.to_string())
-                } else {
-                    Error::Backend(format!("redb table storage error: {}", err))
-                }
+        match err {
+            redb::TableError::Storage(storage_err) => storage_err.into(),
+            redb::TableError::TableDoesNotExist(ref name) => {
+                Error::Backend(format!("table '{}' does not exist", name))
             }
-            _ => Error::Backend(format!("redb table error: {}", err)),
+            redb::TableError::TableTypeMismatch { ref table, .. } => {
+                tracing::error!(table = %table, "Table type mismatch - possible schema corruption");
+                Error::Backend(format!("table type mismatch for '{}': {}", table, err))
+            }
+            redb::TableError::TableAlreadyOpen(ref name, location) => {
+                tracing::warn!(table = %name, location = %location, "Table already open");
+                Error::Backend(format!("table '{}' already open at {}", name, location))
+            }
+            redb::TableError::TableIsMultimap(ref name) => {
+                Error::Backend(format!("table '{}' is a multimap table", name))
+            }
+            redb::TableError::TableIsNotMultimap(ref name) => {
+                Error::Backend(format!("table '{}' is not a multimap table", name))
+            }
+            redb::TableError::TableExists(ref name) => {
+                Error::Backend(format!("table '{}' already exists", name))
+            }
+            // Handle future variants (non-exhaustive enum)
+            other => Error::Backend(format!("redb table error: {}", other)),
         }
     }
 }
 
 impl From<redb::StorageError> for Error {
     fn from(err: redb::StorageError) -> Self {
-        // Classify storage errors - I/O errors get special handling
-        match &err {
+        match err {
             redb::StorageError::Io(io_err) => Error::Io(io_err.to_string()),
-            redb::StorageError::Corrupted(_) => {
-                Error::Backend(format!("redb database corrupted: {}", err))
+            redb::StorageError::PreviousIo => {
+                tracing::error!("Previous I/O error - database must be closed and reopened");
+                Error::Io(
+                    "previous I/O error occurred - database must be closed and reopened".into(),
+                )
             }
-            redb::StorageError::ValueTooLarge(_) => {
-                Error::Backend(format!("redb value too large: {}", err))
+            redb::StorageError::Corrupted(ref msg) => {
+                tracing::error!(message = %msg, "Database corruption detected");
+                Error::Backend(format!("database corrupted: {}", msg))
             }
-            redb::StorageError::LockPoisoned(_) => Error::TxnConflict,
+            redb::StorageError::ValueTooLarge(size) => {
+                Error::Backend(format!("value too large: {} bytes exceeds maximum", size))
+            }
+            // CRITICAL: LockPoisoned is NOT a transaction conflict!
+            // It indicates a thread panicked while holding a lock - this is fatal.
+            redb::StorageError::LockPoisoned(location) => {
+                tracing::error!(location = %location, "Lock poisoned - a thread panicked while holding a lock");
+                Error::Backend(format!(
+                    "internal error: lock poisoned at {} - database may be in undefined state",
+                    location
+                ))
+            }
             // Handle future variants (non-exhaustive enum)
-            _ => Error::Backend(format!("redb storage error: {}", err)),
+            other => Error::Backend(format!("redb storage error: {}", other)),
         }
     }
 }
 
 impl From<redb::CommitError> for Error {
     fn from(err: redb::CommitError) -> Self {
-        // Classify commit errors
-        match &err {
-            redb::CommitError::Storage(storage_err) => {
-                if let redb::StorageError::Io(io_err) = storage_err {
-                    Error::Io(io_err.to_string())
-                } else {
-                    Error::Backend(format!("redb commit storage error: {}", err))
-                }
-            }
+        match err {
+            // Delegate storage errors to the StorageError handler for consistent classification
+            redb::CommitError::Storage(storage_err) => storage_err.into(),
             // Handle future variants (non-exhaustive enum)
-            _ => Error::Backend(format!("redb commit error: {}", err)),
+            other => Error::Backend(format!("redb commit error: {}", other)),
         }
     }
 }

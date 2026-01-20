@@ -321,19 +321,20 @@ impl Writer for MemoryTxn {
 #[async_trait]
 impl Txn for MemoryTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
-        // Check if already committed (defensive - ownership prevents this in normal usage)
-        if *self.committed.lock() {
-            tracing::warn!("Attempted to commit an already committed transaction");
-            return Err(Error::Other("Transaction already committed".into()));
-        }
-
+        // Check discarded first (matches redb backend order)
         if *self.discarded.lock() {
-            // Execute error callbacks before returning error
+            tracing::warn!("Attempted to commit a discarded transaction");
             let on_error = std::mem::take(&mut *self.on_error.lock());
             let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
             Self::execute_callbacks(on_error);
             Self::execute_async_callbacks(on_error_async).await;
             return Err(Error::DiscardedTxn);
+        }
+
+        // Check if already committed (defensive - ownership prevents this in normal usage)
+        if *self.committed.lock() {
+            tracing::warn!("Attempted to commit an already committed transaction");
+            return Err(Error::Other("Transaction already committed".into()));
         }
 
         // Mark as committed
