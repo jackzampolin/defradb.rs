@@ -55,7 +55,7 @@ pub mod test_suite;
 pub use memory::MemoryStore;
 
 #[cfg(feature = "redb")]
-pub use redb::RedbStore;
+pub use redb::{CallbackCounts, RedbStore};
 
 #[cfg(feature = "redb")]
 pub use redb_config::RedbStoreOptions;

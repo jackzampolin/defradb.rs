@@ -95,6 +95,10 @@ pub struct RedbStore {
     closed: Arc<RwLock<bool>>,
     /// Count of active transactions (for graceful shutdown)
     active_txn_count: Arc<AtomicUsize>,
+    /// Close timeout duration
+    close_timeout: std::time::Duration,
+    /// Database file path (for error messages)
+    db_path: std::path::PathBuf,
 }
 
 impl RedbStore {
@@ -153,7 +157,39 @@ impl RedbStore {
             builder.set_cache_size(cache_size);
         }
 
-        let db = builder.create(db_path)?;
+        // Open database with path context in error messages
+        let db = builder.create(&db_path).map_err(|e| {
+            // Add file path context to common errors
+            match &e {
+                redb::DatabaseError::DatabaseAlreadyOpen => {
+                    tracing::warn!(db_path = %db_path.display(), "Database is locked by another process");
+                    Error::Backend(format!(
+                        "database '{}' already open - another process may be using it",
+                        db_path.display()
+                    ))
+                }
+                redb::DatabaseError::UpgradeRequired(version) => {
+                    tracing::warn!(
+                        db_path = %db_path.display(),
+                        version = version,
+                        "Database file format upgrade required"
+                    );
+                    Error::Backend(format!(
+                        "database '{}' file format version {} requires upgrade",
+                        db_path.display(),
+                        version
+                    ))
+                }
+                _ => {
+                    tracing::error!(
+                        db_path = %db_path.display(),
+                        error = %e,
+                        "Failed to open database"
+                    );
+                    e.into()
+                }
+            }
+        })?;
 
         // Ensure the KV table exists by opening a write transaction
         {
@@ -166,12 +202,93 @@ impl RedbStore {
             db: Arc::new(db),
             closed: Arc::new(RwLock::new(false)),
             active_txn_count: Arc::new(AtomicUsize::new(0)),
+            close_timeout: opts.close_timeout(),
+            db_path,
         })
     }
 
     /// Get the current count of active transactions.
     pub fn active_transaction_count(&self) -> usize {
         self.active_txn_count.load(Ordering::SeqCst)
+    }
+
+    /// Get the database file path.
+    pub fn db_path(&self) -> &std::path::Path {
+        &self.db_path
+    }
+
+    /// Check database integrity.
+    ///
+    /// This performs a read-only scan of the database to verify that all data
+    /// is readable and the internal structure is consistent. It does NOT repair
+    /// any issues found.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` if the database passes integrity checks
+    /// * `Ok(false)` if issues were found (details logged)
+    /// * `Err(Error)` if the check could not be completed
+    ///
+    /// # Note
+    ///
+    /// This operation may be slow on large databases as it reads all data.
+    pub fn check_integrity(&self) -> Result<bool> {
+        // Attempt to read all keys to verify data integrity
+        let read_txn = self.db.begin_read()?;
+
+        let table = match read_txn.open_table(KV_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                // Empty database is valid
+                return Ok(true);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Integrity check failed: cannot open table");
+                return Err(e.into());
+            }
+        };
+
+        let mut key_count = 0u64;
+        let mut error_count = 0u64;
+
+        let range = match table.range::<&[u8]>(..) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "Integrity check failed: cannot create range iterator");
+                return Err(e.into());
+            }
+        };
+
+        for result in range {
+            match result {
+                Ok((key, value)) => {
+                    // Try to read the key and value to verify they're accessible
+                    let _ = key.value();
+                    let _ = value.value();
+                    key_count += 1;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        keys_checked = key_count,
+                        "Integrity check found error while reading key"
+                    );
+                    error_count += 1;
+                }
+            }
+        }
+
+        if error_count > 0 {
+            tracing::warn!(
+                total_keys = key_count,
+                errors = error_count,
+                "Integrity check completed with errors"
+            );
+            Ok(false)
+        } else {
+            tracing::info!(total_keys = key_count, "Integrity check passed");
+            Ok(true)
+        }
     }
 
     /// Check if the store is closed.
@@ -246,23 +363,27 @@ impl Store for RedbStore {
         if active > 0 {
             tracing::info!(
                 active_transactions = active,
+                db_path = %self.db_path.display(),
                 "Store closing with active transactions - waiting for completion"
             );
 
-            // Poll for up to 5 seconds for transactions to complete
+            // Poll for transactions to complete (uses configurable timeout)
             let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(5);
+            let timeout = self.close_timeout;
             while self.active_txn_count.load(Ordering::SeqCst) > 0 {
                 if start.elapsed() > timeout {
                     let remaining = self.active_txn_count.load(Ordering::SeqCst);
                     tracing::error!(
                         remaining_transactions = remaining,
-                        timeout_seconds = 5,
+                        timeout_secs = timeout.as_secs(),
+                        db_path = %self.db_path.display(),
                         "Failed to close store - transactions still active after timeout"
                     );
                     return Err(Error::Other(format!(
-                        "Close timeout: {} transactions still active after 5s",
-                        remaining
+                        "Close timeout: {} transactions still active after {}s (db: {})",
+                        remaining,
+                        timeout.as_secs(),
+                        self.db_path.display()
                     )));
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -458,7 +579,63 @@ impl Drop for RedbTxn {
     }
 }
 
+/// Callback counts for monitoring transaction callback accumulation.
+#[derive(Debug, Clone, Default)]
+pub struct CallbackCounts {
+    /// Number of synchronous on_success callbacks registered
+    pub on_success: usize,
+    /// Number of asynchronous on_success callbacks registered
+    pub on_success_async: usize,
+    /// Number of synchronous on_error callbacks registered
+    pub on_error: usize,
+    /// Number of asynchronous on_error callbacks registered
+    pub on_error_async: usize,
+    /// Number of synchronous on_discard callbacks registered
+    pub on_discard: usize,
+    /// Number of asynchronous on_discard callbacks registered
+    pub on_discard_async: usize,
+}
+
+impl CallbackCounts {
+    /// Total number of callbacks registered across all types.
+    pub fn total(&self) -> usize {
+        self.on_success
+            + self.on_success_async
+            + self.on_error
+            + self.on_error_async
+            + self.on_discard
+            + self.on_discard_async
+    }
+}
+
 impl RedbTxn {
+    /// Get the current count of registered callbacks.
+    ///
+    /// This is useful for monitoring callback accumulation in long-lived
+    /// transactions and detecting potential memory pressure.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let txn = store.new_txn(false).await?;
+    /// // ... register some callbacks ...
+    /// let counts = txn.callback_counts();
+    /// if counts.total() > 100 {
+    ///     tracing::warn!("Transaction has {} callbacks registered", counts.total());
+    /// }
+    /// ```
+    #[allow(dead_code)] // Part of public API - used externally for monitoring
+    pub fn callback_counts(&self) -> CallbackCounts {
+        CallbackCounts {
+            on_success: self.on_success.lock().len(),
+            on_success_async: self.on_success_async.lock().len(),
+            on_error: self.on_error.lock().len(),
+            on_error_async: self.on_error_async.lock().len(),
+            on_discard: self.on_discard.lock().len(),
+            on_discard_async: self.on_discard_async.lock().len(),
+        }
+    }
+
     /// Get a value, checking pending changes first, then snapshot.
     fn get_internal(&self, key: &[u8]) -> Option<Vec<u8>> {
         // Check pending changes first
@@ -1009,7 +1186,11 @@ impl From<redb::Error> for Error {
             // Critical: Database corruption
             redb::Error::Corrupted(ref msg) => {
                 tracing::error!(message = %msg, "Database corruption detected");
-                Error::Backend(format!("database corrupted: {}", msg))
+                Error::Backend(format!(
+                    "database corrupted: {}. Recovery options: (1) restore from backup, \
+                     (2) delete database and resync from peers, (3) check disk for errors",
+                    msg
+                ))
             }
 
             // Lock poisoned: A thread panicked while holding a lock (fatal condition)
@@ -1153,7 +1334,11 @@ impl From<redb::StorageError> for Error {
             }
             redb::StorageError::Corrupted(ref msg) => {
                 tracing::error!(message = %msg, "Database corruption detected");
-                Error::Backend(format!("database corrupted: {}", msg))
+                Error::Backend(format!(
+                    "database corrupted: {}. Recovery options: (1) restore from backup, \
+                     (2) delete database and resync from peers, (3) check disk for errors",
+                    msg
+                ))
             }
             redb::StorageError::ValueTooLarge(size) => {
                 Error::Backend(format!("value too large: {} bytes exceeds maximum", size))
@@ -2126,6 +2311,384 @@ mod redb_specific_tests {
             err_msg.contains("transactions still active"),
             "Error should mention active transactions: {}",
             err_msg
+        );
+    }
+
+    // =========================================================================
+    // HIGH-CONTENTION STRESS TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_redb_high_contention_100_concurrent_txns() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let num_tasks = 100;
+
+        let mut handles = vec![];
+
+        for i in 0..num_tasks {
+            let store = Arc::clone(&store);
+            let completed = Arc::clone(&completed);
+
+            handles.push(tokio::spawn(async move {
+                let mut txn = store.new_txn(false).await.unwrap();
+                // Write and read contended key
+                txn.set(b"contended", format!("{}", i).as_bytes())
+                    .await
+                    .unwrap();
+                let _ = txn.get(b"contended").await.unwrap();
+                txn.commit().await.unwrap();
+                completed.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            num_tasks,
+            "All 100 concurrent transactions should complete"
+        );
+
+        // Verify no transactions leaked
+        assert_eq!(
+            store.active_transaction_count(),
+            0,
+            "No active transactions should remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_close_during_concurrent_transaction_creation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let rejected = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+
+        // Spawn 50 tasks that continuously create and complete transactions
+        for _ in 0..50 {
+            let store = Arc::clone(&store);
+            let completed = Arc::clone(&completed);
+            let rejected = Arc::clone(&rejected);
+
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    match store.new_txn(true).await {
+                        Ok(txn) => {
+                            txn.discard();
+                            completed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(crate::corekv::Error::DBClosed) => {
+                            rejected.fetch_add(1, Ordering::SeqCst);
+                            return; // Stop trying after close
+                        }
+                        Err(e) => panic!("Unexpected error: {:?}", e),
+                    }
+                    // Small yield to allow close to interleave
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        // After a small delay, initiate close
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Close in background - may timeout if transactions are still active
+        let store_clone = Arc::clone(&store);
+        let close_handle = tokio::spawn(async move { store_clone.close().await });
+
+        // Wait for all spawned tasks
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Wait for close to complete (may succeed or timeout)
+        let _close_result =
+            tokio::time::timeout(std::time::Duration::from_secs(10), close_handle).await;
+
+        // Verify count is 0 regardless of close result
+        assert_eq!(
+            store.active_transaction_count(),
+            0,
+            "Transaction count should be 0 after all tasks complete"
+        );
+
+        // At least some transactions should have completed
+        assert!(
+            completed.load(Ordering::SeqCst) > 0,
+            "Some transactions should have completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_mixed_read_write_high_contention() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        // Setup initial data
+        {
+            let mut txn = store.new_txn(false).await.unwrap();
+            for i in 0..10 {
+                txn.set(format!("key_{}", i).as_bytes(), b"initial")
+                    .await
+                    .unwrap();
+            }
+            txn.commit().await.unwrap();
+        }
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+
+        // 50 readers
+        for _ in 0..50 {
+            let store = Arc::clone(&store);
+            let reads = Arc::clone(&reads);
+
+            handles.push(tokio::spawn(async move {
+                for _ in 0..20 {
+                    let txn = store.new_txn(true).await.unwrap();
+                    // Read all keys
+                    for i in 0..10 {
+                        let _ = txn.get(format!("key_{}", i).as_bytes()).await.unwrap();
+                    }
+                    txn.discard();
+                    reads.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        // 20 writers
+        for writer_id in 0..20 {
+            let store = Arc::clone(&store);
+            let writes = Arc::clone(&writes);
+
+            handles.push(tokio::spawn(async move {
+                for cycle in 0..10 {
+                    let mut txn = store.new_txn(false).await.unwrap();
+                    let key = format!("key_{}", cycle % 10);
+                    let value = format!("writer_{}_{}", writer_id, cycle);
+                    txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
+                    txn.commit().await.unwrap();
+                    writes.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        // Wait for all to complete
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            50 * 20,
+            "All reads should complete"
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            20 * 10,
+            "All writes should complete"
+        );
+        assert_eq!(
+            store.active_transaction_count(),
+            0,
+            "No leaked transactions"
+        );
+    }
+
+    // =========================================================================
+    // LARGE DATASET STRESS TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // Run with: cargo test -- --ignored (takes several seconds)
+    async fn test_redb_100k_keys_stress() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.redb");
+
+        let store = RedbStore::open(&path).unwrap();
+
+        // Insert 100K keys in batches of 1000
+        for batch in 0..100 {
+            let mut txn = store.new_txn(false).await.unwrap();
+            for i in 0..1000 {
+                let key = format!("key_{:08}", batch * 1000 + i);
+                let value = vec![0xAB; 100]; // 100 bytes per value
+                txn.set(key.as_bytes(), &value).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+        }
+
+        // Verify reads work with 100K keys in snapshot
+        let txn = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"key_00000000").await.unwrap(),
+            Some(vec![0xAB; 100]),
+            "First key should be retrievable"
+        );
+        assert_eq!(
+            txn.get(b"key_00099999").await.unwrap(),
+            Some(vec![0xAB; 100]),
+            "Last key should be retrievable"
+        );
+
+        // Test prefix iteration on large dataset
+        let opts = crate::corekv::IterOptions::new().with_prefix(b"key_00050".to_vec());
+        let mut iter = txn.iterator(opts).await.unwrap();
+        let mut count = 0;
+        while iter.next().await.unwrap().is_some() {
+            count += 1;
+        }
+        // Keys matching "key_00050*" should be key_00050000 through key_00050999
+        assert_eq!(count, 1000, "Should have 1000 keys with prefix key_00050");
+
+        txn.discard();
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_redb_10k_keys_with_large_values() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        // 10K keys with 1KB values each = ~10MB total
+        let value = vec![0xCD; 1024];
+
+        let mut txn = store.new_txn(false).await.unwrap();
+        for i in 0..10_000 {
+            let key = format!("largevalue_{:06}", i);
+            txn.set(key.as_bytes(), &value).await.unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        // Verify random access
+        let txn = store.new_txn(true).await.unwrap();
+        for check in [0, 1000, 5000, 9999] {
+            let key = format!("largevalue_{:06}", check);
+            let retrieved = txn.get(key.as_bytes()).await.unwrap();
+            assert_eq!(
+                retrieved.as_ref().map(|v| v.len()),
+                Some(1024),
+                "Key {} should have 1KB value",
+                key
+            );
+        }
+        txn.discard();
+    }
+
+    // =========================================================================
+    // CALLBACK MONITORING TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_redb_callback_counts() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        // Initially all counts should be 0
+        let redb_txn = txn.as_any().downcast_ref::<RedbTxn>().unwrap();
+        let counts = redb_txn.callback_counts();
+        assert_eq!(counts.total(), 0, "Initial callback count should be 0");
+
+        // Register some callbacks
+        txn.on_success(Box::new(|| {}));
+        txn.on_success(Box::new(|| {}));
+        txn.on_error(Box::new(|| {}));
+        txn.on_discard(Box::new(|| {}));
+
+        // Check updated counts
+        let redb_txn = txn.as_any().downcast_ref::<RedbTxn>().unwrap();
+        let counts = redb_txn.callback_counts();
+        assert_eq!(counts.on_success, 2, "Should have 2 success callbacks");
+        assert_eq!(counts.on_error, 1, "Should have 1 error callback");
+        assert_eq!(counts.on_discard, 1, "Should have 1 discard callback");
+        assert_eq!(counts.total(), 4, "Total should be 4");
+
+        txn.discard();
+    }
+
+    #[tokio::test]
+    async fn test_redb_check_integrity() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        // Empty database should pass integrity check
+        assert!(
+            store.check_integrity().unwrap(),
+            "Empty database should pass integrity check"
+        );
+
+        // Add some data
+        {
+            let mut txn = store.new_txn(false).await.unwrap();
+            for i in 0..100 {
+                let key = format!("key_{}", i);
+                let value = format!("value_{}", i);
+                txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+        }
+
+        // Database with data should pass integrity check
+        assert!(
+            store.check_integrity().unwrap(),
+            "Database with data should pass integrity check"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_db_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let expected_path = temp_dir.path().join("mytest.redb");
+        let store = RedbStore::open(&expected_path).unwrap();
+
+        assert_eq!(
+            store.db_path(),
+            expected_path,
+            "db_path() should return the correct path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_configurable_close_timeout() {
+        use std::time::Duration;
+
+        let temp_dir = TempDir::new().unwrap();
+        let opts = RedbStoreOptions::new().with_close_timeout(Duration::from_millis(100));
+        let store = Arc::new(
+            RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap(),
+        );
+
+        // Create a transaction that we intentionally don't close
+        let _held_txn = store.new_txn(true).await.unwrap();
+
+        // Close should timeout much faster (100ms instead of default 5s)
+        let start = std::time::Instant::now();
+        let result = store.close().await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "Close should timeout");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "Close should timeout quickly with custom 100ms timeout, took {:?}",
+            elapsed
         );
     }
 }

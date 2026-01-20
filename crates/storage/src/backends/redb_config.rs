@@ -1,3 +1,8 @@
+use std::time::Duration;
+
+/// Default close timeout in seconds.
+pub const DEFAULT_CLOSE_TIMEOUT_SECS: u64 = 5;
+
 /// Configuration options for RedbStore.
 ///
 /// This struct provides a builder pattern for configuring redb database options.
@@ -8,15 +13,27 @@
 ///
 /// ```ignore
 /// use storage::backends::RedbStoreOptions;
+/// use std::time::Duration;
 ///
 /// let opts = RedbStoreOptions::new()
-///     .with_cache_size(64 * 1024 * 1024); // 64MB cache
+///     .with_cache_size(64 * 1024 * 1024) // 64MB cache
+///     .with_close_timeout(Duration::from_secs(10)); // 10 second close timeout
 ///
 /// let store = RedbStore::open_with_options("/path/to/db", opts)?;
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RedbStoreOptions {
     cache_size: Option<usize>,
+    close_timeout: Duration,
+}
+
+impl Default for RedbStoreOptions {
+    fn default() -> Self {
+        Self {
+            cache_size: None,
+            close_timeout: Duration::from_secs(DEFAULT_CLOSE_TIMEOUT_SECS),
+        }
+    }
 }
 
 impl RedbStoreOptions {
@@ -41,5 +58,25 @@ impl RedbStoreOptions {
     /// Get the configured cache size, if set.
     pub fn cache_size(&self) -> Option<usize> {
         self.cache_size
+    }
+
+    /// Set the close timeout duration.
+    ///
+    /// When `close()` is called, the store will wait up to this duration for
+    /// active transactions to complete before returning an error.
+    ///
+    /// Default: 5 seconds
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum time to wait for transactions to complete
+    pub fn with_close_timeout(mut self, timeout: Duration) -> Self {
+        self.close_timeout = timeout;
+        self
+    }
+
+    /// Get the configured close timeout.
+    pub fn close_timeout(&self) -> Duration {
+        self.close_timeout
     }
 }

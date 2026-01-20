@@ -291,6 +291,18 @@ pub trait Txn: ReaderWriter {
     /// Register an asynchronous callback to be called on discard.
     ///
     /// Multiple callbacks can be registered and will be executed sequentially in registration order.
+    ///
+    /// # Fire-and-Forget Warning
+    ///
+    /// Unlike `on_success_async` and `on_error_async` which are awaited during commit,
+    /// async discard callbacks are **spawned as background tasks** and may not complete
+    /// if the process exits before they finish. This matches Go DefraDB semantics where
+    /// `discard()` is a synchronous operation.
+    ///
+    /// If you need completion guarantees for async cleanup:
+    /// - Use `on_discard` (synchronous) instead
+    /// - Use `commit()` with `on_success_async` when possible
+    /// - Implement your own synchronization (e.g., `tokio::sync::WaitGroup`)
     fn on_discard_async(&mut self, callback: AsyncTxnCallback);
 
     /// Downcast to concrete type (for internal use in tests)

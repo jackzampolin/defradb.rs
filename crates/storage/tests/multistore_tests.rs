@@ -444,3 +444,286 @@ async fn test_get_size_through_namespace() {
     assert_eq!(txn.get_size(b"sized_key").await.unwrap(), Some(5));
     assert_eq!(txn.get_size(b"nonexistent").await.unwrap(), None);
 }
+
+// =========================================================================
+// REDB MULTISTORE INTEGRATION TESTS
+// These tests verify the redb backend works correctly through the multistore
+// =========================================================================
+
+#[cfg(feature = "redb")]
+mod redb_multistore_tests {
+    use storage::corekv::{IterOptions, Store};
+    use storage::stores::multistore::RedbMultistore;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_redb_multistore_creation_and_close() {
+        let temp_dir = TempDir::new().unwrap();
+        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+        assert!(ms.close().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_redb_multistore_persistence_across_stores() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Write to multiple stores
+        {
+            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+            let mut txn = ms.datastore.new_txn(false).await.unwrap();
+            txn.set(b"doc:1", b"document_data").await.unwrap();
+            txn.commit().await.unwrap();
+
+            let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+            txn.set(b"schema:users", b"schema_data").await.unwrap();
+            txn.commit().await.unwrap();
+
+            let mut txn = ms.peerstore.new_txn(false).await.unwrap();
+            txn.set(b"peer:1", b"peer_data").await.unwrap();
+            txn.commit().await.unwrap();
+
+            ms.close().await.unwrap();
+        }
+
+        // Reopen and verify data persisted with namespace isolation
+        {
+            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+            let txn = ms.datastore.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"doc:1").await.unwrap(),
+                Some(b"document_data".to_vec()),
+                "Datastore data should persist"
+            );
+            txn.discard();
+
+            let txn = ms.systemstore.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"schema:users").await.unwrap(),
+                Some(b"schema_data".to_vec()),
+                "Systemstore data should persist"
+            );
+            txn.discard();
+
+            let txn = ms.peerstore.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"peer:1").await.unwrap(),
+                Some(b"peer_data".to_vec()),
+                "Peerstore data should persist"
+            );
+            txn.discard();
+
+            // Verify namespace isolation: datastore should NOT see systemstore data
+            let txn = ms.datastore.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"schema:users").await.unwrap(),
+                None,
+                "Datastore should not see systemstore data"
+            );
+            txn.discard();
+
+            ms.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_multistore_namespace_isolation() {
+        let temp_dir = TempDir::new().unwrap();
+        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+        // Write same key to different stores
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"shared_key", b"datastore_value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.systemstore.new_txn(false).await.unwrap();
+        txn.set(b"shared_key", b"systemstore_value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.blockstore.new_txn(false).await.unwrap();
+        txn.set(b"shared_key", b"blockstore_value").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Each store should have its own value
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"shared_key").await.unwrap(),
+            Some(b"datastore_value".to_vec())
+        );
+        txn.discard();
+
+        let txn = ms.systemstore.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"shared_key").await.unwrap(),
+            Some(b"systemstore_value".to_vec())
+        );
+        txn.discard();
+
+        let txn = ms.blockstore.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"shared_key").await.unwrap(),
+            Some(b"blockstore_value".to_vec())
+        );
+        txn.discard();
+
+        ms.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_redb_multistore_iterator_isolation() {
+        let temp_dir = TempDir::new().unwrap();
+        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+        // Write to multiple stores
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"d_key1", b"value1").await.unwrap();
+        txn.set(b"d_key2", b"value2").await.unwrap();
+        txn.commit().await.unwrap();
+
+        let mut txn = ms.blockstore.new_txn(false).await.unwrap();
+        txn.set(b"b_key1", b"block1").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Iterate datastore - should only see datastore keys
+        let txn = ms.datastore.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+        let mut ds_keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            ds_keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+        }
+        iter.close().await.unwrap();
+        txn.discard();
+
+        assert_eq!(ds_keys.len(), 2);
+        assert!(ds_keys.contains(&"d_key1".to_string()));
+        assert!(ds_keys.contains(&"d_key2".to_string()));
+
+        // Iterate blockstore - should only see blockstore keys
+        let txn = ms.blockstore.new_txn(true).await.unwrap();
+        let mut iter = txn.iterator(IterOptions::new()).await.unwrap();
+        let mut bs_keys = vec![];
+        while let Some(kv) = iter.next().await.unwrap() {
+            bs_keys.push(String::from_utf8_lossy(kv.key_bytes()).to_string());
+        }
+        iter.close().await.unwrap();
+        txn.discard();
+
+        assert_eq!(bs_keys.len(), 1);
+        assert!(bs_keys.contains(&"b_key1".to_string()));
+
+        ms.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_redb_multistore_transaction_across_stores() {
+        let temp_dir = TempDir::new().unwrap();
+        let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+        // Write initial data
+        let mut txn = ms.datastore.new_txn(false).await.unwrap();
+        txn.set(b"key1", b"initial").await.unwrap();
+        txn.commit().await.unwrap();
+
+        // Start a reader before the write
+        let reader = ms.datastore.new_txn(true).await.unwrap();
+
+        // Concurrent writer commits
+        let mut writer = ms.datastore.new_txn(false).await.unwrap();
+        writer.set(b"key1", b"modified").await.unwrap();
+        writer.commit().await.unwrap();
+
+        // Reader should see original value (snapshot isolation)
+        let value = reader.get(b"key1").await.unwrap();
+        assert_eq!(
+            value,
+            Some(b"initial".to_vec()),
+            "Reader should see original value due to snapshot isolation"
+        );
+        reader.discard();
+
+        // New reader should see modified value
+        let new_reader = ms.datastore.new_txn(true).await.unwrap();
+        let value = new_reader.get(b"key1").await.unwrap();
+        assert_eq!(
+            value,
+            Some(b"modified".to_vec()),
+            "New reader should see committed changes"
+        );
+        new_reader.discard();
+
+        ms.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_redb_multistore_uncommitted_data_lost() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Write but don't commit
+        {
+            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+            let mut txn = ms.datastore.new_txn(false).await.unwrap();
+            txn.set(b"uncommitted", b"value").await.unwrap();
+            txn.discard(); // Discard instead of commit
+
+            ms.close().await.unwrap();
+        }
+
+        // Reopen - uncommitted data should be gone
+        {
+            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+            let txn = ms.datastore.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"uncommitted").await.unwrap(),
+                None,
+                "Uncommitted data should not survive reopen"
+            );
+            txn.discard();
+
+            ms.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_multistore_delete_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Write and then delete
+        {
+            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+            let mut txn = ms.datastore.new_txn(false).await.unwrap();
+            txn.set(b"to_delete", b"value").await.unwrap();
+            txn.set(b"to_keep", b"value").await.unwrap();
+            txn.commit().await.unwrap();
+
+            let mut txn = ms.datastore.new_txn(false).await.unwrap();
+            txn.delete(b"to_delete").await.unwrap();
+            txn.commit().await.unwrap();
+
+            ms.close().await.unwrap();
+        }
+
+        // Reopen and verify delete persisted
+        {
+            let ms = RedbMultistore::new_redb(temp_dir.path()).unwrap();
+
+            let txn = ms.datastore.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"to_delete").await.unwrap(),
+                None,
+                "Deleted key should not exist after reopen"
+            );
+            assert_eq!(
+                txn.get(b"to_keep").await.unwrap(),
+                Some(b"value".to_vec()),
+                "Non-deleted key should persist"
+            );
+            txn.discard();
+
+            ms.close().await.unwrap();
+        }
+    }
+}
