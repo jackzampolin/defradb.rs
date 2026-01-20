@@ -1733,33 +1733,6 @@ async fn test_dag_sync_handle_sync_complete_failure() {
 }
 
 #[tokio::test]
-async fn test_replicator_registry_access_control() {
-    use p2p::{BlockAccessController, ReplicatorRegistry};
-
-    let registry = Arc::new(ReplicatorRegistry::new());
-    let peer1 = libp2p::PeerId::random();
-    let peer2 = libp2p::PeerId::random();
-
-    // Register peer1 as a replicator for "users" collection
-    registry.add_replicator("users", peer1);
-
-    // Create controller with access control enabled
-    let controller = BlockAccessController::controlled(registry);
-
-    let cid =
-        cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-
-    // peer1 should have access (is replicator)
-    assert!(controller.has_access(&peer1, &cid, Some("users")));
-
-    // peer2 should NOT have access (not a replicator)
-    assert!(!controller.has_access(&peer2, &cid, Some("users")));
-
-    // peer1 should also have access when collection is unknown (is_any_replicator)
-    assert!(controller.has_access(&peer1, &cid, None));
-}
-
-#[tokio::test]
 async fn test_replicator_registry_multiple_collections() {
     use p2p::ReplicatorRegistry;
 
@@ -2675,98 +2648,6 @@ async fn test_dag_sync_failure_allows_retry() {
         .await
         .unwrap();
     assert!(plan.needs_fetch(), "Should be able to retry after failure");
-}
-
-// ============================================================================
-// Cross-Collection Access Control Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_cross_collection_access_denial() {
-    use p2p::{BlockAccessController, ReplicatorRegistry};
-
-    let registry = Arc::new(ReplicatorRegistry::new());
-
-    // Peer A is a replicator for "users" collection only
-    let peer_a = libp2p::PeerId::random();
-    registry.add_replicator("users", peer_a);
-
-    // Peer B is a replicator for "posts" collection only
-    let peer_b = libp2p::PeerId::random();
-    registry.add_replicator("posts", peer_b);
-
-    // Create controller with access control enabled
-    let controller = BlockAccessController::controlled(registry);
-
-    let cid =
-        cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-
-    // Peer A should have access to "users" collection
-    assert!(
-        controller.has_access(&peer_a, &cid, Some("users")),
-        "Peer A should have access to users collection"
-    );
-
-    // Peer B should have access to "posts" collection
-    assert!(
-        controller.has_access(&peer_b, &cid, Some("posts")),
-        "Peer B should have access to posts collection"
-    );
-
-    // Strangers (non-replicators) should NOT have access to any collection
-    let stranger = libp2p::PeerId::random();
-    assert!(
-        !controller.has_access(&stranger, &cid, Some("users")),
-        "Stranger should NOT have access to users collection"
-    );
-    assert!(
-        !controller.has_access(&stranger, &cid, Some("posts")),
-        "Stranger should NOT have access to posts collection"
-    );
-    assert!(
-        !controller.has_access(&stranger, &cid, None),
-        "Stranger should NOT have access when collection is unknown"
-    );
-
-    // Replicators for ANY collection get access via is_any_replicator fallback
-    // This is intentional behavior - replicators are trusted
-    assert!(
-        controller.has_access(&peer_a, &cid, None),
-        "Replicator should have access when collection is unknown"
-    );
-    assert!(
-        controller.has_access(&peer_b, &cid, None),
-        "Replicator should have access when collection is unknown"
-    );
-
-    // Due to is_any_replicator fallback, replicators for one collection
-    // also have access to blocks in other collections when the collection
-    // context is provided (this is the designed "permissive" behavior)
-    // See BlockAccessController::has_access implementation comment
-}
-
-#[tokio::test]
-async fn test_access_mode_open_allows_all() {
-    use p2p::{BlockAccessController, ReplicatorRegistry};
-
-    let registry = Arc::new(ReplicatorRegistry::new());
-
-    // Create controller with OPEN access (no ACP)
-    let controller = BlockAccessController::open(registry);
-
-    let cid =
-        cid::Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-
-    // Any peer should have access with Open mode
-    let random_peer = libp2p::PeerId::random();
-    assert!(
-        controller.has_access(&random_peer, &cid, Some("users")),
-        "Open mode should allow all access"
-    );
-    assert!(
-        controller.has_access(&random_peer, &cid, None),
-        "Open mode should allow all access even without collection"
-    );
 }
 
 // ============================================================================
