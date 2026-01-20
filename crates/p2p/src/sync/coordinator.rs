@@ -210,29 +210,21 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// 1. If mode is Open → allow all
     /// 2. If peer is a replicator for the collection → allow
     /// 3. Otherwise → deny
+    ///
+    /// This follows the Go DefraDB security model where each replicator is authorized
+    /// per-collection. A peer authorized for collection A cannot access collection B.
     fn check_access(&self, peer_id: &PeerId, collection_id: &str) -> Result<()> {
         // Fast path: Open mode allows all access
         if self.access_mode.is_open() {
             return Ok(());
         }
 
-        // Check if peer is a replicator for this collection
+        // Check if peer is a replicator for this specific collection
         if self.replicators.is_replicator(collection_id, peer_id) {
             return Ok(());
         }
 
-        // Check if peer is a replicator for any collection (more permissive fallback)
-        // This handles the case where the peer might be syncing across collections
-        if self.replicators.is_any_replicator(peer_id) {
-            tracing::debug!(
-                peer_id = %peer_id,
-                collection_id = %collection_id,
-                "Peer is replicator for other collections, allowing access"
-            );
-            return Ok(());
-        }
-
-        // Access denied
+        // Access denied - peer is not authorized for this collection
         tracing::warn!(
             peer_id = %peer_id,
             collection_id = %collection_id,
@@ -342,7 +334,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     );
                     let reply = PushLogReply::error(
                         &request.metadata.message_id,
-                        &format!("access denied: not authorized for collection {}", request.collection_id),
+                        &format!(
+                            "access denied: not authorized for collection {}",
+                            request.collection_id
+                        ),
                     );
                     if let Err(send_err) = self.host.send_pushlog_response(channel, reply).await {
                         tracing::warn!(
