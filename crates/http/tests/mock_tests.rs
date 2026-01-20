@@ -51,7 +51,7 @@ async fn test_mock_rest_list_collections() {
 #[tokio::test]
 async fn test_mock_rest_get_collection_doc_ids() {
     let rest = MockRestOperations::new();
-    let ids = rest.get_collection_doc_ids("Users").await.unwrap();
+    let ids = rest.get_collection_doc_ids("Users", None).await.unwrap();
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&"bae-123".to_string()));
     assert!(ids.contains(&"bae-456".to_string()));
@@ -60,14 +60,14 @@ async fn test_mock_rest_get_collection_doc_ids() {
 #[tokio::test]
 async fn test_mock_rest_get_collection_not_found() {
     let rest = MockRestOperations::new();
-    let result = rest.get_collection_doc_ids("NonExistent").await;
+    let result = rest.get_collection_doc_ids("NonExistent", None).await;
     assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_mock_rest_get_document() {
     let rest = MockRestOperations::new();
-    let doc = rest.get_document("Users", "bae-123").await.unwrap();
+    let doc = rest.get_document("Users", "bae-123", None).await.unwrap();
     assert!(doc.is_some());
     let doc = doc.unwrap();
     assert_eq!(doc.get("_docID").unwrap(), "bae-123");
@@ -77,7 +77,7 @@ async fn test_mock_rest_get_document() {
 #[tokio::test]
 async fn test_mock_rest_get_document_not_found() {
     let rest = MockRestOperations::new();
-    let doc = rest.get_document("Users", "bae-nonexistent").await.unwrap();
+    let doc = rest.get_document("Users", "bae-nonexistent", None).await.unwrap();
     assert!(doc.is_none());
 }
 
@@ -85,7 +85,7 @@ async fn test_mock_rest_get_document_not_found() {
 async fn test_mock_rest_create_document() {
     let rest = MockRestOperations::new();
     let doc = rest
-        .create_document("Users", json!({"name": "Charlie", "age": 35}))
+        .create_document("Users", json!({"name": "Charlie", "age": 35}), None)
         .await
         .unwrap();
     assert!(doc.get("_docID").is_some());
@@ -102,6 +102,7 @@ async fn test_mock_rest_create_documents() {
                 json!({"name": "Dave", "age": 40}),
                 json!({"name": "Eve", "age": 28}),
             ],
+            None,
         )
         .await
         .unwrap();
@@ -114,7 +115,7 @@ async fn test_mock_rest_create_documents() {
 async fn test_mock_rest_update_document() {
     let rest = MockRestOperations::new();
     let doc = rest
-        .update_document("Users", "bae-123", json!({"age": 31}))
+        .update_document("Users", "bae-123", json!({"age": 31}), None)
         .await
         .unwrap();
     assert_eq!(doc.get("_docID").unwrap(), "bae-123");
@@ -126,7 +127,7 @@ async fn test_mock_rest_update_document() {
 async fn test_mock_rest_update_document_not_found() {
     let rest = MockRestOperations::new();
     let result = rest
-        .update_document("Users", "bae-nonexistent", json!({"age": 31}))
+        .update_document("Users", "bae-nonexistent", json!({"age": 31}), None)
         .await;
     assert!(result.is_err());
 }
@@ -134,11 +135,11 @@ async fn test_mock_rest_update_document_not_found() {
 #[tokio::test]
 async fn test_mock_rest_delete_document() {
     let rest = MockRestOperations::new();
-    let deleted = rest.delete_document("Users", "bae-123").await.unwrap();
+    let deleted = rest.delete_document("Users", "bae-123", None).await.unwrap();
     assert!(deleted);
 
     // Verify it's gone
-    let doc = rest.get_document("Users", "bae-123").await.unwrap();
+    let doc = rest.get_document("Users", "bae-123", None).await.unwrap();
     assert!(doc.is_none());
 }
 
@@ -146,7 +147,7 @@ async fn test_mock_rest_delete_document() {
 async fn test_mock_rest_delete_document_not_found() {
     let rest = MockRestOperations::new();
     let deleted = rest
-        .delete_document("Users", "bae-nonexistent")
+        .delete_document("Users", "bae-nonexistent", None)
         .await
         .unwrap();
     assert!(!deleted);
@@ -156,13 +157,13 @@ async fn test_mock_rest_delete_document_not_found() {
 async fn test_failing_mock_rest() {
     let rest = FailingMockRestOperations::new("test error");
     assert!(rest.list_collections().await.is_err());
-    assert!(rest.get_collection_doc_ids("Users").await.is_err());
-    assert!(rest.get_document("Users", "bae-123").await.is_err());
-    assert!(rest.create_document("Users", json!({})).await.is_err());
-    assert!(rest.create_documents("Users", vec![]).await.is_err());
+    assert!(rest.get_collection_doc_ids("Users", None).await.is_err());
+    assert!(rest.get_document("Users", "bae-123", None).await.is_err());
+    assert!(rest.create_document("Users", json!({}), None).await.is_err());
+    assert!(rest.create_documents("Users", vec![], None).await.is_err());
     assert!(rest
-        .update_document("Users", "bae-123", json!({}))
+        .update_document("Users", "bae-123", json!({}), None)
         .await
         .is_err());
-    assert!(rest.delete_document("Users", "bae-123").await.is_err());
+    assert!(rest.delete_document("Users", "bae-123", None).await.is_err());
 }
