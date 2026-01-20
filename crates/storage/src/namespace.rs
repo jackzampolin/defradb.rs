@@ -241,6 +241,10 @@ impl Txn for NamespacedTxn {
     fn is_readonly(&self) -> bool {
         self.txn.is_readonly()
     }
+
+    fn callback_count(&self) -> usize {
+        self.txn.callback_count()
+    }
 }
 
 /// A namespaced iterator that strips prefixes from returned keys

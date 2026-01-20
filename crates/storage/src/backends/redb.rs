@@ -100,6 +100,8 @@ pub struct RedbStore {
     close_timeout: std::time::Duration,
     /// Database file path (for error messages)
     db_path: std::path::PathBuf,
+    /// Maximum keys allowed in a snapshot (OOM safeguard)
+    max_snapshot_keys: Option<usize>,
 }
 
 impl RedbStore {
@@ -165,7 +167,11 @@ impl RedbStore {
                 redb::DatabaseError::DatabaseAlreadyOpen => {
                     tracing::warn!(db_path = %db_path.display(), "Database is locked by another process");
                     Error::Backend(format!(
-                        "database '{}' already open - another process may be using it",
+                        "database '{}' is locked by another process. \
+                         Troubleshooting: (1) check for other running processes using 'lsof {}', \
+                         (2) if no process found, the lock file may be stale - check for .lock files, \
+                         (3) ensure previous instance shut down cleanly",
+                        db_path.display(),
                         db_path.display()
                     ))
                 }
@@ -176,9 +182,13 @@ impl RedbStore {
                         "Database file format upgrade required"
                     );
                     Error::Backend(format!(
-                        "database '{}' file format version {} requires upgrade",
+                        "database '{}' uses file format version {} which requires upgrade. \
+                         To upgrade: (1) backup your database first, \
+                         (2) use 'redb-cli upgrade {}' or equivalent tool, \
+                         (3) see redb documentation for migration details",
                         db_path.display(),
-                        version
+                        version,
+                        db_path.display()
                     ))
                 }
                 _ => {
@@ -205,6 +215,7 @@ impl RedbStore {
             active_txn_count: Arc::new(AtomicUsize::new(0)),
             close_timeout: opts.close_timeout(),
             db_path,
+            max_snapshot_keys: opts.max_snapshot_keys(),
         })
     }
 
@@ -226,14 +237,13 @@ impl RedbStore {
     ///
     /// # Returns
     ///
-    /// * `Ok(true)` if the database passes integrity checks
-    /// * `Ok(false)` if issues were found (details logged)
+    /// * `Ok(IntegrityReport)` with detailed results of the check
     /// * `Err(Error)` if the check could not be completed
     ///
     /// # Note
     ///
     /// This operation may be slow on large databases as it reads all data.
-    pub fn check_integrity(&self) -> Result<bool> {
+    pub fn check_integrity(&self) -> Result<IntegrityReport> {
         // Attempt to read all keys to verify data integrity
         let read_txn = self.db.begin_read()?;
 
@@ -241,7 +251,12 @@ impl RedbStore {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => {
                 // Empty database is valid
-                return Ok(true);
+                return Ok(IntegrityReport {
+                    is_valid: true,
+                    total_keys: 0,
+                    error_count: 0,
+                    first_error: None,
+                });
             }
             Err(e) => {
                 tracing::error!(error = %e, "Integrity check failed: cannot open table");
@@ -251,6 +266,7 @@ impl RedbStore {
 
         let mut key_count = 0u64;
         let mut error_count = 0u64;
+        let mut first_error: Option<String> = None;
 
         let range = match table.range::<&[u8]>(..) {
             Ok(r) => r,
@@ -269,27 +285,37 @@ impl RedbStore {
                     key_count += 1;
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
                     tracing::error!(
                         error = %e,
                         keys_checked = key_count,
                         "Integrity check found error while reading key"
                     );
+                    if first_error.is_none() {
+                        first_error = Some(error_msg);
+                    }
                     error_count += 1;
                 }
             }
         }
 
-        if error_count > 0 {
+        let is_valid = error_count == 0;
+        if !is_valid {
             tracing::warn!(
                 total_keys = key_count,
                 errors = error_count,
                 "Integrity check completed with errors"
             );
-            Ok(false)
         } else {
             tracing::info!(total_keys = key_count, "Integrity check passed");
-            Ok(true)
         }
+
+        Ok(IntegrityReport {
+            is_valid,
+            total_keys: key_count,
+            error_count,
+            first_error,
+        })
     }
 
     /// Check if the store is closed.
@@ -326,7 +352,7 @@ impl Store for RedbStore {
 
         // Capture a snapshot for read isolation
         let read_txn = self.db.begin_read()?;
-        let snapshot = capture_snapshot(&read_txn)?;
+        let snapshot = capture_snapshot(&read_txn, self.max_snapshot_keys)?;
 
         // Defuse the guard - transaction will manage its own count via its Drop impl
         guard.1 = true;
@@ -499,8 +525,23 @@ fn prefix_to_end_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Capture a snapshot of the current database state into memory.
-fn capture_snapshot(read_txn: &ReadTransaction) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+///
+/// # Arguments
+///
+/// * `read_txn` - The redb read transaction to snapshot
+/// * `max_keys` - Optional limit on number of keys to prevent OOM
+///
+/// # Returns
+///
+/// * `Ok(BTreeMap)` - The snapshot of all key-value pairs
+/// * `Err(Error::Backend)` - If max_keys limit is exceeded
+fn capture_snapshot(
+    read_txn: &ReadTransaction,
+    max_keys: Option<usize>,
+) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
     let mut snapshot = BTreeMap::new();
+    let mut key_count: usize = 0;
+    let mut total_bytes: usize = 0;
 
     let table = match read_txn.open_table(KV_TABLE) {
         Ok(t) => t,
@@ -511,7 +552,44 @@ fn capture_snapshot(read_txn: &ReadTransaction) -> Result<BTreeMap<Vec<u8>, Vec<
     let range = table.range::<&[u8]>(..)?;
     for result in range {
         let (key, value) = result?;
-        snapshot.insert(key.value().to_vec(), value.value().to_vec());
+        key_count += 1;
+
+        // Check limit before allocating more memory
+        if let Some(limit) = max_keys {
+            if key_count > limit {
+                tracing::error!(
+                    key_count = key_count,
+                    limit = limit,
+                    "Snapshot exceeds maximum key limit - database too large for in-memory snapshot"
+                );
+                return Err(Error::Backend(format!(
+                    "database has more than {} keys which exceeds snapshot limit. \
+                     Consider using a different backend or increasing the limit via \
+                     RedbStoreOptions::with_max_snapshot_keys()",
+                    limit
+                )));
+            }
+        }
+
+        let key_vec = key.value().to_vec();
+        let value_vec = value.value().to_vec();
+        total_bytes += key_vec.len() + value_vec.len();
+        snapshot.insert(key_vec, value_vec);
+    }
+
+    // Log for observability on large snapshots
+    if key_count > 100_000 {
+        tracing::warn!(
+            key_count = key_count,
+            total_bytes = total_bytes,
+            "Large snapshot captured - consider memory implications for concurrent transactions"
+        );
+    } else {
+        tracing::debug!(
+            key_count = key_count,
+            total_bytes = total_bytes,
+            "Database snapshot captured"
+        );
     }
 
     Ok(snapshot)
@@ -623,6 +701,29 @@ impl CallbackCounts {
             + self.on_error_async
             + self.on_discard
             + self.on_discard_async
+    }
+}
+
+/// Report from database integrity check.
+///
+/// Provides detailed information about the integrity check results,
+/// including total keys scanned and any errors encountered.
+#[derive(Debug, Clone)]
+pub struct IntegrityReport {
+    /// Whether the integrity check passed (no errors found).
+    pub is_valid: bool,
+    /// Total number of keys scanned during the check.
+    pub total_keys: u64,
+    /// Number of errors encountered during the check.
+    pub error_count: u64,
+    /// First error message encountered, if any (for debugging).
+    pub first_error: Option<String>,
+}
+
+impl IntegrityReport {
+    /// Check if the database passed the integrity check.
+    pub fn is_valid(&self) -> bool {
+        self.is_valid
     }
 }
 
@@ -775,6 +876,19 @@ impl Reader for RedbTxn {
             .filter(|(k, _)| matches_prefix(k))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+
+        // Log warning for large result sets (memory is proportional to matched keys)
+        let total_items = snapshot_items.len() + pending_items.len();
+        if total_items > 100_000 {
+            tracing::warn!(
+                snapshot_items = snapshot_items.len(),
+                pending_items = pending_items.len(),
+                total_items = total_items,
+                has_prefix = opts.prefix().is_some(),
+                has_range = opts.start().is_some() || opts.end().is_some(),
+                "Iterator materialized large result set - consider using a more specific query"
+            );
+        }
 
         Ok(Box::new(MergingIterator::new(
             snapshot_items,
@@ -1003,6 +1117,10 @@ impl Txn for RedbTxn {
     fn is_readonly(&self) -> bool {
         self.readonly
     }
+
+    fn callback_count(&self) -> usize {
+        self.callback_counts().total()
+    }
 }
 
 /// Merging iterator that combines pre-materialized snapshot and pending changes.
@@ -1227,14 +1345,18 @@ impl From<redb::Error> for Error {
             // Database already open (useful for diagnosing lock issues)
             redb::Error::DatabaseAlreadyOpen => {
                 tracing::warn!("Database is locked by another process");
-                Error::Backend("database already open - another process may be using it".into())
+                Error::Backend(
+                    "database is locked by another process. \
+                     Check for other running processes or stale lock files".into()
+                )
             }
 
             // Upgrade required (file format migration needed)
             redb::Error::UpgradeRequired(version) => {
                 tracing::warn!(version = version, "Database file format upgrade required");
                 Error::Backend(format!(
-                    "database file format version {} requires upgrade",
+                    "database uses file format version {} which requires upgrade. \
+                     Backup database and use redb migration tools",
                     version
                 ))
             }
@@ -1243,7 +1365,8 @@ impl From<redb::Error> for Error {
             redb::Error::ReadTransactionStillInUse(_) => {
                 tracing::warn!("Transaction still held by table or iterator");
                 Error::Backend(
-                    "transaction still in use - ensure all tables and iterators are dropped".into(),
+                    "transaction still in use - ensure all tables and iterators are dropped \
+                     before committing or discarding the transaction".into(),
                 )
             }
 
@@ -1262,7 +1385,12 @@ impl From<redb::Error> for Error {
 
             // Value size limit
             redb::Error::ValueTooLarge(size) => {
-                Error::Backend(format!("value too large: {} bytes exceeds maximum", size))
+                const MAX_VALUE_SIZE: usize = 3 * 1024 * 1024 * 1024; // 3 GiB
+                Error::Backend(format!(
+                    "value too large: {} bytes exceeds redb maximum of {} bytes (3 GiB). \
+                     Consider chunking large values or using a different storage backend",
+                    size, MAX_VALUE_SIZE
+                ))
             }
 
             // Handle remaining variants (non-exhaustive enum)
@@ -1276,18 +1404,25 @@ impl From<redb::DatabaseError> for Error {
         match err {
             redb::DatabaseError::DatabaseAlreadyOpen => {
                 tracing::warn!("Database is locked by another process");
-                Error::Backend("database already open - another process may be using it".into())
+                Error::Backend(
+                    "database is locked by another process. \
+                     Check for other running processes or stale lock files".into()
+                )
             }
             redb::DatabaseError::UpgradeRequired(version) => {
                 tracing::warn!(version = version, "Database file format upgrade required");
                 Error::Backend(format!(
-                    "database file format version {} requires upgrade",
+                    "database uses file format version {} which requires upgrade. \
+                     Backup database and use redb migration tools",
                     version
                 ))
             }
             redb::DatabaseError::RepairAborted => {
                 tracing::warn!("Database repair was aborted");
-                Error::Backend("database repair aborted".into())
+                Error::Backend(
+                    "database repair was aborted before completion. \
+                     Database may be in inconsistent state - restore from backup recommended".into()
+                )
             }
             redb::DatabaseError::Storage(storage_err) => storage_err.into(),
             // Handle future variants (non-exhaustive enum)
@@ -1367,7 +1502,13 @@ impl From<redb::StorageError> for Error {
                 ))
             }
             redb::StorageError::ValueTooLarge(size) => {
-                Error::Backend(format!("value too large: {} bytes exceeds maximum", size))
+                // redb has a 3GB maximum value size
+                const MAX_VALUE_SIZE: usize = 3 * 1024 * 1024 * 1024; // 3 GiB
+                Error::Backend(format!(
+                    "value too large: {} bytes exceeds redb maximum of {} bytes (3 GiB). \
+                     Consider chunking large values or using a different storage backend",
+                    size, MAX_VALUE_SIZE
+                ))
             }
             // CRITICAL: LockPoisoned is NOT a transaction conflict!
             // It indicates a thread panicked while holding a lock - this is fatal.
@@ -2678,10 +2819,11 @@ mod redb_specific_tests {
         let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
 
         // Empty database should pass integrity check
-        assert!(
-            store.check_integrity().unwrap(),
-            "Empty database should pass integrity check"
-        );
+        let report = store.check_integrity().unwrap();
+        assert!(report.is_valid, "Empty database should pass integrity check");
+        assert_eq!(report.total_keys, 0, "Empty database should have 0 keys");
+        assert_eq!(report.error_count, 0, "Empty database should have 0 errors");
+        assert!(report.first_error.is_none(), "Empty database should have no error message");
 
         // Add some data
         {
@@ -2695,10 +2837,11 @@ mod redb_specific_tests {
         }
 
         // Database with data should pass integrity check
-        assert!(
-            store.check_integrity().unwrap(),
-            "Database with data should pass integrity check"
-        );
+        let report = store.check_integrity().unwrap();
+        assert!(report.is_valid, "Database with data should pass integrity check");
+        assert_eq!(report.total_keys, 100, "Database should have 100 keys");
+        assert_eq!(report.error_count, 0, "Database should have 0 errors");
+        assert!(report.first_error.is_none(), "Database should have no error message");
     }
 
     #[tokio::test]
@@ -2738,5 +2881,95 @@ mod redb_specific_tests {
             "Close should timeout quickly with custom 100ms timeout, took {:?}",
             elapsed
         );
+    }
+
+    #[tokio::test]
+    async fn test_redb_max_snapshot_keys_limit() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // First, create a database with some data
+        {
+            let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            // Insert 100 keys
+            for i in 0..100 {
+                let key = format!("key_{:04}", i);
+                let value = format!("value_{}", i);
+                txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+            store.close().await.unwrap();
+        }
+
+        // Reopen with a max_snapshot_keys limit less than the number of keys
+        let opts = RedbStoreOptions::new().with_max_snapshot_keys(50);
+        let store = RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap();
+
+        // Creating a new transaction should fail because it exceeds the snapshot limit
+        let result = store.new_txn(false).await;
+        assert!(result.is_err(), "Should fail when snapshot exceeds max_snapshot_keys");
+
+        // Use pattern matching to extract error (Box<dyn Txn> doesn't impl Debug)
+        if let Err(err) = result {
+            let err_msg = err.to_string();
+            assert!(
+                err_msg.contains("exceeds snapshot limit"),
+                "Error should mention snapshot limit: {}",
+                err_msg
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_max_snapshot_keys_allows_within_limit() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a database with some data
+        {
+            let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            // Insert 50 keys
+            for i in 0..50 {
+                let key = format!("key_{:04}", i);
+                let value = format!("value_{}", i);
+                txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
+            }
+            txn.commit().await.unwrap();
+            store.close().await.unwrap();
+        }
+
+        // Reopen with a max_snapshot_keys limit equal to the number of keys
+        let opts = RedbStoreOptions::new().with_max_snapshot_keys(50);
+        let store = RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap();
+
+        // Creating a new transaction should succeed (exactly at limit)
+        let result = store.new_txn(false).await;
+        assert!(
+            result.is_ok(),
+            "Should succeed when snapshot equals max_snapshot_keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redb_callback_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
+
+        let mut txn = store.new_txn(false).await.unwrap();
+
+        // Initially no callbacks
+        assert_eq!(txn.callback_count(), 0, "Should start with 0 callbacks");
+
+        // Register some callbacks
+        txn.on_success(Box::new(|| {}));
+        assert_eq!(txn.callback_count(), 1, "Should have 1 callback after on_success");
+
+        txn.on_error(Box::new(|| {}));
+        assert_eq!(txn.callback_count(), 2, "Should have 2 callbacks after on_error");
+
+        txn.on_discard(Box::new(|| {}));
+        assert_eq!(txn.callback_count(), 3, "Should have 3 callbacks after on_discard");
+
+        txn.discard();
     }
 }

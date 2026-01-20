@@ -151,6 +151,13 @@ impl BasicTxn {
     ///
     /// On success, all on_success callbacks are executed.
     /// On error, all on_error callbacks are executed.
+    ///
+    /// # Callback Panic Handling
+    ///
+    /// Callback panics are caught and logged but do not affect the return value.
+    /// If a callback panics, remaining callbacks still execute, and `commit()`
+    /// returns `Ok(())` if the database commit succeeded. Check error logs for
+    /// callback panic details.
     pub async fn commit(mut self) -> Result<()> {
         if self.state != TxnState::Active {
             return Err(match self.state {
@@ -179,26 +186,33 @@ impl BasicTxn {
             (self.error_fns, self.error_async_fns)
         };
 
-        // Execute async callbacks concurrently, logging any failures
-        for callback in async_fns {
-            let txn_id = self.id;
-            tokio::spawn(async move {
-                let result = std::panic::AssertUnwindSafe(callback())
-                    .catch_unwind()
-                    .await;
-                if let Err(e) = result {
-                    tracing::error!(
-                        txn_id = txn_id,
-                        error = ?e,
-                        "Transaction async callback panicked"
-                    );
-                }
-            });
+        // Execute async callbacks sequentially with panic protection (matches storage backend)
+        for (i, callback) in async_fns.into_iter().enumerate() {
+            let callback_result = std::panic::AssertUnwindSafe(callback())
+                .catch_unwind()
+                .await;
+            if let Err(e) = callback_result {
+                tracing::error!(
+                    txn_id = self.id,
+                    callback_index = i,
+                    error = ?e,
+                    "Transaction async callback panicked - continuing with remaining callbacks"
+                );
+            }
         }
 
-        // Execute sync callbacks
-        for callback in sync_fns {
-            callback();
+        // Execute sync callbacks with panic protection
+        for (i, callback) in sync_fns.into_iter().enumerate() {
+            let callback_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+            if let Err(e) = callback_result {
+                tracing::error!(
+                    txn_id = self.id,
+                    callback_index = i,
+                    error = ?e,
+                    "Transaction sync callback panicked - continuing with remaining callbacks"
+                );
+            }
         }
 
         result.map_err(Error::Storage)
@@ -208,6 +222,17 @@ impl BasicTxn {
     ///
     /// All on_discard callbacks are executed on success.
     /// Returns an error if the transaction is not active or still has references.
+    ///
+    /// # Callback Panic Handling
+    ///
+    /// Callback panics are caught and logged but do not affect the return value.
+    /// If a callback panics, remaining callbacks still execute.
+    ///
+    /// # Async Callback Warning
+    ///
+    /// Async discard callbacks are spawned as background tasks and may not complete
+    /// if the process exits before they finish. For completion guarantees, use
+    /// sync callbacks or prefer `commit()` when async cleanup is critical.
     pub fn discard(mut self) -> Result<()> {
         if self.state != TxnState::Active {
             return Err(match self.state {
@@ -225,26 +250,44 @@ impl BasicTxn {
 
         self.state = TxnState::Discarded;
 
-        // Execute async callbacks concurrently, logging any failures
+        // Execute async callbacks concurrently with panic protection (fire-and-forget for discard)
         let txn_id = self.id;
-        for callback in self.discard_async_fns {
-            tokio::spawn(async move {
-                let result = std::panic::AssertUnwindSafe(callback())
-                    .catch_unwind()
-                    .await;
-                if let Err(e) = result {
-                    tracing::error!(
-                        txn_id = txn_id,
-                        error = ?e,
-                        "Transaction discard async callback panicked"
-                    );
-                }
-            });
+        if !self.discard_async_fns.is_empty() {
+            let callback_count = self.discard_async_fns.len();
+            tracing::debug!(
+                txn_id = txn_id,
+                count = callback_count,
+                "Spawning async discard callbacks in background"
+            );
+            for (i, callback) in self.discard_async_fns.into_iter().enumerate() {
+                tokio::spawn(async move {
+                    let result = std::panic::AssertUnwindSafe(callback())
+                        .catch_unwind()
+                        .await;
+                    if let Err(e) = result {
+                        tracing::error!(
+                            txn_id = txn_id,
+                            callback_index = i,
+                            error = ?e,
+                            "Transaction discard async callback panicked"
+                        );
+                    }
+                });
+            }
         }
 
-        // Execute sync callbacks
-        for callback in self.discard_fns {
-            callback();
+        // Execute sync callbacks with panic protection
+        for (i, callback) in self.discard_fns.into_iter().enumerate() {
+            let callback_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+            if let Err(e) = callback_result {
+                tracing::error!(
+                    txn_id = self.id,
+                    callback_index = i,
+                    error = ?e,
+                    "Transaction discard sync callback panicked - continuing with remaining callbacks"
+                );
+            }
         }
 
         Ok(())

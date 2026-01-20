@@ -428,6 +428,15 @@ impl Txn for MemoryTxn {
     fn is_readonly(&self) -> bool {
         self.readonly
     }
+
+    fn callback_count(&self) -> usize {
+        self.on_success.lock().len()
+            + self.on_success_async.lock().len()
+            + self.on_error.lock().len()
+            + self.on_error_async.lock().len()
+            + self.on_discard.lock().len()
+            + self.on_discard_async.lock().len()
+    }
 }
 
 /// Iterator over in-memory key-value pairs.

@@ -17,7 +17,8 @@ pub const DEFAULT_CLOSE_TIMEOUT_SECS: u64 = 5;
 ///
 /// let opts = RedbStoreOptions::new()
 ///     .with_cache_size(64 * 1024 * 1024) // 64MB cache
-///     .with_close_timeout(Duration::from_secs(10)); // 10 second close timeout
+///     .with_close_timeout(Duration::from_secs(10)) // 10 second close timeout
+///     .with_max_snapshot_keys(1_000_000); // Limit snapshots to 1M keys
 ///
 /// let store = RedbStore::open_with_options("/path/to/db", opts)?;
 /// ```
@@ -25,6 +26,7 @@ pub const DEFAULT_CLOSE_TIMEOUT_SECS: u64 = 5;
 pub struct RedbStoreOptions {
     cache_size: Option<usize>,
     close_timeout: Duration,
+    max_snapshot_keys: Option<usize>,
 }
 
 impl Default for RedbStoreOptions {
@@ -32,6 +34,7 @@ impl Default for RedbStoreOptions {
         Self {
             cache_size: None,
             close_timeout: Duration::from_secs(DEFAULT_CLOSE_TIMEOUT_SECS),
+            max_snapshot_keys: None,
         }
     }
 }
@@ -78,5 +81,39 @@ impl RedbStoreOptions {
     /// Get the configured close timeout.
     pub fn close_timeout(&self) -> Duration {
         self.close_timeout
+    }
+
+    /// Set the maximum number of keys allowed in a transaction snapshot.
+    ///
+    /// When a transaction is created, it captures a snapshot of the database
+    /// into memory. This option limits the snapshot size to prevent OOM
+    /// conditions with large databases.
+    ///
+    /// If the database contains more keys than this limit when creating a
+    /// transaction, `new_txn()` will return an error instead of loading
+    /// all keys into memory.
+    ///
+    /// Default: None (no limit - use with caution on large databases)
+    ///
+    /// # Recommended Values
+    ///
+    /// - Small databases (<100K keys): No limit needed
+    /// - Medium databases (100K-1M keys): 1_000_000
+    /// - Large databases: Consider a different storage backend
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let opts = RedbStoreOptions::new()
+    ///     .with_max_snapshot_keys(500_000); // Limit to 500K keys
+    /// ```
+    pub fn with_max_snapshot_keys(mut self, max_keys: usize) -> Self {
+        self.max_snapshot_keys = Some(max_keys);
+        self
+    }
+
+    /// Get the configured maximum snapshot keys, if set.
+    pub fn max_snapshot_keys(&self) -> Option<usize> {
+        self.max_snapshot_keys
     }
 }
