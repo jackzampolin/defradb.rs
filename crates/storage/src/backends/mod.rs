@@ -46,6 +46,9 @@ pub mod memory;
 #[cfg(feature = "redb")]
 pub mod redb;
 
+#[cfg(feature = "redb")]
+pub mod redb_config;
+
 #[cfg(test)]
 pub mod test_suite;
 
@@ -53,3 +56,6 @@ pub use memory::MemoryStore;
 
 #[cfg(feature = "redb")]
 pub use redb::RedbStore;
+
+#[cfg(feature = "redb")]
+pub use redb_config::RedbStoreOptions;

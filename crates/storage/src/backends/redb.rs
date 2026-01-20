@@ -76,6 +76,8 @@ use crate::corekv::{
     TxnCallback, Writer,
 };
 
+use super::redb_config::RedbStoreOptions;
+
 /// Table definition for the main key-value store.
 const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 
@@ -96,7 +98,7 @@ pub struct RedbStore {
 }
 
 impl RedbStore {
-    /// Open a redb database at the specified path.
+    /// Open a redb database at the specified path with default options.
     ///
     /// If the database doesn't exist, it will be created.
     /// If the path is a directory, creates `data.redb` inside it.
@@ -110,13 +112,48 @@ impl RedbStore {
     /// * `Ok(RedbStore)` on success
     /// * `Err(Error)` if the database cannot be opened
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::open_with_options(path, RedbStoreOptions::default())
+    }
+
+    /// Open a redb database at the specified path with custom options.
+    ///
+    /// If the database doesn't exist, it will be created.
+    /// If the path is a directory, creates `data.redb` inside it.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the database file or directory
+    /// * `opts` - Configuration options for the database
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(RedbStore)` on success
+    /// * `Err(Error)` if the database cannot be opened
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use storage::backends::{RedbStore, RedbStoreOptions};
+    ///
+    /// let opts = RedbStoreOptions::new()
+    ///     .with_cache_size(64 * 1024 * 1024); // 64MB cache
+    ///
+    /// let store = RedbStore::open_with_options("/path/to/db", opts)?;
+    /// ```
+    pub fn open_with_options<P: AsRef<Path>>(path: P, opts: RedbStoreOptions) -> Result<Self> {
         let path = path.as_ref();
         let db_path = if path.is_dir() {
             path.join("data.redb")
         } else {
             path.to_path_buf()
         };
-        let db = Database::create(db_path)?;
+
+        let mut builder = redb::Builder::new();
+        if let Some(cache_size) = opts.cache_size() {
+            builder.set_cache_size(cache_size);
+        }
+
+        let db = builder.create(db_path)?;
 
         // Ensure the KV table exists by opening a write transaction
         {
@@ -492,50 +529,31 @@ impl Reader for RedbTxn {
         // Compute the effective range bounds for efficient range queries
         let (start_bound, end_bound) = compute_range_bounds(&opts);
 
-        // Build merged data using range queries for efficiency
-        // Only iterate over the relevant range instead of cloning entire snapshot
-        let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = self
+        // Helper to check prefix
+        let matches_prefix =
+            |key: &[u8]| -> bool { opts.prefix().map_or(true, |p| key.starts_with(p)) };
+
+        // Extract snapshot items into Vec (already sorted by BTreeMap)
+        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = self
             .snapshot
             .range((start_bound.clone(), end_bound.clone()))
-            .filter(|(k, _)| {
-                // Apply prefix filter if set
-                if let Some(prefix) = opts.prefix() {
-                    k.starts_with(prefix)
-                } else {
-                    true
-                }
-            })
+            .filter(|(k, _)| matches_prefix(k))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        // Merge pending changes that fall within the range
+        // Extract pending items into Vec (sorted by BTreeMap, with Option for deletions)
         let pending = self.pending.lock();
-        for (key, value) in pending.iter() {
-            // Check if key falls within the range
-            let in_range = match (&start_bound, &end_bound) {
-                (Bound::Included(s), Bound::Excluded(e)) => key.as_slice() >= s.as_slice() && key.as_slice() < e.as_slice(),
-                (Bound::Included(s), Bound::Unbounded) => key.as_slice() >= s.as_slice(),
-                (Bound::Unbounded, Bound::Excluded(e)) => key.as_slice() < e.as_slice(),
-                (Bound::Unbounded, Bound::Unbounded) => true,
-                _ => true, // Other combinations shouldn't occur
-            };
+        let pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)> = pending
+            .range((start_bound, end_bound))
+            .filter(|(k, _)| matches_prefix(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-            // Also check prefix if set
-            let matches_prefix = opts.prefix().map_or(true, |p| key.starts_with(p));
-
-            if in_range && matches_prefix {
-                match value {
-                    Some(v) => {
-                        merged.insert(key.clone(), v.clone());
-                    }
-                    None => {
-                        merged.remove(key);
-                    }
-                }
-            }
-        }
-
-        Ok(Box::new(RedbIterator::new(merged, opts)?))
+        Ok(Box::new(MergingIterator::new(
+            snapshot_items,
+            pending_items,
+            opts,
+        )))
     }
 }
 
@@ -760,67 +778,143 @@ impl Txn for RedbTxn {
     }
 }
 
-/// Iterator over redb key-value pairs.
-struct RedbIterator {
-    /// Sorted vector of key-value pairs
-    data: Vec<(Vec<u8>, Vec<u8>)>,
+/// Merging iterator that lazily combines snapshot and pending changes.
+///
+/// Instead of materializing the full merged result upfront, this iterator
+/// holds both sorted Vecs and merges on-demand during iteration.
+struct MergingIterator {
+    /// Items from snapshot (sorted ascending)
+    snapshot_items: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Current position in snapshot
+    snapshot_pos: usize,
 
-    /// Current position in the iterator
-    position: usize,
+    /// Pending changes (sorted ascending, None = deletion)
+    pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// Current position in pending
+    pending_pos: usize,
 
+    /// Whether iteration is reversed
+    reverse: bool,
+    /// Whether to return only keys
+    keys_only: bool,
     /// Whether the iterator is closed
     closed: bool,
-
-    /// Whether this is a keys-only iterator
-    keys_only: bool,
-
-    /// Whether this iterator is in reverse mode
-    reverse: bool,
 }
 
-impl RedbIterator {
-    /// Create a new iterator from pre-filtered data.
-    ///
-    /// The data should already be filtered for prefix/start/end bounds.
-    /// This constructor only handles ordering (reverse) and keys-only mode.
-    fn new(data: BTreeMap<Vec<u8>, Vec<u8>>, opts: IterOptions) -> Result<Self> {
-        // Convert to Vec - data is already filtered by iterator() method
-        let mut items: Vec<_> = data.into_iter().collect();
-
-        // Apply reverse ordering
+impl MergingIterator {
+    fn new(
+        mut snapshot_items: Vec<(Vec<u8>, Vec<u8>)>,
+        mut pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        opts: IterOptions,
+    ) -> Self {
         let reverse = opts.reverse();
         if reverse {
-            items.reverse();
+            snapshot_items.reverse();
+            pending_items.reverse();
         }
 
-        Ok(Self {
-            data: items,
-            position: 0,
-            closed: false,
-            keys_only: opts.keys_only(),
+        Self {
+            snapshot_items,
+            snapshot_pos: 0,
+            pending_items,
+            pending_pos: 0,
             reverse,
-        })
+            keys_only: opts.keys_only(),
+            closed: false,
+        }
+    }
+
+    /// Get the next merged key-value pair, handling overrides and deletions.
+    fn next_merged(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        loop {
+            let snap_key = self.snapshot_items.get(self.snapshot_pos).map(|(k, _)| k);
+            let pend_key = self.pending_items.get(self.pending_pos).map(|(k, _)| k);
+
+            match (snap_key, pend_key) {
+                (None, None) => return None,
+
+                (Some(_), None) => {
+                    let (key, value) = self.snapshot_items[self.snapshot_pos].clone();
+                    self.snapshot_pos += 1;
+                    return Some((key, value));
+                }
+
+                (None, Some(_)) => {
+                    let (key, value_opt) = self.pending_items[self.pending_pos].clone();
+                    self.pending_pos += 1;
+                    match value_opt {
+                        Some(value) => return Some((key, value)),
+                        None => continue, // Deletion of non-existent key, skip
+                    }
+                }
+
+                (Some(sk), Some(pk)) => {
+                    let cmp = if self.reverse {
+                        pk.cmp(sk) // Reversed: larger keys come first
+                    } else {
+                        sk.cmp(pk)
+                    };
+
+                    match cmp {
+                        std::cmp::Ordering::Less => {
+                            // Snapshot key comes first (no pending override)
+                            let (key, value) = self.snapshot_items[self.snapshot_pos].clone();
+                            self.snapshot_pos += 1;
+                            return Some((key, value));
+                        }
+                        std::cmp::Ordering::Greater => {
+                            // Pending key comes first (new key not in snapshot)
+                            let (key, value_opt) = self.pending_items[self.pending_pos].clone();
+                            self.pending_pos += 1;
+                            match value_opt {
+                                Some(value) => return Some((key, value)),
+                                None => continue, // Deletion of non-existent key
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // Same key: pending overrides snapshot
+                            let (key, value_opt) = self.pending_items[self.pending_pos].clone();
+                            self.snapshot_pos += 1; // Skip snapshot version
+                            self.pending_pos += 1;
+                            match value_opt {
+                                Some(value) => return Some((key, value)),
+                                None => continue, // Deletion
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Binary search for seek position in a sorted Vec.
+    fn binary_search_position<T>(items: &[(Vec<u8>, T)], key: &[u8], reverse: bool) -> usize {
+        if reverse {
+            // Reversed: items are [k4, k3, k2, k1], find first <= key
+            items.partition_point(|(k, _)| k.as_slice() > key)
+        } else {
+            // Forward: items are [k1, k2, k3, k4], find first >= key
+            items.partition_point(|(k, _)| k.as_slice() < key)
+        }
     }
 }
 
 #[async_trait]
-impl Iterator for RedbIterator {
+impl Iterator for MergingIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {
         if self.closed {
             return Err(Error::Iterator("Iterator has been closed".into()));
         }
 
-        if self.position >= self.data.len() {
-            return Ok(None);
-        }
-
-        let (key, value) = &self.data[self.position];
-        self.position += 1;
-
-        if self.keys_only {
-            Ok(Some(KvPair::key_only(key.clone())))
-        } else {
-            Ok(Some(KvPair::new(key.clone(), value.clone())))
+        match self.next_merged() {
+            Some((key, value)) => {
+                if self.keys_only {
+                    Ok(Some(KvPair::key_only(key)))
+                } else {
+                    Ok(Some(KvPair::new(key, value)))
+                }
+            }
+            None => Ok(None),
         }
     }
 
@@ -834,28 +928,15 @@ impl Iterator for RedbIterator {
             return Err(Error::Iterator("Iterator has been closed".into()));
         }
 
-        // Find the position to seek to based on iteration direction.
-        let pos = if self.reverse {
-            // Reverse mode: data is [k4, k3, k2, k1] (descending)
-            // seek(k2) should find the first key <= k2
-            self.data.iter().position(|(k, _)| k.as_slice() <= key)
-        } else {
-            // Forward mode: data is [k1, k2, k3, k4] (ascending)
-            // seek(k2) should find the first key >= k2
-            self.data.iter().position(|(k, _)| k.as_slice() >= key)
-        };
+        // Seek both iterators to the target position
+        self.snapshot_pos = Self::binary_search_position(&self.snapshot_items, key, self.reverse);
+        self.pending_pos = Self::binary_search_position(&self.pending_items, key, self.reverse);
 
-        match pos {
-            Some(p) => {
-                self.position = p;
-                Ok(true)
-            }
-            None => {
-                // No matching key found, position at end
-                self.position = self.data.len();
-                Ok(false)
-            }
-        }
+        // Check if there's any data at or after the seek position
+        let has_snapshot = self.snapshot_pos < self.snapshot_items.len();
+        let has_pending = self.pending_pos < self.pending_items.len();
+
+        Ok(has_snapshot || has_pending)
     }
 
     async fn reset(&mut self) -> Result<()> {
@@ -863,7 +944,8 @@ impl Iterator for RedbIterator {
             return Err(Error::Iterator("Iterator has been closed".into()));
         }
 
-        self.position = 0;
+        self.snapshot_pos = 0;
+        self.pending_pos = 0;
         Ok(())
     }
 
@@ -1086,23 +1168,43 @@ mod redb_specific_tests {
         let temp_dir = TempDir::new().unwrap();
         let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
 
-        assert_eq!(store.active_transaction_count(), 0, "No active transactions initially");
+        assert_eq!(
+            store.active_transaction_count(),
+            0,
+            "No active transactions initially"
+        );
 
         // Create a transaction
         let txn1 = store.new_txn(true).await.unwrap();
-        assert_eq!(store.active_transaction_count(), 1, "One active transaction");
+        assert_eq!(
+            store.active_transaction_count(),
+            1,
+            "One active transaction"
+        );
 
         // Create another
         let txn2 = store.new_txn(false).await.unwrap();
-        assert_eq!(store.active_transaction_count(), 2, "Two active transactions");
+        assert_eq!(
+            store.active_transaction_count(),
+            2,
+            "Two active transactions"
+        );
 
         // Discard one
         txn1.discard();
-        assert_eq!(store.active_transaction_count(), 1, "One active after discard");
+        assert_eq!(
+            store.active_transaction_count(),
+            1,
+            "One active after discard"
+        );
 
         // Commit the other
         txn2.commit().await.unwrap();
-        assert_eq!(store.active_transaction_count(), 0, "None active after commit");
+        assert_eq!(
+            store.active_transaction_count(),
+            0,
+            "None active after commit"
+        );
     }
 
     #[tokio::test]
@@ -1339,7 +1441,10 @@ mod redb_specific_tests {
         let opts = IterOptions::new();
         let mut iter = txn.iterator(opts).await.unwrap();
         while let Some(kv) = iter.next().await.unwrap() {
-            assert_ne!(kv.key, b"to_delete", "Deleted key should not appear in iterator");
+            assert_ne!(
+                kv.key, b"to_delete",
+                "Deleted key should not appear in iterator"
+            );
         }
     }
 
