@@ -199,8 +199,35 @@ impl ExtractTokenIdentity {
     }
 
     /// Returns the DID if identity is present.
+    ///
+    /// If a token identity exists but DID derivation fails, logs a warning
+    /// and returns None. For explicit error handling, use `try_did()`.
     pub fn did(&self) -> Option<Did> {
-        self.0.as_ref().and_then(|id| id.did().ok())
+        self.0.as_ref().and_then(|id| match id.did() {
+            Ok(did) => Some(did),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to derive DID from validated token identity - treating as anonymous"
+                );
+                None
+            }
+        })
+    }
+
+    /// Returns the DID if identity is present, or an error if DID derivation fails.
+    ///
+    /// Use this when you need to explicitly handle DID derivation errors.
+    pub fn try_did(&self) -> Result<Option<Did>, IdentityExtractionError> {
+        match &self.0 {
+            Some(id) => {
+                let did = id
+                    .did()
+                    .map_err(|e| IdentityExtractionError::InvalidToken(e.to_string()))?;
+                Ok(Some(did))
+            }
+            None => Ok(None),
+        }
     }
 }
 

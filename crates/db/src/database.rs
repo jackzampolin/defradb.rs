@@ -444,6 +444,9 @@ impl<S: Store> DB<S> {
     ) -> Result<()> {
         // Validate collection name
         let collection_name = CollectionName::new(&schema.name)?;
+
+        // Validate schema (includes policy validation for path traversal prevention)
+        schema.validate()?;
         let name = collection_name.as_str().to_string();
 
         // Check if collection exists in txn cache or store

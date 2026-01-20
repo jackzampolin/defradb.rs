@@ -35,31 +35,48 @@ impl PolicyDescription {
     /// Validate the policy description.
     ///
     /// Ensures:
-    /// - `id` is non-empty and doesn't contain path separators
-    /// - `resource_name` is non-empty and doesn't contain path separators
+    /// - `id` is non-empty (not empty or whitespace-only) and doesn't contain dangerous characters
+    /// - `resource_name` is non-empty and doesn't contain dangerous characters
     ///
-    /// Path separators are rejected to prevent path traversal attacks in ACP storage keys.
+    /// Dangerous characters rejected for defense-in-depth against path traversal:
+    /// - Path separators: `/` and `\`
+    /// - Parent directory sequences: `..`
+    /// - Null bytes: `\0`
     pub fn validate(&self) -> Result<()> {
-        if self.id.is_empty() {
-            return Err(SchemaError::InvalidPolicy(
-                "policy id cannot be empty".into(),
-            ));
+        Self::validate_field(&self.id, "policy id")?;
+        Self::validate_field(&self.resource_name, "policy resource_name")?;
+        Ok(())
+    }
+
+    /// Validate a single field for dangerous characters.
+    fn validate_field(value: &str, field_name: &str) -> Result<()> {
+        // Check empty or whitespace-only
+        if value.is_empty() || value.trim().is_empty() {
+            return Err(SchemaError::InvalidPolicy(format!(
+                "{} cannot be empty or whitespace-only",
+                field_name
+            )));
         }
-        if self.resource_name.is_empty() {
-            return Err(SchemaError::InvalidPolicy(
-                "policy resource_name cannot be empty".into(),
-            ));
+        // Check path separators
+        if value.contains('/') || value.contains('\\') {
+            return Err(SchemaError::InvalidPolicy(format!(
+                "{} cannot contain path separators (/ or \\)",
+                field_name
+            )));
         }
-        // Prevent path traversal in ACP storage keys
-        if self.id.contains('/') || self.id.contains('\\') {
-            return Err(SchemaError::InvalidPolicy(
-                "policy id cannot contain path separators (/ or \\)".into(),
-            ));
+        // Check parent directory sequences
+        if value.contains("..") {
+            return Err(SchemaError::InvalidPolicy(format!(
+                "{} cannot contain '..' sequences",
+                field_name
+            )));
         }
-        if self.resource_name.contains('/') || self.resource_name.contains('\\') {
-            return Err(SchemaError::InvalidPolicy(
-                "policy resource_name cannot contain path separators (/ or \\)".into(),
-            ));
+        // Check null bytes
+        if value.contains('\0') {
+            return Err(SchemaError::InvalidPolicy(format!(
+                "{} cannot contain null bytes",
+                field_name
+            )));
         }
         Ok(())
     }
@@ -87,6 +104,8 @@ mod tests {
         assert!(policy.validate().is_ok());
     }
 
+    // === Empty string tests ===
+
     #[test]
     fn test_policy_validate_empty_id() {
         let policy = PolicyDescription::new("", "users");
@@ -95,7 +114,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("id cannot be empty"));
+            .contains("cannot be empty"));
     }
 
     #[test]
@@ -106,8 +125,34 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("resource_name cannot be empty"));
+            .contains("cannot be empty"));
     }
+
+    // === Whitespace-only tests ===
+
+    #[test]
+    fn test_policy_validate_whitespace_only_id() {
+        let policy = PolicyDescription::new("   ", "users");
+        let result = policy.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be empty or whitespace-only"));
+    }
+
+    #[test]
+    fn test_policy_validate_whitespace_only_resource_name() {
+        let policy = PolicyDescription::new("policy-123", "\t\n  ");
+        let result = policy.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be empty or whitespace-only"));
+    }
+
+    // === Path separator tests ===
 
     #[test]
     fn test_policy_validate_id_with_forward_slash() {
@@ -139,5 +184,65 @@ mod tests {
         let result = policy.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("path separators"));
+    }
+
+    // === Path traversal sequence tests ===
+
+    #[test]
+    fn test_policy_validate_id_with_path_traversal() {
+        let policy = PolicyDescription::new("../admin", "users");
+        let result = policy.validate();
+        assert!(result.is_err());
+        // Should be caught by path separator check first
+        assert!(result.unwrap_err().to_string().contains("path separators"));
+    }
+
+    #[test]
+    fn test_policy_validate_id_with_dotdot_sequence() {
+        let policy = PolicyDescription::new("policy..secret", "users");
+        let result = policy.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'..'"));
+    }
+
+    #[test]
+    fn test_policy_validate_resource_name_with_dotdot_sequence() {
+        let policy = PolicyDescription::new("policy-123", "users..admin");
+        let result = policy.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'..'"));
+    }
+
+    // === Null byte tests ===
+
+    #[test]
+    fn test_policy_validate_id_with_null_byte() {
+        let policy = PolicyDescription::new("policy\0123", "users");
+        let result = policy.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("null bytes"));
+    }
+
+    #[test]
+    fn test_policy_validate_resource_name_with_null_byte() {
+        let policy = PolicyDescription::new("policy-123", "users\0admin");
+        let result = policy.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("null bytes"));
+    }
+
+    // === Valid edge cases ===
+
+    #[test]
+    fn test_policy_validate_single_dot_allowed() {
+        // Single dots are allowed (not path traversal)
+        let policy = PolicyDescription::new("policy.v1", "users.table");
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn test_policy_validate_with_dashes_and_underscores() {
+        let policy = PolicyDescription::new("my-policy_v1", "user_table-v2");
+        assert!(policy.validate().is_ok());
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use db::database::{DbOptions, DB};
 use db::Error;
-use schema::{CollectionVersion, FieldDescription, FieldKind};
+use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
 use storage::backends::MemoryStore;
 
 #[tokio::test]
@@ -964,6 +964,117 @@ async fn test_merkle_proof_no_path_returns_none() {
     // Try to extract proof between unrelated blocks
     let result = db.extract_proof(&cid1, &cid2).await.unwrap();
     assert!(result.is_none(), "Should return None for unrelated blocks");
+}
+
+// =========================================================================
+// Policy Validation at DB Layer Tests
+// =========================================================================
+
+#[tokio::test]
+async fn test_create_collection_rejects_invalid_policy_path_separator() {
+    let store = MemoryStore::new();
+    let db = DB::new(store);
+
+    let schema = CollectionVersion::new(
+        "Users",
+        "v1",
+        "col-users",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+        ],
+    )
+    .with_policy(PolicyDescription::new("policy/traversal", "users"));
+
+    let result = db.create_collection(schema).await;
+    assert!(result.is_err(), "Should reject policy with path separator");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, Error::Schema(_)),
+        "Expected Schema error, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("path separators"),
+        "Error should mention path separators: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_create_collection_rejects_invalid_policy_dotdot() {
+    let store = MemoryStore::new();
+    let db = DB::new(store);
+
+    let schema = CollectionVersion::new(
+        "Users",
+        "v1",
+        "col-users",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+        ],
+    )
+    .with_policy(PolicyDescription::new("policy..secret", "users"));
+
+    let result = db.create_collection(schema).await;
+    assert!(
+        result.is_err(),
+        "Should reject policy with '..' sequence"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("'..'"),
+        "Error should mention '..' sequences: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_create_collection_rejects_invalid_policy_null_byte() {
+    let store = MemoryStore::new();
+    let db = DB::new(store);
+
+    let schema = CollectionVersion::new(
+        "Users",
+        "v1",
+        "col-users",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+        ],
+    )
+    .with_policy(PolicyDescription::new("policy\0123", "users"));
+
+    let result = db.create_collection(schema).await;
+    assert!(result.is_err(), "Should reject policy with null byte");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("null bytes"),
+        "Error should mention null bytes: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_create_collection_accepts_valid_policy() {
+    let store = MemoryStore::new();
+    let db = DB::new(store);
+
+    let schema = CollectionVersion::new(
+        "Users",
+        "v1",
+        "col-users",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+        ],
+    )
+    .with_policy(PolicyDescription::new("policy-123", "users"));
+
+    let result = db.create_collection(schema).await;
+    assert!(result.is_ok(), "Should accept valid policy");
+    assert!(db.has_collection("Users").unwrap());
 }
 
 // =========================================================================
