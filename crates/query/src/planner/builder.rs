@@ -278,6 +278,24 @@ impl Planner {
                     child_scan = child_scan.with_fetcher(fetcher.clone());
                 }
 
+                // Reject unsupported arguments on nested selections.
+                // Order and limit on nested selections require per-parent ordering/limiting
+                // which is not yet implemented. Return a clear error rather than silently ignoring.
+                if nested_select.order_by.is_some() {
+                    return Err(QueryError::execution(format!(
+                        "order on nested selection '{}' is not yet supported. \
+                         Use separate queries to order nested results.",
+                        relation_field_name
+                    )));
+                }
+                if nested_select.limit.is_some() {
+                    return Err(QueryError::execution(format!(
+                        "limit/offset on nested selection '{}' is not yet supported. \
+                         Use separate queries to limit nested results.",
+                        relation_field_name
+                    )));
+                }
+
                 // Wrap in SelectNode if there's a filter on the nested select
                 let mut child_plan: Box<dyn PlanNode> =
                     if let Some(ref filter) = nested_select.filter {

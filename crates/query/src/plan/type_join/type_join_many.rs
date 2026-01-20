@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -211,10 +211,17 @@ impl PlanNode for TypeJoinMany {
         let mut parent_doc = self.parent_plan.value().deep_clone();
 
         // Get parent's _docID for the lookup (O(1) cache lookup)
-        let children = parent_doc
-            .doc_id()
-            .map(|id| self.find_child_docs(id))
-            .unwrap_or_default();
+        let children = match parent_doc.doc_id() {
+            Some(id) => self.find_child_docs(id),
+            None => {
+                debug!(
+                    parent_collection = %self.parent_side.collection().name,
+                    relation_field = %self.parent_side.relation_field().name,
+                    "Parent document missing _docID, cannot look up children"
+                );
+                Vec::new()
+            }
+        };
 
         // Merge children array into parent
         self.merge_children(&mut parent_doc, children);
