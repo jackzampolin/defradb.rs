@@ -88,6 +88,7 @@ impl Store for MemoryStore {
             pending: Mutex::new(BTreeMap::new()),
             readonly,
             discarded: Mutex::new(false),
+            committed: Mutex::new(false),
             on_success: Mutex::new(Vec::new()),
             on_success_async: Mutex::new(Vec::new()),
             on_error: Mutex::new(Vec::new()),
@@ -137,6 +138,9 @@ struct MemoryTxn {
 
     /// Whether the transaction has been discarded
     discarded: Mutex<bool>,
+
+    /// Whether the transaction has been committed
+    committed: Mutex<bool>,
 
     /// Callbacks for successful commit
     on_success: Mutex<Vec<TxnCallback>>,
@@ -317,6 +321,12 @@ impl Writer for MemoryTxn {
 #[async_trait]
 impl Txn for MemoryTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
+        // Check if already committed (defensive - ownership prevents this in normal usage)
+        if *self.committed.lock() {
+            tracing::warn!("Attempted to commit an already committed transaction");
+            return Err(Error::Other("Transaction already committed".into()));
+        }
+
         if *self.discarded.lock() {
             // Execute error callbacks before returning error
             let on_error = std::mem::take(&mut *self.on_error.lock());
@@ -325,6 +335,9 @@ impl Txn for MemoryTxn {
             Self::execute_async_callbacks(on_error_async).await;
             return Err(Error::DiscardedTxn);
         }
+
+        // Mark as committed
+        *self.committed.lock() = true;
 
         // Clone pending changes before awaiting (can't hold MutexGuard across await)
         let pending = self.pending.lock().clone();

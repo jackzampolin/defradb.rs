@@ -247,11 +247,15 @@ impl Store for RedbStore {
             while self.active_txn_count.load(Ordering::SeqCst) > 0 {
                 if start.elapsed() > timeout {
                     let remaining = self.active_txn_count.load(Ordering::SeqCst);
-                    tracing::warn!(
+                    tracing::error!(
                         remaining_transactions = remaining,
-                        "Timeout waiting for transactions to complete during close"
+                        timeout_seconds = 5,
+                        "Failed to close store - transactions still active after timeout"
                     );
-                    break;
+                    return Err(Error::Other(format!(
+                        "Close timeout: {} transactions still active after 5s",
+                        remaining
+                    )));
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -954,10 +958,14 @@ impl Iterator for MergingIterator {
     }
 }
 
-// Convert redb errors to our error type with context
+// Convert redb errors to our error type with context and classification
 impl From<redb::Error> for Error {
     fn from(err: redb::Error) -> Self {
-        Error::Backend(format!("redb error: {}", err))
+        // Classify specific error types for better handling
+        match &err {
+            redb::Error::Io(io_err) => Error::Io(io_err.to_string()),
+            _ => Error::Backend(format!("redb error: {}", err)),
+        }
     }
 }
 
@@ -969,25 +977,74 @@ impl From<redb::DatabaseError> for Error {
 
 impl From<redb::TransactionError> for Error {
     fn from(err: redb::TransactionError) -> Self {
-        Error::Backend(format!("redb transaction error: {}", err))
+        // Classify transaction errors for retriable handling
+        match &err {
+            redb::TransactionError::ReadTransactionStillInUse(_) => {
+                tracing::debug!("Classified redb error as transaction conflict");
+                Error::TxnConflict
+            }
+            redb::TransactionError::Storage(storage_err) => {
+                // Check if it's an I/O error
+                if let redb::StorageError::Io(io_err) = storage_err {
+                    Error::Io(io_err.to_string())
+                } else {
+                    Error::Backend(format!("redb transaction storage error: {}", err))
+                }
+            }
+            // Handle future variants (non-exhaustive enum)
+            _ => Error::Backend(format!("redb transaction error: {}", err)),
+        }
     }
 }
 
 impl From<redb::TableError> for Error {
     fn from(err: redb::TableError) -> Self {
-        Error::Backend(format!("redb table error: {}", err))
+        // Classify table errors
+        match &err {
+            redb::TableError::Storage(storage_err) => {
+                if let redb::StorageError::Io(io_err) = storage_err {
+                    Error::Io(io_err.to_string())
+                } else {
+                    Error::Backend(format!("redb table storage error: {}", err))
+                }
+            }
+            _ => Error::Backend(format!("redb table error: {}", err)),
+        }
     }
 }
 
 impl From<redb::StorageError> for Error {
     fn from(err: redb::StorageError) -> Self {
-        Error::Backend(format!("redb storage error: {}", err))
+        // Classify storage errors - I/O errors get special handling
+        match &err {
+            redb::StorageError::Io(io_err) => Error::Io(io_err.to_string()),
+            redb::StorageError::Corrupted(_) => {
+                Error::Backend(format!("redb database corrupted: {}", err))
+            }
+            redb::StorageError::ValueTooLarge(_) => {
+                Error::Backend(format!("redb value too large: {}", err))
+            }
+            redb::StorageError::LockPoisoned(_) => Error::TxnConflict,
+            // Handle future variants (non-exhaustive enum)
+            _ => Error::Backend(format!("redb storage error: {}", err)),
+        }
     }
 }
 
 impl From<redb::CommitError> for Error {
     fn from(err: redb::CommitError) -> Self {
-        Error::Backend(format!("redb commit error: {}", err))
+        // Classify commit errors
+        match &err {
+            redb::CommitError::Storage(storage_err) => {
+                if let redb::StorageError::Io(io_err) = storage_err {
+                    Error::Io(io_err.to_string())
+                } else {
+                    Error::Backend(format!("redb commit storage error: {}", err))
+                }
+            }
+            // Handle future variants (non-exhaustive enum)
+            _ => Error::Backend(format!("redb commit error: {}", err)),
+        }
     }
 }
 
@@ -1530,6 +1587,8 @@ mod redb_specific_tests {
                 "Large value content should match"
             );
 
+            // Clean up transaction before closing
+            txn.discard();
             store.close().await.unwrap();
         }
 
@@ -1604,6 +1663,7 @@ mod redb_specific_tests {
             Some(b"value".to_vec()),
             "Store with custom cache should work normally"
         );
+        txn.discard();
     }
 
     #[tokio::test]
@@ -1766,5 +1826,170 @@ mod redb_specific_tests {
             }
             assert_eq!(count, 1000, "Should have 1000 keys after persistence");
         }
+    }
+
+    #[tokio::test]
+    async fn test_redb_drop_all_with_active_transactions() {
+        use crate::corekv::Dropable;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        // Setup initial data
+        {
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"key1", b"value1").await.unwrap();
+            txn.set(b"key2", b"value2").await.unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        // Start a read transaction before drop_all
+        let reader = store.new_txn(true).await.unwrap();
+
+        // Verify reader can see the data
+        assert_eq!(
+            reader.get(b"key1").await.unwrap(),
+            Some(b"value1".to_vec()),
+            "Reader should see initial data"
+        );
+
+        // drop_all should succeed even with active readers
+        // (redb allows this - readers see their snapshot, drop_all creates new state)
+        store.drop_all().await.unwrap();
+
+        // Reader should still see the snapshot data (MVCC isolation)
+        assert_eq!(
+            reader.get(b"key1").await.unwrap(),
+            Some(b"value1".to_vec()),
+            "Reader should still see snapshot data after drop_all"
+        );
+
+        // A new transaction should see empty store
+        let new_reader = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            new_reader.get(b"key1").await.unwrap(),
+            None,
+            "New reader should see empty store after drop_all"
+        );
+
+        // Clean up transactions before closing
+        reader.discard();
+        new_reader.discard();
+    }
+
+    #[tokio::test]
+    async fn test_redb_rapid_transaction_cycles() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let num_tasks = 50;
+        let cycles_per_task = 20;
+
+        let mut handles = vec![];
+
+        for task_id in 0..num_tasks {
+            let store = Arc::clone(&store);
+            let completed = Arc::clone(&completed);
+
+            handles.push(tokio::spawn(async move {
+                for cycle in 0..cycles_per_task {
+                    // Alternate between read-only and read-write transactions
+                    let readonly = cycle % 2 == 0;
+                    let txn = store.new_txn(readonly).await.unwrap();
+
+                    // Do some work
+                    if !readonly {
+                        let mut txn = txn;
+                        let key = format!("task_{}_cycle_{}", task_id, cycle);
+                        txn.set(key.as_bytes(), b"value").await.unwrap();
+
+                        // Alternate between commit and discard
+                        if cycle % 3 == 0 {
+                            txn.discard();
+                        } else {
+                            txn.commit().await.unwrap();
+                        }
+                    } else {
+                        // Read-only: just read and discard
+                        let _ = txn.has(b"some_key").await;
+                        txn.discard();
+                    }
+
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all cycles completed
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            num_tasks * cycles_per_task,
+            "All transaction cycles should complete"
+        );
+
+        // Verify no transactions are leaked
+        assert_eq!(
+            store.active_transaction_count(),
+            0,
+            "No active transactions should remain after all cycles complete"
+        );
+
+        // Store should close cleanly without timeout
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_redb_close_timeout_returns_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        // Create a transaction that we intentionally don't close
+        let _held_txn = store.new_txn(true).await.unwrap();
+
+        assert_eq!(
+            store.active_transaction_count(),
+            1,
+            "Should have one active transaction"
+        );
+
+        // Close should timeout and return an error (timeout is 5 seconds)
+        // We use a shorter test by checking the error is returned
+        let start = std::time::Instant::now();
+        let result = store.close().await;
+
+        // Verify that close took approximately 5 seconds (with some tolerance)
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_secs(4),
+            "Close should have waited at least 4 seconds, but took {:?}",
+            elapsed
+        );
+
+        // Verify error was returned
+        assert!(
+            result.is_err(),
+            "Close should return error when transactions are still active"
+        );
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Close timeout"),
+            "Error should mention timeout: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("transactions still active"),
+            "Error should mention active transactions: {}",
+            err_msg
+        );
     }
 }
