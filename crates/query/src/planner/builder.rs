@@ -2,13 +2,10 @@
 //!
 //! Converts Select operations into executable plan trees.
 
-use schema::CollectionVersion;
-
-/// Maximum allowed nesting depth for nested queries.
-/// Prevents stack overflow from deeply nested or circular query structures.
-const MAX_NESTING_DEPTH: usize = 10;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use schema::CollectionVersion;
 use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
@@ -20,6 +17,10 @@ use crate::plan::{
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
+
+/// Maximum allowed nesting depth for nested queries.
+/// Prevents stack overflow from deeply nested or circular query structures.
+const MAX_NESTING_DEPTH: usize = 10;
 
 /// Result of planning a query, containing both the plan and optional index scan info.
 pub struct PlanResult {

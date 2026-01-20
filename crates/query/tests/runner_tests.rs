@@ -2688,3 +2688,350 @@ async fn test_nested_query_allowed_when_no_acp_configured() {
     let users = result_data.get("Users").unwrap().as_array().unwrap();
     assert_eq!(users.len(), 1);
 }
+
+// =============================================================================
+// Complex Filter Tests on Nested Selections
+// =============================================================================
+
+#[tokio::test]
+async fn test_nested_query_with_and_filter_on_nested_selection() {
+    // Query: { Users { name posts(filter: {_and: [{title: {_like: "A%"}}, {title: {_ne: "Archived"}}]}) { title } } }
+    // Tests _and filter on nested selection
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add posts - some match both conditions, some match one, some match none
+    let mut post1 = Document::new();
+    post1.set("_docID", "post-1");
+    post1.set("title", "Amazing Post"); // Starts with A, not "Archived"
+    post1.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post1);
+
+    let mut post2 = Document::new();
+    post2.set("_docID", "post-2");
+    post2.set("title", "Archived"); // Starts with A, but IS "Archived"
+    post2.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post2);
+
+    let mut post3 = Document::new();
+    post3.set("_docID", "post-3");
+    post3.set("title", "Another Great"); // Starts with A, not "Archived"
+    post3.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post3);
+
+    let mut post4 = Document::new();
+    post4.set("_docID", "post-4");
+    post4.set("title", "Best Post"); // Doesn't start with A
+    post4.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post4);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query(
+            r#"{ Users { name posts(filter: {_and: [{title: {_like: "A%"}}, {title: {_ne: "Archived"}}]}) { title } } }"#,
+        )
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert_eq!(users.len(), 1);
+
+    let posts = users[0].get("posts").unwrap().as_array().unwrap();
+    // Only posts starting with A and NOT equal to "Archived" should be returned
+    assert_eq!(posts.len(), 2, "Expected 2 posts matching _and condition");
+
+    let titles: Vec<&str> = posts
+        .iter()
+        .map(|p| p.get("title").unwrap().as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Amazing Post"));
+    assert!(titles.contains(&"Another Great"));
+    assert!(!titles.contains(&"Archived"));
+    assert!(!titles.contains(&"Best Post"));
+}
+
+#[tokio::test]
+async fn test_nested_query_with_or_filter_on_nested_selection() {
+    // Query: { Users { name posts(filter: {_or: [{title: {_eq: "Post A"}}, {title: {_eq: "Post C"}}]}) { title } } }
+    // Tests _or filter on nested selection
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add posts
+    let mut post_a = Document::new();
+    post_a.set("_docID", "post-a");
+    post_a.set("title", "Post A");
+    post_a.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post_a);
+
+    let mut post_b = Document::new();
+    post_b.set("_docID", "post-b");
+    post_b.set("title", "Post B");
+    post_b.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post_b);
+
+    let mut post_c = Document::new();
+    post_c.set("_docID", "post-c");
+    post_c.set("title", "Post C");
+    post_c.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post_c);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query(
+            r#"{ Users { name posts(filter: {_or: [{title: {_eq: "Post A"}}, {title: {_eq: "Post C"}}]}) { title } } }"#,
+        )
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert_eq!(users.len(), 1);
+
+    let posts = users[0].get("posts").unwrap().as_array().unwrap();
+    // Only Post A and Post C should be returned
+    assert_eq!(posts.len(), 2, "Expected 2 posts matching _or condition");
+
+    let titles: Vec<&str> = posts
+        .iter()
+        .map(|p| p.get("title").unwrap().as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Post A"));
+    assert!(titles.contains(&"Post C"));
+    assert!(!titles.contains(&"Post B"));
+}
+
+#[tokio::test]
+async fn test_nested_query_with_not_filter_on_nested_selection() {
+    // Query: { Users { name posts(filter: {_not: {title: {_eq: "Draft"}}}) { title } } }
+    // Tests _not filter on nested selection
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add posts
+    let mut published = Document::new();
+    published.set("_docID", "post-1");
+    published.set("title", "Published Post");
+    published.set("author_id", "user-1");
+    fetcher.add_doc("Posts", published);
+
+    let mut draft = Document::new();
+    draft.set("_docID", "post-2");
+    draft.set("title", "Draft");
+    draft.set("author_id", "user-1");
+    fetcher.add_doc("Posts", draft);
+
+    let mut another = Document::new();
+    another.set("_docID", "post-3");
+    another.set("title", "Another Post");
+    another.set("author_id", "user-1");
+    fetcher.add_doc("Posts", another);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query(
+            r#"{ Users { name posts(filter: {_not: {title: {_eq: "Draft"}}}) { title } } }"#,
+        )
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert_eq!(users.len(), 1);
+
+    let posts = users[0].get("posts").unwrap().as_array().unwrap();
+    // All posts except "Draft" should be returned
+    assert_eq!(posts.len(), 2, "Expected 2 posts (not Draft)");
+
+    let titles: Vec<&str> = posts
+        .iter()
+        .map(|p| p.get("title").unwrap().as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Published Post"));
+    assert!(titles.contains(&"Another Post"));
+    assert!(!titles.contains(&"Draft"));
+}
+
+#[tokio::test]
+async fn test_nested_query_with_complex_combined_filter() {
+    // Query: { Users { name posts(filter: {_and: [{_or: [{title: {_like: "A%"}}, {title: {_like: "B%"}}]}, {_not: {title: {_eq: "Blocked"}}}]}) { title } } }
+    // Tests combined _and, _or, _not filter on nested selection
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add posts
+    let mut awesome = Document::new();
+    awesome.set("_docID", "post-1");
+    awesome.set("title", "Awesome");
+    awesome.set("author_id", "user-1");
+    fetcher.add_doc("Posts", awesome);
+
+    let mut brilliant = Document::new();
+    brilliant.set("_docID", "post-2");
+    brilliant.set("title", "Brilliant");
+    brilliant.set("author_id", "user-1");
+    fetcher.add_doc("Posts", brilliant);
+
+    let mut blocked = Document::new();
+    blocked.set("_docID", "post-3");
+    blocked.set("title", "Blocked"); // Starts with B but is excluded by _not
+    blocked.set("author_id", "user-1");
+    fetcher.add_doc("Posts", blocked);
+
+    let mut cool = Document::new();
+    cool.set("_docID", "post-4");
+    cool.set("title", "Cool"); // Doesn't start with A or B
+    cool.set("author_id", "user-1");
+    fetcher.add_doc("Posts", cool);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query(
+            r#"{ Users { name posts(filter: {_and: [{_or: [{title: {_like: "A%"}}, {title: {_like: "B%"}}]}, {_not: {title: {_eq: "Blocked"}}}]}) { title } } }"#,
+        )
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert_eq!(users.len(), 1);
+
+    let posts = users[0].get("posts").unwrap().as_array().unwrap();
+    // Only "Awesome" and "Brilliant" should be returned
+    // (starts with A or B) AND (not "Blocked")
+    assert_eq!(posts.len(), 2, "Expected 2 posts matching combined filter");
+
+    let titles: Vec<&str> = posts
+        .iter()
+        .map(|p| p.get("title").unwrap().as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Awesome"));
+    assert!(titles.contains(&"Brilliant"));
+    assert!(!titles.contains(&"Blocked"));
+    assert!(!titles.contains(&"Cool"));
+}
+
+#[tokio::test]
+async fn test_nested_query_empty_parent_collection() {
+    // Query: { Users { name posts { title } } }
+    // Tests that empty parent collection returns empty array (not error)
+
+    let fetcher = MockFetcher::new();
+
+    // Add posts but no users
+    let mut post = Document::new();
+    post.set("_docID", "post-1");
+    post.set("title", "Orphan Post");
+    post.set("author_id", "nonexistent-user");
+    fetcher.add_doc("Posts", post);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query("{ Users { name posts { title } } }")
+        .await
+        .unwrap();
+
+    let users = result.get("Users").unwrap().as_array().unwrap();
+    assert!(users.is_empty(), "Should return empty array for empty parent collection");
+}
+
+#[tokio::test]
+async fn test_nested_query_filter_on_nonexistent_field_returns_error() {
+    // Query: { Users { name posts(filter: { nonexistent_field: { _eq: "value" } }) { title } } }
+    // Tests that filter on non-existent field returns an error
+
+    let fetcher = MockFetcher::new();
+
+    // Add user
+    let mut alice = Document::new();
+    alice.set("_docID", "user-1");
+    alice.set("name", "Alice");
+    fetcher.add_doc("Users", alice);
+
+    // Add post
+    let mut post = Document::new();
+    post.set("_docID", "post-1");
+    post.set("title", "Test Post");
+    post.set("author_id", "user-1");
+    fetcher.add_doc("Posts", post);
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query(
+            r#"{ Users { name posts(filter: { nonexistent_field: { _eq: "value" } }) { title } } }"#,
+        )
+        .await;
+
+    // Should return an error for unknown field in filter
+    assert!(result.is_err(), "Should return error for filter on non-existent field");
+    let err = result.unwrap_err();
+    let err_msg = err.to_string().to_lowercase();
+    assert!(
+        err_msg.contains("unknown") || err_msg.contains("field") || err_msg.contains("not found"),
+        "Error should indicate unknown field: {}",
+        err
+    );
+}

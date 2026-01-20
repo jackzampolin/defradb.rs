@@ -128,15 +128,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                     doc_id,
                                 )
                                 .await
-                                .unwrap_or_else(|e| {
-                                    tracing::warn!(
-                                        doc_id = %doc_id,
-                                        identity = %identity_for_acp,
-                                        error = %e,
-                                        "ACP permission check failed during UPDATE, denying access"
-                                    );
-                                    false // Fail-closed on errors
-                                });
+                                .map_err(|e| {
+                                    QueryError::acp_check_failed("update", doc_id, e)
+                                })?;
 
                             if !has_permission {
                                 return Err(QueryError::permission_denied(format!(
@@ -168,15 +162,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                     doc_id,
                                 )
                                 .await
-                                .unwrap_or_else(|e| {
-                                    tracing::warn!(
-                                        doc_id = %doc_id,
-                                        identity = %identity_for_acp,
-                                        error = %e,
-                                        "ACP permission check failed during DELETE, denying access"
-                                    );
-                                    false // Fail-closed on errors
-                                });
+                                .map_err(|e| {
+                                    QueryError::acp_check_failed("delete", doc_id, e)
+                                })?;
 
                             if !has_permission {
                                 return Err(QueryError::permission_denied(format!(
@@ -279,14 +267,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                         let is_registered = acp
                             .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
                             .await
-                            .unwrap_or_else(|e| {
-                                tracing::warn!(
-                                    doc_id = %doc_id,
-                                    error = %e,
-                                    "Failed to check document registration status - assuming unregistered"
-                                );
-                                false
-                            });
+                            .map_err(|e| {
+                                QueryError::acp_registration_check_failed(doc_id, e)
+                            })?;
 
                         // Only register if not already registered (new document)
                         if !is_registered {

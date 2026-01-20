@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -110,17 +110,17 @@ impl TypeJoinOne {
     /// For primary joins, extracts the FK field value.
     /// For inverted joins, extracts the parent's `_docID`.
     ///
-    /// Logs a warning if the FK field exists but has an unexpected type.
-    /// Logs a debug message if the FK field is missing from the document.
+    /// Logs a warning if the FK field has an unexpected type or is missing.
     fn extract_fk(&self, parent_doc: &Doc) -> Option<String> {
         match &self.direction {
             JoinDirection::Inverted => {
                 // Secondary side: use parent's _docID as the lookup key
                 let doc_id = parent_doc.doc_id();
                 if doc_id.is_none() {
-                    debug!(
+                    warn!(
                         parent_collection = %self.parent_side.collection().name,
-                        "Parent document missing _docID for inverted join lookup"
+                        "Parent document missing _docID for inverted join lookup. \
+                         This may indicate data corruption or a schema mismatch."
                     );
                 }
                 doc_id.map(String::from)
@@ -130,12 +130,13 @@ impl TypeJoinOne {
                 let value = match parent_doc.get(*parent_fk_index) {
                     Some(v) => v,
                     None => {
-                        debug!(
+                        warn!(
                             parent_collection = %self.parent_side.collection().name,
                             relation_field = %self.parent_side.relation_field().name,
                             fk_index = parent_fk_index,
                             doc_id = ?parent_doc.doc_id(),
-                            "FK field not found at expected index in document"
+                            "FK field not found at expected index in document. \
+                             This may indicate a schema migration issue or document corruption."
                         );
                         return None;
                     }
