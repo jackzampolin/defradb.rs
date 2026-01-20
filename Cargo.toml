@@ -47,7 +47,7 @@ libp2p-bitswap-next = "0.26"
 multiaddr = "0.18"
 
 # Storage
-rocksdb = "0.24"
+redb = "2.4"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde"] }

@@ -2,7 +2,7 @@
 ///
 /// This crate provides the complete storage layer for DefraDB, including:
 /// - CoreKV abstraction layer for key-value operations
-/// - Multiple backend implementations (Memory, RocksDB)
+/// - Multiple backend implementations (Memory, Redb)
 /// - MVCC transactions with snapshot isolation
 /// - Six specialized stores with namespace isolation (plus RootStore foundation)
 /// - 27 key types for hierarchical organization across 6 stores
@@ -30,7 +30,7 @@
 ///     ↓
 /// Backend Implementation
 ///     ├── MemoryStore (testing)
-///     └── RocksDBStore (production)
+///     └── RedbStore (production, WASM-compatible)
 /// ```
 ///
 /// # Quick Start
@@ -62,7 +62,7 @@
 /// ## Phase 1: CoreKV Foundation ✅ (Complete)
 /// - CoreKV trait hierarchy
 /// - Memory backend
-/// - RocksDB backend
+/// - Redb backend (WASM-compatible)
 /// - Iterators with filtering
 /// - Transaction callbacks
 ///
@@ -107,7 +107,11 @@ pub mod stores;
 // See #19 for transaction wrapper module
 
 // Re-export commonly used types for convenience
-pub use backends::{MemoryStore, RocksDBStore};
+pub use backends::MemoryStore;
+
+#[cfg(feature = "redb")]
+pub use backends::RedbStore;
+
 pub use corekv::{
     Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer,
 };

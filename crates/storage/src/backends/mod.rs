@@ -9,40 +9,47 @@
 /// - **Memory**: Fast in-memory storage using BTreeMap. Suitable for testing,
 ///   development, and ephemeral caches. Data is lost when the process exits.
 ///
-/// - **RocksDB**: Production-ready persistent storage using RocksDB (an LSM-tree
-///   based key-value store). Suitable for production deployments requiring
-///   persistence and high performance.
+/// - **Redb** (default): Pure Rust persistent storage using redb. WASM-compatible,
+///   ACID transactions with snapshot isolation. Suitable for production deployments.
 ///
 /// # Choosing a Backend
 ///
-/// | Feature | Memory | RocksDB |
-/// |---------|--------|---------|
+/// | Feature | Memory | Redb |
+/// |---------|--------|------|
 /// | Persistence | No | Yes |
+/// | WASM Support | Yes | Yes |
 /// | Performance | Very Fast | Fast |
 /// | Memory Usage | High (all in RAM) | Configurable |
-/// | Crash Recovery | No | Yes (WAL) |
+/// | Crash Recovery | No | Yes |
 /// | Concurrent Access | Yes | Yes |
 /// | ACID Transactions | Yes | Yes |
-/// | Snapshot Isolation | Yes (MVCC) | Yes (RocksDB snapshots) |
+/// | Snapshot Isolation | Yes (MVCC) | Yes |
 /// | Use Case | Testing, Dev | Production |
 ///
 /// # Example
 ///
 /// ```ignore
-/// use storage::backends::{MemoryStore, RocksDBStore};
+/// use storage::backends::MemoryStore;
 /// use storage::corekv::Store;
 ///
 /// // For testing
 /// let memory_store = MemoryStore::new();
 ///
-/// // For production
-/// let rocksdb_store = RocksDBStore::open("/path/to/db")?;
+/// #[cfg(feature = "redb")]
+/// {
+///     use storage::backends::RedbStore;
+///     let redb_store = RedbStore::open("/path/to/db")?;
+/// }
 /// ```
 pub mod memory;
-pub mod rocksdb;
+
+#[cfg(feature = "redb")]
+pub mod redb;
 
 #[cfg(test)]
 pub mod test_suite;
 
 pub use memory::MemoryStore;
-pub use rocksdb::RocksDBStore;
+
+#[cfg(feature = "redb")]
+pub use redb::RedbStore;

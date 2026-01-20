@@ -83,7 +83,6 @@ pub trait Reader: Send + Sync {
     /// # Note
     ///
     /// Some backends may need to read the entire value to determine its size.
-    /// RocksDB can determine size without reading the value in some cases.
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>>;
 
     /// Create an iterator over key-value pairs.

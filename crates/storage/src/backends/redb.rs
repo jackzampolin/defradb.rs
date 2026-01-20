@@ -1,38 +1,45 @@
-/// In-memory backend implementation using BTreeMap.
+/// Redb backend implementation with snapshot isolation and ACID transactions.
 ///
-/// This backend provides a simple, fast, in-memory key-value store suitable for
-/// testing and development. It uses a BTreeMap for ordered storage and supports
-/// full MVCC transactions with snapshot isolation.
+/// This backend provides a pure Rust, WASM-compatible persistent key-value store
+/// using redb. It uses read snapshots for isolation and buffered writes for
+/// read-your-writes consistency within transactions.
 ///
 /// # Features
 ///
-/// - Ordered key-value storage with BTreeMap
-/// - Full transaction support with snapshot isolation
-/// - Concurrent read access with RwLock
-/// - Zero persistence (data lost on process exit)
-/// - No external dependencies beyond standard library
+/// - Pure Rust implementation (no C/C++ dependencies)
+/// - WASM-compatible
+/// - ACID transactions with snapshot isolation
+/// - Persistent storage with crash recovery
+/// - Single-writer model (matches Go DefraDB's LevelDB semantics)
+///
+/// # MVCC Behavior
+///
+/// When a transaction is created, it captures a snapshot of the database state.
+/// All reads within the transaction see the database state as it was at that moment,
+/// regardless of concurrent writes by other transactions.
 ///
 /// # Use Cases
 ///
-/// - Unit testing
-/// - Integration testing
-/// - Development and prototyping
-/// - Ephemeral caches
+/// - Production deployments requiring WASM compatibility
+/// - Embedded applications
+/// - Cross-platform storage
 ///
 /// # Example
 ///
 /// ```ignore
-/// use storage::backends::memory::MemoryStore;
+/// use storage::backends::redb::RedbStore;
 /// use storage::corekv::{Store, Reader, Writer};
 ///
-/// let store = MemoryStore::new();
+/// let store = RedbStore::open("/path/to/db")?;
 /// let mut txn = store.new_txn(false).await?;
 /// txn.set(b"key", b"value").await?;
 /// txn.commit().await?;
 /// ```
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use redb::{Database, ReadTransaction, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -41,23 +48,45 @@ use crate::corekv::{
     TxnCallback, Writer,
 };
 
-/// In-memory key-value store using BTreeMap.
+/// Table definition for the main key-value store.
+const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
+
+/// Redb-backed key-value store.
 ///
-/// Data is stored in a BTreeMap wrapped in Arc<RwLock<>> for thread-safe
-/// concurrent access. The store provides snapshot isolation for transactions.
-#[derive(Clone)]
-pub struct MemoryStore {
-    data: Arc<RwLock<BTreeMap<Vec<u8>, Vec<u8>>>>,
+/// This store wraps a redb Database instance and provides MVCC transaction
+/// support through snapshots and buffered writes.
+pub struct RedbStore {
+    db: Arc<Database>,
     closed: Arc<RwLock<bool>>,
 }
 
-impl MemoryStore {
-    /// Create a new empty memory store.
-    pub fn new() -> Self {
-        Self {
-            data: Arc::new(RwLock::new(BTreeMap::new())),
-            closed: Arc::new(RwLock::new(false)),
+impl RedbStore {
+    /// Open a redb database at the specified path.
+    ///
+    /// If the database doesn't exist, it will be created.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the database file
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(RedbStore)` on success
+    /// * `Err(Error)` if the database cannot be opened
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let db = Database::create(path)?;
+
+        // Ensure the KV table exists by opening a write transaction
+        {
+            let write_txn = db.begin_write()?;
+            let _ = write_txn.open_table(KV_TABLE)?;
+            write_txn.commit()?;
         }
+
+        Ok(Self {
+            db: Arc::new(db),
+            closed: Arc::new(RwLock::new(false)),
+        })
     }
 
     /// Check if the store is closed.
@@ -66,24 +95,19 @@ impl MemoryStore {
     }
 }
 
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
-impl Store for MemoryStore {
+impl Store for RedbStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         if self.is_closed().await {
             return Err(Error::DBClosed);
         }
 
-        // Take a snapshot of current data for isolation
-        let snapshot = self.data.read().await.clone();
+        // Capture a snapshot for read isolation
+        let read_txn = self.db.begin_read()?;
+        let snapshot = capture_snapshot(&read_txn)?;
 
-        Ok(Box::new(MemoryTxn {
-            store: Arc::clone(&self.data),
+        Ok(Box::new(RedbTxn {
+            db: Arc::clone(&self.db),
             snapshot,
             pending: Mutex::new(BTreeMap::new()),
             readonly,
@@ -105,26 +129,60 @@ impl Store for MemoryStore {
 }
 
 #[async_trait]
-impl Dropable for MemoryStore {
+impl Dropable for RedbStore {
     async fn drop_all(&self) -> Result<()> {
         if self.is_closed().await {
             return Err(Error::DBClosed);
         }
 
-        // Clear all data
-        let mut data = self.data.write().await;
-        data.clear();
+        // Open a write transaction and delete all entries
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(KV_TABLE)?;
+            // Collect all keys first to avoid borrow issues
+            let keys: Vec<Vec<u8>> = {
+                let range = table.range::<&[u8]>(..)?;
+                range
+                    .map(|result| result.map(|(k, _)| k.value().to_vec()))
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            // Delete all keys
+            for key in keys {
+                table.remove(key.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+
         Ok(())
     }
 }
 
-/// In-memory transaction with snapshot isolation.
+/// Capture a snapshot of the current database state into memory.
+fn capture_snapshot(read_txn: &ReadTransaction) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+    let mut snapshot = BTreeMap::new();
+
+    let table = match read_txn.open_table(KV_TABLE) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(snapshot),
+        Err(e) => return Err(e.into()),
+    };
+
+    let range = table.range::<&[u8]>(..)?;
+    for result in range {
+        let (key, value) = result?;
+        snapshot.insert(key.value().to_vec(), value.value().to_vec());
+    }
+
+    Ok(snapshot)
+}
+
+/// Redb transaction with snapshot isolation and buffered writes.
 ///
 /// Transactions maintain a snapshot of the store at creation time and track
 /// pending changes. Changes are applied atomically on commit.
-struct MemoryTxn {
-    /// Reference to the store's data
-    store: Arc<RwLock<BTreeMap<Vec<u8>, Vec<u8>>>>,
+struct RedbTxn {
+    /// Reference to the redb database
+    db: Arc<Database>,
 
     /// Snapshot of store at transaction start (for reads)
     snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -151,7 +209,7 @@ struct MemoryTxn {
     on_discard_async: Mutex<Vec<AsyncTxnCallback>>,
 }
 
-impl MemoryTxn {
+impl RedbTxn {
     /// Get a value, checking pending changes first, then snapshot.
     fn get_internal(&self, key: &[u8]) -> Option<Vec<u8>> {
         // Check pending changes first
@@ -177,9 +235,6 @@ impl MemoryTxn {
     }
 
     /// Execute sync callbacks with panic protection.
-    ///
-    /// Each callback is wrapped in catch_unwind to ensure that a panic in one
-    /// callback doesn't prevent execution of subsequent callbacks.
     fn execute_callbacks(callbacks: Vec<TxnCallback>) {
         for (i, callback) in callbacks.into_iter().enumerate() {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
@@ -194,14 +249,11 @@ impl MemoryTxn {
     }
 
     /// Execute async callbacks with panic protection.
-    ///
-    /// Each callback is executed sequentially with panic catching via FutureExt::catch_unwind.
     async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) {
         use futures::FutureExt;
 
         for (i, callback) in callbacks.into_iter().enumerate() {
             let future = callback();
-            // Wrap the future in AssertUnwindSafe and catch panics
             let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
             if let Err(panic_info) = result {
                 tracing::error!(
@@ -215,7 +267,7 @@ impl MemoryTxn {
 }
 
 #[async_trait]
-impl Reader for MemoryTxn {
+impl Reader for RedbTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
@@ -271,12 +323,12 @@ impl Reader for MemoryTxn {
             }
         }
 
-        Ok(Box::new(MemoryIterator::new(merged, opts)?))
+        Ok(Box::new(RedbIterator::new(merged, opts)?))
     }
 }
 
 #[async_trait]
-impl Writer for MemoryTxn {
+impl Writer for RedbTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
@@ -315,10 +367,9 @@ impl Writer for MemoryTxn {
 }
 
 #[async_trait]
-impl Txn for MemoryTxn {
+impl Txn for RedbTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
         if *self.discarded.lock() {
-            // Execute error callbacks before returning error
             let on_error = std::mem::take(&mut *self.on_error.lock());
             let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
             Self::execute_callbacks(on_error);
@@ -326,22 +377,66 @@ impl Txn for MemoryTxn {
             return Err(Error::DiscardedTxn);
         }
 
-        // Clone pending changes before awaiting (can't hold MutexGuard across await)
+        // Clone pending changes before any async operations
         let pending = self.pending.lock().clone();
 
-        // Apply pending changes to store
+        // Apply pending changes to the database if there are any
         if !pending.is_empty() {
-            let mut store = self.store.write().await;
+            let write_txn = match self.db.begin_write() {
+                Ok(txn) => txn,
+                Err(e) => {
+                    let on_error = std::mem::take(&mut *self.on_error.lock());
+                    let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
+                    Self::execute_callbacks(on_error);
+                    Self::execute_async_callbacks(on_error_async).await;
+                    return Err(e.into());
+                }
+            };
 
-            for (key, value) in pending.iter() {
-                match value {
-                    Some(v) => {
-                        store.insert(key.clone(), v.clone());
+            {
+                let mut table = match write_txn.open_table(KV_TABLE) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let on_error = std::mem::take(&mut *self.on_error.lock());
+                        let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
+                        Self::execute_callbacks(on_error);
+                        Self::execute_async_callbacks(on_error_async).await;
+                        return Err(e.into());
                     }
-                    None => {
-                        store.remove(key);
+                };
+
+                for (key, value) in pending.iter() {
+                    match value {
+                        Some(v) => {
+                            if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
+                                let on_error = std::mem::take(&mut *self.on_error.lock());
+                                let on_error_async =
+                                    std::mem::take(&mut *self.on_error_async.lock());
+                                Self::execute_callbacks(on_error);
+                                Self::execute_async_callbacks(on_error_async).await;
+                                return Err(e.into());
+                            }
+                        }
+                        None => {
+                            if let Err(e) = table.remove(key.as_slice()) {
+                                let on_error = std::mem::take(&mut *self.on_error.lock());
+                                let on_error_async =
+                                    std::mem::take(&mut *self.on_error_async.lock());
+                                Self::execute_callbacks(on_error);
+                                Self::execute_async_callbacks(on_error_async).await;
+                                return Err(e.into());
+                            }
+                        }
                     }
                 }
+            }
+
+            if let Err(e) = write_txn.commit() {
+                let on_error = std::mem::take(&mut *self.on_error.lock());
+                let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
+                Self::execute_callbacks(on_error);
+                Self::execute_async_callbacks(on_error_async).await;
+                return Err(e.into());
             }
         }
 
@@ -370,8 +465,6 @@ impl Txn for MemoryTxn {
                 "Transaction has async discard callbacks. Spawning in background - they may not complete if process exits. Consider using commit() instead of discard() when async callbacks are registered."
             );
 
-            // Spawn async callbacks in background with error tracking
-            // NOTE: These may not complete if the process exits before they finish
             tokio::spawn(async move {
                 Self::execute_async_callbacks(on_discard_async).await;
                 tracing::debug!(count = callback_count, "Async discard callbacks completed");
@@ -416,8 +509,8 @@ impl Txn for MemoryTxn {
     }
 }
 
-/// Iterator over in-memory key-value pairs.
-struct MemoryIterator {
+/// Iterator over redb key-value pairs.
+struct RedbIterator {
     /// Sorted vector of key-value pairs
     data: Vec<(Vec<u8>, Vec<u8>)>,
 
@@ -434,7 +527,7 @@ struct MemoryIterator {
     reverse: bool,
 }
 
-impl MemoryIterator {
+impl RedbIterator {
     fn new(data: BTreeMap<Vec<u8>, Vec<u8>>, opts: IterOptions) -> Result<Self> {
         // Apply filters and convert to Vec
         let mut filtered: Vec<_> = data
@@ -482,7 +575,7 @@ impl MemoryIterator {
 }
 
 #[async_trait]
-impl Iterator for MemoryIterator {
+impl Iterator for RedbIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {
         if self.closed {
             return Err(Error::Iterator("Iterator has been closed".into()));
@@ -513,18 +606,13 @@ impl Iterator for MemoryIterator {
         }
 
         // Find the position to seek to based on iteration direction.
-        // For forward iteration: find first key >= seek_key
-        // For reverse iteration: find first key <= seek_key
-        //
-        // The data is stored in iteration order (reversed for reverse mode),
-        // so in reverse mode we're looking for k <= key in descending order.
         let pos = if self.reverse {
             // Reverse mode: data is [k4, k3, k2, k1] (descending)
-            // seek(k2) should find the first key <= k2, which is k2 at position 2
+            // seek(k2) should find the first key <= k2
             self.data.iter().position(|(k, _)| k.as_slice() <= key)
         } else {
             // Forward mode: data is [k1, k2, k3, k4] (ascending)
-            // seek(k2) should find the first key >= k2, which is k2 at position 1
+            // seek(k2) should find the first key >= k2
             self.data.iter().position(|(k, _)| k.as_slice() >= key)
         };
 
@@ -555,6 +643,43 @@ impl Iterator for MemoryIterator {
     }
 }
 
+// Convert redb errors to our error type
+impl From<redb::Error> for Error {
+    fn from(err: redb::Error) -> Self {
+        Error::Backend(err.to_string())
+    }
+}
+
+impl From<redb::DatabaseError> for Error {
+    fn from(err: redb::DatabaseError) -> Self {
+        Error::Backend(err.to_string())
+    }
+}
+
+impl From<redb::TransactionError> for Error {
+    fn from(err: redb::TransactionError) -> Self {
+        Error::Backend(err.to_string())
+    }
+}
+
+impl From<redb::TableError> for Error {
+    fn from(err: redb::TableError) -> Self {
+        Error::Backend(err.to_string())
+    }
+}
+
+impl From<redb::StorageError> for Error {
+    fn from(err: redb::StorageError) -> Self {
+        Error::Backend(err.to_string())
+    }
+}
+
+impl From<redb::CommitError> for Error {
+    fn from(err: redb::CommitError) -> Self {
+        Error::Backend(err.to_string())
+    }
+}
+
 // ============================================================================
 // SHARED TEST SUITE - Run same tests against all backends
 // ============================================================================
@@ -564,13 +689,20 @@ mod shared_tests {
     use crate::generate_backend_concurrency_tests;
     use crate::generate_backend_dropable_tests;
     use crate::generate_backend_tests;
+    use tempfile::TempDir;
 
-    async fn create_store() -> MemoryStore {
-        MemoryStore::new()
+    async fn create_store() -> RedbStore {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.redb");
+        std::mem::forget(temp_dir); // Prevent cleanup until test ends
+        RedbStore::open(&path).unwrap()
     }
 
-    async fn create_arc_store() -> Arc<MemoryStore> {
-        Arc::new(MemoryStore::new())
+    async fn create_arc_store() -> Arc<RedbStore> {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.redb");
+        std::mem::forget(temp_dir);
+        Arc::new(RedbStore::open(&path).unwrap())
     }
 
     // Generate all standard backend tests
@@ -579,125 +711,140 @@ mod shared_tests {
     // Generate concurrency tests
     generate_backend_concurrency_tests!(create_arc_store);
 
-    // Generate Dropable tests (MemoryStore implements Dropable)
+    // Generate Dropable tests (RedbStore implements Dropable)
     generate_backend_dropable_tests!(create_store);
 }
 
 // ============================================================================
-// MEMORY-SPECIFIC TESTS - Tests unique to MemoryStore behavior
+// REDB-SPECIFIC TESTS - Persistence and specific behaviors
 // ============================================================================
 #[cfg(test)]
-mod memory_specific_tests {
+mod redb_specific_tests {
     use super::*;
+    use tempfile::TempDir;
 
-    /// Test MVCC snapshot isolation
-    ///
-    /// MemoryStore provides true MVCC snapshot isolation where readers
-    /// get a snapshot at transaction start and never see concurrent commits.
     #[tokio::test]
-    async fn test_memory_snapshot_isolation() {
-        let store = Arc::new(MemoryStore::new());
+    async fn test_redb_data_survives_close_reopen() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.redb");
 
-        // Setup: write initial value
-        let mut setup_txn = store.new_txn(false).await.unwrap();
-        setup_txn.set(b"key", b"initial_value").await.unwrap();
-        setup_txn.commit().await.unwrap();
-
-        // Start reader transaction (gets snapshot with initial value)
-        let reader = store.new_txn(true).await.unwrap();
-
-        // Concurrent writer modifies and commits
-        let mut writer = store.new_txn(false).await.unwrap();
-        writer.set(b"key", b"modified_value").await.unwrap();
-        writer.commit().await.unwrap();
-
-        // Reader should STILL see initial value (true MVCC snapshot isolation)
-        assert_eq!(
-            reader.get(b"key").await.unwrap(),
-            Some(b"initial_value".to_vec()),
-            "MemoryStore reader should maintain snapshot isolation"
-        );
-
-        // New reader sees committed value
-        let new_reader = store.new_txn(true).await.unwrap();
-        assert_eq!(
-            new_reader.get(b"key").await.unwrap(),
-            Some(b"modified_value".to_vec())
-        );
-    }
-
-    /// Test concurrent delete with snapshot isolation
-    #[tokio::test]
-    async fn test_memory_snapshot_preserves_deleted_keys() {
-        let store = Arc::new(MemoryStore::new());
-
-        // Setup
-        let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"to_delete", b"exists").await.unwrap();
-        txn.commit().await.unwrap();
-
-        // Reader starts (snapshot has the key)
-        let reader = store.new_txn(true).await.unwrap();
-
-        // Deleter runs concurrently
-        let mut deleter = store.new_txn(false).await.unwrap();
-        deleter.delete(b"to_delete").await.unwrap();
-        deleter.commit().await.unwrap();
-
-        // Reader should still see the key (snapshot isolation)
-        assert_eq!(
-            reader.get(b"to_delete").await.unwrap(),
-            Some(b"exists".to_vec()),
-            "Reader snapshot should preserve deleted key"
-        );
-
-        // New transaction sees deletion
-        let new_txn = store.new_txn(true).await.unwrap();
-        assert_eq!(
-            new_txn.get(b"to_delete").await.unwrap(),
-            None,
-            "New transaction should see deletion"
-        );
-    }
-
-    /// Stress test: 50 parallel transactions
-    #[tokio::test]
-    async fn test_memory_parallel_commits_stress() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let store = Arc::new(MemoryStore::new());
-        let commit_count = Arc::new(AtomicUsize::new(0));
-        let mut handles = vec![];
-
-        for i in 0..50 {
-            let store = store.clone();
-            let commit_count = commit_count.clone();
-            handles.push(tokio::spawn(async move {
-                let mut txn = store.new_txn(false).await.unwrap();
-                txn.set(format!("stress_key_{}", i).as_bytes(), b"value")
-                    .await
-                    .unwrap();
-                txn.commit().await.unwrap();
-                commit_count.fetch_add(1, Ordering::SeqCst);
-            }));
+        // Write data and close
+        {
+            let store = RedbStore::open(&path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"persistent_key", b"persistent_value")
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            store.close().await.unwrap();
         }
 
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        assert_eq!(commit_count.load(Ordering::SeqCst), 50);
-
-        // Verify all 50 keys exist
-        let txn = store.new_txn(true).await.unwrap();
-        for i in 0..50 {
-            assert!(
-                txn.has(format!("stress_key_{}", i).as_bytes())
-                    .await
-                    .unwrap(),
-                "Key {} should exist after concurrent commits",
-                i
+        // Reopen and verify
+        {
+            let store = RedbStore::open(&path).unwrap();
+            let txn = store.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"persistent_key").await.unwrap(),
+                Some(b"persistent_value".to_vec()),
+                "Data should survive close/reopen"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_redb_uncommitted_data_lost_on_reopen() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.redb");
+
+        // Write data but DON'T commit
+        {
+            let store = RedbStore::open(&path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"uncommitted_key", b"value").await.unwrap();
+            // No commit! Discard.
+            txn.discard();
+            store.close().await.unwrap();
+        }
+
+        // Reopen - uncommitted data should be gone
+        {
+            let store = RedbStore::open(&path).unwrap();
+            let txn = store.new_txn(true).await.unwrap();
+            assert_eq!(
+                txn.get(b"uncommitted_key").await.unwrap(),
+                None,
+                "Uncommitted data should not survive reopen"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_persistence_through_multiple_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.redb");
+
+        // Session 1: Write keys
+        {
+            let store = RedbStore::open(&path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"key1", b"value1").await.unwrap();
+            txn.set(b"key2", b"value2").await.unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        // Session 2: Modify and add
+        {
+            let store = RedbStore::open(&path).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.set(b"key1", b"modified").await.unwrap();
+            txn.set(b"key3", b"value3").await.unwrap();
+            txn.delete(b"key2").await.unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        // Session 3: Verify all changes
+        {
+            let store = RedbStore::open(&path).unwrap();
+            let txn = store.new_txn(true).await.unwrap();
+            assert_eq!(txn.get(b"key1").await.unwrap(), Some(b"modified".to_vec()));
+            assert_eq!(txn.get(b"key2").await.unwrap(), None);
+            assert_eq!(txn.get(b"key3").await.unwrap(), Some(b"value3".to_vec()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redb_snapshot_isolation() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
+
+        // Setup initial value
+        let mut setup = store.new_txn(false).await.unwrap();
+        setup.set(b"key", b"initial").await.unwrap();
+        setup.commit().await.unwrap();
+
+        // Start a reader BEFORE the write
+        let reader = store.new_txn(true).await.unwrap();
+
+        // Concurrent writer commits
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(b"key", b"modified").await.unwrap();
+        writer.commit().await.unwrap();
+
+        // Reader should see the ORIGINAL value (snapshot isolation)
+        let value = reader.get(b"key").await.unwrap();
+        assert_eq!(
+            value,
+            Some(b"initial".to_vec()),
+            "Reader should see original value (snapshot isolation)"
+        );
+
+        // A new reader should see the modified value
+        let new_reader = store.new_txn(true).await.unwrap();
+        let new_value = new_reader.get(b"key").await.unwrap();
+        assert_eq!(
+            new_value,
+            Some(b"modified".to_vec()),
+            "New reader should see committed changes"
+        );
     }
 }

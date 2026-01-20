@@ -8,7 +8,11 @@
 /// - Systemstore: Metadata and configuration
 /// - Peerstore: Peer and replication metadata
 /// - Encstore: Encrypted blocks (uses blockstore implementation)
-use crate::backends::{MemoryStore, RocksDBStore};
+use crate::backends::MemoryStore;
+
+#[cfg(feature = "redb")]
+use crate::backends::RedbStore;
+
 use crate::corekv::{Result, Store};
 use crate::stores::{
     blockstore::Blockstore, datastore::Datastore, headstore::Headstore, peerstore::Peerstore,
@@ -72,13 +76,15 @@ impl MemoryMultistore {
     }
 }
 
-/// Multistore specialized for RocksDBStore
-pub type RocksDBMultistore = Multistore<RocksDBStore>;
+/// Multistore specialized for RedbStore
+#[cfg(feature = "redb")]
+pub type RedbMultistore = Multistore<RedbStore>;
 
-impl RocksDBMultistore {
-    /// Create a new RocksDB-backed Multistore
-    pub fn new_rocksdb(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let store = Arc::new(RocksDBStore::open(path)?);
+#[cfg(feature = "redb")]
+impl RedbMultistore {
+    /// Create a new Redb-backed Multistore
+    pub fn new_redb(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let store = Arc::new(RedbStore::open(path)?);
         Ok(Self::new(store))
     }
 }

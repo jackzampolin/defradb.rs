@@ -2,7 +2,7 @@
 ///
 /// This module provides a complete abstraction layer for key-value storage operations,
 /// inspired by the Go corekv package. It defines a set of traits that allow for multiple
-/// backend implementations (RocksDB, Memory, etc.) while providing a consistent API.
+/// backend implementations (Redb, Memory, etc.) while providing a consistent API.
 ///
 /// # Architecture
 ///
@@ -28,14 +28,14 @@
 /// - **MVCC Transactions**: Support for serializable snapshot isolation
 /// - **Callbacks**: Transaction lifecycle hooks for success, error, and discard events
 /// - **Iteration**: Flexible iteration with prefix, range, and reverse support
-/// - **Backend Agnostic**: Works with RocksDB, in-memory, or custom backends
+/// - **Backend Agnostic**: Works with Redb, in-memory, or custom backends
 ///
 /// # Example
 ///
 /// ```ignore
 /// use storage::corekv::{Store, Reader, Writer, IterOptions};
 ///
-/// // Create a store (memory or RocksDB)
+/// // Create a store (memory or redb)
 /// let store = MemoryStore::new();
 ///
 /// // Create a transaction

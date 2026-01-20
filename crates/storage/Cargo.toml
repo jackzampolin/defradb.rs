@@ -19,7 +19,7 @@ async-trait.workspace = true
 futures.workspace = true
 
 # Storage backend
-rocksdb.workspace = true
+redb = { workspace = true, optional = true }
 
 # Serialization
 serde.workspace = true
@@ -39,6 +39,10 @@ tracing.workspace = true
 # Utilities
 hex = "0.4"
 parking_lot = "0.12"
+
+[features]
+default = ["redb"]
+redb = ["dep:redb"]
 
 [dev-dependencies]
 proptest.workspace = true

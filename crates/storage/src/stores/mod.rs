@@ -22,7 +22,10 @@ pub mod systemstore;
 pub use blockstore::Blockstore;
 pub use datastore::{Datastore, CHUNK_SIZE};
 pub use headstore::Headstore;
-pub use multistore::{MemoryMultistore, Multistore, RocksDBMultistore};
+pub use multistore::{MemoryMultistore, Multistore};
 pub use peerstore::Peerstore;
 pub use rootstore::RootStore;
 pub use systemstore::Systemstore;
+
+#[cfg(feature = "redb")]
+pub use multistore::RedbMultistore;
