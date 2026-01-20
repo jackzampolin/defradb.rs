@@ -129,6 +129,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 )
                                 .await
                                 .map_err(|e| {
+                                    tracing::warn!(
+                                        doc_id = %doc_id,
+                                        identity = %identity_for_acp,
+                                        error = %e,
+                                        "ACP permission check failed during UPDATE - propagating error"
+                                    );
                                     QueryError::acp_check_failed("update", doc_id, e)
                                 })?;
 
@@ -163,6 +169,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 )
                                 .await
                                 .map_err(|e| {
+                                    tracing::warn!(
+                                        doc_id = %doc_id,
+                                        identity = %identity_for_acp,
+                                        error = %e,
+                                        "ACP permission check failed during DELETE - propagating error"
+                                    );
                                     QueryError::acp_check_failed("delete", doc_id, e)
                                 })?;
 
@@ -268,6 +280,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                             .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
                             .await
                             .map_err(|e| {
+                                tracing::warn!(
+                                    doc_id = %doc_id,
+                                    policy_id = %policy.id,
+                                    error = %e,
+                                    "Failed to check ACP registration status - propagating error"
+                                );
                                 QueryError::acp_registration_check_failed(doc_id, e)
                             })?;
 

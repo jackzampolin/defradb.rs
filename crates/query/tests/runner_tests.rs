@@ -2988,7 +2988,10 @@ async fn test_nested_query_empty_parent_collection() {
         .unwrap();
 
     let users = result.get("Users").unwrap().as_array().unwrap();
-    assert!(users.is_empty(), "Should return empty array for empty parent collection");
+    assert!(
+        users.is_empty(),
+        "Should return empty array for empty parent collection"
+    );
 }
 
 #[tokio::test]
@@ -3026,7 +3029,10 @@ async fn test_nested_query_filter_on_nonexistent_field_returns_error() {
         .await;
 
     // Should return an error for unknown field in filter
-    assert!(result.is_err(), "Should return error for filter on non-existent field");
+    assert!(
+        result.is_err(),
+        "Should return error for filter on non-existent field"
+    );
     let err = result.unwrap_err();
     let err_msg = err.to_string().to_lowercase();
     assert!(
@@ -3034,4 +3040,523 @@ async fn test_nested_query_filter_on_nonexistent_field_returns_error() {
         "Error should indicate unknown field: {}",
         err
     );
+}
+
+// =============================================================================
+// ACP Error Propagation Tests
+// =============================================================================
+
+/// ACP implementation that returns storage errors on check_doc_access.
+/// Used to verify that ACP errors are properly propagated rather than silently swallowed.
+struct FailingAcp {
+    error_message: String,
+}
+
+impl FailingAcp {
+    fn new(message: &str) -> Self {
+        Self {
+            error_message: message.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl DocumentACP for FailingAcp {
+    async fn register_doc_object(
+        &self,
+        _identity: &Did,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+
+    async fn is_doc_registered(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        // Return error to simulate storage failure
+        Err(acp::Error::Storage(self.error_message.clone()))
+    }
+
+    async fn check_doc_access(
+        &self,
+        _identity: &acp::Identity,
+        _permission: acp::DocumentPermission,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        // Return error to simulate storage failure
+        Err(acp::Error::Storage(self.error_message.clone()))
+    }
+
+    async fn add_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+    ) -> acp::Result<bool> {
+        Ok(true)
+    }
+
+    async fn delete_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+    ) -> acp::Result<bool> {
+        Ok(true)
+    }
+
+    async fn unregister_doc_object(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+}
+
+/// ACP implementation that denies all access (returns Ok(false) for check_doc_access).
+/// Used to verify permission denied scenarios work correctly.
+struct DenyingAcp;
+
+#[async_trait]
+impl DocumentACP for DenyingAcp {
+    async fn register_doc_object(
+        &self,
+        _identity: &Did,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+
+    async fn is_doc_registered(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        // Document is registered, so ACP checks will be performed
+        Ok(true)
+    }
+
+    async fn check_doc_access(
+        &self,
+        _identity: &acp::Identity,
+        _permission: acp::DocumentPermission,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        // Deny all access
+        Ok(false)
+    }
+
+    async fn add_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+    ) -> acp::Result<bool> {
+        Ok(true)
+    }
+
+    async fn delete_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+    ) -> acp::Result<bool> {
+        Ok(true)
+    }
+
+    async fn unregister_doc_object(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_mutation_update_acp_error_propagates() {
+    // When ACP check_doc_access returns an error, it should propagate
+    // rather than being silently swallowed.
+
+    let fetcher = MockFetcher::new();
+    let mutator = Arc::new(MockMutator::new());
+
+    // Add a document to update
+    let mut doc = Document::new();
+    doc.set("_docID", "doc-1");
+    doc.set("name", "Alice");
+    doc.set("age", 30i64);
+    mutator.add_doc("Users", doc.clone());
+    fetcher.add_doc("Users", doc);
+
+    let runner = QueryRunner::new(fetcher, vec![make_acp_collection()])
+        .with_mutator(mutator)
+        .with_acp(Arc::new(FailingAcp::new("connection refused")));
+
+    let result = runner
+        .execute_mutation_with_identity(
+            r#"mutation { update_Users(docIDs: ["doc-1"], input: { name: "Bob" }) { name } }"#,
+            Some(test_acp_did()),
+        )
+        .await;
+
+    // Should fail with ACP error, not permission denied
+    assert!(result.is_err(), "Expected ACP error to propagate");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ACP") && err.contains("check failed"),
+        "Error should indicate ACP check failed (not generic permission denied). Got: {}",
+        err
+    );
+    assert!(
+        err.contains("connection refused"),
+        "Error should contain the underlying error message. Got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_mutation_delete_acp_error_propagates() {
+    // When ACP check_doc_access returns an error during DELETE, it should propagate.
+
+    let fetcher = MockFetcher::new();
+    let mutator = Arc::new(MockMutator::new());
+
+    // Add a document to delete
+    let mut doc = Document::new();
+    doc.set("_docID", "doc-1");
+    doc.set("name", "Alice");
+    doc.set("age", 30i64);
+    mutator.add_doc("Users", doc.clone());
+    fetcher.add_doc("Users", doc);
+
+    let runner = QueryRunner::new(fetcher, vec![make_acp_collection()])
+        .with_mutator(mutator)
+        .with_acp(Arc::new(FailingAcp::new("database unavailable")));
+
+    let result = runner
+        .execute_mutation_with_identity(
+            r#"mutation { delete_Users(docIDs: ["doc-1"]) { _docID } }"#,
+            Some(test_acp_did()),
+        )
+        .await;
+
+    // Should fail with ACP error
+    assert!(result.is_err(), "Expected ACP error to propagate");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ACP") && err.contains("check failed"),
+        "Error should indicate ACP check failed. Got: {}",
+        err
+    );
+    assert!(
+        err.contains("database unavailable"),
+        "Error should contain the underlying error message. Got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_mutation_create_registration_check_error_propagates() {
+    // When is_doc_registered returns an error during CREATE, it should propagate.
+
+    let fetcher = MockFetcher::new();
+    let mutator = Arc::new(MockMutator::new());
+
+    let runner = QueryRunner::new(fetcher, vec![make_acp_collection()])
+        .with_mutator(mutator)
+        .with_acp(Arc::new(FailingAcp::new("storage timeout")));
+
+    let result = runner
+        .execute_mutation_with_identity(
+            r#"mutation { create_Users(input: [{ name: "Alice", age: 30 }]) { _docID name } }"#,
+            Some(test_acp_did()),
+        )
+        .await;
+
+    // Should fail with ACP registration check error
+    assert!(
+        result.is_err(),
+        "Expected ACP registration check error to propagate"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("registration") && err.contains("storage timeout"),
+        "Error should indicate registration check failed with underlying error. Got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_mutation_update_permission_denied() {
+    // When ACP check_doc_access returns Ok(false), should get permission denied error.
+
+    let fetcher = MockFetcher::new();
+    let mutator = Arc::new(MockMutator::new());
+
+    // Add a document to update
+    let mut doc = Document::new();
+    doc.set("_docID", "doc-1");
+    doc.set("name", "Alice");
+    doc.set("age", 30i64);
+    mutator.add_doc("Users", doc.clone());
+    fetcher.add_doc("Users", doc);
+
+    let runner = QueryRunner::new(fetcher, vec![make_acp_collection()])
+        .with_mutator(mutator)
+        .with_acp(Arc::new(DenyingAcp));
+
+    let result = runner
+        .execute_mutation_with_identity(
+            r#"mutation { update_Users(docIDs: ["doc-1"], input: { name: "Bob" }) { name } }"#,
+            Some(test_acp_did()),
+        )
+        .await;
+
+    // Should fail with permission denied (not ACP check failed)
+    assert!(result.is_err(), "Expected permission denied error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("permission denied"),
+        "Error should indicate permission denied. Got: {}",
+        err
+    );
+    assert!(
+        err.contains("update"),
+        "Error should mention the operation type. Got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_mutation_delete_permission_denied() {
+    // When ACP check_doc_access returns Ok(false) for DELETE, should get permission denied.
+
+    let fetcher = MockFetcher::new();
+    let mutator = Arc::new(MockMutator::new());
+
+    // Add a document to delete
+    let mut doc = Document::new();
+    doc.set("_docID", "doc-1");
+    doc.set("name", "Alice");
+    doc.set("age", 30i64);
+    mutator.add_doc("Users", doc.clone());
+    fetcher.add_doc("Users", doc);
+
+    let runner = QueryRunner::new(fetcher, vec![make_acp_collection()])
+        .with_mutator(mutator)
+        .with_acp(Arc::new(DenyingAcp));
+
+    let result = runner
+        .execute_mutation_with_identity(
+            r#"mutation { delete_Users(docIDs: ["doc-1"]) { _docID } }"#,
+            Some(test_acp_did()),
+        )
+        .await;
+
+    // Should fail with permission denied
+    assert!(result.is_err(), "Expected permission denied error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("permission denied"),
+        "Error should indicate permission denied. Got: {}",
+        err
+    );
+    assert!(
+        err.contains("delete"),
+        "Error should mention the operation type. Got: {}",
+        err
+    );
+}
+
+// =============================================================================
+// Large Dataset Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_nested_query_with_100_users_and_10_posts_each() {
+    // Tests that nested queries perform well with larger datasets.
+    // 100 users with 10 posts each = 1000 posts total.
+
+    let fetcher = MockFetcher::new();
+
+    // Add 100 users
+    for i in 0..100 {
+        let mut user = Document::new();
+        user.set("_docID", format!("user-{}", i));
+        user.set("name", format!("User {}", i));
+        fetcher.add_doc("Users", user);
+    }
+
+    // Add 1000 posts (10 per user)
+    for i in 0..1000 {
+        let mut post = Document::new();
+        post.set("_docID", format!("post-{}", i));
+        post.set("title", format!("Post {} by User {}", i % 10, i / 10));
+        post.set("author_id", format!("user-{}", i / 10));
+        fetcher.add_doc("Posts", post);
+    }
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![
+            make_users_with_posts_collection(),
+            make_posts_with_author_collection(),
+        ],
+    );
+
+    let result = runner
+        .execute_query("{ Users { _docID name posts { _docID title } } }")
+        .await;
+
+    assert!(result.is_ok(), "Query should succeed with large dataset");
+    let result_data = result.unwrap();
+    let users = result_data.get("Users").unwrap().as_array().unwrap();
+
+    // Verify all 100 users returned
+    assert_eq!(users.len(), 100, "Should have 100 users");
+
+    // Verify each user has 10 posts
+    for user in users {
+        let posts = user.get("posts").unwrap().as_array().unwrap();
+        assert_eq!(posts.len(), 10, "Each user should have 10 posts");
+    }
+}
+
+#[tokio::test]
+async fn test_nested_query_three_levels_with_many_documents() {
+    // Tests multi-level nesting with larger datasets.
+    // 20 users -> 50 posts total -> 200 comments total
+
+    let fetcher = MockFetcher::new();
+
+    // Add 20 users
+    for i in 0..20 {
+        let mut user = Document::new();
+        user.set("_docID", format!("user-{}", i));
+        user.set("name", format!("User {}", i));
+        fetcher.add_doc("Users", user);
+    }
+
+    // Add 50 posts (some users have more, some have less)
+    for i in 0..50 {
+        let mut post = Document::new();
+        post.set("_docID", format!("post-{}", i));
+        post.set("title", format!("Post {}", i));
+        post.set("author_id", format!("user-{}", i % 20)); // Distribute among users
+        fetcher.add_doc("Posts", post);
+    }
+
+    // Add 200 comments (4 per post)
+    for i in 0..200 {
+        let mut comment = Document::new();
+        comment.set("_docID", format!("comment-{}", i));
+        comment.set("text", format!("Comment {}", i));
+        comment.set("post_id", format!("post-{}", i / 4)); // 4 comments per post
+        fetcher.add_doc("Comments", comment);
+    }
+
+    // Create collections with nested relations
+    let users_collection = CollectionVersion::new(
+        "Users",
+        "v1",
+        "coll-users",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "posts", FieldKind::relation("Posts", true))
+                .with_relation_name("author_posts"),
+        ],
+    );
+
+    let posts_collection = CollectionVersion::new(
+        "Posts",
+        "v1",
+        "coll-posts",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            FieldDescription::new("3", "author", FieldKind::relation("Users", false))
+                .with_relation_name("author_posts")
+                .as_primary(),
+            FieldDescription::new("4", "author_id", FieldKind::doc_id())
+                .with_relation_name("author_posts")
+                .as_primary(),
+            FieldDescription::new("5", "comments", FieldKind::relation("Comments", true))
+                .with_relation_name("post_comments"),
+        ],
+    );
+
+    let comments_collection = CollectionVersion::new(
+        "Comments",
+        "v1",
+        "coll-comments",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "text", FieldKind::string()),
+            FieldDescription::new("3", "post", FieldKind::relation("Posts", false))
+                .with_relation_name("post_comments")
+                .as_primary(),
+            FieldDescription::new("4", "post_id", FieldKind::doc_id())
+                .with_relation_name("post_comments")
+                .as_primary(),
+        ],
+    );
+
+    let runner = QueryRunner::new(
+        fetcher,
+        vec![users_collection, posts_collection, comments_collection],
+    );
+
+    let result = runner
+        .execute_query("{ Users { _docID name posts { _docID title comments { _docID text } } } }")
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "3-level nested query should succeed with many documents"
+    );
+    let result_data = result.unwrap();
+    let users = result_data.get("Users").unwrap().as_array().unwrap();
+
+    // Verify all 20 users returned
+    assert_eq!(users.len(), 20, "Should have 20 users");
+
+    // Count total posts and comments to verify join correctness
+    let mut total_posts = 0;
+    let mut total_comments = 0;
+    for user in users {
+        let posts = user.get("posts").unwrap().as_array().unwrap();
+        total_posts += posts.len();
+        for post in posts {
+            let comments = post.get("comments").unwrap().as_array().unwrap();
+            total_comments += comments.len();
+        }
+    }
+
+    assert_eq!(total_posts, 50, "Should have 50 total posts");
+    assert_eq!(total_comments, 200, "Should have 200 total comments");
 }

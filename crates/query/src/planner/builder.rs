@@ -18,7 +18,9 @@ use crate::plan::{
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
 
-/// Maximum allowed nesting depth for nested queries.
+/// Maximum allowed nesting depth for nested queries (0-indexed).
+/// A depth of 0 is the root query, depth 1 is the first nested level, etc.
+/// With MAX_NESTING_DEPTH = 10, queries can nest up to 11 levels deep (depths 0-10).
 /// Prevents stack overflow from deeply nested or circular query structures.
 const MAX_NESTING_DEPTH: usize = 10;
 

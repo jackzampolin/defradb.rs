@@ -23,6 +23,14 @@ use super::JoinSide;
 ///
 /// Child documents are pre-loaded and indexed during `init()` to avoid
 /// O(N * M) nested loop scans. Lookups are O(1) via HashMap.
+///
+/// # Memory Considerations
+///
+/// The child cache is unbounded - all child documents matching the query are loaded
+/// into memory during `init()`. For collections with very large numbers of documents
+/// (e.g., millions of posts for a popular author), this may cause significant memory
+/// usage. Consider using pagination or separate queries for large datasets. Future
+/// versions may implement LRU caching or streaming lookups to address this limitation.
 pub struct TypeJoinMany {
     /// Parent side of the join (the "one" side)
     parent_side: JoinSide,

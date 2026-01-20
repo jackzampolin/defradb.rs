@@ -28,6 +28,14 @@ use super::{JoinDirection, JoinSide};
 ///
 /// Child documents are pre-loaded and indexed during `init()` to avoid
 /// O(N * M) nested loop scans. Lookups are O(1) via HashMap.
+///
+/// # Memory Considerations
+///
+/// The child cache is unbounded - all child documents matching the query are loaded
+/// into memory during `init()`. For collections with very large numbers of documents,
+/// this may cause significant memory usage. Consider using pagination or separate
+/// queries for large datasets. Future versions may implement LRU caching or streaming
+/// lookups to address this limitation.
 pub struct TypeJoinOne {
     /// Parent side of the join (outer loop)
     parent_side: JoinSide,
