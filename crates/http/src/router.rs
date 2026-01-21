@@ -222,6 +222,44 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+impl AppState {
+    /// Get P2P operations or return ServiceUnavailable error.
+    pub fn require_p2p(&self) -> Result<&Arc<dyn P2POperations>, crate::error::HttpError> {
+        self.p2p.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()
+            )
+        })
+    }
+
+    /// Get ACP operations or return ServiceUnavailable error.
+    pub fn require_acp(&self) -> Result<&Arc<dyn AcpOperations>, crate::error::HttpError> {
+        self.acp.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "ACP (Access Control Policy) is not enabled. Start the server with ACP enabled to use this feature.".into()
+            )
+        })
+    }
+
+    /// Get index operations or return ServiceUnavailable error.
+    pub fn require_index(&self) -> Result<&Arc<dyn IndexOperations>, crate::error::HttpError> {
+        self.index.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()
+            )
+        })
+    }
+
+    /// Get backup operations or return ServiceUnavailable error.
+    pub fn require_backup(&self) -> Result<&Arc<dyn BackupOperations>, crate::error::HttpError> {
+        self.backup.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Backup operations are not enabled. Start the server with backup enabled to use this feature.".into()
+            )
+        })
+    }
+}
+
 /// Builder for constructing AppState with optional components.
 pub struct AppStateBuilder {
     executor: Arc<dyn QueryExecutor>,

@@ -34,10 +34,7 @@ pub async fn add_policy(
     State(state): State<AppState>,
     Json(request): Json<AddPolicyRequest>,
 ) -> Result<Json<AddPolicyResponse>, HttpError> {
-    let acp = state
-        .acp
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("ACP (Access Control Policy) is not enabled. Start the server with ACP enabled to use this feature.".into()))?;
+    let acp = state.require_acp()?;
 
     if request.policy.trim().is_empty() {
         return Err(HttpError::BadRequest("policy cannot be empty".into()));
@@ -57,10 +54,7 @@ pub async fn add_policy(
 pub async fn list_policies(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PolicyInfo>>, HttpError> {
-    let acp = state
-        .acp
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("ACP (Access Control Policy) is not enabled. Start the server with ACP enabled to use this feature.".into()))?;
+    let acp = state.require_acp()?;
 
     let policies = acp
         .list_policies()
@@ -77,10 +71,7 @@ pub async fn get_policy(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<PolicyInfo>, HttpError> {
-    let acp = state
-        .acp
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("ACP (Access Control Policy) is not enabled. Start the server with ACP enabled to use this feature.".into()))?;
+    let acp = state.require_acp()?;
 
     let policy = acp
         .get_policy(&id)

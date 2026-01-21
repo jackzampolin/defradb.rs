@@ -950,3 +950,169 @@ impl BackupOperations for MockBackupOperations {
         })
     }
 }
+
+// ============================================================================
+// Failing Mock Operations (for error path testing)
+// ============================================================================
+
+/// Mock P2P operations that always fails with a configurable error.
+#[derive(Debug, Clone)]
+pub struct FailingMockP2POperations {
+    error: String,
+}
+
+impl FailingMockP2POperations {
+    /// Create a new failing mock with the given error message.
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl P2POperations for FailingMockP2POperations {
+    async fn local_peer_id(&self) -> std::result::Result<String, String> {
+        Err(self.error.clone())
+    }
+
+    async fn listen_addresses(&self) -> std::result::Result<Vec<String>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn connected_peers(&self) -> std::result::Result<Vec<String>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn connect_peer(&self, _addr: &str) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn get_replicators(&self) -> std::result::Result<Vec<ReplicatorInfo>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn add_replicator(
+        &self,
+        _collections: Vec<String>,
+        _addr: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn remove_replicator(
+        &self,
+        _collections: Vec<String>,
+        _addr: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn get_collections(&self) -> std::result::Result<Vec<String>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn add_collections(&self, _collections: Vec<String>) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn remove_collections(&self, _collections: Vec<String>) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+}
+
+/// Mock ACP operations that always fails with a configurable error.
+#[derive(Debug, Clone)]
+pub struct FailingMockAcpOperations {
+    error: String,
+}
+
+impl FailingMockAcpOperations {
+    /// Create a new failing mock with the given error message.
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl AcpOperations for FailingMockAcpOperations {
+    async fn add_policy(&self, _policy: &str) -> std::result::Result<String, String> {
+        Err(self.error.clone())
+    }
+
+    async fn list_policies(&self) -> std::result::Result<Vec<PolicyInfo>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn get_policy(&self, _id: &str) -> std::result::Result<Option<PolicyInfo>, String> {
+        Err(self.error.clone())
+    }
+}
+
+/// Mock index operations that always fails with a configurable error.
+#[derive(Debug, Clone)]
+pub struct FailingMockIndexOperations {
+    error: String,
+}
+
+impl FailingMockIndexOperations {
+    /// Create a new failing mock with the given error message.
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl IndexOperations for FailingMockIndexOperations {
+    async fn create_index(
+        &self,
+        _collection: &str,
+        _fields: Vec<String>,
+        _name: Option<&str>,
+        _unique: bool,
+    ) -> std::result::Result<IndexInfo, String> {
+        Err(self.error.clone())
+    }
+
+    async fn list_indexes(&self, _collection: Option<&str>) -> std::result::Result<Vec<IndexInfo>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn drop_index(&self, _collection: &str, _name: &str) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+}
+
+/// Mock backup operations that always fails with a configurable error.
+#[derive(Debug, Clone)]
+pub struct FailingMockBackupOperations {
+    error: String,
+}
+
+impl FailingMockBackupOperations {
+    /// Create a new failing mock with the given error message.
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl BackupOperations for FailingMockBackupOperations {
+    async fn export(
+        &self,
+        _collections: Option<Vec<String>>,
+        _pretty: bool,
+    ) -> std::result::Result<String, String> {
+        Err(self.error.clone())
+    }
+
+    async fn import(&self, _data: &str) -> std::result::Result<ImportResult, String> {
+        Err(self.error.clone())
+    }
+}

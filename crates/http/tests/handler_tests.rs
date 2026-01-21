@@ -9,8 +9,9 @@ use axum::{
 use tower::ServiceExt;
 
 use defra_http::mock::{
-    MockAcpOperations, MockBackupOperations, MockIndexOperations, MockP2POperations,
-    MockQueryExecutor,
+    FailingMockAcpOperations, FailingMockBackupOperations, FailingMockIndexOperations,
+    FailingMockP2POperations, MockAcpOperations, MockBackupOperations, MockIndexOperations,
+    MockP2POperations, MockQueryExecutor,
 };
 use defra_http::{create_router_with_state, AppStateBuilder};
 
@@ -720,6 +721,469 @@ async fn test_backup_import_primitive_json() {
                 .uri("/api/v0/backup/import")
                 .header("content-type", "application/json")
                 .body(Body::from("\"just a string\""))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ============================================================================
+// Error Path Tests with Failing Mocks
+// ============================================================================
+
+#[tokio::test]
+async fn test_p2p_info_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let p2p = Arc::new(FailingMockP2POperations::new("P2P service unavailable"));
+    let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/p2p/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_p2p_connect_peer_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let p2p = Arc::new(FailingMockP2POperations::new("Connection refused"));
+    let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/peers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"address": "/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWTestPeer"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_acp_add_policy_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let acp = Arc::new(FailingMockAcpOperations::new("Policy validation failed"));
+    let state = AppStateBuilder::new(executor).with_acp(acp).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"policy": "name: test\nresources: []"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_acp_list_policies_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let acp = Arc::new(FailingMockAcpOperations::new("Database connection failed"));
+    let state = AppStateBuilder::new(executor).with_acp(acp).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_index_create_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let index = Arc::new(FailingMockIndexOperations::new("Collection not found"));
+    let state = AppStateBuilder::new(executor).with_index(index).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/index")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"collection": "Users", "fields": ["name"], "unique": false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_index_list_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let index = Arc::new(FailingMockIndexOperations::new("Database unavailable"));
+    let state = AppStateBuilder::new(executor).with_index(index).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/index")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_backup_export_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let backup = Arc::new(FailingMockBackupOperations::new("Export failed"));
+    let state = AppStateBuilder::new(executor).with_backup(backup).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/backup/export")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_backup_import_internal_error() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let backup = Arc::new(FailingMockBackupOperations::new("Import failed"));
+    let state = AppStateBuilder::new(executor).with_backup(backup).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/backup/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"Users": [{"_docID": "bae-456", "name": "Bob"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ============================================================================
+// Validation Edge Case Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_index_create_unicode_collection_name() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let index = Arc::new(MockIndexOperations::new());
+    let state = AppStateBuilder::new(executor).with_index(index).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/index")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"collection": "Usuários", "fields": ["name"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Unicode characters should be rejected
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_index_create_field_with_special_chars() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let index = Arc::new(MockIndexOperations::new());
+    let state = AppStateBuilder::new(executor).with_index(index).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/index")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"collection": "Users", "fields": ["name-field"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Hyphens should be rejected
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_index_create_field_with_spaces() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let index = Arc::new(MockIndexOperations::new());
+    let state = AppStateBuilder::new(executor).with_index(index).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/index")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"collection": "Users", "fields": ["field name"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Spaces should be rejected
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_p2p_add_replicator_invalid_collection_name() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let p2p = Arc::new(MockP2POperations::new());
+    let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/replicator")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"collections": ["123Invalid"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_p2p_add_collections_invalid_collection_name() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let p2p = Arc::new(MockP2POperations::new());
+    let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/collections")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"collections": ["Users", "Invalid-Name"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_p2p_multiaddr_empty_string() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let p2p = Arc::new(MockP2POperations::new());
+    let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/peers")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"address": ""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_p2p_multiaddr_whitespace_only() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let p2p = Arc::new(MockP2POperations::new());
+    let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/peers")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"address": "   "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ============================================================================
+// ACP Policy Validation Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_acp_add_policy_empty_string() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let acp = Arc::new(MockAcpOperations::new());
+    let state = AppStateBuilder::new(executor).with_acp(acp).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"policy": ""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_acp_add_policy_whitespace_only() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let acp = Arc::new(MockAcpOperations::new());
+    let state = AppStateBuilder::new(executor).with_acp(acp).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"policy": "   \n\t  "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ============================================================================
+// Backup Edge Case Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_backup_import_empty_array() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let backup = Arc::new(MockBackupOperations::new());
+    let state = AppStateBuilder::new(executor).with_backup(backup).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/backup/import")
+                .header("content-type", "application/json")
+                .body(Body::from("[]"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Empty array should be rejected
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_backup_import_number_json() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let backup = Arc::new(MockBackupOperations::new());
+    let state = AppStateBuilder::new(executor).with_backup(backup).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/backup/import")
+                .header("content-type", "application/json")
+                .body(Body::from("123"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Number primitive should be rejected
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_backup_export_invalid_collection_name() {
+    let executor = Arc::new(MockQueryExecutor::new());
+    let backup = Arc::new(MockBackupOperations::new());
+    let state = AppStateBuilder::new(executor).with_backup(backup).build();
+    let router = create_router_with_state(state);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/backup/export?collections=123Invalid")
+                .body(Body::empty())
                 .unwrap(),
         )
         .await

@@ -5,7 +5,7 @@
 //! - Import database from JSON
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Query, State},
     http::header,
     response::Response,
@@ -16,6 +16,12 @@ use serde::Deserialize;
 use crate::error::HttpError;
 use crate::router::{AppState, ImportResult};
 use crate::validation::validate_collection_name;
+
+/// Maximum size for backup import data (100 MB).
+const MAX_IMPORT_SIZE: usize = 100 * 1024 * 1024;
+
+/// Maximum number of collections that can be specified in export query.
+const MAX_EXPORT_COLLECTIONS: usize = 100;
 
 /// Query parameters for export.
 #[derive(Debug, Clone, Deserialize)]
@@ -35,10 +41,15 @@ pub async fn export(
     State(state): State<AppState>,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, HttpError> {
-    let backup = state
-        .backup
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("Backup operations are not enabled. Start the server with backup enabled to use this feature.".into()))?;
+    let backup = state.require_backup()?;
+
+    // Validate collection count limit
+    if query.collections.len() > MAX_EXPORT_COLLECTIONS {
+        return Err(HttpError::BadRequest(format!(
+            "too many collections specified (max: {})",
+            MAX_EXPORT_COLLECTIONS
+        )));
+    }
 
     // Validate collection names if provided
     for col in &query.collections {
@@ -70,12 +81,21 @@ pub async fn export(
 /// POST /api/v0/backup/import
 pub async fn import(
     State(state): State<AppState>,
-    body: String,
+    body: Bytes,
 ) -> Result<Json<ImportResponse>, HttpError> {
-    let backup = state
-        .backup
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("Backup operations are not enabled. Start the server with backup enabled to use this feature.".into()))?;
+    let backup = state.require_backup()?;
+
+    // Check body size limit
+    if body.len() > MAX_IMPORT_SIZE {
+        return Err(HttpError::BadRequest(format!(
+            "import data exceeds maximum size of {} bytes",
+            MAX_IMPORT_SIZE
+        )));
+    }
+
+    // Convert bytes to UTF-8 string
+    let body = String::from_utf8(body.to_vec())
+        .map_err(|_| HttpError::BadRequest("import data must be valid UTF-8".into()))?;
 
     if body.trim().is_empty() {
         return Err(HttpError::BadRequest("import data cannot be empty".into()));

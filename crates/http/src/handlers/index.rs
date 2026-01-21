@@ -47,10 +47,7 @@ pub async fn create_index(
     State(state): State<AppState>,
     Json(request): Json<CreateIndexRequest>,
 ) -> Result<Json<IndexInfo>, HttpError> {
-    let index_ops = state
-        .index
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()))?;
+    let index_ops = state.require_index()?;
 
     // Validate collection name
     validate_identifier(&request.collection).map_err(|_| {
@@ -106,10 +103,7 @@ pub async fn list_indexes(
     State(state): State<AppState>,
     Query(query): Query<ListIndexesQuery>,
 ) -> Result<Json<Vec<IndexInfo>>, HttpError> {
-    let index_ops = state
-        .index
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()))?;
+    let index_ops = state.require_index()?;
 
     // Validate collection name if provided
     if let Some(ref col) = query.collection {
@@ -124,7 +118,7 @@ pub async fn list_indexes(
     let indexes = index_ops
         .list_indexes(query.collection.as_deref())
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(HttpError::Internal)?;
 
     Ok(Json(indexes))
 }
@@ -136,10 +130,7 @@ pub async fn drop_index(
     State(state): State<AppState>,
     Query(query): Query<DropIndexQuery>,
 ) -> Result<Json<()>, HttpError> {
-    let index_ops = state
-        .index
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()))?;
+    let index_ops = state.require_index()?;
 
     // Validate collection name
     validate_identifier(&query.collection).map_err(|_| {

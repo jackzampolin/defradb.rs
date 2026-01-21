@@ -81,10 +81,7 @@ pub struct CollectionsDeleteQuery {
 ///
 /// GET /api/v0/p2p/info
 pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoResponse>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     let peer_id = p2p
         .local_peer_id()
@@ -106,10 +103,7 @@ pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoRespo
 ///
 /// GET /api/v0/p2p/peers
 pub async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<PeerInfo>>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     let peers = p2p
         .connected_peers()
@@ -131,10 +125,7 @@ pub async fn connect_peer(
     State(state): State<AppState>,
     Json(request): Json<ConnectPeerRequest>,
 ) -> Result<Json<()>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     // Validate the multiaddr format
     validate_multiaddr(&request.address)?;
@@ -152,10 +143,7 @@ pub async fn connect_peer(
 pub async fn list_replicators(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ReplicatorInfoResponse>>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     let replicators = p2p
         .get_replicators()
@@ -181,10 +169,7 @@ pub async fn add_replicator(
     State(state): State<AppState>,
     Json(request): Json<ReplicatorRequest>,
 ) -> Result<Json<()>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     if request.collections.is_empty() {
         return Err(HttpError::BadRequest(
@@ -216,10 +201,7 @@ pub async fn remove_replicator(
     State(state): State<AppState>,
     Query(query): Query<ReplicatorDeleteQuery>,
 ) -> Result<Json<()>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     if query.collections.is_empty() {
         return Err(HttpError::BadRequest(
@@ -250,10 +232,7 @@ pub async fn remove_replicator(
 pub async fn list_collections(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<String>>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     let collections = p2p
         .get_collections()
@@ -270,10 +249,7 @@ pub async fn add_collections(
     State(state): State<AppState>,
     Json(request): Json<CollectionsRequest>,
 ) -> Result<Json<()>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     if request.collections.is_empty() {
         return Err(HttpError::BadRequest(
@@ -300,10 +276,7 @@ pub async fn remove_collections(
     State(state): State<AppState>,
     Query(query): Query<CollectionsDeleteQuery>,
 ) -> Result<Json<()>, HttpError> {
-    let p2p = state
-        .p2p
-        .as_ref()
-        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
+    let p2p = state.require_p2p()?;
 
     if query.collections.is_empty() {
         return Err(HttpError::BadRequest(
