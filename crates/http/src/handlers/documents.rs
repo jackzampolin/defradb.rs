@@ -2,6 +2,8 @@
 //!
 //! These handlers extract identity from the Authorization header and pass it
 //! to the REST operations layer for ACP (Access Control Policy) enforcement.
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{
     extract::{Path, State},
@@ -12,7 +14,8 @@ use serde_json::Value as JsonValue;
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
-use crate::router::AppState;
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, NodePermission};
 
 /// Response for delete operations.
 #[derive(Debug, Clone, Serialize)]
@@ -26,11 +29,15 @@ pub struct DeleteResponse {
 ///
 /// Identity is extracted from the Authorization header and used for ACP checks.
 /// Protected documents require read permission.
+///
+/// Requires `DocumentRead` permission when NAC is enabled.
 pub async fn get_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+
     let rest = state
         .rest
         .as_ref()
@@ -65,12 +72,17 @@ pub async fn get_document(
 /// Identity is extracted from the Authorization header and used for ACP:
 /// - If the collection has a policy and identity is provided, the document
 ///   is registered with ACP and the identity becomes the owner.
+///
+/// Requires `DocumentRead` permission when NAC is enabled (document creation
+/// involves reading back the created document).
 pub async fn create_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(collection): Path<String>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+
     let rest = state
         .rest
         .as_ref()
@@ -119,12 +131,16 @@ pub async fn create_document(
 ///
 /// Identity is extracted from the Authorization header and used to check
 /// update permission on protected documents.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
 pub async fn update_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
     Json(patch): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
     let rest = state
         .rest
         .as_ref()
@@ -160,11 +176,15 @@ pub async fn update_document(
 ///
 /// Identity is extracted from the Authorization header and used to check
 /// delete permission on protected documents.
+///
+/// Requires `DocumentDelete` permission when NAC is enabled.
 pub async fn delete_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
 ) -> Result<Json<DeleteResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentDelete).await?;
+
     let rest = state
         .rest
         .as_ref()

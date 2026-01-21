@@ -66,7 +66,11 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
                             RelationExpression::computed_userset(OWNER_RELATION),
                         ]),
                     )
-                    .with_manages(vec![READER_RELATION, UPDATER_RELATION, DELETER_RELATION]),
+                    .with_manages(vec![
+                        READER_RELATION,
+                        UPDATER_RELATION,
+                        DELETER_RELATION,
+                    ]),
                 )
                 .with_relation(Relation::computed(
                     READER_RELATION,
@@ -171,7 +175,13 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         for manager_relation in managers {
             let has_manager = self
                 .store
-                .check_permission_direct(policy_id, resource_name, doc_id, manager_relation, subject)
+                .check_permission_direct(
+                    policy_id,
+                    resource_name,
+                    doc_id,
+                    manager_relation,
+                    subject,
+                )
                 .await?;
 
             if has_manager {
@@ -379,7 +389,14 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         }
 
         // Validate relation name
-        if ![READER_RELATION, UPDATER_RELATION, DELETER_RELATION, ADMIN_RELATION].contains(&relation) {
+        if ![
+            READER_RELATION,
+            UPDATER_RELATION,
+            DELETER_RELATION,
+            ADMIN_RELATION,
+        ]
+        .contains(&relation)
+        {
             return Err(Error::InvalidRelation(format!(
                 "unknown relation '{}', valid relations are: reader, updater, deleter, admin",
                 relation

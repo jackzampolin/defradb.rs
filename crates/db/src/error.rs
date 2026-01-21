@@ -61,6 +61,9 @@ pub enum Error {
 
     #[error("unsafe policy transition blocked: {0}")]
     UnsafePolicyTransition(String),
+
+    #[error("acp error: {0}")]
+    Acp(String),
 }
 
 /// Result type for database operations.

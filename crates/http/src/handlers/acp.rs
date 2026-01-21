@@ -4,6 +4,8 @@
 //! - Add policy
 //! - List policies
 //! - Get policy by ID
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{
     extract::{Path, State},
@@ -12,7 +14,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
-use crate::router::{AppState, PolicyInfo};
+use crate::identity_extractor::ExtractIdentity;
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, NodePermission, PolicyInfo};
 
 /// Request to add a new ACP policy.
 #[derive(Debug, Clone, Deserialize)]
@@ -30,10 +34,15 @@ pub struct AddPolicyResponse {
 /// Add a new ACP policy.
 ///
 /// POST /api/v0/acp/policy
+///
+/// Requires `DacPolicyAdd` permission when NAC is enabled.
 pub async fn add_policy(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<AddPolicyRequest>,
 ) -> Result<Json<AddPolicyResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacPolicyAdd).await?;
+
     let acp = state.require_acp()?;
 
     if request.policy.trim().is_empty() {
@@ -51,9 +60,14 @@ pub async fn add_policy(
 /// List all ACP policies.
 ///
 /// GET /api/v0/acp/policy
+///
+/// Requires `DacStatus` permission when NAC is enabled.
 pub async fn list_policies(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
 ) -> Result<Json<Vec<PolicyInfo>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacStatus).await?;
+
     let acp = state.require_acp()?;
 
     let policies = acp.list_policies().await.map_err(HttpError::Internal)?;
@@ -64,10 +78,15 @@ pub async fn list_policies(
 /// Get a specific ACP policy by ID.
 ///
 /// GET /api/v0/acp/policy/:id
+///
+/// Requires `DacStatus` permission when NAC is enabled.
 pub async fn get_policy(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<PolicyInfo>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacStatus).await?;
+
     let acp = state.require_acp()?;
 
     let policy = acp

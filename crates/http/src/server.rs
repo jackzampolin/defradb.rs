@@ -14,7 +14,7 @@ use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
 use crate::error::Result;
-use crate::router::{AppStateBuilder, P2POperations, SchemaOperations, create_router_with_state};
+use crate::router::{create_router_with_state, AppStateBuilder, P2POperations, SchemaOperations};
 
 /// Server configuration options.
 #[derive(Debug, Clone)]

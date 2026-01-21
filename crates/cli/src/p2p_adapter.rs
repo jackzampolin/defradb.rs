@@ -52,7 +52,9 @@ impl P2POperations for P2PAdapter {
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
         // Parse multiaddr and extract peer ID
-        let multiaddr: libp2p::Multiaddr = addr.parse().map_err(|e| format!("invalid multiaddr: {}", e))?;
+        let multiaddr: libp2p::Multiaddr = addr
+            .parse()
+            .map_err(|e| format!("invalid multiaddr: {}", e))?;
 
         // Extract peer ID from multiaddr (should be in /p2p/<peer_id> component)
         let peer_id = multiaddr

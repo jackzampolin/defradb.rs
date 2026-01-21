@@ -20,7 +20,5 @@ pub use engine::{
 };
 pub use expression::RelationExpression;
 pub use lookup::PolicyLookupTable;
-pub use store::{
-    MemoryZanzibarStore, PersistentZanzibarStore, StorePolicyOptions, ZanzibarStore,
-};
+pub use store::{MemoryZanzibarStore, PersistentZanzibarStore, StorePolicyOptions, ZanzibarStore};
 pub use types::{Policy, Relation, Relationship, Resource, Subject, SubjectRestriction};

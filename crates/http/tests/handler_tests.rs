@@ -153,7 +153,7 @@ async fn test_p2p_add_replicator() {
                 .method("POST")
                 .uri("/api/v0/p2p/replicator")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"collections": ["Users"]}"#))
+                .body(Body::from(r#"{"Collections": ["Users"]}"#))
                 .unwrap(),
         )
         .await
@@ -175,7 +175,7 @@ async fn test_p2p_add_replicator_empty_collections() {
                 .method("POST")
                 .uri("/api/v0/p2p/replicator")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"collections": []}"#))
+                .body(Body::from(r#"{"Collections": []}"#))
                 .unwrap(),
         )
         .await
@@ -999,7 +999,7 @@ async fn test_p2p_add_replicator_invalid_collection_name() {
                 .method("POST")
                 .uri("/api/v0/p2p/replicator")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"collections": ["123Invalid"]}"#))
+                .body(Body::from(r#"{"Collections": ["123Invalid"]}"#))
                 .unwrap(),
         )
         .await
