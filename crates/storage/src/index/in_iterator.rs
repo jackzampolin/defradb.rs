@@ -121,6 +121,9 @@ impl InIterator {
                     self.cached_results.push(entry);
                 }
             }
+
+            // Explicitly close the iterator per Iterator trait contract
+            iter.close().await?;
         }
 
         Ok(())

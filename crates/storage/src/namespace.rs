@@ -156,12 +156,13 @@ impl Reader for NamespacedTxn {
         // to prevent cross-namespace iteration
         let mut prefixed_opts = IterOptions::new();
 
+        // Always scope to namespace via prefix to prevent cross-namespace data leakage
         if let Some(prefix) = opts.prefix() {
             // User specified a prefix - add namespace prefix to it
             prefixed_opts = prefixed_opts.with_prefix(self.namespace.prefix_key(prefix));
-        } else if opts.start().is_none() && opts.end().is_none() {
-            // No prefix, start, or end specified - default to namespace prefix
-            // This ensures we only iterate within our namespace
+        } else {
+            // No user prefix specified - default to namespace prefix
+            // This ensures we ALWAYS iterate within our namespace, even when start/end are specified
             prefixed_opts = prefixed_opts.with_prefix(vec![self.namespace.prefix()]);
         }
 
@@ -240,6 +241,10 @@ impl Txn for NamespacedTxn {
 
     fn is_readonly(&self) -> bool {
         self.txn.is_readonly()
+    }
+
+    fn callback_count(&self) -> usize {
+        self.txn.callback_count()
     }
 }
 

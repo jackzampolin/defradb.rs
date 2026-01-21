@@ -43,7 +43,7 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_txn_retries: Option<u32>,
 
-    /// Specify the datastore to use (supported: badger, rocksdb, memory)
+    /// Specify the datastore to use (supported: badger, redb, memory)
     #[arg(long)]
     pub store: Option<String>,
 
@@ -286,11 +286,8 @@ impl Node {
                 .await?
             }
             DatastoreType::Badger => {
-                info!(
-                    "Using RocksDB datastore at {}",
-                    config.data_path().display()
-                );
-                let store = Arc::new(storage::RocksDBStore::open(config.data_path())?);
+                info!("Using Redb datastore at {}", config.data_path().display());
+                let store = Arc::new(storage::RedbStore::open(config.data_path())?);
                 // Use persistent ACP store at <rootdir>/local_document_acp
                 let acp_path = config.rootdir.join("local_document_acp");
                 info!("Using persistent ACP store at {}", acp_path.display());

@@ -7,42 +7,59 @@
 /// # Available Backends
 ///
 /// - **Memory**: Fast in-memory storage using BTreeMap. Suitable for testing,
-///   development, and ephemeral caches. Data is lost when the process exits.
+///   development, ephemeral caches, and WASM environments. Data is lost when
+///   the process exits.
 ///
-/// - **RocksDB**: Production-ready persistent storage using RocksDB (an LSM-tree
-///   based key-value store). Suitable for production deployments requiring
-///   persistence and high performance.
+/// - **Redb** (default, native only): Pure Rust persistent storage using redb.
+///   ACID transactions with snapshot isolation. **NOT WASM-compatible** due to
+///   memory-mapped file usage. Suitable for native platform production deployments.
 ///
 /// # Choosing a Backend
 ///
-/// | Feature | Memory | RocksDB |
-/// |---------|--------|---------|
+/// | Feature | Memory | Redb |
+/// |---------|--------|------|
 /// | Persistence | No | Yes |
+/// | WASM Support | Yes | **No** |
 /// | Performance | Very Fast | Fast |
-/// | Memory Usage | High (all in RAM) | Configurable |
-/// | Crash Recovery | No | Yes (WAL) |
+/// | Memory Usage | High (all in RAM) | High (snapshot per txn) |
+/// | Crash Recovery | No | Yes |
 /// | Concurrent Access | Yes | Yes |
 /// | ACID Transactions | Yes | Yes |
-/// | Snapshot Isolation | Yes (MVCC) | Yes (RocksDB snapshots) |
-/// | Use Case | Testing, Dev | Production |
+/// | Snapshot Isolation | Yes (MVCC) | Yes |
+/// | Use Case | Testing, Dev, WASM | Production (native) |
 ///
 /// # Example
 ///
 /// ```ignore
-/// use storage::backends::{MemoryStore, RocksDBStore};
+/// use storage::backends::MemoryStore;
 /// use storage::corekv::Store;
 ///
 /// // For testing
 /// let memory_store = MemoryStore::new();
 ///
-/// // For production
-/// let rocksdb_store = RocksDBStore::open("/path/to/db")?;
+/// #[cfg(feature = "redb")]
+/// {
+///     use storage::backends::RedbStore;
+///     let redb_store = RedbStore::open("/path/to/db")?;
+/// }
 /// ```
 pub mod memory;
-pub mod rocksdb;
+
+// Redb is only available on native platforms (not WASM)
+// because it requires memory-mapped files and native filesystem access
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
+pub mod redb;
+
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
+pub mod redb_config;
 
 #[cfg(test)]
 pub mod test_suite;
 
 pub use memory::MemoryStore;
-pub use rocksdb::RocksDBStore;
+
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
+pub use redb::{CallbackCounts, IntegrityReport, RedbStore};
+
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
+pub use redb_config::RedbStoreOptions;

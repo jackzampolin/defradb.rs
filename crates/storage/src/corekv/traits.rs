@@ -83,7 +83,6 @@ pub trait Reader: Send + Sync {
     /// # Note
     ///
     /// Some backends may need to read the entire value to determine its size.
-    /// RocksDB can determine size without reading the value in some cases.
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>>;
 
     /// Create an iterator over key-value pairs.
@@ -225,6 +224,23 @@ pub trait Dropable: Store {
 ///
 /// Each callback type has both sync and async variants.
 ///
+/// # Callback Panic Handling
+///
+/// All callbacks (sync and async) are wrapped in `std::panic::catch_unwind` to
+/// prevent callback panics from crashing the application. If a callback panics:
+///
+/// - The panic is caught and logged via `tracing::error`
+/// - Remaining callbacks continue to execute
+/// - The return value of `commit()` or `discard()` reflects only the database
+///   operation result, not callback execution
+///
+/// This design ensures that:
+/// 1. A buggy callback cannot prevent transaction completion
+/// 2. All registered callbacks get a chance to run
+/// 3. Panic details are preserved in logs for debugging
+///
+/// Check error logs for callback panic details if callbacks don't appear to execute.
+///
 /// # Example
 ///
 /// ```ignore
@@ -249,6 +265,13 @@ pub trait Txn: ReaderWriter {
     /// * `Err(Error::DiscardedTxn)` if the transaction was already discarded
     /// * `Err(Error)` for other errors
     ///
+    /// # Callback Panic Handling
+    ///
+    /// Callback panics are caught and logged but do not affect the return value.
+    /// If a callback panics, remaining callbacks still execute, and `commit()`
+    /// returns `Ok(())` if the database commit succeeded. Check error logs for
+    /// callback panic details.
+    ///
     /// # Note
     ///
     /// After calling commit (success or failure), the transaction cannot be reused.
@@ -259,6 +282,11 @@ pub trait Txn: ReaderWriter {
     /// All on_discard callbacks are executed. After calling discard, the
     /// transaction cannot be used for any further operations.
     ///
+    /// # Callback Panic Handling
+    ///
+    /// Callback panics are caught and logged but do not prevent discard completion.
+    /// If a callback panics, remaining callbacks still execute.
+    ///
     /// # Note
     ///
     /// This method consumes self, ensuring the transaction cannot be used after discard.
@@ -267,31 +295,50 @@ pub trait Txn: ReaderWriter {
     /// Register a synchronous callback to be called on successful commit.
     ///
     /// Multiple callbacks can be registered and will be executed in order.
+    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
     fn on_success(&mut self, callback: TxnCallback);
 
     /// Register an asynchronous callback to be called on successful commit.
     ///
     /// Multiple callbacks can be registered and will be executed sequentially in registration order.
+    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
     fn on_success_async(&mut self, callback: AsyncTxnCallback);
 
     /// Register a synchronous callback to be called on commit error.
     ///
     /// Multiple callbacks can be registered and will be executed in order.
+    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
     fn on_error(&mut self, callback: TxnCallback);
 
     /// Register an asynchronous callback to be called on commit error.
     ///
     /// Multiple callbacks can be registered and will be executed sequentially in registration order.
+    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
     fn on_error_async(&mut self, callback: AsyncTxnCallback);
 
     /// Register a synchronous callback to be called on discard.
     ///
     /// Multiple callbacks can be registered and will be executed in order.
+    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
     fn on_discard(&mut self, callback: TxnCallback);
 
     /// Register an asynchronous callback to be called on discard.
     ///
     /// Multiple callbacks can be registered and will be executed sequentially in registration order.
+    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
+    ///
+    /// # Fire-and-Forget Warning
+    ///
+    /// Unlike `on_success_async` and `on_error_async` which are awaited during commit,
+    /// async discard callbacks are **spawned as background tasks** and may not complete
+    /// if the process exits before they finish. This matches Go DefraDB semantics where
+    /// `discard()` is a synchronous operation.
+    ///
+    /// If you need completion guarantees for async cleanup:
+    /// - Use `on_discard` (synchronous) instead
+    /// - Use `commit()` with `on_success_async` when possible
+    /// - Implement your own synchronization using `tokio::task::JoinSet`,
+    ///   `tokio_util::task::TaskTracker`, or third-party crates like `awaitgroup`
     fn on_discard_async(&mut self, callback: AsyncTxnCallback);
 
     /// Downcast to concrete type (for internal use in tests)
@@ -302,6 +349,14 @@ pub trait Txn: ReaderWriter {
 
     /// Check if this is a read-only transaction.
     fn is_readonly(&self) -> bool;
+
+    /// Get the total number of callbacks registered on this transaction.
+    ///
+    /// This returns the sum of all callback types (success, error, discard)
+    /// including both sync and async variants.
+    ///
+    /// Useful for monitoring callback accumulation in long-running transactions.
+    fn callback_count(&self) -> usize;
 }
 
 /// TxnStore trait for stores that support transactions.

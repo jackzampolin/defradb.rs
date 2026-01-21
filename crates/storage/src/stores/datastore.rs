@@ -320,6 +320,10 @@ impl Txn for DatastoreTxn {
     fn is_readonly(&self) -> bool {
         self.txn.is_readonly()
     }
+
+    fn callback_count(&self) -> usize {
+        self.txn.callback_count()
+    }
 }
 
 // Tests extracted to crates/storage/tests/datastore_tests.rs

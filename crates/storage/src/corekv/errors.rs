@@ -78,7 +78,7 @@ pub enum Error {
 
     /// Backend-specific error.
     ///
-    /// This wraps errors specific to the storage backend (RocksDB, Memory, etc.).
+    /// This wraps errors specific to the storage backend (Redb, Memory, etc.).
     #[error("backend error: {0}")]
     Backend(String),
 
@@ -122,43 +122,6 @@ impl From<std::io::Error> for Error {
 impl From<serde_cbor::Error> for Error {
     fn from(err: serde_cbor::Error) -> Self {
         Error::Serialization(err.to_string())
-    }
-}
-
-impl From<rocksdb::Error> for Error {
-    fn from(err: rocksdb::Error) -> Self {
-        // Check for specific RocksDB errors that map to CoreKV errors
-        let err_str = err.to_string();
-
-        // Log the error for debugging
-        tracing::debug!(
-            error = %err_str,
-            "Converting RocksDB error to CoreKV error"
-        );
-
-        // Use conservative string matching - only classify when we're confident
-        // about the specific RocksDB error patterns to avoid misclassification.
-        // Default to Backend error to preserve original message for unknown errors.
-        //
-        // Known RocksDB transaction conflict patterns:
-        // - "Resource busy" - write conflict
-        // - "Operation timed out: TryAgain" - transaction retry needed
-        // - "Busy" at start of message - resource contention
-        //
-        // We avoid matching substrings like "busy" or "conflict" that could
-        // appear in other contexts (e.g., custom error messages, file paths).
-        if err_str.starts_with("Resource busy")
-            || err_str.starts_with("Busy")
-            || err_str.contains("TryAgain")
-            || err_str.contains("WriteConflict")
-        {
-            tracing::debug!("Classified RocksDB error as TxnConflict (retriable)");
-            Error::TxnConflict
-        } else {
-            // Default to Backend error - preserves original message and
-            // lets callers decide how to handle based on context
-            Error::Backend(err_str)
-        }
     }
 }
 

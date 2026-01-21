@@ -1,6 +1,6 @@
-//! Persistent ACP store backed by RocksDB.
+//! Persistent ACP store backed by redb.
 //!
-//! This implementation stores relation tuples in a separate RocksDB instance,
+//! This implementation stores relation tuples in a separate redb instance,
 //! following Go DefraDB's architecture where ACP data is stored independently
 //! from document data at `<root>/local_document_acp/`.
 
@@ -10,15 +10,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use storage::corekv::{IterOptions, Reader, Store, Writer};
-use storage::RocksDBStore;
+use storage::RedbStore;
 
 use crate::error::{Error, Result};
 use crate::relation::RelationTuple;
 use crate::store::AcpStore;
 
-/// Persistent ACP store backed by RocksDB.
+/// Persistent ACP store backed by redb.
 ///
-/// Stores relation tuples in a separate RocksDB instance, providing:
+/// Stores relation tuples in a separate redb instance, providing:
 /// - Persistence across node restarts
 /// - ACID transactions for tuple operations
 /// - Efficient prefix-based queries for document lookups
@@ -37,24 +37,86 @@ use crate::store::AcpStore;
 /// let store = PersistentAcpStore::open(Path::new("/data/local_document_acp"))?;
 /// ```
 pub struct PersistentAcpStore {
-    store: Arc<RocksDBStore>,
+    store: Arc<RedbStore>,
 }
 
 impl PersistentAcpStore {
-    /// Open a persistent ACP store at the given path.
+    /// Open a persistent ACP store at the given directory path.
     ///
-    /// Creates the database if it doesn't exist.
+    /// Creates the directory and database file (`acp.redb`) if they don't exist.
+    /// The path should be a directory (e.g., `<root>/local_document_acp/`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The directory cannot be created (permission denied, disk full, etc.)
+    /// - The path exists but is not a directory
+    /// - The database file cannot be opened (corruption, permission denied, etc.)
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let store = RocksDBStore::open(path).map_err(|e| Error::Storage(e.to_string()))?;
+        let dir_path = path.as_ref();
+
+        // Check if path exists but is not a directory
+        if dir_path.exists() && !dir_path.is_dir() {
+            return Err(Error::Storage(format!(
+                "ACP path exists but is not a directory: {}",
+                dir_path.display()
+            )));
+        }
+
+        // Create the directory if it doesn't exist
+        if !dir_path.exists() {
+            std::fs::create_dir_all(dir_path).map_err(|e| {
+                let kind = e.kind();
+                Error::Storage(format!(
+                    "failed to create ACP directory '{}': {} ({})",
+                    dir_path.display(),
+                    e,
+                    match kind {
+                        std::io::ErrorKind::PermissionDenied => "check directory permissions",
+                        std::io::ErrorKind::NotFound => "parent directory does not exist",
+                        _ => "check disk space and permissions",
+                    }
+                ))
+            })?;
+        }
+
+        // Verify we can write to the directory
+        let db_path = dir_path.join("acp.redb");
+        if db_path.exists() {
+            // Check if we can read the existing file
+            let metadata = std::fs::metadata(&db_path).map_err(|e| {
+                Error::Storage(format!(
+                    "cannot access ACP database '{}': {}",
+                    db_path.display(),
+                    e
+                ))
+            })?;
+
+            if !metadata.is_file() {
+                return Err(Error::Storage(format!(
+                    "ACP database path is not a file: {}",
+                    db_path.display()
+                )));
+            }
+        }
+
+        let store = RedbStore::open(&db_path).map_err(|e| {
+            Error::Storage(format!(
+                "failed to open ACP database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+
         Ok(Self {
             store: Arc::new(store),
         })
     }
 
-    /// Create from an existing RocksDBStore.
+    /// Create from an existing RedbStore.
     ///
     /// Useful when the store is managed externally.
-    pub fn from_store(store: Arc<RocksDBStore>) -> Self {
+    pub fn from_store(store: Arc<RedbStore>) -> Self {
         Self { store }
     }
 

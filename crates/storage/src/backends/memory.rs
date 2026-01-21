@@ -88,6 +88,7 @@ impl Store for MemoryStore {
             pending: Mutex::new(BTreeMap::new()),
             readonly,
             discarded: Mutex::new(false),
+            committed: Mutex::new(false),
             on_success: Mutex::new(Vec::new()),
             on_success_async: Mutex::new(Vec::new()),
             on_error: Mutex::new(Vec::new()),
@@ -137,6 +138,9 @@ struct MemoryTxn {
 
     /// Whether the transaction has been discarded
     discarded: Mutex<bool>,
+
+    /// Whether the transaction has been committed
+    committed: Mutex<bool>,
 
     /// Callbacks for successful commit
     on_success: Mutex<Vec<TxnCallback>>,
@@ -317,14 +321,24 @@ impl Writer for MemoryTxn {
 #[async_trait]
 impl Txn for MemoryTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
+        // Check discarded first (matches redb backend order)
         if *self.discarded.lock() {
-            // Execute error callbacks before returning error
+            tracing::warn!("Attempted to commit a discarded transaction");
             let on_error = std::mem::take(&mut *self.on_error.lock());
             let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
             Self::execute_callbacks(on_error);
             Self::execute_async_callbacks(on_error_async).await;
             return Err(Error::DiscardedTxn);
         }
+
+        // Check if already committed (defensive - ownership prevents this in normal usage)
+        if *self.committed.lock() {
+            tracing::warn!("Attempted to commit an already committed transaction");
+            return Err(Error::Other("Transaction already committed".into()));
+        }
+
+        // Mark as committed
+        *self.committed.lock() = true;
 
         // Clone pending changes before awaiting (can't hold MutexGuard across await)
         let pending = self.pending.lock().clone();
@@ -413,6 +427,15 @@ impl Txn for MemoryTxn {
 
     fn is_readonly(&self) -> bool {
         self.readonly
+    }
+
+    fn callback_count(&self) -> usize {
+        self.on_success.lock().len()
+            + self.on_success_async.lock().len()
+            + self.on_error.lock().len()
+            + self.on_error_async.lock().len()
+            + self.on_discard.lock().len()
+            + self.on_discard_async.lock().len()
     }
 }
 
@@ -590,11 +613,10 @@ mod shared_tests {
 mod memory_specific_tests {
     use super::*;
 
-    /// Test MVCC snapshot isolation (Memory-specific: true snapshot isolation)
+    /// Test MVCC snapshot isolation
     ///
     /// MemoryStore provides true MVCC snapshot isolation where readers
     /// get a snapshot at transaction start and never see concurrent commits.
-    /// This is DIFFERENT from RocksDB which does NOT have snapshot isolation.
     #[tokio::test]
     async fn test_memory_snapshot_isolation() {
         let store = Arc::new(MemoryStore::new());
