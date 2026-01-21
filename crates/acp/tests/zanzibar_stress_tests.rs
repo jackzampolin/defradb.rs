@@ -977,6 +977,287 @@ async fn test_cycle_detection_allows_parallel_branches() {
     assert!(result, "Diamond pattern should work");
 }
 
+/// Test self-referential cycle: relation_a -> relation_a
+#[tokio::test]
+async fn test_self_referential_cycle() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let mut engine = PermissionEngine::new(store.clone());
+
+    // Self-referential: relation_a points to itself
+    let policy = Policy::new("policy1", "Self Cycle").with_resource(
+        Resource::new("document").with_relation(Relation::computed(
+            "relation_a",
+            RelationExpression::computed_userset("relation_a"),
+        )),
+    );
+
+    engine.add_policy(&policy);
+
+    let user = test_did();
+
+    // Should return false (unauthorized), not error
+    let result = engine
+        .check("policy1", "document", "doc1", "relation_a", &user)
+        .await;
+
+    assert!(result.is_ok(), "Self-referential cycle should not error");
+    assert!(
+        !result.unwrap(),
+        "Self-referential cycle should return false"
+    );
+}
+
+/// Test three-way cycle: A -> B -> C -> A
+#[tokio::test]
+async fn test_three_way_cycle() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let mut engine = PermissionEngine::new(store.clone());
+
+    // Three-way cycle: A -> B -> C -> A
+    let policy = Policy::new("policy1", "Three Way Cycle").with_resource(
+        Resource::new("document")
+            .with_relation(Relation::computed(
+                "relation_a",
+                RelationExpression::computed_userset("relation_b"),
+            ))
+            .with_relation(Relation::computed(
+                "relation_b",
+                RelationExpression::computed_userset("relation_c"),
+            ))
+            .with_relation(Relation::computed(
+                "relation_c",
+                RelationExpression::computed_userset("relation_a"),
+            )),
+    );
+
+    engine.add_policy(&policy);
+
+    let user = test_did();
+
+    // All three should return false
+    for relation in &["relation_a", "relation_b", "relation_c"] {
+        let result = engine
+            .check("policy1", "document", "doc1", relation, &user)
+            .await;
+        assert!(
+            result.is_ok(),
+            "Three-way cycle on {} should not error",
+            relation
+        );
+        assert!(
+            !result.unwrap(),
+            "Three-way cycle on {} should return false",
+            relation
+        );
+    }
+}
+
+/// Test cycle within union branch - one branch cycles, another succeeds
+#[tokio::test]
+async fn test_cycle_in_union_branch_other_succeeds() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let mut engine = PermissionEngine::new(store.clone());
+
+    // viewer = cycle_branch + direct_owner
+    // cycle_branch -> other_cycle -> cycle_branch (cycles)
+    // but direct_owner is a direct relation that should work
+    let policy = Policy::new("policy1", "Union With Cycle").with_resource(
+        Resource::new("document")
+            .with_relation(Relation::direct("direct_owner"))
+            .with_relation(Relation::computed(
+                "cycle_branch",
+                RelationExpression::computed_userset("other_cycle"),
+            ))
+            .with_relation(Relation::computed(
+                "other_cycle",
+                RelationExpression::computed_userset("cycle_branch"),
+            ))
+            .with_relation(Relation::computed(
+                "viewer",
+                RelationExpression::union(vec![
+                    RelationExpression::computed_userset("cycle_branch"),
+                    RelationExpression::computed_userset("direct_owner"),
+                ]),
+            )),
+    );
+
+    engine.add_policy(&policy);
+
+    let owner = test_did();
+
+    // Add direct owner
+    let rel = Relationship::with_entity("document", "doc1", "direct_owner", owner.clone());
+    store.store_relationship("policy1", &rel).await.unwrap();
+
+    // Should succeed via direct_owner branch even though cycle_branch cycles
+    let result = engine
+        .check("policy1", "document", "doc1", "viewer", &owner)
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Union with cycle branch should not error: {:?}",
+        result
+    );
+    assert!(
+        result.unwrap(),
+        "Should succeed via non-cycling branch in union"
+    );
+}
+
+/// Test cycle within intersection - cycle causes overall false
+#[tokio::test]
+async fn test_cycle_in_intersection_branch() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let mut engine = PermissionEngine::new(store.clone());
+
+    // viewer = direct_owner & cycle_branch
+    // Both must be true, but cycle_branch cycles so returns false
+    let policy = Policy::new("policy1", "Intersection With Cycle").with_resource(
+        Resource::new("document")
+            .with_relation(Relation::direct("direct_owner"))
+            .with_relation(Relation::computed(
+                "cycle_branch",
+                RelationExpression::computed_userset("cycle_branch"), // self-cycle
+            ))
+            .with_relation(Relation::computed(
+                "viewer",
+                RelationExpression::intersection(vec![
+                    RelationExpression::computed_userset("direct_owner"),
+                    RelationExpression::computed_userset("cycle_branch"),
+                ]),
+            )),
+    );
+
+    engine.add_policy(&policy);
+
+    let owner = test_did();
+
+    // Add direct owner
+    let rel = Relationship::with_entity("document", "doc1", "direct_owner", owner.clone());
+    store.store_relationship("policy1", &rel).await.unwrap();
+
+    // Should fail because cycle_branch returns false
+    let result = engine
+        .check("policy1", "document", "doc1", "viewer", &owner)
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Intersection with cycle should not error: {:?}",
+        result
+    );
+    assert!(
+        !result.unwrap(),
+        "Intersection should fail when one branch cycles"
+    );
+}
+
+/// Test TTU cycle detection across different object types
+#[tokio::test]
+async fn test_ttu_cross_resource_cycle() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let mut engine = PermissionEngine::new(store.clone());
+
+    // file.admin -> folder.admin (via parent TTU)
+    // folder.admin -> file.admin (via child TTU)
+    // This creates a cycle across different resource types
+    let policy = Policy::new("policy1", "TTU Cross Cycle")
+        .with_resource(
+            Resource::new("file")
+                .with_relation(Relation::direct("parent"))
+                .with_relation(Relation::computed(
+                    "admin",
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::tuple_to_userset("parent", "admin"),
+                    ]),
+                )),
+        )
+        .with_resource(
+            Resource::new("folder")
+                .with_relation(Relation::direct("child"))
+                .with_relation(Relation::computed(
+                    "admin",
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::tuple_to_userset("child", "admin"),
+                    ]),
+                )),
+        );
+
+    engine.add_policy(&policy);
+
+    let user = test_did();
+
+    // Create cycle: file1.parent -> folder1, folder1.child -> file1
+    let rel = Relationship::new(
+        "file",
+        "file1",
+        "parent",
+        Subject::entity_set("folder", "folder1", "admin"),
+    );
+    store.store_relationship("policy1", &rel).await.unwrap();
+
+    let rel = Relationship::new(
+        "folder",
+        "folder1",
+        "child",
+        Subject::entity_set("file", "file1", "admin"),
+    );
+    store.store_relationship("policy1", &rel).await.unwrap();
+
+    // Should return false (cycle detected), not error
+    let result = engine
+        .check("policy1", "file", "file1", "admin", &user)
+        .await;
+
+    assert!(result.is_ok(), "TTU cycle should not error: {:?}", result);
+    assert!(!result.unwrap(), "TTU cycle should return false");
+}
+
+/// Test that breaking a cycle with actual permission grants access
+#[tokio::test]
+async fn test_cycle_with_base_case() {
+    let store = Arc::new(MemoryZanzibarStore::new());
+    let mut engine = PermissionEngine::new(store.clone());
+
+    // admin = _this + computed(admin)
+    // This is technically self-referential, but _this provides a base case
+    let policy = Policy::new("policy1", "Cycle With Base").with_resource(
+        Resource::new("document").with_relation(Relation::computed(
+            "admin",
+            RelationExpression::union(vec![
+                RelationExpression::this(),
+                RelationExpression::computed_userset("admin"), // self-reference
+            ]),
+        )),
+    );
+
+    engine.add_policy(&policy);
+
+    let admin = test_did();
+
+    // Grant direct admin
+    let rel = Relationship::with_entity("document", "doc1", "admin", admin.clone());
+    store.store_relationship("policy1", &rel).await.unwrap();
+
+    // Should succeed via _this branch, even though there's a self-referential branch
+    let result = engine
+        .check("policy1", "document", "doc1", "admin", &admin)
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Cycle with base case should not error: {:?}",
+        result
+    );
+    assert!(
+        result.unwrap(),
+        "Should succeed via _this even with self-referential branch"
+    );
+}
+
 // =============================================================================
 // Complex Expression Tests
 // =============================================================================

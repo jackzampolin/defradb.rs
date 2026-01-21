@@ -63,6 +63,10 @@ pub enum Error {
     /// Invalid EntitySet subject reference
     #[error("invalid EntitySet reference: resource '{resource}' relation '{relation}' does not exist in policy")]
     InvalidEntitySetReference { resource: String, relation: String },
+
+    /// Subject restriction violation
+    #[error("subject restriction violated: {message}")]
+    SubjectRestrictionViolation { message: String },
 }
 
 impl From<serde_json::Error> for Error {

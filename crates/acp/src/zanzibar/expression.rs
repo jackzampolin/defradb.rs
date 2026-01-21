@@ -100,34 +100,40 @@ impl RelationExpression {
     /// - `expr + expr` -> Union
     /// - `expr & expr` -> Intersection
     /// - `expr - expr` -> Difference (note: "->" is NOT a difference operator)
+    ///
+    /// All operators have equal precedence and are evaluated left-to-right,
+    /// matching Go zanzi behavior. Use parentheses to override.
+    ///
+    /// Example: `a + b & c` parses as `(a + b) & c` (left-to-right)
     pub fn parse(input: &str) -> Result<Self> {
         let input = input.trim();
         if input.is_empty() {
             return Err(Error::InvalidExpression("empty expression".into()));
         }
 
-        // Check for union ('+')
-        if let Some(pos) = find_operator(input, '+') {
-            let left = Self::parse(&input[..pos])?;
-            let right = Self::parse(&input[pos + 1..])?;
-            return Ok(merge_union(left, right));
+        // Handle parenthesized expressions
+        if input.starts_with('(') && input.ends_with(')') {
+            // Check if the entire expression is wrapped in matching parens
+            if is_fully_parenthesized(input) {
+                return Self::parse(&input[1..input.len() - 1]);
+            }
         }
 
-        // Check for difference ('-') but NOT '->'
-        if let Some(pos) = find_difference_operator(input) {
+        // Find the RIGHTMOST operator at depth 0 (left-to-right evaluation)
+        // This ensures `a + b & c` is parsed as `(a + b) & c`
+        if let Some((pos, op)) = find_rightmost_operator(input) {
             let left = Self::parse(&input[..pos])?;
             let right = Self::parse(&input[pos + 1..])?;
-            return Ok(Self::Difference {
-                base: Box::new(left),
-                subtract: Box::new(right),
-            });
-        }
 
-        // Check for intersection ('&')
-        if let Some(pos) = find_operator(input, '&') {
-            let left = Self::parse(&input[..pos])?;
-            let right = Self::parse(&input[pos + 1..])?;
-            return Ok(merge_intersection(left, right));
+            return match op {
+                '+' => Ok(merge_union(left, right)),
+                '&' => Ok(merge_intersection(left, right)),
+                '-' => Ok(Self::Difference {
+                    base: Box::new(left),
+                    subtract: Box::new(right),
+                }),
+                _ => unreachable!(),
+            };
         }
 
         // No operators, parse as single term
@@ -135,40 +141,60 @@ impl RelationExpression {
     }
 }
 
-/// Find the position of an operator, respecting parentheses.
-fn find_operator(input: &str, op: char) -> Option<usize> {
+/// Check if the expression is fully wrapped in matching parentheses.
+/// e.g., "(a + b)" returns true, but "(a) + (b)" returns false.
+fn is_fully_parenthesized(input: &str) -> bool {
+    if !input.starts_with('(') || !input.ends_with(')') {
+        return false;
+    }
+
     let mut depth = 0;
-    for (i, c) in input.char_indices() {
+    let chars: Vec<char> = input.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
         match c {
             '(' => depth += 1,
-            ')' => depth -= 1,
-            _ if c == op && depth == 0 => return Some(i),
+            ')' => {
+                depth -= 1;
+                // If depth reaches 0 before the end, the outer parens don't wrap everything
+                if depth == 0 && i < chars.len() - 1 {
+                    return false;
+                }
+            }
             _ => {}
         }
     }
-    None
+    true
 }
 
-/// Find a difference operator '-', but NOT '->'.
-fn find_difference_operator(input: &str) -> Option<usize> {
+/// Find the RIGHTMOST operator (+, &, or -) at depth 0.
+/// Returns the position and the operator character.
+/// This implements left-to-right evaluation with equal precedence.
+///
+/// For '-', ensures it's not part of '->' (tuple-to-userset).
+fn find_rightmost_operator(input: &str) -> Option<(usize, char)> {
     let mut depth = 0;
     let chars: Vec<char> = input.chars().collect();
+    let mut rightmost: Option<(usize, char)> = None;
+
     for i in 0..chars.len() {
         match chars[i] {
             '(' => depth += 1,
             ')' => depth -= 1,
+            '+' | '&' if depth == 0 => {
+                rightmost = Some((i, chars[i]));
+            }
             '-' if depth == 0 => {
                 // Check if this is part of '->'
                 if i + 1 < chars.len() && chars[i + 1] == '>' {
                     // This is '->', skip
                     continue;
                 }
-                return Some(i);
+                rightmost = Some((i, '-'));
             }
             _ => {}
         }
     }
-    None
+    rightmost
 }
 
 /// Parse a single term (no operators).
@@ -508,6 +534,242 @@ mod tests {
             let json = serde_json::to_string(&expr).unwrap();
             let parsed: RelationExpression = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, expr, "roundtrip failed for: {:?}", expr);
+        }
+    }
+
+    // ==========================================================================
+    // Left-to-right precedence tests (matching Go zanzi behavior)
+    // ==========================================================================
+
+    #[test]
+    fn test_left_to_right_union_then_intersection() {
+        // `a + b & c` should parse as `(a + b) & c` (left-to-right)
+        let expr = RelationExpression::parse("a + b & c").unwrap();
+
+        // Expected: Intersection([Union([a, b]), c])
+        match expr {
+            RelationExpression::Intersection(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                // First element should be Union([a, b])
+                match &exprs[0] {
+                    RelationExpression::Union(inner) => {
+                        assert_eq!(inner.len(), 2);
+                        assert_eq!(
+                            inner[0],
+                            RelationExpression::ComputedUserset {
+                                relation: "a".into()
+                            }
+                        );
+                        assert_eq!(
+                            inner[1],
+                            RelationExpression::ComputedUserset {
+                                relation: "b".into()
+                            }
+                        );
+                    }
+                    _ => panic!("expected Union as first element"),
+                }
+                // Second element should be c
+                assert_eq!(
+                    exprs[1],
+                    RelationExpression::ComputedUserset {
+                        relation: "c".into()
+                    }
+                );
+            }
+            _ => panic!("expected Intersection, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_left_to_right_intersection_then_union() {
+        // `a & b + c` should parse as `(a & b) + c` (left-to-right)
+        let expr = RelationExpression::parse("a & b + c").unwrap();
+
+        // Expected: Union([Intersection([a, b]), c])
+        match expr {
+            RelationExpression::Union(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                // First element should be Intersection([a, b])
+                match &exprs[0] {
+                    RelationExpression::Intersection(inner) => {
+                        assert_eq!(inner.len(), 2);
+                        assert_eq!(
+                            inner[0],
+                            RelationExpression::ComputedUserset {
+                                relation: "a".into()
+                            }
+                        );
+                        assert_eq!(
+                            inner[1],
+                            RelationExpression::ComputedUserset {
+                                relation: "b".into()
+                            }
+                        );
+                    }
+                    _ => panic!("expected Intersection as first element"),
+                }
+                // Second element should be c
+                assert_eq!(
+                    exprs[1],
+                    RelationExpression::ComputedUserset {
+                        relation: "c".into()
+                    }
+                );
+            }
+            _ => panic!("expected Union, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_left_to_right_difference_then_intersection() {
+        // `a - b & c` should parse as `(a - b) & c` (left-to-right)
+        let expr = RelationExpression::parse("a - b & c").unwrap();
+
+        // Expected: Intersection([Difference(a, b), c])
+        match expr {
+            RelationExpression::Intersection(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                // First element should be Difference(a, b)
+                match &exprs[0] {
+                    RelationExpression::Difference { base, subtract } => {
+                        assert_eq!(
+                            **base,
+                            RelationExpression::ComputedUserset {
+                                relation: "a".into()
+                            }
+                        );
+                        assert_eq!(
+                            **subtract,
+                            RelationExpression::ComputedUserset {
+                                relation: "b".into()
+                            }
+                        );
+                    }
+                    _ => panic!("expected Difference as first element"),
+                }
+                // Second element should be c
+                assert_eq!(
+                    exprs[1],
+                    RelationExpression::ComputedUserset {
+                        relation: "c".into()
+                    }
+                );
+            }
+            _ => panic!("expected Intersection, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_left_to_right_three_operators() {
+        // `a + b - c & d` should parse as `((a + b) - c) & d` (left-to-right)
+        let expr = RelationExpression::parse("a + b - c & d").unwrap();
+
+        // Expected: Intersection([Difference(Union([a, b]), c), d])
+        match expr {
+            RelationExpression::Intersection(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                // First element should be Difference(Union([a, b]), c)
+                match &exprs[0] {
+                    RelationExpression::Difference { base, subtract } => {
+                        // base should be Union([a, b])
+                        match &**base {
+                            RelationExpression::Union(inner) => {
+                                assert_eq!(inner.len(), 2);
+                            }
+                            _ => panic!("expected Union as base"),
+                        }
+                        // subtract should be c
+                        assert_eq!(
+                            **subtract,
+                            RelationExpression::ComputedUserset {
+                                relation: "c".into()
+                            }
+                        );
+                    }
+                    _ => panic!("expected Difference as first element"),
+                }
+                // Second element should be d
+                assert_eq!(
+                    exprs[1],
+                    RelationExpression::ComputedUserset {
+                        relation: "d".into()
+                    }
+                );
+            }
+            _ => panic!("expected Intersection, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parentheses_override_left_to_right() {
+        // `a + (b & c)` should parse with intersection evaluated first
+        let expr = RelationExpression::parse("a + (b & c)").unwrap();
+
+        // Expected: Union([a, Intersection([b, c])])
+        match expr {
+            RelationExpression::Union(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                // First element should be a
+                assert_eq!(
+                    exprs[0],
+                    RelationExpression::ComputedUserset {
+                        relation: "a".into()
+                    }
+                );
+                // Second element should be Intersection([b, c])
+                match &exprs[1] {
+                    RelationExpression::Intersection(inner) => {
+                        assert_eq!(inner.len(), 2);
+                    }
+                    _ => panic!("expected Intersection as second element"),
+                }
+            }
+            _ => panic!("expected Union, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_nested_parentheses() {
+        // `(a + (b - c)) & d` should parse correctly
+        let expr = RelationExpression::parse("(a + (b - c)) & d").unwrap();
+
+        // Expected: Intersection([Union([a, Difference(b, c)]), d])
+        match expr {
+            RelationExpression::Intersection(exprs) => {
+                assert_eq!(exprs.len(), 2);
+            }
+            _ => panic!("expected Intersection, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_tuple_to_userset_not_confused_with_difference() {
+        // Ensure `parent->owner` is not confused with difference operator
+        let expr = RelationExpression::parse("a + parent->owner & c").unwrap();
+
+        // Should be: Intersection([Union([a, TTU(parent, owner)]), c])
+        match expr {
+            RelationExpression::Intersection(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                match &exprs[0] {
+                    RelationExpression::Union(inner) => {
+                        assert_eq!(inner.len(), 2);
+                        match &inner[1] {
+                            RelationExpression::TupleToUserset {
+                                tuple_relation,
+                                computed_relation,
+                            } => {
+                                assert_eq!(tuple_relation, "parent");
+                                assert_eq!(computed_relation, "owner");
+                            }
+                            _ => panic!("expected TupleToUserset"),
+                        }
+                    }
+                    _ => panic!("expected Union"),
+                }
+            }
+            _ => panic!("expected Intersection, got {:?}", expr),
         }
     }
 }

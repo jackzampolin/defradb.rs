@@ -18,4 +18,4 @@ pub use engine::PermissionEngine;
 pub use expression::RelationExpression;
 pub use lookup::PolicyLookupTable;
 pub use store::{MemoryZanzibarStore, PersistentZanzibarStore, ZanzibarStore};
-pub use types::{Policy, Relation, Relationship, Resource, Subject};
+pub use types::{Policy, Relation, Relationship, Resource, Subject, SubjectRestriction};

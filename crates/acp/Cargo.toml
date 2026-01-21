@@ -25,5 +25,6 @@ sha2 = "0.10"
 
 [dev-dependencies]
 proptest.workspace = true
+serde_yaml = "0.9"
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

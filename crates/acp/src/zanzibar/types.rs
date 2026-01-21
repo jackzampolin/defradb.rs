@@ -210,8 +210,77 @@ pub enum SubjectRestriction {
     /// Subject must be an entity set from a specific resource/relation
     EntitySet { resource: String, relation: String },
 
+    /// Subject must be a typed wildcard for a specific resource
+    TypedWildcard { resource: String },
+
     /// Any subject type is allowed
     Any,
+}
+
+impl SubjectRestriction {
+    /// Check if a subject satisfies this restriction.
+    ///
+    /// Returns Ok(()) if satisfied, Err with a descriptive message otherwise.
+    pub fn satisfies(&self, subject: &Subject) -> std::result::Result<(), String> {
+        match self {
+            SubjectRestriction::Entity => match subject {
+                Subject::Entity(_) => Ok(()),
+                _ => Err(format!(
+                    "expected entity subject, got {}",
+                    subject_type_name(subject)
+                )),
+            },
+            SubjectRestriction::EntitySet { resource, relation } => match subject {
+                Subject::EntitySet {
+                    resource: subj_resource,
+                    relation: subj_relation,
+                    ..
+                } => {
+                    if subj_resource == resource && subj_relation == relation {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "expected EntitySet from {}#{}, got {}#{}",
+                            resource, relation, subj_resource, subj_relation
+                        ))
+                    }
+                }
+                _ => Err(format!(
+                    "expected EntitySet subject, got {}",
+                    subject_type_name(subject)
+                )),
+            },
+            SubjectRestriction::TypedWildcard { resource } => match subject {
+                Subject::TypedWildcard {
+                    resource: subj_resource,
+                } => {
+                    if subj_resource == resource {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "expected TypedWildcard for {}, got {}",
+                            resource, subj_resource
+                        ))
+                    }
+                }
+                _ => Err(format!(
+                    "expected TypedWildcard subject, got {}",
+                    subject_type_name(subject)
+                )),
+            },
+            SubjectRestriction::Any => Ok(()),
+        }
+    }
+}
+
+/// Get a human-readable name for a subject type.
+fn subject_type_name(subject: &Subject) -> &'static str {
+    match subject {
+        Subject::Entity(_) => "Entity",
+        Subject::EntitySet { .. } => "EntitySet",
+        Subject::TypedWildcard { .. } => "TypedWildcard",
+        Subject::Wildcard => "Wildcard",
+    }
 }
 
 /// A subject in a relationship.
@@ -380,20 +449,18 @@ impl Relationship {
     /// Checks that:
     /// - The relationship's resource and relation exist in the policy
     /// - If the subject is an EntitySet, the referenced resource/relation also exist
+    /// - If the relation has a subject restriction, the subject satisfies it
     ///
     /// This should be called before storing relationships to catch invalid references
     /// early rather than at permission evaluation time.
     pub fn validate(&self, policy: &Policy) -> Result<()> {
         // Validate the relationship's own resource/relation
-        if policy
+        let relation_def = policy
             .get_relation(&self.resource, &self.relation)
-            .is_none()
-        {
-            return Err(Error::RelationNotFound {
+            .ok_or_else(|| Error::RelationNotFound {
                 resource: self.resource.clone(),
                 relation: self.relation.clone(),
-            });
-        }
+            })?;
 
         // Validate EntitySet subject references
         if let Subject::EntitySet {
@@ -406,6 +473,18 @@ impl Relationship {
                     relation: relation.clone(),
                 });
             }
+        }
+
+        // Enforce subject restriction if defined
+        if let Some(restriction) = &relation_def.subject_restriction {
+            restriction.satisfies(&self.subject).map_err(|msg| {
+                Error::SubjectRestrictionViolation {
+                    message: format!(
+                        "relation '{}' on resource '{}': {}",
+                        self.relation, self.resource, msg
+                    ),
+                }
+            })?;
         }
 
         Ok(())
@@ -599,5 +678,198 @@ mod tests {
         assert_eq!(parsed.object_id, rel.object_id);
         assert_eq!(parsed.relation, rel.relation);
         assert_eq!(parsed.subject, rel.subject);
+    }
+
+    // SubjectRestriction enforcement tests
+
+    #[test]
+    fn test_subject_restriction_entity_accepts_entity() {
+        let restriction = SubjectRestriction::Entity;
+        let subject = Subject::entity(test_did());
+        assert!(restriction.satisfies(&subject).is_ok());
+    }
+
+    #[test]
+    fn test_subject_restriction_entity_rejects_entity_set() {
+        let restriction = SubjectRestriction::Entity;
+        let subject = Subject::entity_set("folder", "f1", "owner");
+        assert!(restriction.satisfies(&subject).is_err());
+    }
+
+    #[test]
+    fn test_subject_restriction_entity_rejects_wildcard() {
+        let restriction = SubjectRestriction::Entity;
+        let subject = Subject::wildcard();
+        assert!(restriction.satisfies(&subject).is_err());
+    }
+
+    #[test]
+    fn test_subject_restriction_entity_set_accepts_matching() {
+        let restriction = SubjectRestriction::EntitySet {
+            resource: "folder".to_string(),
+            relation: "owner".to_string(),
+        };
+        let subject = Subject::entity_set("folder", "f1", "owner");
+        assert!(restriction.satisfies(&subject).is_ok());
+    }
+
+    #[test]
+    fn test_subject_restriction_entity_set_rejects_wrong_resource() {
+        let restriction = SubjectRestriction::EntitySet {
+            resource: "folder".to_string(),
+            relation: "owner".to_string(),
+        };
+        let subject = Subject::entity_set("document", "d1", "owner");
+        assert!(restriction.satisfies(&subject).is_err());
+    }
+
+    #[test]
+    fn test_subject_restriction_entity_set_rejects_wrong_relation() {
+        let restriction = SubjectRestriction::EntitySet {
+            resource: "folder".to_string(),
+            relation: "owner".to_string(),
+        };
+        let subject = Subject::entity_set("folder", "f1", "reader");
+        assert!(restriction.satisfies(&subject).is_err());
+    }
+
+    #[test]
+    fn test_subject_restriction_entity_set_rejects_entity() {
+        let restriction = SubjectRestriction::EntitySet {
+            resource: "folder".to_string(),
+            relation: "owner".to_string(),
+        };
+        let subject = Subject::entity(test_did());
+        assert!(restriction.satisfies(&subject).is_err());
+    }
+
+    #[test]
+    fn test_subject_restriction_typed_wildcard_accepts_matching() {
+        let restriction = SubjectRestriction::TypedWildcard {
+            resource: "user".to_string(),
+        };
+        let subject = Subject::typed_wildcard("user");
+        assert!(restriction.satisfies(&subject).is_ok());
+    }
+
+    #[test]
+    fn test_subject_restriction_typed_wildcard_rejects_wrong_resource() {
+        let restriction = SubjectRestriction::TypedWildcard {
+            resource: "user".to_string(),
+        };
+        let subject = Subject::typed_wildcard("admin");
+        assert!(restriction.satisfies(&subject).is_err());
+    }
+
+    #[test]
+    fn test_subject_restriction_typed_wildcard_rejects_untyped() {
+        let restriction = SubjectRestriction::TypedWildcard {
+            resource: "user".to_string(),
+        };
+        let subject = Subject::wildcard();
+        assert!(restriction.satisfies(&subject).is_err());
+    }
+
+    #[test]
+    fn test_subject_restriction_any_accepts_all() {
+        let restriction = SubjectRestriction::Any;
+        assert!(restriction.satisfies(&Subject::entity(test_did())).is_ok());
+        assert!(restriction
+            .satisfies(&Subject::entity_set("f", "o", "r"))
+            .is_ok());
+        assert!(restriction.satisfies(&Subject::wildcard()).is_ok());
+        assert!(restriction
+            .satisfies(&Subject::typed_wildcard("user"))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_relationship_validate_enforces_subject_restriction() {
+        // Policy with owner relation restricted to Entity subjects only
+        let policy =
+            Policy::new("policy1", "Test").with_resource(Resource::new("document").with_relation(
+                Relation::direct("owner").with_restriction(SubjectRestriction::Entity),
+            ));
+
+        // Valid: Entity subject with Entity restriction
+        let valid_rel = Relationship::with_entity("document", "doc1", "owner", test_did());
+        assert!(valid_rel.validate(&policy).is_ok());
+
+        // Invalid: Wildcard subject with Entity restriction
+        let invalid_rel = Relationship::new("document", "doc1", "owner", Subject::wildcard());
+        let result = invalid_rel.validate(&policy);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::SubjectRestrictionViolation { .. }),
+            "Expected SubjectRestrictionViolation, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_relationship_validate_allows_when_no_restriction() {
+        // Policy with owner relation and no subject restriction
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(Relation::direct("owner")));
+
+        // All subject types should be valid
+        let rel1 = Relationship::with_entity("document", "doc1", "owner", test_did());
+        assert!(rel1.validate(&policy).is_ok());
+
+        let rel2 = Relationship::new("document", "doc1", "owner", Subject::wildcard());
+        assert!(rel2.validate(&policy).is_ok());
+
+        let rel3 = Relationship::new("document", "doc1", "owner", Subject::typed_wildcard("user"));
+        assert!(rel3.validate(&policy).is_ok());
+    }
+
+    #[test]
+    fn test_relationship_validate_entity_set_restriction() {
+        // Policy with parent relation restricted to folder#owner EntitySet
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(
+                Relation::direct("parent").with_restriction(SubjectRestriction::EntitySet {
+                    resource: "folder".to_string(),
+                    relation: "owner".to_string(),
+                }),
+            ))
+            .with_resource(
+                Resource::new("folder")
+                    .with_relation(Relation::direct("owner"))
+                    .with_relation(Relation::direct("reader")), // Add reader so EntitySet ref is valid
+            );
+
+        // Valid: EntitySet from folder#owner
+        let valid_rel = Relationship::new(
+            "document",
+            "doc1",
+            "parent",
+            Subject::entity_set("folder", "f1", "owner"),
+        );
+        assert!(valid_rel.validate(&policy).is_ok());
+
+        // Invalid: EntitySet from wrong relation (folder#reader exists but restriction requires folder#owner)
+        let invalid_rel = Relationship::new(
+            "document",
+            "doc1",
+            "parent",
+            Subject::entity_set("folder", "f1", "reader"),
+        );
+        let result = invalid_rel.validate(&policy);
+        assert!(
+            matches!(result, Err(Error::SubjectRestrictionViolation { .. })),
+            "Expected SubjectRestrictionViolation, got {:?}",
+            result
+        );
+
+        // Invalid: Entity instead of EntitySet
+        let invalid_rel2 = Relationship::with_entity("document", "doc1", "parent", test_did());
+        let result2 = invalid_rel2.validate(&policy);
+        assert!(
+            matches!(result2, Err(Error::SubjectRestrictionViolation { .. })),
+            "Expected SubjectRestrictionViolation, got {:?}",
+            result2
+        );
     }
 }
