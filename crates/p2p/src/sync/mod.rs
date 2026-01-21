@@ -44,6 +44,7 @@
 //! ```
 
 mod broadcaster;
+mod collection_store;
 mod coordinator;
 mod dag_sync;
 mod manager;
@@ -53,6 +54,7 @@ mod queue;
 mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};
+pub use collection_store::{NoOpCollectionStorage, P2PCollectionStorage, P2PCollectionStore};
 pub use coordinator::{LoadReplicatorsResult, SetReplicatorResult, SyncCoordinator};
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use manager::{SyncConfig, SyncEvent, SyncManager};

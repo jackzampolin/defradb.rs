@@ -459,6 +459,8 @@ impl Node {
         info!("Loaded {} collection schema(s)", collection_count);
 
         // Set up P2P if enabled
+        // Clone store before potential move for sync coordinator blockstore
+        let store_for_sync = store.clone();
         let p2p = if config.net.p2p_disabled {
             None
         } else {
@@ -487,8 +489,73 @@ impl Node {
             // Create auto-committing fetcher for non-transactional queries
             let fetcher = db::AutoCommitFetcher::new(database.clone());
 
-            // Create auto-committing mutator for non-transactional mutations
-            let mutator = std::sync::Arc::new(db::AutoCommitMutator::new(database.clone()));
+            // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
+            let sync_coordinator = if let Some(ref p2p_handle) = p2p {
+                let sync_blockstore =
+                    Arc::new(blockstore::DefraBlockstore::new(store_for_sync.clone(), false));
+
+                // Create persistent collection store for P2P subscriptions
+                let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
+                    Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
+
+                let (coordinator, mut sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
+                    p2p_handle.clone(),
+                    sync_blockstore,
+                    p2p::sync::SyncConfig::default(),
+                    collection_store,
+                )
+                .await
+                .map_err(Error::P2P)?;
+
+                let coordinator = Arc::new(coordinator);
+
+                // Load persisted P2P collection subscriptions
+                match coordinator.load_p2p_collections().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Loaded {} persisted P2P collection subscription(s)", count);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to load persisted P2P collections: {}", e);
+                    }
+                }
+
+                // Spawn sync event handler for incoming blocks
+                tokio::spawn(async move {
+                    while let Some(event) = sync_events.recv().await {
+                        match event {
+                            p2p::sync::SyncEvent::BlockReceived {
+                                cid,
+                                doc_id,
+                                collection_id,
+                                ..
+                            } => {
+                                info!(
+                                    cid = %cid,
+                                    doc_id = %doc_id,
+                                    collection_id = %collection_id,
+                                    "Received block from P2P (merge not yet implemented)"
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+
+                info!("P2P sync coordinator initialized");
+                Some(coordinator)
+            } else {
+                None
+            };
+
+            // Create mutator - use BroadcastMutator if P2P is enabled for network propagation
+            let mutator: Arc<dyn query::mutator::DocMutator> =
+                if let Some(ref coordinator) = sync_coordinator {
+                    Arc::new(db::BroadcastMutator::new(database.clone(), coordinator.clone()))
+                } else {
+                    Arc::new(db::AutoCommitMutator::new(database.clone()))
+                };
 
             // Create transaction registry for explicit transaction support
             let registry = db::DbTransactionRegistry::new(database.clone());
@@ -536,7 +603,20 @@ impl Node {
 
             // Wire P2P to HTTP server if enabled
             if let Some(ref p2p_handle) = p2p {
-                let p2p_adapter = crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone());
+                let p2p_adapter = if let Some(ref coordinator) = sync_coordinator {
+                    // Use sync coordinator for replicator operations (enables auto-subscribe)
+                    // Also provide collection lookup so we can resolve names to CollectionIDs
+                    // for topic subscription (matching Go DefraDB behavior)
+                    let collection_lookup =
+                        crate::p2p_adapter::DbCollectionLookup::new_arc(database.clone());
+                    crate::p2p_adapter::P2PAdapter::with_sync_coordinator_and_lookup_arc(
+                        p2p_handle.clone(),
+                        coordinator.clone(),
+                        collection_lookup,
+                    )
+                } else {
+                    crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone())
+                };
                 server = server.with_p2p_arc(p2p_adapter);
                 info!("P2P HTTP endpoints enabled");
             }

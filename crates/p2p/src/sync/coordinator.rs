@@ -98,6 +98,8 @@ use crate::host::{HostEvent, P2PHostHandle};
 use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::replicator::ReplicatorInfo;
 
+use super::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
+
 /// Result of setting a replicator with auto-subscribe.
 #[derive(Debug, Clone)]
 pub struct SetReplicatorResult {
@@ -160,6 +162,12 @@ pub struct SyncCoordinator<B: Blockstore> {
 
     /// Replicator registry for access control checks
     replicators: Arc<ReplicatorRegistry>,
+
+    /// Set of subscribed collection IDs for P2P sync (in-memory cache)
+    subscribed_collections: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+
+    /// Persistent storage for P2P collection subscriptions
+    collection_store: Arc<dyn P2PCollectionStorage>,
 }
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
@@ -168,8 +176,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Returns the coordinator and a receiver for sync events.
     ///
     /// This constructor creates the coordinator without access control
-    /// (AccessMode::Open). Use `with_access_control` for production deployments
-    /// where access control is required.
+    /// (AccessMode::Open) and no persistent storage for collections.
+    /// Use `with_collection_store` for production deployments with persistence.
     pub async fn new(
         host: P2PHostHandle,
         blockstore: Arc<B>,
@@ -181,6 +189,37 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             config,
             AccessMode::Open,
             Arc::new(ReplicatorRegistry::new()),
+            Arc::new(NoOpCollectionStorage),
+        )
+        .await
+    }
+
+    /// Create a new sync coordinator with a collection store for persistence.
+    ///
+    /// Returns the coordinator and a receiver for sync events.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - Handle to the P2P host
+    /// * `blockstore` - Shared blockstore for storing blocks
+    /// * `config` - Sync configuration
+    /// * `collection_store` - Persistent storage for P2P collection subscriptions
+    ///
+    /// This constructor enables persistent storage for P2P collection subscriptions.
+    /// Collections will be saved to storage when subscribed and loaded on startup.
+    pub async fn with_collection_store(
+        host: P2PHostHandle,
+        blockstore: Arc<B>,
+        config: SyncConfig,
+        collection_store: Arc<dyn P2PCollectionStorage>,
+    ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
+        Self::with_access_control(
+            host,
+            blockstore,
+            config,
+            AccessMode::Open,
+            Arc::new(ReplicatorRegistry::new()),
+            collection_store,
         )
         .await
     }
@@ -196,6 +235,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// * `config` - Sync configuration
     /// * `access_mode` - Access control mode (Open or Controlled)
     /// * `replicators` - Registry of authorized replicator peers
+    /// * `collection_store` - Persistent storage for P2P collection subscriptions
     ///
     /// When `access_mode` is `AccessMode::Controlled`, incoming PushLog requests
     /// and GossipSub messages are checked against the replicator registry. Only
@@ -206,6 +246,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         config: SyncConfig,
         access_mode: AccessMode,
         replicators: Arc<ReplicatorRegistry>,
+        collection_store: Arc<dyn P2PCollectionStorage>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = host.local_peer_id().await?.to_string();
         let broadcaster = Broadcaster::new(host.clone());
@@ -221,6 +262,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 local_peer_id,
                 access_mode,
                 replicators,
+                subscribed_collections: Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashSet::new(),
+                )),
+                collection_store,
             },
             events,
         ))
@@ -442,9 +487,22 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Subscribe to a collection for sync.
     ///
     /// After subscribing, updates to any document in the collection will be
-    /// received and processed.
+    /// received and processed. The subscription is persisted to storage.
     pub async fn subscribe_collection(&self, collection_id: &str) -> Result<bool> {
-        self.broadcaster.subscribe_collection(collection_id).await
+        let result = self.broadcaster.subscribe_collection(collection_id).await?;
+        if result {
+            // Persist to storage first
+            self.collection_store.add_collection(collection_id).await?;
+
+            // Update in-memory cache
+            self.subscribed_collections
+                .write()
+                .await
+                .insert(collection_id.to_string());
+
+            tracing::debug!(collection_id = %collection_id, "Subscribed to collection (persisted)");
+        }
+        Ok(result)
     }
 
     /// Subscribe to a specific document for sync.
@@ -453,13 +511,91 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     }
 
     /// Unsubscribe from a collection.
+    ///
+    /// Removes the collection subscription from both memory and persistent storage.
     pub async fn unsubscribe_collection(&self, collection_id: &str) -> Result<bool> {
-        self.broadcaster.unsubscribe_collection(collection_id).await
+        let result = self.broadcaster.unsubscribe_collection(collection_id).await?;
+        if result {
+            // Remove from persistent storage first
+            self.collection_store
+                .remove_collection(collection_id)
+                .await?;
+
+            // Update in-memory cache
+            self.subscribed_collections
+                .write()
+                .await
+                .remove(collection_id);
+
+            tracing::debug!(collection_id = %collection_id, "Unsubscribed from collection (persisted)");
+        }
+        Ok(result)
     }
 
     /// Unsubscribe from a document.
     pub async fn unsubscribe_document(&self, doc_id: &str) -> Result<bool> {
         self.broadcaster.unsubscribe_document(doc_id).await
+    }
+
+    /// Get the list of subscribed collection IDs.
+    pub async fn get_subscribed_collections(&self) -> Result<Vec<String>> {
+        let collections = self.subscribed_collections.read().await;
+        Ok(collections.iter().cloned().collect())
+    }
+
+    /// Load and subscribe to all persisted P2P collections.
+    ///
+    /// This should be called during startup to restore collection subscriptions
+    /// from persistent storage. It loads collection IDs from storage, populates
+    /// the in-memory cache, and subscribes to the GossipSub topics.
+    ///
+    /// Returns the number of collections loaded.
+    pub async fn load_p2p_collections(&self) -> Result<usize> {
+        let collections = self.collection_store.get_all_collections().await?;
+        let count = collections.len();
+
+        if count == 0 {
+            tracing::debug!("No persisted P2P collections to load");
+            return Ok(0);
+        }
+
+        tracing::info!(count = count, "Loading persisted P2P collections");
+
+        let mut loaded = 0;
+        for collection_id in collections {
+            // Subscribe to the GossipSub topic
+            match self.broadcaster.subscribe_collection(&collection_id).await {
+                Ok(true) => {
+                    // Update in-memory cache
+                    self.subscribed_collections
+                        .write()
+                        .await
+                        .insert(collection_id.clone());
+                    loaded += 1;
+                    tracing::debug!(collection_id = %collection_id, "Loaded P2P collection subscription");
+                }
+                Ok(false) => {
+                    // Already subscribed (shouldn't happen on startup, but handle gracefully)
+                    self.subscribed_collections
+                        .write()
+                        .await
+                        .insert(collection_id.clone());
+                    loaded += 1;
+                    tracing::debug!(collection_id = %collection_id, "P2P collection already subscribed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        collection_id = %collection_id,
+                        error = %e,
+                        "Failed to subscribe to persisted P2P collection"
+                    );
+                    // Continue loading other collections
+                }
+            }
+        }
+
+        tracing::info!(loaded = loaded, "Finished loading P2P collections");
+        Ok(loaded)
     }
 
     /// Broadcast a local update to the network.

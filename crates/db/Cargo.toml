@@ -27,6 +27,10 @@ tracing.workspace = true
 
 # IPLD
 cid.workspace = true
+multihash.workspace = true
+
+# Hashing
+sha2.workspace = true
 
 # P2P
 libp2p.workspace = true

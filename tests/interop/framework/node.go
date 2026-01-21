@@ -1,12 +1,14 @@
 package framework
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -29,14 +31,29 @@ type NodeConfig struct {
 	NoSigning    bool
 }
 
+// multiWriter writes to both an io.Writer and a buffer for later retrieval.
+type multiWriter struct {
+	file   *os.File
+	buffer *bytes.Buffer
+	mu     sync.Mutex
+}
+
+func (mw *multiWriter) Write(p []byte) (n int, err error) {
+	mw.mu.Lock()
+	defer mw.mu.Unlock()
+	mw.buffer.Write(p)
+	return mw.file.Write(p)
+}
+
 // Node represents a running DefraDB node.
 type Node struct {
-	Config  NodeConfig
-	cmd     *exec.Cmd
-	tempDir string
-	httpURL string
-	peerID  string
-	logFile *os.File
+	Config    NodeConfig
+	cmd       *exec.Cmd
+	tempDir   string
+	httpURL   string
+	peerID    string
+	logFile   *os.File
+	logBuffer *bytes.Buffer // Stores logs in memory for debugging
 }
 
 // NewNode creates a new Node with the given configuration.
@@ -181,9 +198,18 @@ func (n *Node) startBinary(ctx context.Context, binary string, args []string) er
 	}
 	n.logFile = logFile
 
-	// Redirect stdout and stderr to log file
-	n.cmd.Stdout = logFile
-	n.cmd.Stderr = logFile
+	// Create buffer for in-memory log capture
+	n.logBuffer = &bytes.Buffer{}
+
+	// Create multiWriter to capture logs both to file and memory
+	mw := &multiWriter{
+		file:   logFile,
+		buffer: n.logBuffer,
+	}
+
+	// Redirect stdout and stderr to multiWriter (file + memory)
+	n.cmd.Stdout = mw
+	n.cmd.Stderr = mw
 
 	// Start the process
 	if err := n.cmd.Start(); err != nil {
@@ -302,43 +328,55 @@ func (n *Node) LogPath() string {
 }
 
 // DumpLogs writes the node's logs to the given writer.
-// Useful for debugging test failures.
+// Uses the in-memory buffer if the log file is no longer available (e.g., after cleanup).
 func (n *Node) DumpLogs(w io.Writer) error {
+	// First try to read from file (most complete)
 	logPath := n.LogPath()
-	if logPath == "" {
-		return fmt.Errorf("no log file available")
+	if logPath != "" {
+		// Sync log file to ensure all data is written
+		if n.logFile != nil {
+			n.logFile.Sync()
+		}
+
+		data, err := os.ReadFile(logPath)
+		if err == nil {
+			_, err = w.Write(data)
+			return err
+		}
+		// Fall through to use buffer
 	}
 
-	// Sync log file to ensure all data is written
-	if n.logFile != nil {
-		n.logFile.Sync()
+	// Fall back to in-memory buffer
+	if n.logBuffer != nil && n.logBuffer.Len() > 0 {
+		_, err := w.Write(n.logBuffer.Bytes())
+		return err
 	}
 
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return fmt.Errorf("failed to read log file: %w", err)
-	}
-
-	_, err = w.Write(data)
-	return err
+	return fmt.Errorf("no log file available")
 }
 
 // DumpLogsString returns the node's logs as a string.
+// Uses the in-memory buffer if the log file is no longer available (e.g., after cleanup).
 func (n *Node) DumpLogsString() (string, error) {
+	// First try to read from file (most complete)
 	logPath := n.LogPath()
-	if logPath == "" {
-		return "", fmt.Errorf("no log file available")
+	if logPath != "" {
+		// Sync log file to ensure all data is written
+		if n.logFile != nil {
+			n.logFile.Sync()
+		}
+
+		data, err := os.ReadFile(logPath)
+		if err == nil {
+			return string(data), nil
+		}
+		// Fall through to use buffer
 	}
 
-	// Sync log file to ensure all data is written
-	if n.logFile != nil {
-		n.logFile.Sync()
+	// Fall back to in-memory buffer
+	if n.logBuffer != nil && n.logBuffer.Len() > 0 {
+		return n.logBuffer.String(), nil
 	}
 
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read log file: %w", err)
-	}
-
-	return string(data), nil
+	return "", fmt.Errorf("no log file available")
 }

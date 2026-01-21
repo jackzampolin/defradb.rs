@@ -30,6 +30,9 @@ serde_json.workspace = true
 # Cryptography (for stable ID generation)
 sha2.workspace = true
 
+# Content addressing
+cid.workspace = true
+
 # Error handling
 thiserror.workspace = true
 

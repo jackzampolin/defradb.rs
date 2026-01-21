@@ -3,6 +3,8 @@
 //! Parses GraphQL Schema Definition Language (SDL) into DefraDB CollectionVersion schemas.
 //! Designed for compatibility with Go DefraDB's SDL parsing behavior.
 
+use cid::Cid;
+
 use crate::error::{QueryError, Result};
 use graphql_parser::schema::{
     Definition, Directive, Document, Field, ObjectType, Type, TypeDefinition,
@@ -544,18 +546,18 @@ impl<'a> SdlParser<'a> {
         type_def: &ParsedTypeDef,
         type_names: &std::collections::HashSet<String>,
     ) -> Result<CollectionVersion> {
-        let collection_id = generate_collection_id(&type_def.name);
+        // collection_id will be generated after fields are created (like Go)
         let mut fields = Vec::new();
         let mut indexes = Vec::new();
         let mut field_id_counter = 1u32;
 
         // Add implicit _docID field
+        // NOTE: Go uses CType::None (0) for _docID, not LwwRegister (1)
         let doc_id_field_id = generate_field_id(&type_def.name, "_docID");
-        fields.push(FieldDescription::new(
-            &doc_id_field_id,
-            "_docID",
-            FieldKind::doc_id(),
-        ));
+        fields.push(
+            FieldDescription::new(&doc_id_field_id, "_docID", FieldKind::doc_id())
+                .with_crdt_type(CType::None),
+        );
         field_id_counter += 1;
 
         // Process user-defined fields
@@ -655,6 +657,26 @@ impl<'a> SdlParser<'a> {
                 unique: composite_idx.unique,
             });
         }
+
+        // INTEROP CRITICAL: Sort fields alphabetically after _docID (like Go does).
+        //
+        // Go's collection.go sorts fields so _docID stays at position 0,
+        // and remaining fields are sorted alphabetically by name.
+        //
+        // Field order affects collection CID generation because:
+        // 1. Each field gets a priority based on its position (1, 2, 3, ...)
+        // 2. Priority is encoded in the field's CRDT delta payload
+        // 3. Different priorities = different field CIDs = different collection CID
+        //
+        // Without this sort, schemas like "type Users { name: String, age: Int }"
+        // would have fields [_docID, name, age] in Rust but [_docID, age, name] in Go,
+        // causing CID mismatches and P2P topic subscription failures.
+        if fields.len() > 1 {
+            fields[1..].sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
+        // Generate collection ID from type name and fields (like Go, includes field CIDs as links)
+        let collection_id = generate_collection_id(&type_def.name, &fields);
 
         // Generate version ID from content
         let version_id = generate_version_id(&type_def.name, &fields);
@@ -760,36 +782,69 @@ fn hash_to_hex(hash: &[u8]) -> String {
     )
 }
 
-/// Generate a deterministic collection ID from the type name.
-fn generate_collection_id(type_name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"collection:");
-    hasher.update(type_name.as_bytes());
-    format!("coll_{}", hash_to_hex(&hasher.finalize()))
+/// Generate a deterministic collection ID from the type name and fields.
+///
+/// Uses the same CID format as Go DefraDB for interoperability.
+/// Like Go, includes field definition CIDs as links in the collection block.
+///
+/// IMPORTANT: Go uses priority=1 for ALL fields and the collection block,
+/// not incrementing priorities. This was verified by comparing actual AddSchema
+/// output with manual CID generation.
+fn generate_collection_id(type_name: &str, fields: &[FieldDescription]) -> String {
+    // Generate CIDs for each field definition with priority=1 (like Go does)
+    // All fields use the same priority=1, not incrementing priorities
+    let field_cids: Vec<Cid> = fields
+        .iter()
+        .filter_map(|f| {
+            schema::generate_field_cid_with_priority(f, 1).ok() // Priority=1 for all
+        })
+        .collect();
+
+    // Use schema::generate_collection_cid_with_priority with priority=1 for Go-compatible CID
+    match schema::generate_collection_cid_with_priority(type_name, &field_cids, 1) {
+        Ok(cid) => cid.to_string(),
+        Err(_) => {
+            // Fallback to simple hash if CID generation fails
+            let mut hasher = Sha256::new();
+            hasher.update(b"collection:");
+            hasher.update(type_name.as_bytes());
+            format!("coll_{}", hash_to_hex(&hasher.finalize()))
+        }
+    }
 }
 
 /// Generate a deterministic field ID from collection name and field name.
+///
+/// Uses the same CID format as Go DefraDB for interoperability.
 fn generate_field_id(type_name: &str, field_name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"field:");
-    hasher.update(type_name.as_bytes());
-    hasher.update(b":");
-    hasher.update(field_name.as_bytes());
-    format!("field_{}", hash_to_hex(&hasher.finalize()))
+    // Build a temporary FieldDescription to get the CID
+    let field = FieldDescription::new(
+        String::new(), // ID will be generated
+        field_name.to_string(),
+        FieldKind::Scalar(ScalarKind::String), // Kind doesn't significantly affect CID for name-based fields
+    );
+
+    match schema::generate_field_cid(&field) {
+        Ok(cid) => cid.to_string(),
+        Err(_) => {
+            // Fallback to simple hash if CID generation fails
+            let mut hasher = Sha256::new();
+            hasher.update(b"field:");
+            hasher.update(type_name.as_bytes());
+            hasher.update(b":");
+            hasher.update(field_name.as_bytes());
+            format!("field_{}", hash_to_hex(&hasher.finalize()))
+        }
+    }
 }
 
 /// Generate a deterministic version ID from collection name and fields.
+///
+/// Uses the same CID format as Go DefraDB for interoperability.
+/// In Go, for a new schema the VersionID equals the CollectionID.
 fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"version:");
-    hasher.update(name.as_bytes());
-    for field in fields {
-        hasher.update(b":");
-        hasher.update(field.name.as_bytes());
-        hasher.update(b":");
-        hasher.update(field.id.as_bytes());
-    }
-    format!("v{}", hash_to_hex(&hasher.finalize()))
+    // Version ID uses the same logic as collection ID (Go behavior for new schemas)
+    generate_collection_id(name, fields)
 }
 
 /// Generate a relation name following Go DefraDB conventions.
@@ -1441,11 +1496,12 @@ mod tests {
 
     #[test]
     fn test_collection_ids_are_deterministic() {
-        let id1 = generate_collection_id("User");
-        let id2 = generate_collection_id("User");
+        // With empty fields (matches Go's behavior for field-less collections)
+        let id1 = generate_collection_id("User", &[]);
+        let id2 = generate_collection_id("User", &[]);
         assert_eq!(id1, id2, "same type name should produce same collection ID");
 
-        let id3 = generate_collection_id("Post");
+        let id3 = generate_collection_id("Post", &[]);
         assert_ne!(
             id1, id3,
             "different type names should produce different IDs"
@@ -2374,6 +2430,68 @@ mod tests {
             output.warnings.is_empty(),
             "includes is a known argument but got warnings: {:?}",
             output.warnings
+        );
+    }
+
+    // =========================================================================
+    // Go Interoperability - Field Ordering Tests
+    // =========================================================================
+
+    #[test]
+    fn test_fields_sorted_alphabetically_after_docid() {
+        // Go sorts fields alphabetically after _docID
+        // For "name, age" input order, Go outputs [_docID, age, name]
+        let sdl = r#"
+            type Users {
+                name: String
+                age: Int
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+        let users = &collections[0];
+
+        // Verify field order: _docID first, then alphabetical
+        let field_names: Vec<&str> = users.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["_docID", "age", "name"],
+            "Fields should be sorted alphabetically after _docID"
+        );
+    }
+
+    #[test]
+    fn test_collection_cid_matches_go_with_sorted_fields() {
+        // This CID was generated by Go DefraDB for:
+        // type Users { name: String, age: Int }
+        // With fields sorted as [_docID, age, name]
+        //
+        // Go debug output (from running TestDebugUsersCIDGeneration):
+        // Collection 'Users' (p=4, 3 field links): bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq
+        //
+        // Note: This CID comes from Go's actual AddSchema behavior, not the debug test
+        // which manually specifies field order. The actual AddSchema sorts fields.
+        const GO_EXPECTED_CID: &str = "bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq";
+
+        let sdl = r#"
+            type Users {
+                name: String
+                age: Int
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+        let users = &collections[0];
+
+        // Print debug info for diagnosing CID mismatches
+        println!("Field order: {:?}", users.fields.iter().map(|f| &f.name).collect::<Vec<_>>());
+        println!("Collection CID: {}", users.collection_id);
+        println!("Expected (Go): {}", GO_EXPECTED_CID);
+
+        assert_eq!(
+            users.collection_id,
+            GO_EXPECTED_CID,
+            "Collection CID should match Go DefraDB"
         );
     }
 }

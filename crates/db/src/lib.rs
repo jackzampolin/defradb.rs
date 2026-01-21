@@ -45,6 +45,8 @@
 pub mod acp_merge_handler;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
+pub mod block_builder;
+pub mod broadcast_mutator;
 pub mod collection;
 pub mod collection_acp;
 pub mod collection_cache;
@@ -68,6 +70,8 @@ pub mod txn_registry;
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
+pub use block_builder::{build_block_from_document, BlockResult};
+pub use broadcast_mutator::BroadcastMutator;
 pub use collection::Collection;
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
