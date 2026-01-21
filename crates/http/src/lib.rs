@@ -80,8 +80,8 @@ pub use error::{HttpError, Result};
 pub use identity_extractor::{ExtractIdentity, ExtractTokenIdentity, IdentityExtractionError};
 pub use router::{
     create_router, create_router_with_rest, create_router_with_state, AcpOperations, AppState,
-    AppStateBuilder, BackupOperations, IndexFieldInfo, IndexInfo, IndexOperations, P2POperations,
-    PolicyInfo, ReplicatorInfo,
+    AppStateBuilder, BackupOperations, IndexFieldInfo, IndexInfo, IndexOperations, NacStatus,
+    NacStatusInfo, NodeAcpOperations, NodePermission, P2POperations, PolicyInfo, ReplicatorInfo,
 };
 pub use server::{Server, ServerConfig};
 
@@ -89,6 +89,6 @@ pub use server::{Server, ServerConfig};
 pub use mock::{
     FailingMockAcpOperations, FailingMockBackupOperations, FailingMockExecutor,
     FailingMockIndexOperations, FailingMockP2POperations, FailingMockRestOperations,
-    MockAcpOperations, MockBackupOperations, MockIndexOperations, MockP2POperations,
-    MockQueryExecutor, MockRestOperations,
+    MockAcpOperations, MockBackupOperations, MockIndexOperations, MockNodeAcpOperations,
+    MockP2POperations, MockQueryExecutor, MockRestOperations,
 };
