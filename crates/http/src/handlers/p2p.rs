@@ -16,12 +16,10 @@ use crate::error::HttpError;
 use crate::router::AppState;
 use crate::validation::{validate_collection_name, validate_multiaddr};
 
-/// Response for P2P node info.
-#[derive(Debug, Clone, Serialize)]
-pub struct P2pInfoResponse {
-    pub id: String,
-    pub addresses: Vec<String>,
-}
+/// Response for P2P node info (Go-compatible format).
+/// Returns array of full multiaddrs with peer ID embedded.
+/// Example: ["/ip4/127.0.0.1/tcp/9181/p2p/12D3KooWxyz..."]
+pub type P2pInfoResponse = Vec<String>;
 
 /// Response for listing peers.
 #[derive(Debug, Clone, Serialize)]
@@ -47,12 +45,15 @@ pub struct ReplicatorInfoResponse {
     pub address: Option<String>,
 }
 
-/// Request to add a replicator.
+/// Request to add a replicator (Go-compatible format).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReplicatorRequest {
+    /// List of collection names to replicate.
+    #[serde(rename = "Collections")]
     pub collections: Vec<String>,
-    #[serde(default)]
-    pub address: Option<String>,
+    /// List of peer multiaddrs to replicate to.
+    #[serde(rename = "Addresses", default)]
+    pub addresses: Vec<String>,
 }
 
 /// Query parameters for replicator removal.
@@ -77,9 +78,12 @@ pub struct CollectionsDeleteQuery {
     pub collections: Vec<String>,
 }
 
-/// Get P2P node information.
+/// Get P2P node information (Go-compatible format).
 ///
 /// GET /api/v0/p2p/info
+///
+/// Returns array of full multiaddrs with peer ID embedded.
+/// Example: ["/ip4/127.0.0.1/tcp/9181/p2p/12D3KooWxyz..."]
 pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoResponse>, HttpError> {
     let p2p = state.require_p2p()?;
 
@@ -87,10 +91,13 @@ pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoRespo
 
     let addresses = p2p.listen_addresses().await.map_err(HttpError::Internal)?;
 
-    Ok(Json(P2pInfoResponse {
-        id: peer_id,
-        addresses,
-    }))
+    // Build full multiaddrs with peer ID embedded (Go-compatible format)
+    let full_addrs: Vec<String> = addresses
+        .into_iter()
+        .map(|addr| format!("{}/p2p/{}", addr, peer_id))
+        .collect();
+
+    Ok(Json(full_addrs))
 }
 
 /// List connected peers.
@@ -109,9 +116,11 @@ pub async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<PeerIn
     Ok(Json(peer_infos))
 }
 
-/// Connect to a peer.
+/// Connect to a peer (legacy format).
 ///
 /// POST /api/v0/p2p/peers
+///
+/// Body: {"address": "/ip4/..."}
 pub async fn connect_peer(
     State(state): State<AppState>,
     Json(request): Json<ConnectPeerRequest>,
@@ -126,6 +135,27 @@ pub async fn connect_peer(
         .map_err(HttpError::BadRequest)?;
 
     Ok(Json(()))
+}
+
+/// Connect to peers (Go-compatible format).
+///
+/// POST /api/v0/p2p/connect
+///
+/// Body: ["/ip4/.../p2p/...", ...]
+pub async fn connect(
+    State(state): State<AppState>,
+    Json(addresses): Json<Vec<String>>,
+) -> Result<(), HttpError> {
+    let p2p = state.require_p2p()?;
+
+    for addr in &addresses {
+        validate_multiaddr(addr)?;
+        p2p.connect_peer(addr)
+            .await
+            .map_err(HttpError::BadRequest)?;
+    }
+
+    Ok(())
 }
 
 /// List replicators.
@@ -150,9 +180,11 @@ pub async fn list_replicators(
     Ok(Json(response))
 }
 
-/// Add a replicator.
+/// Add a replicator (Go-compatible format).
 ///
-/// POST /api/v0/p2p/replicator
+/// POST /api/v0/p2p/replicators
+///
+/// Body: {"Addresses": ["..."], "Collections": ["..."]}
 pub async fn add_replicator(
     State(state): State<AppState>,
     Json(request): Json<ReplicatorRequest>,
@@ -170,12 +202,15 @@ pub async fn add_replicator(
         validate_collection_name(col)?;
     }
 
-    // Validate address if provided
-    if let Some(ref addr) = request.address {
+    // Validate and use addresses
+    for addr in &request.addresses {
         validate_multiaddr(addr)?;
     }
 
-    p2p.add_replicator(request.collections, request.address.as_deref())
+    // Use first address if provided (Go sends array, trait takes optional single)
+    let addr = request.addresses.first().map(|s| s.as_str());
+
+    p2p.add_replicator(request.collections, addr)
         .await
         .map_err(HttpError::BadRequest)?;
 
@@ -294,18 +329,19 @@ mod tests {
 
     #[test]
     fn test_replicator_request_deserialize() {
-        let json = r#"{"collections": ["Users", "Posts"], "address": "/ip4/127.0.0.1/tcp/9000"}"#;
+        // Go-compatible format with PascalCase field names
+        let json = r#"{"Collections": ["Users", "Posts"], "Addresses": ["/ip4/127.0.0.1/tcp/9000"]}"#;
         let request: ReplicatorRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.collections.len(), 2);
-        assert!(request.address.is_some());
+        assert_eq!(request.addresses.len(), 1);
     }
 
     #[test]
     fn test_replicator_request_without_address() {
-        let json = r#"{"collections": ["Users"]}"#;
+        let json = r#"{"Collections": ["Users"]}"#;
         let request: ReplicatorRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.collections.len(), 1);
-        assert!(request.address.is_none());
+        assert!(request.addresses.is_empty());
     }
 
     #[test]
@@ -317,12 +353,13 @@ mod tests {
 
     #[test]
     fn test_p2p_info_response_serialize() {
-        let response = P2pInfoResponse {
-            id: "12D3KooWtest".to_string(),
-            addresses: vec!["/ip4/127.0.0.1/tcp/9000".to_string()],
-        };
+        // Response is now array of full multiaddrs (Go-compatible format)
+        let response: P2pInfoResponse =
+            vec!["/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWtest".to_string()];
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("12D3KooWtest"));
         assert!(json.contains("/ip4/127.0.0.1/tcp/9000"));
+        // Verify it's an array, not an object
+        assert!(json.starts_with('['));
     }
 }

@@ -14,7 +14,7 @@ use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
 use crate::error::Result;
-use crate::router::{create_router, create_router_with_rest};
+use crate::router::{AppStateBuilder, P2POperations, SchemaOperations, create_router_with_state};
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -40,6 +40,8 @@ pub struct Server {
     config: ServerConfig,
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
+    p2p: Option<Arc<dyn P2POperations>>,
+    schema: Option<Arc<dyn SchemaOperations>>,
 }
 
 impl Server {
@@ -49,6 +51,8 @@ impl Server {
             config: ServerConfig::default(),
             executor: Arc::new(executor),
             rest: None,
+            p2p: None,
+            schema: None,
         }
     }
 
@@ -58,6 +62,8 @@ impl Server {
             config,
             executor: Arc::new(executor),
             rest: None,
+            p2p: None,
+            schema: None,
         }
     }
 
@@ -67,6 +73,8 @@ impl Server {
             config: ServerConfig::default(),
             executor,
             rest: None,
+            p2p: None,
+            schema: None,
         }
     }
 
@@ -76,6 +84,8 @@ impl Server {
             config,
             executor,
             rest: None,
+            p2p: None,
+            schema: None,
         }
     }
 
@@ -99,6 +109,39 @@ impl Server {
         self
     }
 
+    /// Set P2P operations for peer-to-peer networking endpoints.
+    ///
+    /// When P2P operations are configured, the server enables additional endpoints:
+    /// - `GET /api/v0/p2p/info` - Get P2P node info (peer ID, addresses)
+    /// - `GET /api/v0/p2p/peers` - List connected peers
+    /// - `POST /api/v0/p2p/peers` - Connect to a peer
+    /// - And other P2P management endpoints
+    pub fn with_p2p<P: P2POperations + 'static>(mut self, p2p: P) -> Self {
+        self.p2p = Some(Arc::new(p2p));
+        self
+    }
+
+    /// Set P2P operations from an Arc.
+    pub fn with_p2p_arc(mut self, p2p: Arc<dyn P2POperations>) -> Self {
+        self.p2p = Some(p2p);
+        self
+    }
+
+    /// Set schema operations for schema management endpoints.
+    ///
+    /// When schema operations are configured, the server enables:
+    /// - `POST /api/v0/schema` - Add schema from SDL
+    pub fn with_schema<S: SchemaOperations + 'static>(mut self, schema: S) -> Self {
+        self.schema = Some(Arc::new(schema));
+        self
+    }
+
+    /// Set schema operations from an Arc.
+    pub fn with_schema_arc(mut self, schema: Arc<dyn SchemaOperations>) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
     /// Build the router with all routes and middleware.
     ///
     /// CORS configuration matches Go DefraDB behavior:
@@ -110,10 +153,19 @@ impl Server {
     pub fn router(&self) -> Result<Router> {
         let cors = self.build_cors_layer()?;
 
-        let router = match &self.rest {
-            Some(rest) => create_router_with_rest(Arc::clone(&self.executor), Arc::clone(rest)),
-            None => create_router(Arc::clone(&self.executor)),
-        };
+        // Build state with all configured components
+        let mut builder = AppStateBuilder::new(Arc::clone(&self.executor));
+        if let Some(ref rest) = self.rest {
+            builder = builder.with_rest(Arc::clone(rest));
+        }
+        if let Some(ref p2p) = self.p2p {
+            builder = builder.with_p2p(Arc::clone(p2p));
+        }
+        if let Some(ref schema) = self.schema {
+            builder = builder.with_schema(Arc::clone(schema));
+        }
+        let state = builder.build();
+        let router = create_router_with_state(state);
 
         Ok(router.layer(TraceLayer::new_for_http()).layer(cors))
     }

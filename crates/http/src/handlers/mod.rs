@@ -16,6 +16,7 @@ pub mod documents;
 pub mod graphql;
 pub mod index;
 pub mod p2p;
+pub mod schema;
 
 // Re-export GraphQL handlers for backwards compatibility
 pub use graphql::{
