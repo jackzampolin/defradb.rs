@@ -280,19 +280,13 @@ impl NodePermission {
     }
 
     /// Check if this permission is admin-only (requires owner or admin relation).
+    ///
+    /// In Go DefraDB, all 33 node permissions are defined with `expr: owner + admin`,
+    /// meaning they all require either the owner or admin relation to be granted.
+    /// This matches that behavior.
     pub fn is_admin_only(&self) -> bool {
-        matches!(
-            self,
-            Self::DacBypass
-                | Self::DacEnable
-                | Self::DacDisable
-                | Self::DacPurge
-                | Self::NacReEnable
-                | Self::NacDisable
-                | Self::NacPurge
-                | Self::NacRelationAdd
-                | Self::NacRelationDelete
-        )
+        // All node permissions require owner or admin relation per Go implementation
+        true
     }
 }
 
@@ -331,10 +325,14 @@ mod tests {
 
     #[test]
     fn test_admin_only_permissions() {
-        assert!(NodePermission::DacBypass.is_admin_only());
-        assert!(NodePermission::NacPurge.is_admin_only());
-        assert!(!NodePermission::DocumentRead.is_admin_only());
-        assert!(!NodePermission::P2pReplicatorList.is_admin_only());
+        // All 33 permissions require owner or admin relation (matches Go behavior)
+        for perm in NodePermission::all() {
+            assert!(
+                perm.is_admin_only(),
+                "permission {} should be admin-only",
+                perm
+            );
+        }
     }
 
     #[test]
