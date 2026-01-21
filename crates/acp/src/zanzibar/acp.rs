@@ -22,6 +22,7 @@ pub const OWNER_RELATION: &str = "owner";
 pub const READER_RELATION: &str = "reader";
 pub const UPDATER_RELATION: &str = "updater";
 pub const DELETER_RELATION: &str = "deleter";
+pub const ADMIN_RELATION: &str = "admin";
 
 /// DocumentACP implementation using the Zanzibar permission model.
 ///
@@ -48,18 +49,31 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
     ///
     /// This creates a policy with the standard DPI relations:
     /// - owner: direct relation (base case)
-    /// - reader: owner + direct readers
-    /// - updater: owner + direct updaters
-    /// - deleter: owner + direct deleters
+    /// - admin: direct relation that manages [reader, updater, deleter]
+    /// - reader: owner + admin + direct readers
+    /// - updater: owner + admin + direct updaters
+    /// - deleter: owner + admin + direct deleters
     pub fn create_default_policy(policy_id: &str, resource_name: &str) -> Policy {
         Policy::new(policy_id, format!("Policy for {}", resource_name)).with_resource(
             Resource::new(resource_name)
                 .with_relation(Relation::direct(OWNER_RELATION))
+                // Admin relation with manages capability
+                .with_relation(
+                    Relation::computed(
+                        ADMIN_RELATION,
+                        RelationExpression::union(vec![
+                            RelationExpression::this(),
+                            RelationExpression::computed_userset(OWNER_RELATION),
+                        ]),
+                    )
+                    .with_manages(vec![READER_RELATION, UPDATER_RELATION, DELETER_RELATION]),
+                )
                 .with_relation(Relation::computed(
                     READER_RELATION,
                     RelationExpression::union(vec![
                         RelationExpression::this(),
                         RelationExpression::computed_userset(OWNER_RELATION),
+                        RelationExpression::computed_userset(ADMIN_RELATION),
                         // Updater and deleter also imply read
                         RelationExpression::computed_userset(UPDATER_RELATION),
                         RelationExpression::computed_userset(DELETER_RELATION),
@@ -70,6 +84,7 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
                     RelationExpression::union(vec![
                         RelationExpression::this(),
                         RelationExpression::computed_userset(OWNER_RELATION),
+                        RelationExpression::computed_userset(ADMIN_RELATION),
                     ]),
                 ))
                 .with_relation(Relation::computed(
@@ -77,6 +92,7 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
                     RelationExpression::union(vec![
                         RelationExpression::this(),
                         RelationExpression::computed_userset(OWNER_RELATION),
+                        RelationExpression::computed_userset(ADMIN_RELATION),
                     ]),
                 )),
         )
@@ -119,6 +135,61 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         self.store
             .check_permission_direct(policy_id, resource_name, doc_id, OWNER_RELATION, subject)
             .await
+    }
+
+    /// Check if subject can manage a given relation (is owner OR has a managing relation).
+    ///
+    /// DefraDB pattern: actors can manage relationships if they are either:
+    /// 1. The owner of the object, OR
+    /// 2. Have a relation that has the target relation in its `manages` list
+    async fn can_manage_relation(
+        &self,
+        subject: &Did,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+        target_relation: &str,
+    ) -> Result<bool> {
+        // Check if owner first (fast path)
+        if self
+            .is_owner(subject, policy_id, resource_name, doc_id)
+            .await?
+        {
+            return Ok(true);
+        }
+
+        // Get the policy to find managing relations
+        let policy = match self.store.get_policy(policy_id).await? {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+
+        // Find all relations that can manage the target relation
+        let managers = policy.get_managers_for_relation(resource_name, target_relation);
+
+        // Check if subject has any of the managing relations
+        for manager_relation in managers {
+            let has_manager = self
+                .store
+                .check_permission_direct(policy_id, resource_name, doc_id, manager_relation, subject)
+                .await?;
+
+            if has_manager {
+                tracing::debug!(
+                    target: "acp::audit",
+                    event = "manager_authorized",
+                    subject = %subject,
+                    manager_relation = %manager_relation,
+                    target_relation = %target_relation,
+                    collection = %resource_name,
+                    doc_id = %doc_id,
+                    "Subject authorized via manager relation"
+                );
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Map DocumentPermission to relation name.
@@ -300,16 +371,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         // Ensure the policy exists before operating on relationships
         self.ensure_policy(collection_id, collection_id).await?;
 
-        // Only owner can add relationships
-        if !self
-            .is_owner(requestor, collection_id, collection_id, doc_id)
-            .await?
-        {
-            return Err(Error::NotOwner {
-                operation: "add actor relationship".to_string(),
-            });
-        }
-
         // Cannot add owner relation
         if relation == OWNER_RELATION {
             return Err(Error::InvalidRelation(
@@ -318,11 +379,21 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         }
 
         // Validate relation name
-        if ![READER_RELATION, UPDATER_RELATION, DELETER_RELATION].contains(&relation) {
+        if ![READER_RELATION, UPDATER_RELATION, DELETER_RELATION, ADMIN_RELATION].contains(&relation) {
             return Err(Error::InvalidRelation(format!(
-                "unknown relation '{}', valid relations are: reader, updater, deleter",
+                "unknown relation '{}', valid relations are: reader, updater, deleter, admin",
                 relation
             )));
+        }
+
+        // Check if requestor can manage this relation (owner OR has managing relation)
+        if !self
+            .can_manage_relation(requestor, collection_id, collection_id, doc_id, relation)
+            .await?
+        {
+            return Err(Error::NotOwner {
+                operation: "add actor relationship".to_string(),
+            });
         }
 
         // Check if relationship already exists
@@ -381,21 +452,21 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         // Ensure the policy exists before operating on relationships
         self.ensure_policy(collection_id, collection_id).await?;
 
-        // Only owner can delete relationships
-        if !self
-            .is_owner(requestor, collection_id, collection_id, doc_id)
-            .await?
-        {
-            return Err(Error::NotOwner {
-                operation: "delete actor relationship".to_string(),
-            });
-        }
-
         // Cannot delete owner relation
         if relation == OWNER_RELATION {
             return Err(Error::InvalidRelation(
                 "cannot delete owner relation".to_string(),
             ));
+        }
+
+        // Check if requestor can manage this relation (owner OR has managing relation)
+        if !self
+            .can_manage_relation(requestor, collection_id, collection_id, doc_id, relation)
+            .await?
+        {
+            return Err(Error::NotOwner {
+                operation: "delete actor relationship".to_string(),
+            });
         }
 
         // Delete relationship
@@ -795,5 +866,241 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(Error::InvalidRelation(_))));
+    }
+
+    // ==========================================================================
+    // Manager Delegation Pattern Tests
+    // ==========================================================================
+
+    fn test_did3() -> Did {
+        Did::new("did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi").unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_admin_can_add_reader_relationship() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let acp = ZanzibarDocumentACP::new(store);
+
+        let owner = test_did();
+        let admin = test_did2();
+        let reader = test_did3();
+
+        // Register document
+        acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+            .await
+            .unwrap();
+
+        // Owner adds admin
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+            .await
+            .unwrap();
+
+        // Admin should be able to add reader (admin manages reader)
+        let added = acp
+            .add_actor_relationship(&admin, &reader, "collection1", "doc1", "reader")
+            .await
+            .unwrap();
+        assert!(added);
+
+        // Reader should now have read access
+        let can_read = acp
+            .check_doc_access(
+                &Identity::Authenticated(reader),
+                DocumentPermission::Read,
+                "collection1",
+                "collection1",
+                "doc1",
+            )
+            .await
+            .unwrap();
+        assert!(can_read);
+    }
+
+    #[tokio::test]
+    async fn test_admin_can_delete_reader_relationship() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let acp = ZanzibarDocumentACP::new(store);
+
+        let owner = test_did();
+        let admin = test_did2();
+        let reader = test_did3();
+
+        // Register document
+        acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+            .await
+            .unwrap();
+
+        // Owner adds admin
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+            .await
+            .unwrap();
+
+        // Owner adds reader
+        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader")
+            .await
+            .unwrap();
+
+        // Admin should be able to delete reader (admin manages reader)
+        let deleted = acp
+            .delete_actor_relationship(&admin, &reader, "collection1", "doc1", "reader")
+            .await
+            .unwrap();
+        assert!(deleted);
+
+        // Reader should no longer have access
+        let can_read = acp
+            .check_doc_access(
+                &Identity::Authenticated(reader),
+                DocumentPermission::Read,
+                "collection1",
+                "collection1",
+                "doc1",
+            )
+            .await
+            .unwrap();
+        assert!(!can_read);
+    }
+
+    #[tokio::test]
+    async fn test_admin_cannot_add_admin_relationship() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let acp = ZanzibarDocumentACP::new(store);
+
+        let owner = test_did();
+        let admin = test_did2();
+        let other = test_did3();
+
+        // Register document
+        acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+            .await
+            .unwrap();
+
+        // Owner adds admin
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+            .await
+            .unwrap();
+
+        // Admin should NOT be able to add another admin (admin doesn't manage admin)
+        let result = acp
+            .add_actor_relationship(&admin, &other, "collection1", "doc1", "admin")
+            .await;
+        assert!(matches!(result, Err(Error::NotOwner { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_reader_cannot_add_relationships() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let acp = ZanzibarDocumentACP::new(store);
+
+        let owner = test_did();
+        let reader = test_did2();
+        let other = test_did3();
+
+        // Register document
+        acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+            .await
+            .unwrap();
+
+        // Owner adds reader
+        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader")
+            .await
+            .unwrap();
+
+        // Reader should NOT be able to add another reader (reader doesn't manage anything)
+        let result = acp
+            .add_actor_relationship(&reader, &other, "collection1", "doc1", "reader")
+            .await;
+        assert!(matches!(result, Err(Error::NotOwner { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_admin_has_read_update_delete_permissions() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let acp = ZanzibarDocumentACP::new(store);
+
+        let owner = test_did();
+        let admin = test_did2();
+
+        // Register document
+        acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+            .await
+            .unwrap();
+
+        // Owner adds admin
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+            .await
+            .unwrap();
+
+        let admin_identity = Identity::Authenticated(admin);
+
+        // Admin should have read access (reader includes admin)
+        let can_read = acp
+            .check_doc_access(
+                &admin_identity,
+                DocumentPermission::Read,
+                "collection1",
+                "collection1",
+                "doc1",
+            )
+            .await
+            .unwrap();
+        assert!(can_read);
+
+        // Admin should have update access (updater includes admin)
+        let can_update = acp
+            .check_doc_access(
+                &admin_identity,
+                DocumentPermission::Update,
+                "collection1",
+                "collection1",
+                "doc1",
+            )
+            .await
+            .unwrap();
+        assert!(can_update);
+
+        // Admin should have delete access (deleter includes admin)
+        let can_delete = acp
+            .check_doc_access(
+                &admin_identity,
+                DocumentPermission::Delete,
+                "collection1",
+                "collection1",
+                "doc1",
+            )
+            .await
+            .unwrap();
+        assert!(can_delete);
+    }
+
+    #[tokio::test]
+    async fn test_revoking_admin_removes_management_capability() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let acp = ZanzibarDocumentACP::new(store);
+
+        let owner = test_did();
+        let admin = test_did2();
+        let reader = test_did3();
+
+        // Register document
+        acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+            .await
+            .unwrap();
+
+        // Owner adds admin
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+            .await
+            .unwrap();
+
+        // Owner revokes admin
+        acp.delete_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+            .await
+            .unwrap();
+
+        // Former admin should NOT be able to add reader anymore
+        let result = acp
+            .add_actor_relationship(&admin, &reader, "collection1", "doc1", "reader")
+            .await;
+        assert!(matches!(result, Err(Error::NotOwner { .. })));
     }
 }

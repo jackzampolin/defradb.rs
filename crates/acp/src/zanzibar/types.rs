@@ -59,6 +59,21 @@ impl Policy {
             .and_then(|r| r.get_relation(relation))
     }
 
+    /// Find all relations that can manage (grant/revoke) a given relation.
+    ///
+    /// Returns a list of relation names that have the target relation in their `manages` list.
+    pub fn get_managers_for_relation(&self, resource: &str, relation: &str) -> Vec<&str> {
+        self.get_resource(resource)
+            .map(|r| {
+                r.relations
+                    .iter()
+                    .filter(|rel| rel.manages.iter().any(|m| m == relation))
+                    .map(|rel| rel.name.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Validate the policy structure.
     ///
     /// Checks that:
@@ -262,6 +277,17 @@ pub struct Relation {
     /// Optional restriction on valid subject types
     #[serde(default)]
     pub subject_restriction: Option<SubjectRestriction>,
+
+    /// List of relations this relation can manage (grant/revoke).
+    ///
+    /// For example, an "admin" relation with `manages: ["reader", "updater", "deleter"]`
+    /// allows actors with the "admin" relation to grant or revoke those relations
+    /// on behalf of the owner.
+    ///
+    /// This implements the DefraDB delegation pattern where non-owners can manage
+    /// certain relationships if they have the appropriate managing relation.
+    #[serde(default)]
+    pub manages: Vec<String>,
 }
 
 impl Relation {
@@ -271,6 +297,7 @@ impl Relation {
             name: name.into(),
             expression: RelationExpression::This,
             subject_restriction: None,
+            manages: Vec::new(),
         }
     }
 
@@ -280,12 +307,22 @@ impl Relation {
             name: name.into(),
             expression,
             subject_restriction: None,
+            manages: Vec::new(),
         }
     }
 
     /// Add a subject restriction.
     pub fn with_restriction(mut self, restriction: SubjectRestriction) -> Self {
         self.subject_restriction = Some(restriction);
+        self
+    }
+
+    /// Add relations that this relation can manage.
+    ///
+    /// For example, an "admin" relation that manages ["reader", "updater", "deleter"]
+    /// allows actors with "admin" to grant/revoke those relations.
+    pub fn with_manages(mut self, manages: Vec<impl Into<String>>) -> Self {
+        self.manages = manages.into_iter().map(|s| s.into()).collect();
         self
     }
 }
