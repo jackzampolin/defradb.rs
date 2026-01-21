@@ -17,6 +17,7 @@ use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use url::Url;
+use urlencoding::encode;
 
 use crate::error::{Error, Result};
 
@@ -270,6 +271,18 @@ impl HttpClient {
         Err(last_error.unwrap_or_else(|| Error::Server("Request failed after retries".to_string())))
     }
 
+    /// Extract error details from a failed response and return an error.
+    ///
+    /// This helper reduces code duplication for error handling across HTTP client methods.
+    async fn extract_error(response: Response) -> Error {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("[failed to read body: {}]", e));
+        Error::Server(format!("HTTP {}: {}", status, body.trim()))
+    }
+
     /// Execute a GraphQL query
     pub async fn graphql(
         &self,
@@ -289,15 +302,7 @@ impl HttpClient {
         let response = self.send_with_retry("POST", &url, Some(&body)).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let result: GraphQLResponse = response.json().await?;
@@ -310,15 +315,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let schema = response.text().await?;
@@ -357,21 +354,14 @@ impl HttpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body_text = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
+            let body_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("[failed to read body: {}]", e));
             if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body_text) {
                 return Err(Error::Server(err.error));
             }
-            return Err(Error::Server(format!(
-                "HTTP {}: {}",
-                status,
-                body_text.trim()
-            )));
+            return Err(Error::Server(format!("HTTP {}: {}", status, body_text.trim())));
         }
 
         let result: T = response.json().await?;
@@ -452,15 +442,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let policies: Vec<AcpPolicy> = response.json().await?;
@@ -469,19 +451,12 @@ impl HttpClient {
 
     /// Get a specific ACP policy by ID
     pub async fn acp_get_policy(&self, policy_id: &str) -> Result<AcpPolicy> {
-        let url = format!("{}/api/v0/acp/policy/{}", self.base_url, policy_id);
+        // URL-encode the policy ID to handle special characters safely
+        let url = format!("{}/api/v0/acp/policy/{}", self.base_url, encode(policy_id));
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let policy: AcpPolicy = response.json().await?;
@@ -496,11 +471,11 @@ impl HttpClient {
     ) -> Result<String> {
         let mut url = format!("{}/api/v0/backup/export", self.base_url);
 
-        // Build query parameters
+        // Build query parameters with URL encoding
         let mut params = Vec::new();
         if let Some(cols) = collections {
             for col in cols {
-                params.push(format!("collections={}", col));
+                params.push(format!("collections={}", encode(col)));
             }
         }
         if pretty {
@@ -513,15 +488,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let data = response.text().await?;
@@ -534,15 +501,7 @@ impl HttpClient {
         let response = self.send_with_retry("POST", &url, Some(data)).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         Ok(())
@@ -569,21 +528,13 @@ impl HttpClient {
     /// List indexes (optionally filtered by collection)
     pub async fn index_list(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>> {
         let url = match collection {
-            Some(col) => format!("{}/api/v0/index?collection={}", self.base_url, col),
+            Some(col) => format!("{}/api/v0/index?collection={}", self.base_url, encode(col)),
             None => format!("{}/api/v0/index", self.base_url),
         };
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let indexes: Vec<IndexInfo> = response.json().await?;
@@ -594,20 +545,14 @@ impl HttpClient {
     pub async fn index_drop(&self, collection: &str, name: &str) -> Result<()> {
         let url = format!(
             "{}/api/v0/index?collection={}&name={}",
-            self.base_url, collection, name
+            self.base_url,
+            encode(collection),
+            encode(name)
         );
         let response = self.send_with_retry("DELETE", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         Ok(())
@@ -724,15 +669,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let info: P2pInfo = response.json().await?;
@@ -745,15 +682,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let peers: Vec<P2pPeerInfo> = response.json().await?;
@@ -770,15 +699,7 @@ impl HttpClient {
         let response = self.send_with_retry("POST", &url, Some(&body)).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         Ok(())
@@ -790,15 +711,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let replicators: Vec<P2pReplicatorInfo> = response.json().await?;
@@ -820,15 +733,7 @@ impl HttpClient {
         let response = self.send_with_retry("POST", &url, Some(&body)).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         Ok(())
@@ -842,13 +747,13 @@ impl HttpClient {
     ) -> Result<()> {
         let mut url = format!("{}/api/v0/p2p/replicator", self.base_url);
 
-        // Build query parameters
+        // Build query parameters with URL encoding
         let mut params = Vec::new();
         for col in collections {
-            params.push(format!("collections={}", col));
+            params.push(format!("collections={}", encode(col)));
         }
         if let Some(addr) = address {
-            params.push(format!("address={}", addr));
+            params.push(format!("address={}", encode(addr)));
         }
         if !params.is_empty() {
             url = format!("{}?{}", url, params.join("&"));
@@ -857,15 +762,7 @@ impl HttpClient {
         let response = self.send_with_retry("DELETE", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         Ok(())
@@ -877,15 +774,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let collections: Vec<String> = response.json().await?;
@@ -902,15 +791,7 @@ impl HttpClient {
         let response = self.send_with_retry("POST", &url, Some(&body)).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         Ok(())
@@ -920,10 +801,10 @@ impl HttpClient {
     pub async fn p2p_collection_remove(&self, collections: &[String]) -> Result<()> {
         let mut url = format!("{}/api/v0/p2p/collections", self.base_url);
 
-        // Build query parameters
+        // Build query parameters with URL encoding
         let params: Vec<String> = collections
             .iter()
-            .map(|c| format!("collections={}", c))
+            .map(|c| format!("collections={}", encode(c)))
             .collect();
         if !params.is_empty() {
             url = format!("{}?{}", url, params.join("&"));
@@ -932,15 +813,7 @@ impl HttpClient {
         let response = self.send_with_retry("DELETE", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         Ok(())

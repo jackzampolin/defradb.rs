@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::error::HttpError;
 use crate::router::{AppState, IndexInfo};
+use crate::validation::validate_identifier;
 
 /// Request to create a new index.
 #[derive(Debug, Clone, Deserialize)]
@@ -51,9 +52,13 @@ pub async fn create_index(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("Index operations not configured".into()))?;
 
-    if request.collection.trim().is_empty() {
-        return Err(HttpError::BadRequest("collection cannot be empty".into()));
-    }
+    // Validate collection name
+    validate_identifier(&request.collection).map_err(|_| {
+        HttpError::BadRequest(format!(
+            "invalid collection name '{}': must match [A-Za-z_][A-Za-z0-9_]*",
+            request.collection
+        ))
+    })?;
 
     if request.fields.is_empty() {
         return Err(HttpError::BadRequest(
@@ -63,9 +68,22 @@ pub async fn create_index(
 
     // Validate field names
     for field in &request.fields {
-        if field.trim().is_empty() {
-            return Err(HttpError::BadRequest("field name cannot be empty".into()));
-        }
+        validate_identifier(field).map_err(|_| {
+            HttpError::BadRequest(format!(
+                "invalid field name '{}': must match [A-Za-z_][A-Za-z0-9_]*",
+                field
+            ))
+        })?;
+    }
+
+    // Validate index name if provided
+    if let Some(ref name) = request.name {
+        validate_identifier(name).map_err(|_| {
+            HttpError::BadRequest(format!(
+                "invalid index name '{}': must match [A-Za-z_][A-Za-z0-9_]*",
+                name
+            ))
+        })?;
     }
 
     let index = index_ops
@@ -113,13 +131,21 @@ pub async fn drop_index(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("Index operations not configured".into()))?;
 
-    if query.collection.trim().is_empty() {
-        return Err(HttpError::BadRequest("collection cannot be empty".into()));
-    }
+    // Validate collection name
+    validate_identifier(&query.collection).map_err(|_| {
+        HttpError::BadRequest(format!(
+            "invalid collection name '{}': must match [A-Za-z_][A-Za-z0-9_]*",
+            query.collection
+        ))
+    })?;
 
-    if query.name.trim().is_empty() {
-        return Err(HttpError::BadRequest("name cannot be empty".into()));
-    }
+    // Validate index name
+    validate_identifier(&query.name).map_err(|_| {
+        HttpError::BadRequest(format!(
+            "invalid index name '{}': must match [A-Za-z_][A-Za-z0-9_]*",
+            query.name
+        ))
+    })?;
 
     index_ops
         .drop_index(&query.collection, &query.name)

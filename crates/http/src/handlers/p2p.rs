@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
 use crate::router::AppState;
+use crate::validation::{validate_collection_name, validate_multiaddr};
 
 /// Response for P2P node info.
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +136,9 @@ pub async fn connect_peer(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
 
+    // Validate the multiaddr format
+    validate_multiaddr(&request.address)?;
+
     p2p.connect_peer(&request.address)
         .await
         .map_err(HttpError::BadRequest)?;
@@ -188,6 +192,16 @@ pub async fn add_replicator(
         ));
     }
 
+    // Validate collection names
+    for col in &request.collections {
+        validate_collection_name(col)?;
+    }
+
+    // Validate address if provided
+    if let Some(ref addr) = request.address {
+        validate_multiaddr(addr)?;
+    }
+
     p2p.add_replicator(request.collections, request.address.as_deref())
         .await
         .map_err(HttpError::BadRequest)?;
@@ -211,6 +225,16 @@ pub async fn remove_replicator(
         return Err(HttpError::BadRequest(
             "at least one collection is required".into(),
         ));
+    }
+
+    // Validate collection names
+    for col in &query.collections {
+        validate_collection_name(col)?;
+    }
+
+    // Validate address if provided
+    if let Some(ref addr) = query.address {
+        validate_multiaddr(addr)?;
     }
 
     p2p.remove_replicator(query.collections, query.address.as_deref())
@@ -257,6 +281,11 @@ pub async fn add_collections(
         ));
     }
 
+    // Validate collection names
+    for col in &request.collections {
+        validate_collection_name(col)?;
+    }
+
     p2p.add_collections(request.collections)
         .await
         .map_err(HttpError::BadRequest)?;
@@ -280,6 +309,11 @@ pub async fn remove_collections(
         return Err(HttpError::BadRequest(
             "at least one collection is required".into(),
         ));
+    }
+
+    // Validate collection names
+    for col in &query.collections {
+        validate_collection_name(col)?;
     }
 
     p2p.remove_collections(query.collections)

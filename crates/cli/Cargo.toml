@@ -73,6 +73,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # URL parsing
 url = "2.5"
 
+# URL encoding for query parameters
+urlencoding = "2.1"
+
 [dev-dependencies]
 tempfile = "3.17"
 portpicker = "0.1"

@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::error::HttpError;
 use crate::router::AppState;
+use crate::validation::validate_collection_name;
 
 /// Query parameters for export.
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +40,11 @@ pub async fn export(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("Backup operations not configured".into()))?;
 
+    // Validate collection names if provided
+    for col in &query.collections {
+        validate_collection_name(col)?;
+    }
+
     let collections = if query.collections.is_empty() {
         None
     } else {
@@ -59,13 +65,6 @@ pub async fn export(
     Ok(response)
 }
 
-/// Import request body - just the raw JSON data.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ImportRequest {
-    #[serde(flatten)]
-    pub data: serde_json::Value,
-}
-
 /// Import the database.
 ///
 /// POST /api/v0/backup/import
@@ -82,9 +81,16 @@ pub async fn import(
         return Err(HttpError::BadRequest("import data cannot be empty".into()));
     }
 
-    // Validate that the body is valid JSON
-    serde_json::from_str::<serde_json::Value>(&body)
+    // Validate that the body is valid JSON with expected structure
+    let parsed: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| HttpError::BadRequest(format!("invalid JSON: {}", e)))?;
+
+    // Backup data should be an object or array, not a primitive
+    if !parsed.is_object() && !parsed.is_array() {
+        return Err(HttpError::BadRequest(
+            "backup data must be a JSON object or array".into(),
+        ));
+    }
 
     backup
         .import(&body)

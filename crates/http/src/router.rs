@@ -14,7 +14,13 @@ use crate::handlers;
 
 /// Trait for P2P operations that can be accessed via HTTP.
 ///
-/// This trait abstracts the P2P host handle for testing.
+/// Abstracts P2P host functionality to decouple HTTP handlers from the
+/// actual P2P implementation, enabling both dependency injection and testing.
+///
+/// All methods return `Result<T, String>` where the error string should be
+/// a user-friendly message. For validation failures, use descriptive messages
+/// like "invalid address format". For internal errors, use messages like
+/// "failed to connect: <reason>".
 #[async_trait::async_trait]
 pub trait P2POperations: Send + Sync {
     /// Get the local peer ID.
@@ -64,16 +70,28 @@ pub struct ReplicatorInfo {
     pub address: Option<String>,
 }
 
-/// Trait for ACP policy operations.
+/// Trait for ACP (Access Control Policy) operations.
+///
+/// ACP policies define access permissions for collections and documents,
+/// determining which identities can read, write, or manage data.
+///
+/// Policies should be provided in YAML or JSON format following the ACP
+/// policy specification.
 #[async_trait::async_trait]
 pub trait AcpOperations: Send + Sync {
-    /// Add a new policy. Returns the policy ID.
+    /// Add a new policy. Returns the policy ID on success.
+    ///
+    /// The policy should be valid YAML or JSON. Returns an error string
+    /// if the policy is malformed or cannot be added.
     async fn add_policy(&self, policy: &str) -> Result<String, String>;
 
     /// List all policies.
     async fn list_policies(&self) -> Result<Vec<PolicyInfo>, String>;
 
     /// Get a policy by ID.
+    ///
+    /// Returns `Ok(None)` if the policy doesn't exist, `Ok(Some(info))` if found,
+    /// or `Err(message)` on internal errors.
     async fn get_policy(&self, id: &str) -> Result<Option<PolicyInfo>, String>;
 }
 
@@ -94,9 +112,15 @@ pub struct PolicyInfo {
 }
 
 /// Trait for index operations.
+///
+/// Indexes improve query performance for specific fields. Creating unique
+/// indexes also enforces uniqueness constraints on the indexed fields.
 #[async_trait::async_trait]
 pub trait IndexOperations: Send + Sync {
-    /// Create an index. Returns the created index info.
+    /// Create an index on a collection. Returns the created index info.
+    ///
+    /// If `name` is `None`, an index name will be auto-generated.
+    /// The `unique` flag enforces uniqueness constraints on the indexed fields.
     async fn create_index(
         &self,
         collection: &str,
@@ -106,9 +130,11 @@ pub trait IndexOperations: Send + Sync {
     ) -> Result<IndexInfo, String>;
 
     /// List indexes, optionally filtered by collection.
+    ///
+    /// If `collection` is `None`, returns indexes from all collections.
     async fn list_indexes(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>, String>;
 
-    /// Drop an index.
+    /// Drop an index by collection and name.
     async fn drop_index(&self, collection: &str, name: &str) -> Result<(), String>;
 }
 
@@ -131,9 +157,19 @@ pub struct IndexFieldInfo {
 }
 
 /// Trait for backup operations.
+///
+/// Enables exporting and importing database state as JSON. Export produces
+/// a JSON representation of documents that can be reimported to restore state.
+///
+/// For export, the JSON includes document metadata and relationships.
+/// For import, the JSON must match the expected structure with valid document
+/// IDs and collection references.
 #[async_trait::async_trait]
 pub trait BackupOperations: Send + Sync {
     /// Export database to JSON.
+    ///
+    /// If `collections` is `None`, exports all collections.
+    /// If `pretty` is true, the JSON output is formatted with indentation.
     async fn export(
         &self,
         collections: Option<Vec<String>>,
@@ -141,6 +177,9 @@ pub trait BackupOperations: Send + Sync {
     ) -> Result<String, String>;
 
     /// Import database from JSON.
+    ///
+    /// The `data` parameter should be valid JSON matching the export format.
+    /// Returns an error if the JSON is malformed or references invalid collections.
     async fn import(&self, data: &str) -> Result<(), String>;
 }
 

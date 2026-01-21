@@ -70,6 +70,7 @@ pub mod handlers;
 pub mod identity_extractor;
 pub mod router;
 pub mod server;
+pub mod validation;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
