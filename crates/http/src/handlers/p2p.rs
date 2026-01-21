@@ -330,7 +330,8 @@ mod tests {
     #[test]
     fn test_replicator_request_deserialize() {
         // Go-compatible format with PascalCase field names
-        let json = r#"{"Collections": ["Users", "Posts"], "Addresses": ["/ip4/127.0.0.1/tcp/9000"]}"#;
+        let json =
+            r#"{"Collections": ["Users", "Posts"], "Addresses": ["/ip4/127.0.0.1/tcp/9000"]}"#;
         let request: ReplicatorRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.collections.len(), 2);
         assert_eq!(request.addresses.len(), 1);
