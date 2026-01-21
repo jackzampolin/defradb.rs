@@ -1,8 +1,8 @@
-//! Persistent ACP store backed by redb.
+//! Persistent ACP store backed by any Store implementation.
 //!
-//! This implementation stores relation tuples in a separate redb instance,
-//! following Go DefraDB's architecture where ACP data is stored independently
-//! from document data at `<root>/local_document_acp/`.
+//! This implementation stores relation tuples with namespace isolation,
+//! allowing ACP data to be stored in the main database using the
+//! `Namespace::Acpstore` prefix, or in a standalone database.
 
 use async_trait::async_trait;
 use identity::Did;
@@ -10,41 +10,75 @@ use std::path::Path;
 use std::sync::Arc;
 
 use storage::corekv::{IterOptions, Reader, Store, Writer};
+use storage::namespace::{Namespace, NamespacedStore};
 use storage::RedbStore;
 
 use crate::error::{Error, Result};
 use crate::relation::RelationTuple;
 use crate::store::AcpStore;
 
-/// Persistent ACP store backed by redb.
+/// Persistent ACP store backed by any Store implementation.
 ///
-/// Stores relation tuples in a separate redb instance, providing:
+/// Stores relation tuples with namespace isolation, providing:
 /// - Persistence across node restarts
 /// - ACID transactions for tuple operations
 /// - Efficient prefix-based queries for document lookups
+/// - Namespace isolation when sharing a database with other stores
 ///
-/// # Directory Structure
+/// # Usage Modes
 ///
-/// Following Go DefraDB's convention, this store should be opened at:
-/// `<root>/local_document_acp/`
+/// ## Unified Mode (Recommended)
 ///
-/// # Example
+/// Share the main database with ACP namespace isolation:
 ///
 /// ```ignore
 /// use acp::PersistentAcpStore;
-/// use std::path::Path;
+/// use storage::RedbStore;
+/// use std::sync::Arc;
 ///
-/// let store = PersistentAcpStore::open(Path::new("/data/local_document_acp"))?;
+/// let main_store = Arc::new(RedbStore::open("/data")?);
+/// let acp_store = PersistentAcpStore::from_store(main_store);
 /// ```
-pub struct PersistentAcpStore {
-    store: Arc<RedbStore>,
+///
+/// ## Standalone Mode (Backward Compatible)
+///
+/// Use a separate database at `<root>/local_document_acp/`:
+///
+/// ```ignore
+/// use acp::PersistentAcpStore;
+///
+/// let store = PersistentAcpStore::open("/data/local_document_acp")?;
+/// ```
+pub struct PersistentAcpStore<S: Store> {
+    store: NamespacedStore<S>,
 }
 
-impl PersistentAcpStore {
+impl<S: Store> PersistentAcpStore<S> {
+    /// Create from an existing Store with ACP namespace isolation.
+    ///
+    /// This is the recommended way to create a PersistentAcpStore when
+    /// sharing a database with other stores. The ACP namespace prefix
+    /// ensures complete isolation from other data.
+    pub fn from_store(store: Arc<S>) -> Self {
+        Self {
+            store: NamespacedStore::new(store, Namespace::Acpstore),
+        }
+    }
+
+    /// Get the underlying namespaced store.
+    pub fn inner(&self) -> &NamespacedStore<S> {
+        &self.store
+    }
+}
+
+impl PersistentAcpStore<RedbStore> {
     /// Open a persistent ACP store at the given directory path.
     ///
     /// Creates the directory and database file (`acp.redb`) if they don't exist.
     /// The path should be a directory (e.g., `<root>/local_document_acp/`).
+    ///
+    /// This method provides backward compatibility for standalone ACP stores.
+    /// For new deployments, prefer `from_store()` with a shared database.
     ///
     /// # Errors
     ///
@@ -109,15 +143,8 @@ impl PersistentAcpStore {
         })?;
 
         Ok(Self {
-            store: Arc::new(store),
+            store: NamespacedStore::new(Arc::new(store), Namespace::Acpstore),
         })
-    }
-
-    /// Create from an existing RedbStore.
-    ///
-    /// Useful when the store is managed externally.
-    pub fn from_store(store: Arc<RedbStore>) -> Self {
-        Self { store }
     }
 
     /// Close the store.
@@ -130,7 +157,7 @@ impl PersistentAcpStore {
 }
 
 #[async_trait]
-impl AcpStore for PersistentAcpStore {
+impl<S: Store> AcpStore for PersistentAcpStore<S> {
     async fn put_tuple(&self, tuple: &RelationTuple) -> Result<()> {
         let mut txn = self
             .store

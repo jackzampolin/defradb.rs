@@ -203,8 +203,7 @@ impl BasicTxn {
 
         // Execute sync callbacks with panic protection
         for (i, callback) in sync_fns.into_iter().enumerate() {
-            let callback_result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+            let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
             if let Err(e) = callback_result {
                 tracing::error!(
                     txn_id = self.id,
@@ -278,8 +277,7 @@ impl BasicTxn {
 
         // Execute sync callbacks with panic protection
         for (i, callback) in self.discard_fns.into_iter().enumerate() {
-            let callback_result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+            let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
             if let Err(e) = callback_result {
                 tracing::error!(
                     txn_id = self.id,

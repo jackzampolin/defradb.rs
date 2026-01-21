@@ -288,16 +288,10 @@ impl Node {
             DatastoreType::Badger => {
                 info!("Using Redb datastore at {}", config.data_path().display());
                 let store = Arc::new(storage::RedbStore::open(config.data_path())?);
-                // Use persistent ACP store at <rootdir>/local_document_acp
-                let acp_path = config.rootdir.join("local_document_acp");
-                info!("Using persistent ACP store at {}", acp_path.display());
+                // Use unified ACP store backed by main database with namespace isolation
+                info!("Using unified ACP store (namespace isolated in main database)");
                 let acp_store: Arc<dyn acp::AcpStore> =
-                    Arc::new(acp::PersistentAcpStore::open(&acp_path).map_err(|e| {
-                        Error::Storage(storage::Error::Other(format!(
-                            "failed to open ACP store: {}",
-                            e
-                        )))
-                    })?);
+                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
                 Self::init_store_and_server(
                     store,
                     &config,

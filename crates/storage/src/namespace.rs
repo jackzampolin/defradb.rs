@@ -8,6 +8,7 @@
 /// - 's' (0x73): Systemstore
 /// - 'p' (0x70): Peerstore
 /// - 'e' (0x65): Encstore
+/// - 'a' (0x61): Acpstore
 ///
 /// The NamespacedStore wraps any Store implementation and automatically
 /// prepends the prefix to all keys, ensuring complete isolation between stores.
@@ -30,6 +31,8 @@ pub enum Namespace {
     Peerstore,
     /// Encstore - encrypted blocks
     Encstore,
+    /// Acpstore - Access Control Policy tuples
+    Acpstore,
 }
 
 impl Namespace {
@@ -42,6 +45,7 @@ impl Namespace {
             Namespace::Systemstore => b's',
             Namespace::Peerstore => b'p',
             Namespace::Encstore => b'e',
+            Namespace::Acpstore => b'a',
         }
     }
 
@@ -54,6 +58,7 @@ impl Namespace {
             Namespace::Systemstore => "systemstore",
             Namespace::Peerstore => "peerstore",
             Namespace::Encstore => "encstore",
+            Namespace::Acpstore => "acpstore",
         }
     }
 

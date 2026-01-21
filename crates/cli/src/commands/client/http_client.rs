@@ -366,7 +366,11 @@ impl HttpClient {
             if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body_text) {
                 return Err(Error::Server(err.error));
             }
-            return Err(Error::Server(format!("HTTP {}: {}", status, body_text.trim())));
+            return Err(Error::Server(format!(
+                "HTTP {}: {}",
+                status,
+                body_text.trim()
+            )));
         }
 
         let result: T = response.json().await?;

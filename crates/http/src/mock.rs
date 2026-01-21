@@ -668,7 +668,10 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
-    async fn remove_collections(&self, collections: Vec<String>) -> std::result::Result<(), String> {
+    async fn remove_collections(
+        &self,
+        collections: Vec<String>,
+    ) -> std::result::Result<(), String> {
         let mut existing = self.collections.write().unwrap();
         existing.retain(|c| !collections.contains(c));
         Ok(())
@@ -842,10 +845,17 @@ impl IndexOperations for MockIndexOperations {
         Ok(index)
     }
 
-    async fn list_indexes(&self, collection: Option<&str>) -> std::result::Result<Vec<IndexInfo>, String> {
+    async fn list_indexes(
+        &self,
+        collection: Option<&str>,
+    ) -> std::result::Result<Vec<IndexInfo>, String> {
         let indexes = self.indexes.read().unwrap();
         match collection {
-            Some(col) => Ok(indexes.iter().filter(|i| i.collection == col).cloned().collect()),
+            Some(col) => Ok(indexes
+                .iter()
+                .filter(|i| i.collection == col)
+                .cloned()
+                .collect()),
             None => Ok(indexes.clone()),
         }
     }
@@ -857,7 +867,10 @@ impl IndexOperations for MockIndexOperations {
         if indexes.len() < initial_len {
             Ok(())
         } else {
-            Err(format!("index '{}' not found in collection '{}'", name, collection))
+            Err(format!(
+                "index '{}' not found in collection '{}'",
+                name, collection
+            ))
         }
     }
 }
@@ -890,7 +903,9 @@ impl MockBackupOperations {
     /// Create a new mock backup operations instance.
     pub fn new() -> Self {
         Self {
-            data: Arc::new(RwLock::new(r#"{"Users": [{"_docID": "bae-123", "name": "Alice"}]}"#.to_string())),
+            data: Arc::new(RwLock::new(
+                r#"{"Users": [{"_docID": "bae-123", "name": "Alice"}]}"#.to_string(),
+            )),
         }
     }
 
@@ -912,10 +927,9 @@ impl BackupOperations for MockBackupOperations {
         let data = self.data.read().unwrap().clone();
         if pretty {
             // Format the JSON nicely
-            let parsed: serde_json::Value = serde_json::from_str(&data)
-                .map_err(|e| format!("invalid JSON: {}", e))?;
-            serde_json::to_string_pretty(&parsed)
-                .map_err(|e| format!("failed to serialize: {}", e))
+            let parsed: serde_json::Value =
+                serde_json::from_str(&data).map_err(|e| format!("invalid JSON: {}", e))?;
+            serde_json::to_string_pretty(&parsed).map_err(|e| format!("failed to serialize: {}", e))
         } else {
             Ok(data)
         }
@@ -923,8 +937,8 @@ impl BackupOperations for MockBackupOperations {
 
     async fn import(&self, data: &str) -> std::result::Result<ImportResult, String> {
         // Parse the incoming data to validate it
-        let parsed: serde_json::Value = serde_json::from_str(data)
-            .map_err(|e| format!("invalid JSON: {}", e))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(data).map_err(|e| format!("invalid JSON: {}", e))?;
 
         // Count documents and collections
         let mut documents_imported = 0u64;
@@ -1016,7 +1030,10 @@ impl P2POperations for FailingMockP2POperations {
         Err(self.error.clone())
     }
 
-    async fn remove_collections(&self, _collections: Vec<String>) -> std::result::Result<(), String> {
+    async fn remove_collections(
+        &self,
+        _collections: Vec<String>,
+    ) -> std::result::Result<(), String> {
         Err(self.error.clone())
     }
 }
@@ -1078,7 +1095,10 @@ impl IndexOperations for FailingMockIndexOperations {
         Err(self.error.clone())
     }
 
-    async fn list_indexes(&self, _collection: Option<&str>) -> std::result::Result<Vec<IndexInfo>, String> {
+    async fn list_indexes(
+        &self,
+        _collection: Option<&str>,
+    ) -> std::result::Result<Vec<IndexInfo>, String> {
         Err(self.error.clone())
     }
 

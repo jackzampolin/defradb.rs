@@ -1018,10 +1018,7 @@ async fn test_create_collection_rejects_invalid_policy_dotdot() {
     .with_policy(PolicyDescription::new("policy..secret", "users"));
 
     let result = db.create_collection(schema).await;
-    assert!(
-        result.is_err(),
-        "Should reject policy with '..' sequence"
-    );
+    assert!(result.is_err(), "Should reject policy with '..' sequence");
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("'..'"),

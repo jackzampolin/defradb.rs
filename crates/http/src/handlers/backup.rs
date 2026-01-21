@@ -124,10 +124,7 @@ pub async fn import(
         ));
     }
 
-    let result = backup
-        .import(&body)
-        .await
-        .map_err(HttpError::BadRequest)?;
+    let result = backup.import(&body).await.map_err(HttpError::BadRequest)?;
 
     Ok(Json(ImportResponse::from(result)))
 }
