@@ -24,6 +24,23 @@ impl P2PAdapter {
     }
 }
 
+/// Parse a peer ID and multiaddr from a full multiaddr string.
+fn parse_peer_id_from_multiaddr(addr: &str) -> Result<(libp2p::PeerId, libp2p::Multiaddr), String> {
+    let multiaddr: libp2p::Multiaddr = addr
+        .parse()
+        .map_err(|e| format!("invalid multiaddr: {}", e))?;
+
+    let peer_id = multiaddr
+        .iter()
+        .find_map(|proto| match proto {
+            libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
+            _ => None,
+        })
+        .ok_or_else(|| "multiaddr must contain /p2p/<peer_id> component".to_string())?;
+
+    Ok((peer_id, multiaddr))
+}
+
 #[async_trait]
 impl P2POperations for P2PAdapter {
     async fn local_peer_id(&self) -> Result<String, String> {
@@ -78,24 +95,53 @@ impl P2POperations for P2PAdapter {
     }
 
     async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
-        // Replicator functionality is not implemented yet
-        Ok(Vec::new())
+        let p2p_infos = self
+            .handle
+            .get_all_replicators()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let http_infos: Vec<ReplicatorInfo> = p2p_infos
+            .into_iter()
+            .map(|info| {
+                let address = info.addresses_str().first().map(|s| s.to_string());
+                ReplicatorInfo {
+                    id: Some(info.peer_id_str().to_string()),
+                    collections: info.collections,
+                    address,
+                }
+            })
+            .collect();
+
+        Ok(http_infos)
     }
 
     async fn add_replicator(
         &self,
-        _collections: Vec<String>,
-        _addr: Option<&str>,
+        collections: Vec<String>,
+        addr: Option<&str>,
     ) -> Result<(), String> {
-        Err("replicator functionality not yet implemented".to_string())
+        let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
+        let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
+
+        self.handle
+            .set_replicator(peer_id, collections)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn remove_replicator(
         &self,
         _collections: Vec<String>,
-        _addr: Option<&str>,
+        addr: Option<&str>,
     ) -> Result<(), String> {
-        Err("replicator functionality not yet implemented".to_string())
+        let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
+        let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
+
+        self.handle
+            .delete_replicator(peer_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn get_collections(&self) -> Result<Vec<String>, String> {
