@@ -11,10 +11,36 @@
 //! Wire message types for DefraDB P2P protocol.
 //!
 //! Messages are CBOR encoded for wire compatibility with the Go implementation.
+//! CBOR byte strings (major type 2) require serde_bytes annotations for Vec<u8>.
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::MESSAGE_VERSION;
+
+/// Custom serialization for Option<Vec<u8>> as CBOR byte strings.
+/// Needed because serde_bytes doesn't directly support Option<Vec<u8>>.
+mod optional_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => serde_bytes::serialize(bytes, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Try to deserialize as an Option<serde_bytes::ByteBuf>
+        let opt: Option<serde_bytes::ByteBuf> = Option::deserialize(deserializer)?;
+        Ok(opt.map(|b| b.into_vec()))
+    }
+}
 
 /// Metadata that is part of every P2P message.
 ///
@@ -35,11 +61,18 @@ pub struct MetaData {
     pub sender_id: String,
 
     /// Public key of the node that created the message.
-    #[serde(rename = "Pubkey")]
+    /// Uses serde_bytes for CBOR byte string compatibility with Go.
+    #[serde(rename = "Pubkey", with = "serde_bytes")]
     pub pubkey: Vec<u8>,
 
     /// Signature for message authentication.
-    #[serde(rename = "Signature", skip_serializing_if = "Option::is_none")]
+    /// Uses custom serialization for optional CBOR bytes.
+    #[serde(
+        rename = "Signature",
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "optional_bytes"
+    )]
     pub signature: Option<Vec<u8>>,
 
     /// Error message if something went wrong.
@@ -76,7 +109,8 @@ pub struct PushLogRequest {
     pub doc_id: String,
 
     /// Content ID (CID) of the block.
-    #[serde(rename = "CID")]
+    /// Uses serde_bytes for CBOR byte string compatibility with Go.
+    #[serde(rename = "CID", with = "serde_bytes")]
     pub cid: Vec<u8>,
 
     /// Collection ID the document belongs to.
@@ -88,7 +122,8 @@ pub struct PushLogRequest {
     pub creator: String,
 
     /// The IPLD block data.
-    #[serde(rename = "Block")]
+    /// Uses serde_bytes for CBOR byte string compatibility with Go.
+    #[serde(rename = "Block", with = "serde_bytes")]
     pub block: Vec<u8>,
 }
 
@@ -215,7 +250,8 @@ pub struct PushLogBroadcast {
     pub doc_id: String,
 
     /// Content ID (CID) of the block.
-    #[serde(rename = "CID")]
+    /// Uses serde_bytes for CBOR byte string compatibility with Go.
+    #[serde(rename = "CID", with = "serde_bytes")]
     pub cid: Vec<u8>,
 
     /// Collection ID the document belongs to.
@@ -227,7 +263,8 @@ pub struct PushLogBroadcast {
     pub creator: String,
 
     /// The IPLD block data.
-    #[serde(rename = "Block")]
+    /// Uses serde_bytes for CBOR byte string compatibility with Go.
+    #[serde(rename = "Block", with = "serde_bytes")]
     pub block: Vec<u8>,
 }
 

@@ -1124,8 +1124,11 @@ impl P2PHost {
                 );
 
                 // Decode the message payload
-                match serde_cbor::from_slice::<PushLogBroadcast>(&message.data) {
-                    Ok(broadcast) => {
+                // Go sends PushLogRequest with MetaData, then we convert to PushLogBroadcast
+                match serde_cbor::from_slice::<PushLogRequest>(&message.data) {
+                    Ok(request) => {
+                        // Convert to broadcast format (strips metadata)
+                        let broadcast = PushLogBroadcast::from_request(&request);
                         if self
                             .event_tx
                             .send(HostEvent::GossipMessage {

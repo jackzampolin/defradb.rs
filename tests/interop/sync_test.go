@@ -85,27 +85,27 @@ func TestSyncRustToGoWriteRead(t *testing.T) {
 	require.Len(t, goSchemas, 1, "expected 1 schema from Go node")
 	t.Logf("Go schema: Name=%s CollectionID=%s VersionID=%s", goSchemas[0].Name, goSchemas[0].CollectionID, goSchemas[0].VersionID)
 
-	// Add P2P collections to Go node so it subscribes to collection topics
-	// This is required for Go to receive GossipSub messages from Rust
-	// Note: Go uses CollectionID (from schema lookup) for topic subscription
+	// Verify both nodes generate the same CollectionID (CID interop fix)
+	require.Equal(t, rustSchemas[0].CollectionID, goSchemas[0].CollectionID,
+		"CollectionID mismatch: Rust and Go should generate identical CIDs for the same schema")
+	t.Logf("CollectionID match confirmed: %s", rustSchemas[0].CollectionID)
+
+	// Add P2P collections to both nodes using collection NAME
+	// Both nodes will look up the CollectionID internally and subscribe to the same topic
 	t.Log("Adding P2P collections to Go node...")
 	err = goClient.AddP2PCollections(ctx, []string{goSchemas[0].Name})
 	require.NoError(t, err, "failed to add P2P collections to Go node")
 	t.Log("P2P collections added to Go node")
 
-	// Also add P2P collections to Rust node using Go's CollectionID
-	// This ensures both nodes subscribe to the same GossipSub topic
-	// (Rust and Go generate different CollectionIDs for the same schema)
-	t.Log("Adding P2P collections to Rust node (using Go's CollectionID)...")
-	err = rustClient.AddP2PCollections(ctx, []string{goSchemas[0].CollectionID})
+	t.Log("Adding P2P collections to Rust node...")
+	err = rustClient.AddP2PCollections(ctx, []string{rustSchemas[0].Name})
 	require.NoError(t, err, "failed to add P2P collections to Rust node")
-	t.Logf("Rust subscribed to topic: %s", goSchemas[0].CollectionID)
+	t.Log("P2P collections added to Rust node")
 
 	// Set up replication from Rust to Go
-	// The Rust node will push data to the Go node
-	// Use Go's CollectionID for the replicator so it broadcasts to the correct topic
+	// The Rust node will push data to the Go node via request-response protocol
 	t.Log("Setting up replication...")
-	err = rustClient.SetReplicator(ctx, []string{goNode.P2PMultiaddr()}, []string{goSchemas[0].CollectionID})
+	err = rustClient.SetReplicator(ctx, []string{goNode.P2PMultiaddr()}, []string{rustSchemas[0].Name})
 	require.NoError(t, err, "failed to set replicator on Rust node")
 	t.Log("Replicator set on Rust node")
 
@@ -237,18 +237,22 @@ func TestSyncGoToRustWriteRead(t *testing.T) {
 	require.Len(t, goSchemas, 1, "expected 1 schema from Go node")
 	t.Logf("Go schema: Name=%s CollectionID=%s VersionID=%s", goSchemas[0].Name, goSchemas[0].CollectionID, goSchemas[0].VersionID)
 
+	// Verify both nodes generate the same CollectionID (CID interop fix)
+	require.Equal(t, rustSchemas[0].CollectionID, goSchemas[0].CollectionID,
+		"CollectionID mismatch: Rust and Go should generate identical CIDs for the same schema")
+	t.Logf("CollectionID match confirmed: %s", rustSchemas[0].CollectionID)
+
 	// Add P2P collections to Rust node so it subscribes to collection topics
-	// This is required for Rust to receive GossipSub messages from Go
-	// Note: Use collection NAME for P2P subscriptions so both nodes use the same topic
+	// This is required for Rust to receive messages from Go via GossipSub or request-response
 	t.Log("Adding P2P collections to Rust node...")
 	err = rustClient.AddP2PCollections(ctx, []string{rustSchemas[0].Name})
 	require.NoError(t, err, "failed to add P2P collections to Rust node")
 	t.Log("P2P collections added to Rust node")
 
 	// Set up replication from Go to Rust
-	// The Go node will push data to the Rust node
+	// The Go node will push data to the Rust node via request-response protocol
 	t.Log("Setting up replication...")
-	err = goClient.SetReplicator(ctx, []string{rustNode.P2PMultiaddr()}, []string{"Users"})
+	err = goClient.SetReplicator(ctx, []string{rustNode.P2PMultiaddr()}, []string{goSchemas[0].Name})
 	require.NoError(t, err, "failed to set replicator on Go node")
 	t.Log("Replicator set on Go node")
 
