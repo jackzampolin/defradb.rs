@@ -15,7 +15,7 @@ use super::expression::RelationExpression;
 use super::lookup::PolicyLookupTable;
 use super::store::ZanzibarStore;
 use super::types::{Policy, Subject};
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Node identifier for cycle detection.
 ///
@@ -161,12 +161,10 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                     relation: computed_rel,
                 } => {
                     // Check for cycles when transitioning to a new relation
+                    // Per Go zanzi behavior: cycles return false (unauthorized), not error
                     let node_id = NodeId::new(resource, object_id, computed_rel);
                     if trail.contains(&node_id) {
-                        return Err(Error::CycleDetected(format!(
-                            "{}:{}#{}",
-                            resource, object_id, computed_rel
-                        )));
+                        return Ok(false);
                     }
                     let new_trail = trail.with_node(node_id);
 
@@ -644,5 +642,67 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(Error::RelationNotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_returns_false() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let mut engine = PermissionEngine::new(store.clone());
+
+        // Create a policy with a cyclic relation:
+        // reader = viewer, viewer = reader (mutual recursion)
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::computed(
+                    "reader",
+                    RelationExpression::computed_userset("viewer"),
+                ))
+                .with_relation(Relation::computed(
+                    "viewer",
+                    RelationExpression::computed_userset("reader"),
+                )),
+        );
+
+        engine.add_policy(&policy);
+
+        let did = test_did();
+
+        // Cycle detection should return false (not authorized), not an error
+        // This matches Go zanzi behavior
+        let result = engine
+            .check("policy1", "document", "doc1", "reader", &did)
+            .await;
+
+        // Should succeed with false, not error
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_typed_wildcard_permission() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let mut engine = PermissionEngine::new(store.clone());
+
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(Relation::direct("viewer")));
+
+        engine.add_policy(&policy);
+
+        // Store typed wildcard relationship (user:*)
+        let rel = Relationship::new(
+            "document",
+            "doc1",
+            "viewer",
+            Subject::typed_wildcard("user"),
+        );
+        store.store_relationship("policy1", &rel).await.unwrap();
+
+        // Any user should have permission via typed wildcard
+        let did = test_did();
+        let result = engine
+            .check("policy1", "document", "doc1", "viewer", &did)
+            .await
+            .unwrap();
+        assert!(result);
     }
 }

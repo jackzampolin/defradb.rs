@@ -189,13 +189,25 @@ impl ZanzibarStore for MemoryZanzibarStore {
         let direct = Relationship::with_entity(resource, object_id, relation, subject.clone());
         let direct_key = direct.storage_key();
 
-        // Check wildcard relationship
+        // Check untyped wildcard relationship
         let wildcard = Relationship::new(resource, object_id, relation, Subject::Wildcard);
         let wildcard_key = wildcard.storage_key();
 
         let guard = self.relationships.read();
         if let Some(rels) = guard.get(policy_id) {
-            return Ok(rels.contains_key(&direct_key) || rels.contains_key(&wildcard_key));
+            // Direct match or untyped wildcard
+            if rels.contains_key(&direct_key) || rels.contains_key(&wildcard_key) {
+                return Ok(true);
+            }
+
+            // Check for any typed wildcard on this relation
+            // TypedWildcard matches any entity (DIDs don't carry resource type info)
+            let prefix = Relationship::relation_prefix(resource, object_id, relation);
+            for (key, rel) in rels.iter() {
+                if key.starts_with(&prefix) && rel.subject.is_typed_wildcard() {
+                    return Ok(true);
+                }
+            }
         }
         Ok(false)
     }
@@ -482,13 +494,40 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
             return Ok(true);
         }
 
-        // Check wildcard relationship
+        // Check untyped wildcard relationship
         let wildcard = Relationship::new(resource, object_id, relation, Subject::Wildcard);
         let wildcard_key = Self::relationship_key(policy_id, &wildcard);
 
-        txn.has(wildcard_key.as_bytes())
+        if txn
+            .has(wildcard_key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
+            return Ok(true);
+        }
+
+        // Check for any typed wildcard on this relation
+        // TypedWildcard matches any entity (DIDs don't carry resource type info)
+        let prefix = Self::relation_prefix(policy_id, resource, object_id, relation);
+        let iter_opts = IterOptions::new().with_prefix(prefix.into_bytes());
+
+        let mut iter = txn
+            .iterator(iter_opts)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+        {
+            let rel: Relationship = serde_json::from_slice(&kv.value)?;
+            if rel.subject.is_typed_wildcard() {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     async fn get_relation_subjects(
@@ -684,6 +723,37 @@ mod tests {
             .await
             .unwrap();
         assert!(perm);
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_typed_wildcard() {
+        let store = MemoryZanzibarStore::new();
+        let did = test_did();
+
+        // Store typed wildcard relationship (user:*)
+        let rel = Relationship::new(
+            "document",
+            "doc1",
+            "viewer",
+            Subject::typed_wildcard("user"),
+        );
+        store.store_relationship("policy1", &rel).await.unwrap();
+
+        // Any user should have permission via typed wildcard
+        // (DIDs don't carry resource type, so typed wildcards match any entity)
+        let perm = store
+            .check_permission_direct("policy1", "document", "doc1", "viewer", &did)
+            .await
+            .unwrap();
+        assert!(perm);
+
+        // A different user should also match
+        let did2 = test_did2();
+        let perm2 = store
+            .check_permission_direct("policy1", "document", "doc1", "viewer", &did2)
+            .await
+            .unwrap();
+        assert!(perm2);
     }
 
     #[tokio::test]

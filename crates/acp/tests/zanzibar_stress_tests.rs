@@ -924,12 +924,15 @@ async fn test_computed_userset_cycle_detection() {
 
     let user = test_did();
 
-    // This should detect the cycle and return an error
+    // Cycle detection returns false (unauthorized), not error
+    // This matches Go zanzi behavior: cycles terminate the branch
+    // with "not authorized" rather than failing
     let result = engine
         .check("policy1", "document", "doc1", "relation_a", &user)
         .await;
 
-    assert!(result.is_err(), "Should detect cycle in computed userset");
+    assert!(result.is_ok(), "Cycle detection should not error");
+    assert!(!result.unwrap(), "Cycle should return false (unauthorized)");
 }
 
 /// Test that cycle detection doesn't block parallel branches.

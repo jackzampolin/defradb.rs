@@ -219,6 +219,7 @@ pub enum SubjectRestriction {
 /// Subjects can be:
 /// - A direct entity (DID)
 /// - An entity set (all entities with a relation to an object)
+/// - A typed wildcard (all entities of a specific resource type)
 /// - A wildcard (all entities)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Subject {
@@ -233,7 +234,12 @@ pub enum Subject {
         relation: String,
     },
 
-    /// Wildcard: matches any entity
+    /// Typed wildcard: matches any entity of a specific resource type
+    /// Notation: resource:* (e.g., "user:*" means any user)
+    /// Matches Go zanzi's ResourceSet type
+    TypedWildcard { resource: String },
+
+    /// Wildcard: matches any entity regardless of type
     /// Used for public access patterns
     Wildcard,
 }
@@ -257,7 +263,14 @@ impl Subject {
         }
     }
 
-    /// Create a wildcard subject.
+    /// Create a typed wildcard subject (matches all entities of a resource type).
+    pub fn typed_wildcard(resource: impl Into<String>) -> Self {
+        Self::TypedWildcard {
+            resource: resource.into(),
+        }
+    }
+
+    /// Create a wildcard subject (matches any entity).
     pub fn wildcard() -> Self {
         Self::Wildcard
     }
@@ -272,15 +285,33 @@ impl Subject {
         matches!(self, Self::EntitySet { .. })
     }
 
-    /// Check if this subject is a wildcard.
+    /// Check if this subject is a typed wildcard.
+    pub fn is_typed_wildcard(&self) -> bool {
+        matches!(self, Self::TypedWildcard { .. })
+    }
+
+    /// Check if this subject is an untyped wildcard.
     pub fn is_wildcard(&self) -> bool {
         matches!(self, Self::Wildcard)
+    }
+
+    /// Check if this subject matches any entity (typed or untyped wildcard).
+    pub fn is_any_wildcard(&self) -> bool {
+        matches!(self, Self::Wildcard | Self::TypedWildcard { .. })
     }
 
     /// Get the entity DID if this is an entity subject.
     pub fn as_entity(&self) -> Option<&Did> {
         match self {
             Self::Entity(did) => Some(did),
+            _ => None,
+        }
+    }
+
+    /// Get the resource type if this is a typed wildcard.
+    pub fn as_typed_wildcard_resource(&self) -> Option<&str> {
+        match self {
+            Self::TypedWildcard { resource } => Some(resource),
             _ => None,
         }
     }
@@ -303,6 +334,7 @@ impl std::fmt::Display for Subject {
                 object_id,
                 relation,
             } => write!(f, "{}:{}#{}", resource, object_id, relation),
+            Self::TypedWildcard { resource } => write!(f, "{}:*", resource),
             Self::Wildcard => write!(f, "*"),
         }
     }
@@ -438,8 +470,23 @@ mod tests {
 
         assert!(!subject.is_entity());
         assert!(!subject.is_entity_set());
+        assert!(!subject.is_typed_wildcard());
         assert!(subject.is_wildcard());
+        assert!(subject.is_any_wildcard());
         assert_eq!(subject.to_string(), "*");
+    }
+
+    #[test]
+    fn test_subject_typed_wildcard() {
+        let subject = Subject::typed_wildcard("user");
+
+        assert!(!subject.is_entity());
+        assert!(!subject.is_entity_set());
+        assert!(subject.is_typed_wildcard());
+        assert!(!subject.is_wildcard());
+        assert!(subject.is_any_wildcard());
+        assert_eq!(subject.as_typed_wildcard_resource(), Some("user"));
+        assert_eq!(subject.to_string(), "user:*");
     }
 
     #[test]
