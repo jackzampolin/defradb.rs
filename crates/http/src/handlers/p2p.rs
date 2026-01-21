@@ -83,15 +83,9 @@ pub struct CollectionsDeleteQuery {
 pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoResponse>, HttpError> {
     let p2p = state.require_p2p()?;
 
-    let peer_id = p2p
-        .local_peer_id()
-        .await
-        .map_err(HttpError::Internal)?;
+    let peer_id = p2p.local_peer_id().await.map_err(HttpError::Internal)?;
 
-    let addresses = p2p
-        .listen_addresses()
-        .await
-        .map_err(HttpError::Internal)?;
+    let addresses = p2p.listen_addresses().await.map_err(HttpError::Internal)?;
 
     Ok(Json(P2pInfoResponse {
         id: peer_id,
@@ -105,10 +99,7 @@ pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoRespo
 pub async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<PeerInfo>>, HttpError> {
     let p2p = state.require_p2p()?;
 
-    let peers = p2p
-        .connected_peers()
-        .await
-        .map_err(HttpError::Internal)?;
+    let peers = p2p.connected_peers().await.map_err(HttpError::Internal)?;
 
     let peer_infos: Vec<PeerInfo> = peers
         .into_iter()
@@ -145,10 +136,7 @@ pub async fn list_replicators(
 ) -> Result<Json<Vec<ReplicatorInfoResponse>>, HttpError> {
     let p2p = state.require_p2p()?;
 
-    let replicators = p2p
-        .get_replicators()
-        .await
-        .map_err(HttpError::Internal)?;
+    let replicators = p2p.get_replicators().await.map_err(HttpError::Internal)?;
 
     let response: Vec<ReplicatorInfoResponse> = replicators
         .into_iter()
@@ -234,10 +222,7 @@ pub async fn list_collections(
 ) -> Result<Json<Vec<String>>, HttpError> {
     let p2p = state.require_p2p()?;
 
-    let collections = p2p
-        .get_collections()
-        .await
-        .map_err(HttpError::Internal)?;
+    let collections = p2p.get_collections().await.map_err(HttpError::Internal)?;
 
     Ok(Json(collections))
 }

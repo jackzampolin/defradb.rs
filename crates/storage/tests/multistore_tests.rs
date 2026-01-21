@@ -813,15 +813,18 @@ mod redb_multistore_tests {
         for i in 0..10 {
             assert!(
                 txn.has(format!("ds_key_{}", i).as_bytes()).await.unwrap(),
-                "Datastore should have ds_key_{}", i
+                "Datastore should have ds_key_{}",
+                i
             );
             assert!(
                 !txn.has(format!("bs_key_{}", i).as_bytes()).await.unwrap(),
-                "Datastore should NOT have bs_key_{}", i
+                "Datastore should NOT have bs_key_{}",
+                i
             );
             assert!(
                 !txn.has(format!("ss_key_{}", i).as_bytes()).await.unwrap(),
-                "Datastore should NOT have ss_key_{}", i
+                "Datastore should NOT have ss_key_{}",
+                i
             );
         }
         txn.discard();
@@ -830,7 +833,8 @@ mod redb_multistore_tests {
         for i in 0..10 {
             assert!(
                 txn.has(format!("bs_key_{}", i).as_bytes()).await.unwrap(),
-                "Blockstore should have bs_key_{}", i
+                "Blockstore should have bs_key_{}",
+                i
             );
         }
         txn.discard();
@@ -839,7 +843,8 @@ mod redb_multistore_tests {
         for i in 0..10 {
             assert!(
                 txn.has(format!("ss_key_{}", i).as_bytes()).await.unwrap(),
-                "Systemstore should have ss_key_{}", i
+                "Systemstore should have ss_key_{}",
+                i
             );
         }
         txn.discard();

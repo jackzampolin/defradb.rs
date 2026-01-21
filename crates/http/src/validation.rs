@@ -49,9 +49,7 @@ pub fn validate_collection_name(name: &str) -> Result<(), HttpError> {
 /// Full validation happens in the P2P layer.
 pub fn validate_multiaddr(address: &str) -> Result<(), HttpError> {
     if address.trim().is_empty() {
-        return Err(HttpError::BadRequest(
-            "address cannot be empty".to_string(),
-        ));
+        return Err(HttpError::BadRequest("address cannot be empty".to_string()));
     }
 
     if !address.starts_with('/') {

@@ -111,10 +111,7 @@ mod tests {
         let policy = PolicyDescription::new("", "users");
         let result = policy.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be empty"));
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
     }
 
     #[test]
@@ -122,10 +119,7 @@ mod tests {
         let policy = PolicyDescription::new("policy-123", "");
         let result = policy.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be empty"));
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
     }
 
     // === Whitespace-only tests ===

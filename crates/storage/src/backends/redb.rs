@@ -1086,9 +1086,7 @@ impl Txn for RedbTxn {
                     "Failed to finalize commit - all changes rolled back"
                 );
                 // Note: redb guarantees atomicity - if commit fails, no changes are persisted
-                tracing::debug!(
-                    "Commit failed at finalization stage - database state unchanged"
-                );
+                tracing::debug!("Commit failed at finalization stage - database state unchanged");
                 let on_error = std::mem::take(&mut *self.on_error.lock());
                 let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
                 Self::execute_callbacks(on_error);
@@ -1401,7 +1399,8 @@ impl From<redb::Error> for Error {
                 tracing::warn!("Database is locked by another process");
                 Error::Backend(
                     "database is locked by another process. \
-                     Check for other running processes or stale lock files".into()
+                     Check for other running processes or stale lock files"
+                        .into(),
                 )
             }
 
@@ -1420,7 +1419,8 @@ impl From<redb::Error> for Error {
                 tracing::warn!("Transaction still held by table or iterator");
                 Error::Backend(
                     "transaction still in use - ensure all tables and iterators are dropped \
-                     before committing or discarding the transaction".into(),
+                     before committing or discarding the transaction"
+                        .into(),
                 )
             }
 
@@ -1460,7 +1460,8 @@ impl From<redb::DatabaseError> for Error {
                 tracing::warn!("Database is locked by another process");
                 Error::Backend(
                     "database is locked by another process. \
-                     Check for other running processes or stale lock files".into()
+                     Check for other running processes or stale lock files"
+                        .into(),
                 )
             }
             redb::DatabaseError::UpgradeRequired(version) => {
@@ -1475,7 +1476,8 @@ impl From<redb::DatabaseError> for Error {
                 tracing::warn!("Database repair was aborted");
                 Error::Backend(
                     "database repair was aborted before completion. \
-                     Database may be in inconsistent state - restore from backup recommended".into()
+                     Database may be in inconsistent state - restore from backup recommended"
+                        .into(),
                 )
             }
             redb::DatabaseError::Storage(storage_err) => storage_err.into(),
@@ -2874,10 +2876,16 @@ mod redb_specific_tests {
 
         // Empty database should pass integrity check
         let report = store.check_integrity().unwrap();
-        assert!(report.is_valid, "Empty database should pass integrity check");
+        assert!(
+            report.is_valid,
+            "Empty database should pass integrity check"
+        );
         assert_eq!(report.total_keys, 0, "Empty database should have 0 keys");
         assert_eq!(report.error_count, 0, "Empty database should have 0 errors");
-        assert!(report.first_error.is_none(), "Empty database should have no error message");
+        assert!(
+            report.first_error.is_none(),
+            "Empty database should have no error message"
+        );
 
         // Add some data
         {
@@ -2892,10 +2900,16 @@ mod redb_specific_tests {
 
         // Database with data should pass integrity check
         let report = store.check_integrity().unwrap();
-        assert!(report.is_valid, "Database with data should pass integrity check");
+        assert!(
+            report.is_valid,
+            "Database with data should pass integrity check"
+        );
         assert_eq!(report.total_keys, 100, "Database should have 100 keys");
         assert_eq!(report.error_count, 0, "Database should have 0 errors");
-        assert!(report.first_error.is_none(), "Database should have no error message");
+        assert!(
+            report.first_error.is_none(),
+            "Database should have no error message"
+        );
     }
 
     #[tokio::test]
@@ -2961,7 +2975,10 @@ mod redb_specific_tests {
 
         // Creating a new transaction should fail because it exceeds the snapshot limit
         let result = store.new_txn(false).await;
-        assert!(result.is_err(), "Should fail when snapshot exceeds max_snapshot_keys");
+        assert!(
+            result.is_err(),
+            "Should fail when snapshot exceeds max_snapshot_keys"
+        );
 
         // Use pattern matching to extract error (Box<dyn Txn> doesn't impl Debug)
         if let Err(err) = result {
@@ -3016,13 +3033,25 @@ mod redb_specific_tests {
 
         // Register some callbacks
         txn.on_success(Box::new(|| {}));
-        assert_eq!(txn.callback_count(), 1, "Should have 1 callback after on_success");
+        assert_eq!(
+            txn.callback_count(),
+            1,
+            "Should have 1 callback after on_success"
+        );
 
         txn.on_error(Box::new(|| {}));
-        assert_eq!(txn.callback_count(), 2, "Should have 2 callbacks after on_error");
+        assert_eq!(
+            txn.callback_count(),
+            2,
+            "Should have 2 callbacks after on_error"
+        );
 
         txn.on_discard(Box::new(|| {}));
-        assert_eq!(txn.callback_count(), 3, "Should have 3 callbacks after on_discard");
+        assert_eq!(
+            txn.callback_count(),
+            3,
+            "Should have 3 callbacks after on_discard"
+        );
 
         txn.discard();
     }
@@ -3046,7 +3075,9 @@ mod redb_specific_tests {
 
         // Use a reasonable max_snapshot_keys limit for this test
         let opts = RedbStoreOptions::new().with_max_snapshot_keys(100_000);
-        let store = Arc::new(RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap());
+        let store = Arc::new(
+            RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap(),
+        );
 
         // Setup: Create 10K keys with 100-byte values (~1MB total)
         let value = vec![0xAB; 100];
