@@ -309,14 +309,14 @@ impl std::fmt::Display for RelationExpression {
             } => write!(f, "{}->{}", tuple_relation, computed_relation),
             Self::Union(exprs) => {
                 let parts: Vec<_> = exprs.iter().map(|e| e.to_string()).collect();
-                write!(f, "{}", parts.join(" + "))
+                write!(f, "({})", parts.join(" + "))
             }
             Self::Intersection(exprs) => {
                 let parts: Vec<_> = exprs.iter().map(|e| e.to_string()).collect();
-                write!(f, "{}", parts.join(" & "))
+                write!(f, "({})", parts.join(" & "))
             }
             Self::Difference { base, subtract } => {
-                write!(f, "{} - {}", base, subtract)
+                write!(f, "({} - {})", base, subtract)
             }
         }
     }
@@ -370,7 +370,7 @@ mod tests {
             RelationExpression::this(),
             RelationExpression::computed_userset("reader"),
         ]);
-        assert_eq!(expr.to_string(), "_this + reader");
+        assert_eq!(expr.to_string(), "(_this + reader)");
     }
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
             RelationExpression::computed_userset("member"),
             RelationExpression::computed_userset("approved"),
         ]);
-        assert_eq!(expr.to_string(), "member & approved");
+        assert_eq!(expr.to_string(), "(member & approved)");
     }
 
     #[test]
@@ -388,7 +388,7 @@ mod tests {
             RelationExpression::computed_userset("member"),
             RelationExpression::computed_userset("banned"),
         );
-        assert_eq!(expr.to_string(), "member - banned");
+        assert_eq!(expr.to_string(), "(member - banned)");
     }
 
     #[test]
@@ -771,5 +771,149 @@ mod tests {
             }
             _ => panic!("expected Intersection, got {:?}", expr),
         }
+    }
+
+    // ==========================================================================
+    // Go Domain Type Tests (matching zanzi/pkg/domain/relation_expression_tree_test.go)
+    // These tests verify that RelationExpression.to_string() matches Go's
+    // RelationExpression() output exactly.
+    // ==========================================================================
+
+    #[test]
+    fn test_go_this_to_relation_expression() {
+        // Go: TestThisToRelationExpression
+        let tree = RelationExpression::this();
+        let rel_expr = tree.to_string();
+        assert_eq!(rel_expr, "_this");
+    }
+
+    #[test]
+    fn test_go_computed_userset_to_relation_expression() {
+        // Go: TestComputedUsersetToRelationExpression
+        let tree = RelationExpression::computed_userset("relation");
+        let rel_expr = tree.to_string();
+        assert_eq!(rel_expr, "relation");
+    }
+
+    #[test]
+    fn test_go_tuple_to_userset_to_relation_expression() {
+        // Go: TestTupleToUsersetToRelationExpression
+        let tree = RelationExpression::tuple_to_userset("parent", "owner");
+        let rel_expr = tree.to_string();
+        assert_eq!(rel_expr, "parent->owner");
+    }
+
+    #[test]
+    fn test_go_union_to_relation_expression() {
+        // Go: TestUnionToRelationExpression
+        let tree = RelationExpression::union(vec![
+            RelationExpression::computed_userset("left"),
+            RelationExpression::computed_userset("right"),
+        ]);
+        let rel_expr = tree.to_string();
+        assert_eq!(rel_expr, "(left + right)");
+    }
+
+    #[test]
+    fn test_go_intersection_to_relation_expression() {
+        // Go: TestIntersectionToRelationExpression
+        let tree = RelationExpression::intersection(vec![
+            RelationExpression::computed_userset("left"),
+            RelationExpression::computed_userset("right"),
+        ]);
+        let rel_expr = tree.to_string();
+        assert_eq!(rel_expr, "(left & right)");
+    }
+
+    #[test]
+    fn test_go_difference_to_relation_expression() {
+        // Go: TestDifferenceToRelationExpression
+        let tree = RelationExpression::difference(
+            RelationExpression::computed_userset("left"),
+            RelationExpression::computed_userset("right"),
+        );
+        let rel_expr = tree.to_string();
+        assert_eq!(rel_expr, "(left - right)");
+    }
+
+    // ==========================================================================
+    // Parse-Display roundtrip tests
+    // Verify that parsing and displaying produces consistent results.
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_display_roundtrip_this() {
+        let original = "_this";
+        let parsed = RelationExpression::parse(original).unwrap();
+        let displayed = parsed.to_string();
+        assert_eq!(displayed, original);
+    }
+
+    #[test]
+    fn test_parse_display_roundtrip_computed_userset() {
+        let original = "owner";
+        let parsed = RelationExpression::parse(original).unwrap();
+        let displayed = parsed.to_string();
+        assert_eq!(displayed, original);
+    }
+
+    #[test]
+    fn test_parse_display_roundtrip_ttu() {
+        let original = "parent->owner";
+        let parsed = RelationExpression::parse(original).unwrap();
+        let displayed = parsed.to_string();
+        assert_eq!(displayed, original);
+    }
+
+    #[test]
+    fn test_parse_display_roundtrip_union() {
+        // Parsing "a + b" produces Union([a, b])
+        // Display outputs "(a + b)"
+        // Re-parsing "(a + b)" should produce the same structure
+        let expr = RelationExpression::parse("a + b").unwrap();
+        let displayed = expr.to_string();
+        assert_eq!(displayed, "(a + b)");
+        let reparsed = RelationExpression::parse(&displayed).unwrap();
+        assert_eq!(expr, reparsed);
+    }
+
+    #[test]
+    fn test_parse_display_roundtrip_intersection() {
+        let expr = RelationExpression::parse("a & b").unwrap();
+        let displayed = expr.to_string();
+        assert_eq!(displayed, "(a & b)");
+        let reparsed = RelationExpression::parse(&displayed).unwrap();
+        assert_eq!(expr, reparsed);
+    }
+
+    #[test]
+    fn test_parse_display_roundtrip_difference() {
+        let expr = RelationExpression::parse("a - b").unwrap();
+        let displayed = expr.to_string();
+        assert_eq!(displayed, "(a - b)");
+        let reparsed = RelationExpression::parse(&displayed).unwrap();
+        assert_eq!(expr, reparsed);
+    }
+
+    #[test]
+    fn test_parse_display_roundtrip_complex() {
+        // Complex expression: (a + b) & c
+        // Due to left-to-right precedence, "a + b & c" parses as "(a + b) & c"
+        let expr = RelationExpression::parse("a + b & c").unwrap();
+        let displayed = expr.to_string();
+        // Should output "((a + b) & c)" with nested parens
+        assert_eq!(displayed, "((a + b) & c)");
+        let reparsed = RelationExpression::parse(&displayed).unwrap();
+        assert_eq!(expr, reparsed);
+    }
+
+    #[test]
+    fn test_parse_display_roundtrip_nested_ttu() {
+        // Complex: owner + parent->admin
+        let expr = RelationExpression::parse("owner + parent->admin").unwrap();
+        let displayed = expr.to_string();
+        assert_eq!(displayed, "(owner + parent->admin)");
+        let reparsed = RelationExpression::parse(&displayed).unwrap();
+        assert_eq!(expr, reparsed);
     }
 }
