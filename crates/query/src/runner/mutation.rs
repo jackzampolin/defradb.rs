@@ -77,8 +77,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             let result = self
                 .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone())
                 .await?;
-            // Use collection name as key (Go behavior)
-            results.insert(mutation.collection_name.clone(), result);
+            // Use full mutation name as key (e.g., "create_Users")
+            let key = format!(
+                "{}_{}",
+                mutation.mutation_type.as_prefix(),
+                mutation.collection_name
+            );
+            results.insert(key, result);
         }
 
         Ok(JsonValue::Object(results))
