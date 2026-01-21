@@ -100,8 +100,9 @@ func TestSyncRustToGoWriteRead(t *testing.T) {
 	require.Empty(t, createResp.Errors, "Create errors: %v", createResp.Errors)
 
 	// Parse the created document to get the docID
+	// Note: GraphQL mutations return arrays even for single document creation
 	var createData struct {
-		CreateUsers struct {
+		CreateUsers []struct {
 			DocID string `json:"_docID"`
 			Name  string `json:"name"`
 			Age   int    `json:"age"`
@@ -109,7 +110,8 @@ func TestSyncRustToGoWriteRead(t *testing.T) {
 	}
 	err = json.Unmarshal(createResp.Data, &createData)
 	require.NoError(t, err, "failed to parse create response")
-	docID := createData.CreateUsers.DocID
+	require.Len(t, createData.CreateUsers, 1, "expected 1 created document")
+	docID := createData.CreateUsers[0].DocID
 	t.Logf("Created document with ID: %s", docID)
 
 	// Wait a bit for replication to happen
@@ -233,8 +235,9 @@ func TestSyncGoToRustWriteRead(t *testing.T) {
 	require.Empty(t, createResp.Errors, "Create errors: %v", createResp.Errors)
 
 	// Parse the created document to get the docID
+	// Note: GraphQL mutations return arrays even for single document creation
 	var createData struct {
-		CreateUsers struct {
+		CreateUsers []struct {
 			DocID string `json:"_docID"`
 			Name  string `json:"name"`
 			Age   int    `json:"age"`
@@ -242,7 +245,8 @@ func TestSyncGoToRustWriteRead(t *testing.T) {
 	}
 	err = json.Unmarshal(createResp.Data, &createData)
 	require.NoError(t, err, "failed to parse create response")
-	docID := createData.CreateUsers.DocID
+	require.Len(t, createData.CreateUsers, 1, "expected 1 created document")
+	docID := createData.CreateUsers[0].DocID
 	t.Logf("Created document with ID: %s", docID)
 
 	// Wait a bit for replication to happen
