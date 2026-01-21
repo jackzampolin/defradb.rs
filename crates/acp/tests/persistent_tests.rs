@@ -2,6 +2,8 @@
 
 use acp::{AcpStore, PersistentAcpStore, RelationTuple};
 use identity::Did;
+use std::sync::Arc;
+use storage::corekv::{Reader, Store, Writer};
 use tempfile::TempDir;
 
 fn test_did() -> Did {
@@ -159,4 +161,153 @@ async fn test_persistent_store_unicode_identifiers() {
     // Cleanup works
     store.delete_doc_tuples("users", "文档1").await.unwrap();
     assert!(!store.is_doc_registered("users", "文档1").await.unwrap());
+}
+
+// ============================================================================
+// Unified Mode Tests (ACP sharing main database with namespace isolation)
+// ============================================================================
+
+#[tokio::test]
+async fn test_unified_store_basic_operations() {
+    let tmp_dir = TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("data");
+
+    // Create main redb store (simulating the main database)
+    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+
+    // Create ACP store from main database using unified mode
+    let acp_store = PersistentAcpStore::from_store(redb_store.clone());
+
+    // Verify basic ACP operations work
+    let tuple = RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
+
+    assert!(!acp_store.has_tuple(&tuple).await.unwrap());
+    acp_store.put_tuple(&tuple).await.unwrap();
+    assert!(acp_store.has_tuple(&tuple).await.unwrap());
+
+    // Verify document registration
+    assert!(acp_store.is_doc_registered("users", "doc1").await.unwrap());
+
+    // Cleanup
+    acp_store.delete_tuple(&tuple).await.unwrap();
+    assert!(!acp_store.has_tuple(&tuple).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_unified_store_namespace_isolation() {
+    let tmp_dir = TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("data");
+
+    // Create main redb store
+    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+
+    // Create ACP store from main database
+    let acp_store = PersistentAcpStore::from_store(redb_store.clone());
+
+    // Write an ACP tuple
+    let tuple = RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
+    acp_store.put_tuple(&tuple).await.unwrap();
+
+    // Write some non-ACP data directly to the main store
+    // This simulates other stores (datastore, blockstore, etc.) writing data
+    {
+        let mut txn = redb_store.new_txn(false).await.unwrap();
+        txn.set(b"d/collection/doc", b"document data")
+            .await
+            .unwrap();
+        txn.set(b"b/block/cid", b"block data").await.unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    // Verify ACP data is still accessible and correct
+    assert!(acp_store.has_tuple(&tuple).await.unwrap());
+
+    // Verify the raw store contains both ACP (with 'a' prefix) and other data
+    {
+        let txn = redb_store.new_txn(true).await.unwrap();
+
+        // Non-ACP data should be accessible directly
+        assert!(txn.has(b"d/collection/doc").await.unwrap());
+        assert!(txn.has(b"b/block/cid").await.unwrap());
+
+        // ACP data should be prefixed with 'a' namespace byte
+        let acp_key = tuple.storage_key();
+        let prefixed_key = format!("a{}", acp_key);
+        assert!(
+            txn.has(prefixed_key.as_bytes()).await.unwrap(),
+            "ACP data should be stored with 'a' namespace prefix"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_unified_store_multiple_documents() {
+    let tmp_dir = TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("data");
+
+    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let acp_store = PersistentAcpStore::from_store(redb_store.clone());
+
+    let did1 = test_did();
+    let did2 = test_did2();
+
+    // Register multiple documents with different permissions
+    let tuple1 =
+        RelationTuple::try_new(did1.clone(), "owner", "users", "doc1").expect("valid tuple");
+    let tuple2 =
+        RelationTuple::try_new(did2.clone(), "reader", "users", "doc1").expect("valid tuple");
+    let tuple3 =
+        RelationTuple::try_new(did1.clone(), "owner", "posts", "post1").expect("valid tuple");
+
+    acp_store.put_tuple(&tuple1).await.unwrap();
+    acp_store.put_tuple(&tuple2).await.unwrap();
+    acp_store.put_tuple(&tuple3).await.unwrap();
+
+    // Verify document lookups work correctly
+    let doc1_tuples = acp_store.get_doc_tuples("users", "doc1").await.unwrap();
+    assert_eq!(doc1_tuples.len(), 2);
+
+    let post1_tuples = acp_store.get_doc_tuples("posts", "post1").await.unwrap();
+    assert_eq!(post1_tuples.len(), 1);
+
+    // Verify both documents are registered
+    assert!(acp_store.is_doc_registered("users", "doc1").await.unwrap());
+    assert!(acp_store.is_doc_registered("posts", "post1").await.unwrap());
+    assert!(
+        !acp_store
+            .is_doc_registered("users", "nonexistent")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_unified_store_atomic_registration() {
+    let tmp_dir = TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("data");
+
+    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let acp_store = PersistentAcpStore::from_store(redb_store.clone());
+
+    let owner = test_did();
+
+    // First registration should succeed
+    let registered = acp_store
+        .register_doc_atomic(&owner, "users", "doc1")
+        .await
+        .unwrap();
+    assert!(registered, "first registration should succeed");
+
+    // Second registration should fail (document already registered)
+    let registered_again = acp_store
+        .register_doc_atomic(&owner, "users", "doc1")
+        .await
+        .unwrap();
+    assert!(
+        !registered_again,
+        "second registration should fail - doc already registered"
+    );
+
+    // Document should be registered with the original owner
+    assert!(acp_store.is_doc_registered("users", "doc1").await.unwrap());
 }
