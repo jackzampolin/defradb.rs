@@ -461,13 +461,14 @@ impl Node {
         // Set up P2P if enabled
         // Clone store before potential move for sync coordinator blockstore
         let store_for_sync = store.clone();
-        let p2p = if config.net.p2p_disabled {
-            None
+        let (p2p, mut p2p_events) = if config.net.p2p_disabled {
+            (None, None)
         } else {
             info!("Initializing P2P network");
             let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
             let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            Some(Self::start_p2p(config, bitswap_store, peer_keypair).await?)
+            let (handle, events) = Self::start_p2p(config, bitswap_store, peer_keypair).await?;
+            (Some(handle), Some(events))
         };
 
         // Create HTTP server with database-backed query runner
@@ -542,6 +543,54 @@ impl Node {
                         }
                     }
                 });
+
+                // Spawn host event handler to process incoming P2P events through coordinator
+                if let Some(mut events) = p2p_events.take() {
+                    let coordinator_for_events = coordinator.clone();
+                    tokio::spawn(async move {
+                        while let Some(event) = events.recv().await {
+                            // Log events for visibility
+                            match &event {
+                                p2p::HostEvent::PeerConnected(peer) => {
+                                    info!("Peer connected: {}", peer);
+                                }
+                                p2p::HostEvent::PeerDisconnected(peer) => {
+                                    info!("Peer disconnected: {}", peer);
+                                }
+                                p2p::HostEvent::PeerDiscovered(peer) => {
+                                    info!("Peer discovered: {}", peer);
+                                }
+                                p2p::HostEvent::Listening(addr) => {
+                                    info!("Now listening on: {}", addr);
+                                }
+                                p2p::HostEvent::GossipMessage {
+                                    propagation_source,
+                                    topic,
+                                    ..
+                                } => {
+                                    info!(
+                                        "Received gossip message on {} from {}",
+                                        topic, propagation_source
+                                    );
+                                }
+                                p2p::HostEvent::TwoStreamRequest { peer_id, request } => {
+                                    info!(
+                                        peer_id = %peer_id,
+                                        message_id = %request.metadata.message_id,
+                                        doc_id = %request.doc_id,
+                                        "Processing TwoStreamRequest through coordinator"
+                                    );
+                                }
+                                _ => {}
+                            }
+
+                            // Process event through coordinator for response handling
+                            if let Err(e) = coordinator_for_events.handle_host_event(event).await {
+                                error!("Failed to handle host event: {}", e);
+                            }
+                        }
+                    });
+                }
 
                 info!("P2P sync coordinator initialized");
                 Some(coordinator)
@@ -640,12 +689,15 @@ impl Node {
     ///
     /// If a keypair is provided, it will be used for the P2P identity.
     /// Otherwise, an ephemeral keypair will be generated.
+    ///
+    /// Returns both the handle and the events receiver so that the caller
+    /// can connect events to the sync coordinator.
     async fn start_p2p<S: p2p::BitswapStore<Params = libipld::DefaultParams>>(
         config: &Config,
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
-    ) -> Result<p2p::P2PHostHandle> {
-        let (host, handle, mut events, _replicators) = match keypair {
+    ) -> Result<(p2p::P2PHostHandle, tokio::sync::mpsc::Receiver<p2p::HostEvent>)> {
+        let (host, handle, events, _replicators) = match keypair {
             Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).map_err(Error::P2P)?,
             None => p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?,
         };
@@ -663,39 +715,6 @@ impl Node {
             info!("P2P listening on {}", addr);
         }
 
-        // Spawn event handler
-        tokio::spawn(async move {
-            while let Some(event) = events.recv().await {
-                match event {
-                    p2p::HostEvent::PeerConnected(peer) => {
-                        info!("Peer connected: {}", peer);
-                    }
-                    p2p::HostEvent::PeerDisconnected(peer) => {
-                        info!("Peer disconnected: {}", peer);
-                    }
-                    p2p::HostEvent::PeerDiscovered(peer) => {
-                        info!("Peer discovered: {}", peer);
-                    }
-                    p2p::HostEvent::Listening(addr) => {
-                        info!("Now listening on: {}", addr);
-                    }
-                    p2p::HostEvent::GossipMessage {
-                        propagation_source,
-                        topic,
-                        ..
-                    } => {
-                        info!(
-                            "Received gossip message on {} from {}",
-                            topic, propagation_source
-                        );
-                    }
-                    other => {
-                        tracing::debug!("Unhandled P2P event: {:?}", other);
-                    }
-                }
-            }
-        });
-
         // Log bootstrap peers (connection will be handled by mDNS discovery)
         if !config.net.peers.is_empty() {
             info!("Bootstrap peers configured: {:?}", config.net.peers);
@@ -708,7 +727,7 @@ impl Node {
             Err(e) => error!("Failed to get local peer ID: {}", e),
         }
 
-        Ok(handle)
+        Ok((handle, events))
     }
 
     /// Run the node until shutdown

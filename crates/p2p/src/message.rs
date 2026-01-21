@@ -42,6 +42,35 @@ mod optional_bytes {
     }
 }
 
+/// Custom serialization for Vec<u8> that handles CBOR null as empty bytes.
+/// Go's fxamacker/cbor sends nil []byte as CBOR null instead of empty byte string.
+/// We serialize empty Vec<u8> as CBOR null to match Go's behavior.
+mod nullable_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize empty Vec as null to match Go's behavior
+        // Go's fxamacker/cbor sends nil []byte as CBOR null
+        if value.is_empty() {
+            serializer.serialize_none()
+        } else {
+            serde_bytes::serialize(value, serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Try to deserialize as Option to handle both null and byte arrays
+        let opt: Option<serde_bytes::ByteBuf> = Option::deserialize(deserializer)?;
+        Ok(opt.map(|b| b.into_vec()).unwrap_or_default())
+    }
+}
+
 /// Metadata that is part of every P2P message.
 ///
 /// This struct contains common fields for message routing, authentication,
@@ -61,8 +90,8 @@ pub struct MetaData {
     pub sender_id: String,
 
     /// Public key of the node that created the message.
-    /// Uses serde_bytes for CBOR byte string compatibility with Go.
-    #[serde(rename = "Pubkey", with = "serde_bytes")]
+    /// Uses nullable_bytes to handle Go's nil []byte as CBOR null.
+    #[serde(rename = "Pubkey", with = "nullable_bytes")]
     pub pubkey: Vec<u8>,
 
     /// Signature for message authentication.

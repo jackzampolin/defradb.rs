@@ -16,9 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use p2p::{
-    codec, testutil::MockBitswapStore, AccessMode, DefraTopic, Error, HostEvent, Message, P2PHost,
-    P2PHostHandle, PushLogBroadcast, PushLogReply, PushLogRequest, ReplicatorRegistry, SyncConfig,
-    SyncCoordinator, SyncEvent, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+    codec, sync::NoOpCollectionStorage, testutil::MockBitswapStore, AccessMode, DefraTopic, Error,
+    HostEvent, Message, P2PHost, P2PHostHandle, PushLogBroadcast, PushLogReply, PushLogRequest,
+    ReplicatorRegistry, SyncConfig, SyncCoordinator, SyncEvent, REP_REQUEST_PROTOCOL,
+    REP_RESPONSE_PROTOCOL,
 };
 use tokio::time::timeout;
 
@@ -367,13 +368,12 @@ async fn test_two_hosts_pushlog_exchange() {
         vec![10, 20, 30, 40, 50], // Block data
     );
 
-    // Send PushLog from host2 to host1
-    // Note: This will timeout because host1 doesn't have a handler that responds.
-    // The request should be received but the response mechanism needs the application
-    // layer to respond. This test verifies the message can be sent.
+    // Send PushLog from host2 to host1 via two-stream protocol
+    // Note: This will timeout because host1 doesn't have a handler that responds
+    // via the two-stream response channel.
     let send_result = timeout(
         Duration::from_secs(2),
-        handle2.send_pushlog(peer_id1, request),
+        handle2.send_two_stream_request(peer_id1, request),
     )
     .await;
 
@@ -384,11 +384,11 @@ async fn test_two_hosts_pushlog_exchange() {
         "Expected timeout (no handler to respond)"
     );
 
-    // Verify the request was received on host1
+    // Verify the request was received on host1 via two-stream
     let received_event = timeout(Duration::from_millis(500), async {
         loop {
             match events1.recv().await {
-                Some(HostEvent::PushLogRequest { request, .. }) => return Some(request),
+                Some(HostEvent::TwoStreamRequest { request, .. }) => return Some(request),
                 Some(_) => continue,
                 None => return None,
             }
@@ -439,7 +439,7 @@ async fn test_send_to_disconnected_peer_returns_error() {
     // The timeout ensures the test doesn't hang if the error isn't returned
     let result = timeout(
         Duration::from_secs(5),
-        handle.send_pushlog(fake_peer_id, request),
+        handle.send_two_stream_request(fake_peer_id, request),
     )
     .await;
 
@@ -3058,6 +3058,7 @@ async fn test_access_control_rejects_unauthorized_peer() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");
@@ -3127,6 +3128,7 @@ async fn test_access_control_allows_authorized_replicator() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");
@@ -3298,6 +3300,7 @@ async fn test_access_control_coordinator_accessors() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");
@@ -3340,6 +3343,7 @@ async fn test_access_control_rejects_replicator_for_wrong_collection() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");
@@ -3439,6 +3443,7 @@ async fn test_access_control_after_replicator_removed() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");
@@ -3535,6 +3540,7 @@ async fn test_access_control_checked_before_cid_parsing() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");
@@ -3604,6 +3610,7 @@ async fn test_pushlog_request_rejects_unauthorized_peer() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");
@@ -3732,6 +3739,7 @@ async fn test_pushlog_request_allows_authorized_replicator() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators.clone(),
+        Arc::new(NoOpCollectionStorage),
     )
     .await
     .expect("failed to create coordinator");

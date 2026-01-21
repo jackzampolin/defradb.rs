@@ -46,15 +46,15 @@ use libp2p::{
     mdns,
     request_response::{self, ProtocolSupport},
     swarm::NetworkBehaviour,
-    Multiaddr, PeerId,
+    Multiaddr, PeerId, StreamProtocol,
 };
 use libp2p_bitswap_next::{Bitswap, BitswapConfig, BitswapEvent, BitswapStore, QueryId};
+use libp2p_stream as stream;
 
 use libp2p::identity::Keypair;
 
 use crate::codec::PushLogCodec;
 use crate::message::{PushLogReply, PushLogRequest};
-use crate::protocol::{rep_request_protocol, rep_response_protocol};
 
 /// Timeout for PushLog requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -82,6 +82,10 @@ pub struct DefraBehaviour {
 
     /// GossipSub for pubsub messaging.
     pub gossipsub: gossipsub::Behaviour,
+
+    /// Raw stream protocol for Go two-stream compatibility.
+    /// Go's DefraDB uses separate streams for request and response.
+    pub stream: stream::Behaviour,
 }
 
 /// Events emitted by the DefraDB network behaviour.
@@ -142,6 +146,14 @@ impl From<gossipsub::Event> for DefraEvent {
     }
 }
 
+impl From<()> for DefraEvent {
+    fn from(_: ()) -> Self {
+        // stream::Behaviour emits () events which we ignore
+        // Stream handling happens through Control, not events
+        unreachable!("stream::Behaviour should not emit events")
+    }
+}
+
 impl DefraBehaviour {
     /// Create a new DefraDB network behaviour with message signing enabled.
     ///
@@ -176,16 +188,14 @@ impl DefraBehaviour {
         // Configure mDNS for local network discovery
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
-        // Configure request-response for PushLog (replicator protocol)
-        // Support both request and response protocols for Go compatibility
-        // Use codec with keypair for message signing/verification
+        // Configure request-response for PushLog (Rust-to-Rust only)
+        // NOTE: We do NOT register rep_request or rep_response protocols here
+        // because stream::Behaviour handles those for Go two-stream compatibility.
+        // Request-response is kept for potential future Rust-only protocols.
         let codec = PushLogCodec::with_keypair(keypair.clone());
         let pushlog = request_response::Behaviour::with_codec(
             codec,
-            [
-                (rep_request_protocol(), ProtocolSupport::Full),
-                (rep_response_protocol(), ProtocolSupport::Full),
-            ],
+            std::iter::empty::<(StreamProtocol, ProtocolSupport)>(),
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 
@@ -231,6 +241,9 @@ impl DefraBehaviour {
         });
         let bitswap = Bitswap::new(BitswapConfig::default(), bitswap_store, executor);
 
+        // Configure stream behaviour for Go two-stream compatibility
+        let stream = stream::Behaviour::new();
+
         Ok(Self {
             identify,
             mdns,
@@ -238,6 +251,7 @@ impl DefraBehaviour {
             bitswap,
             pushlog,
             gossipsub,
+            stream,
         })
     }
 
@@ -268,11 +282,10 @@ impl DefraBehaviour {
         let identify = identify::Behaviour::new(identify_config);
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
+        // NOTE: Do NOT register rep_request or rep_response protocols here
+        // because stream::Behaviour handles those for Go two-stream compatibility.
         let pushlog = request_response::Behaviour::new(
-            [
-                (rep_request_protocol(), ProtocolSupport::Full),
-                (rep_response_protocol(), ProtocolSupport::Full),
-            ],
+            std::iter::empty::<(StreamProtocol, ProtocolSupport)>(),
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 
@@ -312,6 +325,9 @@ impl DefraBehaviour {
         });
         let bitswap = Bitswap::new(BitswapConfig::default(), bitswap_store, executor);
 
+        // Configure stream behaviour for Go two-stream compatibility
+        let stream = stream::Behaviour::new();
+
         Ok(Self {
             identify,
             mdns,
@@ -319,6 +335,7 @@ impl DefraBehaviour {
             bitswap,
             pushlog,
             gossipsub,
+            stream,
         })
     }
 

@@ -34,6 +34,7 @@ use crate::error::{Error, Result};
 use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
+use crate::two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};
 
 /// Default idle connection timeout.
 const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -150,6 +151,20 @@ pub enum HostCommand {
         peer_id: PeerId,
         response: oneshot::Sender<Option<ReplicatorInfo>>,
     },
+
+    /// Send a PushLog response via two-stream protocol (Go compatibility).
+    SendTwoStreamResponse {
+        peer_id: PeerId,
+        reply: PushLogReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a PushLog request via two-stream protocol (Go compatibility).
+    SendTwoStreamRequest {
+        peer_id: PeerId,
+        request: PushLogRequest,
+        response: oneshot::Sender<Result<PushLogReply>>,
+    },
 }
 
 /// Events emitted by the P2P host.
@@ -203,6 +218,12 @@ pub enum HostEvent {
         query_id: QueryId,
         success: bool,
         error: Option<String>,
+    },
+
+    /// Received a PushLog request via two-stream protocol (Go compatibility).
+    TwoStreamRequest {
+        peer_id: PeerId,
+        request: PushLogRequest,
     },
 }
 
@@ -497,6 +518,46 @@ impl P2PHostHandle {
             .map_err(|_| Error::ChannelSend)?;
         response_rx.await.map_err(|_| Error::ChannelReceive)
     }
+
+    /// Send a PushLog response via two-stream protocol (Go compatibility).
+    ///
+    /// This sends a response on a NEW stream, matching Go's two-stream pattern.
+    pub async fn send_two_stream_response(
+        &self,
+        peer_id: PeerId,
+        reply: PushLogReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendTwoStreamResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a PushLog request via two-stream protocol and wait for response.
+    ///
+    /// This uses Go's two-stream pattern: request on one stream, response on another.
+    pub async fn send_two_stream_request(
+        &self,
+        peer_id: PeerId,
+        request: PushLogRequest,
+    ) -> Result<PushLogReply> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendTwoStreamRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
 }
 
 /// P2P Host that manages the libp2p swarm.
@@ -509,6 +570,10 @@ pub struct P2PHost {
         HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<PushLogReply>>>,
     /// Replicator registry for access control
     replicators: Arc<ReplicatorRegistry>,
+    /// Two-stream handler for Go compatibility
+    two_stream_handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
+    /// Receiver for two-stream events
+    two_stream_event_rx: mpsc::Receiver<TwoStreamEvent>,
 }
 
 impl P2PHost {
@@ -594,6 +659,27 @@ impl P2PHost {
         // Create the replicator registry for access control
         let replicators = Arc::new(ReplicatorRegistry::new());
 
+        // Set up two-stream protocol for Go compatibility
+        let mut control = swarm.behaviour().stream.new_control();
+        let request_streams = control
+            .accept(TwoStreamHandler::request_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register request protocol".into()))?;
+        let response_streams = control
+            .accept(TwoStreamHandler::response_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register response protocol".into()))?;
+
+        let two_stream_handler = Arc::new(tokio::sync::Mutex::new(TwoStreamHandler::new(control)));
+        let (two_stream_event_tx, two_stream_event_rx) = mpsc::channel(256);
+
+        // Spawn the two-stream runner as a background task
+        let runner = TwoStreamRunner::new(
+            Arc::clone(&two_stream_handler),
+            request_streams,
+            response_streams,
+            two_stream_event_tx,
+        );
+        tokio::spawn(runner.run());
+
         let host = Self {
             swarm,
             keypair,
@@ -601,6 +687,8 @@ impl P2PHost {
             event_tx,
             pending_requests: HashMap::new(),
             replicators: Arc::clone(&replicators),
+            two_stream_handler,
+            two_stream_event_rx,
         };
 
         Ok((host, handle, event_rx, replicators))
@@ -638,10 +726,48 @@ impl P2PHost {
                 event = self.swarm.select_next_some() => {
                     self.handle_swarm_event(event).await;
                 }
+                // Handle two-stream protocol events (Go compatibility)
+                Some(two_stream_event) = self.two_stream_event_rx.recv() => {
+                    self.handle_two_stream_event(two_stream_event).await;
+                }
             }
         }
 
         info!("P2P host shutdown complete");
+    }
+
+    /// Handle two-stream protocol events.
+    async fn handle_two_stream_event(&mut self, event: TwoStreamEvent) {
+        match event {
+            TwoStreamEvent::InboundRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.metadata.message_id,
+                    doc_id = %request.doc_id,
+                    "Host received PushLog request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::TwoStreamRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send TwoStreamRequest event - receiver dropped"
+                    );
+                } else {
+                    info!(peer_id = %peer_id, "Forwarded TwoStreamRequest event to coordinator");
+                }
+            }
+            TwoStreamEvent::DecodeError { peer_id, error } => {
+                warn!(
+                    peer_id = %peer_id,
+                    error = %error,
+                    "Failed to decode two-stream message"
+                );
+            }
+        }
     }
 
     /// Handle a command from the handle.
@@ -845,6 +971,36 @@ impl P2PHost {
                 if response.send(info).is_err() {
                     debug!(peer_id = %peer_id, "GetReplicator command response dropped - caller cancelled");
                 }
+            }
+
+            HostCommand::SendTwoStreamResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                tokio::spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_response(peer_id, reply).await.map_err(|e| e);
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendTwoStreamResponse command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::SendTwoStreamRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                tokio::spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_request(peer_id, request).await.map_err(|e| e);
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendTwoStreamRequest command response dropped - caller cancelled");
+                    }
+                });
             }
         }
         true

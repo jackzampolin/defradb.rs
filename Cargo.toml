@@ -44,6 +44,7 @@ serde_bytes = "0.11"
 # Note: Using 0.53 to match libp2p-bitswap-next's dependency
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns"] }
 libp2p-bitswap-next = "0.26"
+libp2p-stream = "0.1.0-alpha.1"
 multiaddr = "0.18"
 
 # Storage

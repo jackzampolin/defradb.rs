@@ -111,7 +111,7 @@ pub use libp2p_bitswap_next::{BitswapStore, QueryId};
 pub use replicator::ReplicatorInfo;
 
 // Re-export two-stream protocol types
-pub use two_stream::{TwoStreamEvent, TwoStreamHandler};
+pub use two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};
 
 // Re-export commonly used libp2p types
 pub use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};

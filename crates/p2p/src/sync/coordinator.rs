@@ -476,6 +476,100 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 // Propagate the processing error if there was one
                 process_result?;
             }
+            HostEvent::TwoStreamRequest { peer_id, request } => {
+                // Handle request via Go's two-stream protocol
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    doc_id = %request.doc_id,
+                    message_id = %request.metadata.message_id,
+                    "Received PushLog request via two-stream protocol (Go compatibility)"
+                );
+
+                // Access control check
+                if let Err(e) = self.check_access(&peer_id, &request.collection_id) {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        collection_id = %request.collection_id,
+                        doc_id = %request.doc_id,
+                        "Rejecting two-stream request from unauthorized peer"
+                    );
+                    let reply = PushLogReply::error(
+                        &request.metadata.message_id,
+                        &format!(
+                            "access denied: not authorized for collection {}",
+                            request.collection_id
+                        ),
+                    );
+                    if let Err(send_err) = self.host.send_two_stream_response(peer_id, reply).await
+                    {
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            error = %send_err,
+                            "Failed to send access denied response via two-stream"
+                        );
+                    }
+                    return Err(e);
+                }
+
+                // Parse CID - if invalid, send error response and return early
+                let cid = match Cid::try_from(request.cid.as_slice()) {
+                    Ok(cid) => {
+                        self.peer_state.peer_has_cid(&peer_id, cid);
+                        cid
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Failed to parse CID: {}", e);
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            cid_bytes_len = request.cid.len(),
+                            error = %e,
+                            "Failed to parse CID from two-stream request - sending error response"
+                        );
+                        let reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                        if let Err(send_err) =
+                            self.host.send_two_stream_response(peer_id, reply).await
+                        {
+                            tracing::warn!(
+                                peer_id = %peer_id,
+                                error = %send_err,
+                                "Failed to send error response for invalid CID via two-stream"
+                            );
+                        }
+                        return Err(crate::error::Error::InvalidCid(error_msg));
+                    }
+                };
+
+                // Log that we have a valid CID
+                tracing::trace!(?cid, "Parsed valid CID from two-stream request");
+
+                // Convert request to broadcast format and process
+                let broadcast = PushLogBroadcast::from_request(&request);
+                let process_result = self.manager.process_pushlog(&broadcast).await;
+
+                // Send response via two-stream protocol (on a NEW stream)
+                let reply = match &process_result {
+                    Ok(()) => PushLogReply::success(&request.metadata.message_id),
+                    Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
+                };
+
+                if let Err(e) = self.host.send_two_stream_response(peer_id, reply).await {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        doc_id = %request.doc_id,
+                        error = %e,
+                        "Failed to send two-stream response"
+                    );
+                } else {
+                    tracing::trace!(
+                        peer_id = %peer_id,
+                        doc_id = %request.doc_id,
+                        "Sent two-stream response"
+                    );
+                }
+
+                // Propagate the processing error if there was one
+                process_result?;
+            }
             other => {
                 // Other events (peer discovery, listening, etc.) don't need sync handling
                 tracing::trace!(event = ?other, "Ignoring non-sync host event");

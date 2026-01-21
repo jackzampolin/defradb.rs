@@ -94,16 +94,19 @@ impl TwoStreamHandler {
         peer_id: PeerId,
         mut stream: Stream,
     ) -> Result<TwoStreamEvent> {
+        tracing::info!(peer_id = %peer_id, "Reading message from two-stream request");
+
         // Read the request from the stream
         let request: PushLogRequest = read_message(&mut stream).await.map_err(|e| {
+            tracing::error!(peer_id = %peer_id, error = %e, "Failed to read two-stream request");
             Error::CborDeserialization(format!("failed to read request: {}", e))
         })?;
 
-        tracing::debug!(
+        tracing::info!(
             peer_id = %peer_id,
             message_id = %request.metadata.message_id,
             doc_id = %request.doc_id,
-            "Received PushLog request on two-stream protocol"
+            "Successfully read PushLog request on two-stream protocol"
         );
 
         Ok(TwoStreamEvent::InboundRequest { peer_id, request })
@@ -216,6 +219,13 @@ impl TwoStreamHandler {
     pub async fn send_response(&mut self, peer_id: PeerId, response: PushLogReply) -> Result<()> {
         let message_id = response.metadata.message_id.clone();
 
+        tracing::info!(
+            peer_id = %peer_id,
+            message_id = %message_id,
+            pubkey_len = response.metadata.pubkey.len(),
+            "Opening response stream for two-stream protocol"
+        );
+
         // Open stream and send response
         let mut stream = self
             .control
@@ -227,7 +237,7 @@ impl TwoStreamHandler {
             Error::CborSerialization(format!("failed to write response: {}", e))
         })?;
 
-        tracing::debug!(
+        tracing::info!(
             peer_id = %peer_id,
             message_id = %message_id,
             "Sent PushLog response on two-stream protocol"
@@ -279,19 +289,32 @@ impl TwoStreamRunner {
 
     /// Run the stream handler loop.
     pub async fn run(mut self) {
+        tracing::info!(
+            "Two-stream runner started - listening for Go request/response streams on {} and {}",
+            TwoStreamHandler::request_protocol(),
+            TwoStreamHandler::response_protocol()
+        );
+
         loop {
             tokio::select! {
                 // Handle incoming request streams
                 Some((peer_id, stream)) = self.request_streams.next() => {
+                    tracing::info!(
+                        peer_id = %peer_id,
+                        "Received incoming stream on request protocol"
+                    );
                     let event_tx = self.event_tx.clone();
                     tokio::spawn(async move {
                         match TwoStreamHandler::handle_request_stream(peer_id, stream).await {
                             Ok(event) => {
+                                tracing::info!(peer_id = %peer_id, "Sending TwoStreamEvent to host channel");
                                 if event_tx.send(event).await.is_err() {
                                     tracing::warn!(
                                         peer_id = %peer_id,
                                         "Failed to send two-stream event - receiver dropped"
                                     );
+                                } else {
+                                    tracing::info!(peer_id = %peer_id, "Successfully sent TwoStreamEvent to host channel");
                                 }
                             }
                             Err(e) => {
@@ -310,6 +333,10 @@ impl TwoStreamRunner {
                 }
                 // Handle incoming response streams
                 Some((peer_id, stream)) = self.response_streams.next() => {
+                    tracing::info!(
+                        peer_id = %peer_id,
+                        "Received incoming stream on response protocol"
+                    );
                     let handler = self.handler.clone();
                     tokio::spawn(async move {
                         let h = handler.lock().await;
