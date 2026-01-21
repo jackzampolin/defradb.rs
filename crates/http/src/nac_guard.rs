@@ -27,24 +27,20 @@ pub async fn require_permission(
     };
 
     // Get the identity DID, requiring authentication for NAC-protected operations
-    let did = identity.did().ok_or_else(|| {
-        HttpError::Forbidden(format!(
-            "authentication required for {} operation",
-            permission
-        ))
-    })?;
+    let did = identity
+        .did()
+        .ok_or_else(|| HttpError::Forbidden("forbidden".into()))?;
 
     // Check the permission
     let allowed = nac
         .check_permission(did, permission)
         .await
-        .map_err(|e| HttpError::Internal(format!("NAC check failed: {}", e)))?;
+        .map_err(|_| HttpError::Internal("permission check failed".into()))?;
 
     if !allowed {
-        return Err(HttpError::Forbidden(format!(
-            "identity does not have {} permission",
-            permission
-        )));
+        return Err(HttpError::Forbidden(
+            "not authorized to perform operation".into(),
+        ));
     }
 
     Ok(())
@@ -80,23 +76,19 @@ pub async fn check_permission_optional_auth(
             return Ok(());
         }
         // NAC is enabled but user is anonymous - deny
-        return Err(HttpError::Forbidden(format!(
-            "authentication required for {} operation when NAC is enabled",
-            permission
-        )));
+        return Err(HttpError::Forbidden("forbidden".into()));
     };
 
     // Check the permission
     let allowed = nac
         .check_permission(did, permission)
         .await
-        .map_err(|e| HttpError::Internal(format!("NAC check failed: {}", e)))?;
+        .map_err(|_| HttpError::Internal("permission check failed".into()))?;
 
     if !allowed {
-        return Err(HttpError::Forbidden(format!(
-            "identity does not have {} permission",
-            permission
-        )));
+        return Err(HttpError::Forbidden(
+            "not authorized to perform operation".into(),
+        ));
     }
 
     Ok(())
