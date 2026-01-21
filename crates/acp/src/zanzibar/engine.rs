@@ -233,39 +233,52 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                         .await?;
 
                     for subj in subjects {
-                        if let Subject::EntitySet {
-                            resource: target_resource,
-                            object_id: target_object_id,
-                            relation: target_relation,
-                        } = subj
-                        {
-                            // Check for cycles
-                            let node_id =
-                                NodeId::new(&target_resource, &target_object_id, &target_relation);
-                            if trail.contains(&node_id) {
-                                continue;
-                            }
-                            let new_trail = trail.with_node(node_id);
-
-                            let target_expr = self.lookup.get_expression(
-                                policy_id,
-                                &target_resource,
-                                &target_relation,
-                            )?;
-
-                            if self
-                                .evaluate_expr(
-                                    policy_id,
+                        match subj {
+                            Subject::EntitySet {
+                                resource: target_resource,
+                                object_id: target_object_id,
+                                relation: _, // Ignore EntitySet's relation, use computed_relation
+                            } => {
+                                // Check for cycles using computed_relation (not EntitySet's relation)
+                                let node_id = NodeId::new(
                                     &target_resource,
                                     &target_object_id,
-                                    &target_relation,
-                                    subject,
-                                    target_expr,
-                                    new_trail,
-                                )
-                                .await?
-                            {
+                                    computed_relation,
+                                );
+                                if trail.contains(&node_id) {
+                                    continue;
+                                }
+                                let new_trail = trail.with_node(node_id);
+
+                                let target_expr = self.lookup.get_expression(
+                                    policy_id,
+                                    &target_resource,
+                                    computed_relation,
+                                )?;
+
+                                if self
+                                    .evaluate_expr(
+                                        policy_id,
+                                        &target_resource,
+                                        &target_object_id,
+                                        computed_relation,
+                                        subject,
+                                        target_expr,
+                                        new_trail,
+                                    )
+                                    .await?
+                                {
+                                    return Ok(true);
+                                }
+                            }
+                            Subject::Wildcard | Subject::TypedWildcard { .. } => {
+                                // Wildcard on tuple_relation means any entity is a valid target.
+                                // This grants access because the TTU chain succeeds for everyone.
                                 return Ok(true);
+                            }
+                            Subject::Entity(_) => {
+                                // Direct entity subjects are not targets for TTU traversal
+                                continue;
                             }
                         }
                     }
@@ -349,6 +362,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
     use crate::zanzibar::store::MemoryZanzibarStore;
     use crate::zanzibar::types::{Relation, Relationship, Resource};
 

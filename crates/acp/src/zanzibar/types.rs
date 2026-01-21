@@ -375,6 +375,42 @@ impl Relationship {
         }
     }
 
+    /// Validate this relationship against a policy.
+    ///
+    /// Checks that:
+    /// - The relationship's resource and relation exist in the policy
+    /// - If the subject is an EntitySet, the referenced resource/relation also exist
+    ///
+    /// This should be called before storing relationships to catch invalid references
+    /// early rather than at permission evaluation time.
+    pub fn validate(&self, policy: &Policy) -> Result<()> {
+        // Validate the relationship's own resource/relation
+        if policy
+            .get_relation(&self.resource, &self.relation)
+            .is_none()
+        {
+            return Err(Error::RelationNotFound {
+                resource: self.resource.clone(),
+                relation: self.relation.clone(),
+            });
+        }
+
+        // Validate EntitySet subject references
+        if let Subject::EntitySet {
+            resource, relation, ..
+        } = &self.subject
+        {
+            if policy.get_relation(resource, relation).is_none() {
+                return Err(Error::InvalidEntitySetReference {
+                    resource: resource.clone(),
+                    relation: relation.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create a relationship with a direct entity subject.
     pub fn with_entity(
         resource: impl Into<String>,

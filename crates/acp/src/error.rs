@@ -59,6 +59,10 @@ pub enum Error {
     /// Resource not found in policy
     #[error("resource not found: {0}")]
     ResourceNotFound(String),
+
+    /// Invalid EntitySet subject reference
+    #[error("invalid EntitySet reference: resource '{resource}' relation '{relation}' does not exist in policy")]
+    InvalidEntitySetReference { resource: String, relation: String },
 }
 
 impl From<serde_json::Error> for Error {
