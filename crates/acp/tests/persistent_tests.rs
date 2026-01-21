@@ -3,7 +3,8 @@
 use acp::{AcpStore, PersistentAcpStore, RelationTuple};
 use identity::Did;
 use std::sync::Arc;
-use storage::corekv::{Reader, Store, Writer};
+use storage::corekv::{IterOptions, Reader, Store, Writer};
+use storage::namespace::{Namespace, NamespacedStore};
 use tempfile::TempDir;
 
 fn test_did() -> Did {
@@ -273,12 +274,10 @@ async fn test_unified_store_multiple_documents() {
     // Verify both documents are registered
     assert!(acp_store.is_doc_registered("users", "doc1").await.unwrap());
     assert!(acp_store.is_doc_registered("posts", "post1").await.unwrap());
-    assert!(
-        !acp_store
-            .is_doc_registered("users", "nonexistent")
-            .await
-            .unwrap()
-    );
+    assert!(!acp_store
+        .is_doc_registered("users", "nonexistent")
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -310,4 +309,91 @@ async fn test_unified_store_atomic_registration() {
 
     // Document should be registered with the original owner
     assert!(acp_store.is_doc_registered("users", "doc1").await.unwrap());
+}
+
+#[tokio::test]
+async fn test_unified_store_atomic_registration_concurrent() {
+    let tmp_dir = TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("data");
+
+    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+    let acp_store = Arc::new(PersistentAcpStore::from_store(redb_store.clone()));
+
+    let owner1 = test_did();
+    let owner2 = test_did2();
+
+    // Spawn concurrent registration attempts
+    let store1 = acp_store.clone();
+    let o1 = owner1.clone();
+    let h1 = tokio::spawn(async move { store1.register_doc_atomic(&o1, "users", "doc1").await });
+
+    let store2 = acp_store.clone();
+    let o2 = owner2.clone();
+    let h2 = tokio::spawn(async move { store2.register_doc_atomic(&o2, "users", "doc1").await });
+
+    let (r1, r2) = tokio::join!(h1, h2);
+    let success1 = r1.unwrap().unwrap();
+    let success2 = r2.unwrap().unwrap();
+
+    // Exactly one should succeed
+    assert!(
+        (success1 && !success2) || (!success1 && success2),
+        "Exactly one concurrent registration must succeed, got: r1={}, r2={}",
+        success1,
+        success2
+    );
+
+    // Document should be registered
+    assert!(acp_store.is_doc_registered("users", "doc1").await.unwrap());
+}
+
+#[tokio::test]
+async fn test_unified_store_isolation_from_namespaced_stores() {
+    let tmp_dir = TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("data");
+
+    let redb_store = Arc::new(storage::RedbStore::open(&db_path).unwrap());
+
+    // Create both ACP and Datastore using the NamespacedStore pattern
+    let acp_store = PersistentAcpStore::from_store(redb_store.clone());
+    let datastore = NamespacedStore::new(redb_store.clone(), Namespace::Datastore);
+
+    // Write ACP data
+    let tuple = RelationTuple::try_new(test_did(), "owner", "users", "doc1").expect("valid tuple");
+    acp_store.put_tuple(&tuple).await.unwrap();
+
+    // Write datastore data
+    {
+        let mut txn = datastore.new_txn(false).await.unwrap();
+        txn.set(b"collection/doc", b"document data").await.unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    // Datastore iteration should NOT see ACP data
+    {
+        let txn = datastore.new_txn(true).await.unwrap();
+        let opts = IterOptions::default();
+        let mut iter = txn.iterator(opts).await.unwrap();
+
+        while let Some(pair) = iter.next().await.unwrap() {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            assert!(
+                !key_str.contains("/acp/"),
+                "Datastore should not see ACP keys via iteration, found: {}",
+                key_str
+            );
+        }
+    }
+
+    // ACP store should still work correctly
+    assert!(acp_store.has_tuple(&tuple).await.unwrap());
+    let doc_tuples = acp_store.get_doc_tuples("users", "doc1").await.unwrap();
+    assert_eq!(doc_tuples.len(), 1);
+
+    // Verify datastore can still read its own data
+    {
+        let txn = datastore.new_txn(true).await.unwrap();
+        let value = txn.get(b"collection/doc").await.unwrap();
+        assert_eq!(value, Some(b"document data".to_vec()));
+    }
 }
