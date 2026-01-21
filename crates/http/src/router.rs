@@ -170,6 +170,18 @@ pub struct ImportResult {
     pub errors: Vec<String>,
 }
 
+/// Trait for schema operations.
+///
+/// Enables adding and managing collection schemas via SDL.
+#[async_trait::async_trait]
+pub trait SchemaOperations: Send + Sync {
+    /// Add a schema from SDL string.
+    ///
+    /// Parses the SDL and creates collections for each type defined.
+    /// Returns the created collection versions.
+    async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
+}
+
 /// Trait for backup operations.
 ///
 /// Enables exporting and importing database state as JSON. Export produces
@@ -207,6 +219,7 @@ pub struct AppState {
     pub acp: Option<Arc<dyn AcpOperations>>,
     pub index: Option<Arc<dyn IndexOperations>>,
     pub backup: Option<Arc<dyn BackupOperations>>,
+    pub schema: Option<Arc<dyn SchemaOperations>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -218,6 +231,7 @@ impl std::fmt::Debug for AppState {
             .field("acp", &self.acp.as_ref().map(|_| "<AcpOperations>"))
             .field("index", &self.index.as_ref().map(|_| "<IndexOperations>"))
             .field("backup", &self.backup.as_ref().map(|_| "<BackupOperations>"))
+            .field("schema", &self.schema.as_ref().map(|_| "<SchemaOperations>"))
             .finish()
     }
 }
@@ -258,6 +272,15 @@ impl AppState {
             )
         })
     }
+
+    /// Get schema operations or return ServiceUnavailable error.
+    pub fn require_schema(&self) -> Result<&Arc<dyn SchemaOperations>, crate::error::HttpError> {
+        self.schema.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Schema operations are not enabled. Start the server with schema enabled to use this feature.".into()
+            )
+        })
+    }
 }
 
 /// Builder for constructing AppState with optional components.
@@ -268,6 +291,7 @@ pub struct AppStateBuilder {
     acp: Option<Arc<dyn AcpOperations>>,
     index: Option<Arc<dyn IndexOperations>>,
     backup: Option<Arc<dyn BackupOperations>>,
+    schema: Option<Arc<dyn SchemaOperations>>,
 }
 
 impl AppStateBuilder {
@@ -280,6 +304,7 @@ impl AppStateBuilder {
             acp: None,
             index: None,
             backup: None,
+            schema: None,
         }
     }
 
@@ -313,6 +338,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set schema operations.
+    pub fn with_schema(mut self, schema: Arc<dyn SchemaOperations>) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
     /// Build the AppState.
     pub fn build(self) -> AppState {
         AppState {
@@ -322,6 +353,7 @@ impl AppStateBuilder {
             acp: self.acp,
             index: self.index,
             backup: self.backup,
+            schema: self.schema,
         }
     }
 }
@@ -369,9 +401,13 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // P2P routes
     let p2p_routes = Router::new()
         .route("/info", get(handlers::p2p::get_info))
+        .route("/connect", post(handlers::p2p::connect)) // Go-compatible
         .route("/peers", get(handlers::p2p::list_peers))
-        .route("/peers", post(handlers::p2p::connect_peer))
-        .route("/replicator", get(handlers::p2p::list_replicators))
+        .route("/peers", post(handlers::p2p::connect_peer)) // Legacy
+        .route("/replicators", get(handlers::p2p::list_replicators)) // Go uses /replicators
+        .route("/replicators", post(handlers::p2p::add_replicator))
+        .route("/replicators", delete(handlers::p2p::remove_replicator))
+        .route("/replicator", get(handlers::p2p::list_replicators)) // Legacy
         .route("/replicator", post(handlers::p2p::add_replicator))
         .route("/replicator", delete(handlers::p2p::remove_replicator))
         .route("/collections", get(handlers::p2p::list_collections))
@@ -401,6 +437,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/graphql", post(handlers::graphql_transactional))
         .route("/graphql", get(handlers::graphql_get))
         .route("/schema", get(handlers::schema))
+        .route("/schema", post(handlers::schema::add_schema))
         .route("/version", get(handlers::version))
         // Transaction endpoints
         .nest("/tx", tx_routes)

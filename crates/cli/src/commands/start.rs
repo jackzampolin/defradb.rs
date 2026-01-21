@@ -555,6 +555,11 @@ impl Node {
                 info!("P2P HTTP endpoints enabled");
             }
 
+            // Wire schema operations to HTTP server
+            let schema_adapter = crate::schema_adapter::SchemaAdapter::new_arc(database.clone());
+            server = server.with_schema_arc(schema_adapter);
+            info!("Schema HTTP endpoint enabled");
+
             info!(
                 "HTTP server configured on {} with REST endpoints enabled",
                 api_address

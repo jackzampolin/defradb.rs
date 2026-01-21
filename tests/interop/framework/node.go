@@ -24,7 +24,7 @@ type NodeConfig struct {
 	Type         NodeType
 	HTTPPort     int
 	P2PPort      int
-	Store        string // "memory", "redb", "badger"
+	Store        string // "memory", "redb" (rust only), "badger"
 	NoEncryption bool
 	NoSigning    bool
 }
@@ -64,7 +64,10 @@ func (n *Node) Start(ctx context.Context) error {
 			return err
 		}
 	case NodeTypeGo:
-		return fmt.Errorf("Go node type not yet implemented")
+		if err := n.startGo(ctx); err != nil {
+			n.cleanup()
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown node type: %s", n.Config.Type)
 	}
@@ -97,6 +100,7 @@ func (n *Node) startRust(ctx context.Context) error {
 	}
 
 	// Build command arguments
+	// Rust CLI requires explicit true/false values for boolean flags
 	args := []string{
 		"start",
 		"--url", fmt.Sprintf("127.0.0.1:%d", n.Config.HTTPPort),
@@ -120,6 +124,53 @@ func (n *Node) startRust(ctx context.Context) error {
 		args = append(args, "--no-signing", "true")
 	}
 
+	return n.startBinary(ctx, binary, args)
+}
+
+// startGo starts the Go defra binary.
+func (n *Node) startGo(ctx context.Context) error {
+	binary := n.goBinaryPath()
+
+	// Check if binary exists
+	if _, err := os.Stat(binary); os.IsNotExist(err) {
+		return fmt.Errorf("go binary not found at %s (run 'make build-go' first)", binary)
+	}
+
+	// Build command arguments
+	// Go CLI uses simple boolean flags (no value needed)
+	args := []string{
+		"start",
+		"--url", fmt.Sprintf("127.0.0.1:%d", n.Config.HTTPPort),
+		"--p2paddr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", n.Config.P2PPort),
+		"--rootdir", n.tempDir,
+		"--no-keyring",
+		"--development",
+	}
+
+	// Add store type (Go supports: memory, badger)
+	store := n.Config.Store
+	if store == "" {
+		store = "memory"
+	}
+	// Map redb to badger for Go (redb is Rust-only)
+	if store == "redb" {
+		store = "badger"
+	}
+	args = append(args, "--store", store)
+
+	// Add optional flags (simple boolean flags, no values)
+	if n.Config.NoEncryption {
+		args = append(args, "--no-encryption")
+	}
+	if n.Config.NoSigning {
+		args = append(args, "--no-signing")
+	}
+
+	return n.startBinary(ctx, binary, args)
+}
+
+// startBinary starts the given binary with the given arguments.
+func (n *Node) startBinary(ctx context.Context, binary string, args []string) error {
 	n.cmd = exec.CommandContext(ctx, binary, args...)
 
 	// Create log file in temp directory
@@ -137,7 +188,7 @@ func (n *Node) startRust(ctx context.Context) error {
 	// Start the process
 	if err := n.cmd.Start(); err != nil {
 		logFile.Close()
-		return fmt.Errorf("failed to start rust binary: %w", err)
+		return fmt.Errorf("failed to start binary: %w", err)
 	}
 
 	return nil
@@ -152,6 +203,18 @@ func (n *Node) rustBinaryPath() string {
 
 	// Default to relative path from tests/interop directory
 	return filepath.Join("..", "..", "target", "release", "defra")
+}
+
+// goBinaryPath returns the path to the Go defra binary.
+func (n *Node) goBinaryPath() string {
+	// Check environment variable first
+	if path := os.Getenv("DEFRA_GO_BINARY"); path != "" {
+		return path
+	}
+
+	// Default to relative path from tests/interop directory
+	// This assumes the Go DefraDB is built to build/defradb in the Go repo
+	return filepath.Join("..", "..", "..", "defradb", "build", "defradb")
 }
 
 // Stop stops the node and cleans up resources.

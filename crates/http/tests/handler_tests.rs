@@ -61,9 +61,11 @@ async fn test_p2p_info_with_p2p_enabled() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(info.get("id").is_some());
-    assert!(info.get("addresses").is_some());
+    // Response is now an array of full multiaddrs with peer ID embedded (Go-compatible format)
+    let info: Vec<String> = serde_json::from_slice(&body).unwrap();
+    assert!(!info.is_empty());
+    // Each address should contain /p2p/ with the peer ID
+    assert!(info[0].contains("/p2p/"));
 }
 
 #[tokio::test]

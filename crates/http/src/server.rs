@@ -14,7 +14,7 @@ use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
 use crate::error::Result;
-use crate::router::{AppStateBuilder, P2POperations, create_router_with_state};
+use crate::router::{AppStateBuilder, P2POperations, SchemaOperations, create_router_with_state};
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -41,6 +41,7 @@ pub struct Server {
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
+    schema: Option<Arc<dyn SchemaOperations>>,
 }
 
 impl Server {
@@ -51,6 +52,7 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            schema: None,
         }
     }
 
@@ -61,6 +63,7 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            schema: None,
         }
     }
 
@@ -71,6 +74,7 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            schema: None,
         }
     }
 
@@ -81,6 +85,7 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            schema: None,
         }
     }
 
@@ -122,6 +127,21 @@ impl Server {
         self
     }
 
+    /// Set schema operations for schema management endpoints.
+    ///
+    /// When schema operations are configured, the server enables:
+    /// - `POST /api/v0/schema` - Add schema from SDL
+    pub fn with_schema<S: SchemaOperations + 'static>(mut self, schema: S) -> Self {
+        self.schema = Some(Arc::new(schema));
+        self
+    }
+
+    /// Set schema operations from an Arc.
+    pub fn with_schema_arc(mut self, schema: Arc<dyn SchemaOperations>) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
     /// Build the router with all routes and middleware.
     ///
     /// CORS configuration matches Go DefraDB behavior:
@@ -140,6 +160,9 @@ impl Server {
         }
         if let Some(ref p2p) = self.p2p {
             builder = builder.with_p2p(Arc::clone(p2p));
+        }
+        if let Some(ref schema) = self.schema {
+            builder = builder.with_schema(Arc::clone(schema));
         }
         let state = builder.build();
         let router = create_router_with_state(state);

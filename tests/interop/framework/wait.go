@@ -30,11 +30,18 @@ func WaitForReady(ctx context.Context, client *Client, timeout time.Duration) er
 }
 
 // WaitForPeerConnected polls until the expected peer appears in the connected peers list.
+// Note: Go DefraDB doesn't support listing peers, so this returns nil immediately for Go nodes
+// (assuming the connect call succeeded).
 func WaitForPeerConnected(ctx context.Context, client *Client, expectedPeerID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
 		peers, err := client.ListPeers(ctx)
+		if err == ErrEndpointNotSupported {
+			// Go DefraDB doesn't support listing peers
+			// If connect succeeded, we assume peer is connected
+			return nil
+		}
 		if err == nil {
 			for _, peer := range peers {
 				if peer.ID == expectedPeerID {

@@ -192,3 +192,153 @@ func TestConnectionNodeInfo(t *testing.T) {
 	t.Logf("Node peer ID: %s", info.ID)
 	t.Logf("Node addresses: %v", info.Addresses)
 }
+
+// TestCrossRustToGoConnect tests that a Rust node can connect to a Go node.
+func TestCrossRustToGoConnect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Allocate ports for both nodes
+	httpRust, p2pRust, err := framework.AllocateNodePorts()
+	require.NoError(t, err, "failed to allocate ports for Rust node")
+
+	httpGo, p2pGo, err := framework.AllocateNodePorts()
+	require.NoError(t, err, "failed to allocate ports for Go node")
+
+	// Start Go node first (server)
+	goNode := framework.NewNode(framework.NodeConfig{
+		Type:         framework.NodeTypeGo,
+		HTTPPort:     httpGo,
+		P2PPort:      p2pGo,
+		Store:        "memory",
+		NoEncryption: true,
+		NoSigning:    true,
+	})
+
+	t.Log("Starting Go node...")
+	require.NoError(t, goNode.Start(ctx), "failed to start Go node")
+	defer goNode.Stop()
+	dumpLogsOnFailure(t, "go-node", goNode)
+
+	t.Logf("Go node started with peer ID: %s", goNode.PeerID())
+
+	// Start Rust node (client)
+	rustNode := framework.NewNode(framework.NodeConfig{
+		Type:         framework.NodeTypeRust,
+		HTTPPort:     httpRust,
+		P2PPort:      p2pRust,
+		Store:        "memory",
+		NoEncryption: true,
+		NoSigning:    true,
+	})
+
+	t.Log("Starting Rust node...")
+	require.NoError(t, rustNode.Start(ctx), "failed to start Rust node")
+	defer rustNode.Stop()
+	dumpLogsOnFailure(t, "rust-node", rustNode)
+
+	t.Logf("Rust node started with peer ID: %s", rustNode.PeerID())
+
+	// Get Go node's multiaddr for Rust node to connect to
+	goMultiaddr := goNode.P2PMultiaddr()
+	t.Logf("Go node multiaddr: %s", goMultiaddr)
+
+	// Connect Rust node to Go node
+	t.Log("Connecting Rust node to Go node...")
+	rustClient := rustNode.Client()
+	err = rustClient.ConnectPeer(ctx, goMultiaddr)
+	require.NoError(t, err, "failed to connect Rust node to Go node")
+
+	// Wait for connection to establish (Go doesn't support peer listing)
+	t.Log("Waiting for connection to establish...")
+	goClient := goNode.Client()
+	err = framework.WaitForPeerConnected(ctx, goClient, rustNode.PeerID(), 30*time.Second)
+	require.NoError(t, err, "connection wait failed on Go node")
+
+	err = framework.WaitForPeerConnected(ctx, rustClient, goNode.PeerID(), 30*time.Second)
+	require.NoError(t, err, "Rust node did not see Go node connect")
+
+	// Verify Rust node sees Go node (Go doesn't support peer listing)
+	peersRust, err := rustClient.ListPeers(ctx)
+	require.NoError(t, err, "failed to list peers from Rust node")
+	require.Len(t, peersRust, 1, "Rust node should see exactly 1 peer")
+	require.Equal(t, goNode.PeerID(), peersRust[0].ID, "Rust node should see Go node")
+
+	t.Log("Rust and Go nodes successfully connected!")
+}
+
+// TestCrossGoToRustConnect tests that a Go node can connect to a Rust node.
+func TestCrossGoToRustConnect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Allocate ports for both nodes
+	httpRust, p2pRust, err := framework.AllocateNodePorts()
+	require.NoError(t, err, "failed to allocate ports for Rust node")
+
+	httpGo, p2pGo, err := framework.AllocateNodePorts()
+	require.NoError(t, err, "failed to allocate ports for Go node")
+
+	// Start Rust node first (server)
+	rustNode := framework.NewNode(framework.NodeConfig{
+		Type:         framework.NodeTypeRust,
+		HTTPPort:     httpRust,
+		P2PPort:      p2pRust,
+		Store:        "memory",
+		NoEncryption: true,
+		NoSigning:    true,
+	})
+
+	t.Log("Starting Rust node...")
+	require.NoError(t, rustNode.Start(ctx), "failed to start Rust node")
+	defer rustNode.Stop()
+	dumpLogsOnFailure(t, "rust-node", rustNode)
+
+	t.Logf("Rust node started with peer ID: %s", rustNode.PeerID())
+
+	// Start Go node (client)
+	goNode := framework.NewNode(framework.NodeConfig{
+		Type:         framework.NodeTypeGo,
+		HTTPPort:     httpGo,
+		P2PPort:      p2pGo,
+		Store:        "memory",
+		NoEncryption: true,
+		NoSigning:    true,
+	})
+
+	t.Log("Starting Go node...")
+	require.NoError(t, goNode.Start(ctx), "failed to start Go node")
+	defer goNode.Stop()
+	dumpLogsOnFailure(t, "go-node", goNode)
+
+	t.Logf("Go node started with peer ID: %s", goNode.PeerID())
+
+	// Get Rust node's multiaddr for Go node to connect to
+	rustMultiaddr := rustNode.P2PMultiaddr()
+	t.Logf("Rust node multiaddr: %s", rustMultiaddr)
+
+	// Connect Go node to Rust node
+	t.Log("Connecting Go node to Rust node...")
+	goClient := goNode.Client()
+	err = goClient.ConnectPeer(ctx, rustMultiaddr)
+	require.NoError(t, err, "failed to connect Go node to Rust node")
+
+	// Wait for Rust node to see Go node as connected
+	t.Log("Waiting for Rust node to see Go node...")
+	rustClient := rustNode.Client()
+	err = framework.WaitForPeerConnected(ctx, rustClient, goNode.PeerID(), 30*time.Second)
+	require.NoError(t, err, "Rust node did not see Go node connect")
+
+	// Wait for Go node (Go doesn't support peer listing, so this returns immediately)
+	t.Log("Waiting for Go node connection confirmation...")
+	err = framework.WaitForPeerConnected(ctx, goClient, rustNode.PeerID(), 30*time.Second)
+	require.NoError(t, err, "connection wait failed on Go node")
+
+	// Verify Rust node sees Go node (Go doesn't support peer listing)
+	peersRust, err := rustClient.ListPeers(ctx)
+	require.NoError(t, err, "failed to list peers from Rust node")
+	require.Len(t, peersRust, 1, "Rust node should see exactly 1 peer")
+	require.Equal(t, goNode.PeerID(), peersRust[0].ID, "Rust node should see Go node")
+
+	t.Log("Go and Rust nodes successfully connected!")
+}
