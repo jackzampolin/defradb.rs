@@ -4,10 +4,18 @@
 //! - GraphQL and transaction endpoints
 //! - REST collection endpoints
 //! - REST document endpoints
+//! - P2P endpoints
+//! - ACP (Access Control Policy) endpoints
+//! - Index management endpoints
+//! - Backup endpoints
 
+pub mod acp;
+pub mod backup;
 pub mod collections;
 pub mod documents;
 pub mod graphql;
+pub mod index;
+pub mod p2p;
 
 // Re-export GraphQL handlers for backwards compatibility
 pub use graphql::{

@@ -8,29 +8,24 @@ use serde_json::json;
 
 use defra_http::identity_extractor::ExtractIdentity;
 use defra_http::mock::{FailingMockRestOperations, MockQueryExecutor, MockRestOperations};
-use defra_http::{handlers, AppState, HttpError};
+use defra_http::{handlers, AppState, AppStateBuilder, HttpError};
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
 fn create_state() -> AppState {
-    AppState {
-        executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-        rest: Some(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>),
-    }
+    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+        .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
+        .build()
 }
 
 fn create_state_without_rest() -> AppState {
-    AppState {
-        executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-        rest: None,
-    }
+    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>).build()
 }
 
 fn create_failing_state() -> AppState {
-    AppState {
-        executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-        rest: Some(Arc::new(FailingMockRestOperations::new("test error"))),
-    }
+    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+        .with_rest(Arc::new(FailingMockRestOperations::new("test error")))
+        .build()
 }
 
 fn anonymous() -> ExtractIdentity {
@@ -345,12 +340,11 @@ async fn test_create_empty_document_array() {
 // =========================================================================
 
 fn create_invalid_doc_id_state() -> AppState {
-    AppState {
-        executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-        rest: Some(Arc::new(FailingMockRestOperations::with_invalid_doc_id(
+    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+        .with_rest(Arc::new(FailingMockRestOperations::with_invalid_doc_id(
             "bad-id",
-        ))),
-    }
+        )))
+        .build()
 }
 
 #[tokio::test]
@@ -407,12 +401,11 @@ async fn test_delete_document_invalid_doc_id() {
 // =========================================================================
 
 fn create_invalid_input_state() -> AppState {
-    AppState {
-        executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-        rest: Some(Arc::new(FailingMockRestOperations::with_invalid_input(
+    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+        .with_rest(Arc::new(FailingMockRestOperations::with_invalid_input(
             "type mismatch: expected String, got Int",
-        ))),
-    }
+        )))
+        .build()
 }
 
 #[tokio::test]
@@ -454,12 +447,11 @@ async fn test_update_document_invalid_input() {
 // =========================================================================
 
 fn create_permission_denied_state() -> AppState {
-    AppState {
-        executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-        rest: Some(Arc::new(FailingMockRestOperations::with_permission_denied(
+    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+        .with_rest(Arc::new(FailingMockRestOperations::with_permission_denied(
             "access denied for user",
-        ))),
-    }
+        )))
+        .build()
 }
 
 #[tokio::test]
