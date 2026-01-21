@@ -333,18 +333,18 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("store_policy: create transaction", e))?;
 
         let key = Self::policy_key(&policy.id);
         let value = serde_json::to_vec(policy)?;
 
         txn.set(key.as_bytes(), &value)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_write(format!("store_policy: set key {}", key), e))?;
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("store_policy: commit", e))?;
 
         Ok(())
     }
@@ -354,14 +354,14 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("get_policy: create transaction", e))?;
 
         let key = Self::policy_key(policy_id);
 
         match txn
             .get(key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::storage_read(format!("get_policy: get key {}", key), e))?
         {
             Some(data) => {
                 let policy: Policy = serde_json::from_slice(&data)?;
@@ -386,9 +386,38 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         if exists {
+            // Delete the policy
             txn.delete(key.as_bytes())
                 .await
                 .map_err(|e| Error::Storage(e.to_string()))?;
+
+            // Cascade delete: remove all relationships for this policy
+            // Relationships are stored with prefix /zanzibar/{policy_id}/rel/
+            let rel_prefix = format!("/zanzibar/{}/rel/", policy_id);
+            let iter_opts = IterOptions::new().with_prefix(rel_prefix.into_bytes());
+
+            let mut keys_to_delete = Vec::new();
+            {
+                let mut iter = txn
+                    .iterator(iter_opts)
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+
+                while let Some(kv) = iter
+                    .next()
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?
+                {
+                    keys_to_delete.push(kv.key);
+                }
+            }
+
+            // Delete collected relationship keys
+            for key in keys_to_delete {
+                txn.delete(&key)
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+            }
         }
 
         txn.commit()

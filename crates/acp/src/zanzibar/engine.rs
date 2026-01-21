@@ -3,13 +3,14 @@
 //! Implements goal-tree search with cycle detection for evaluating
 //! Zanzibar permission expressions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use identity::Did;
 use sha2::{Digest, Sha256};
+use tokio::sync::RwLock;
 
 use super::expression::RelationExpression;
 use super::lookup::PolicyLookupTable;
@@ -40,6 +41,12 @@ impl NodeId {
 /// Trail of visited nodes for cycle detection.
 ///
 /// Tracks the path through the evaluation tree to detect cycles.
+///
+/// # Performance Note
+/// The trail is cloned on each recursive call to maintain independent paths.
+/// For very deep permission hierarchies, this could become expensive (O(n) per clone
+/// where n is the depth). If this becomes a bottleneck, consider using the `im` crate
+/// for persistent data structures which provide O(log n) cloning.
 #[derive(Debug, Clone, Default)]
 struct NodeTrail {
     visited: HashSet<NodeId>,
@@ -67,6 +74,67 @@ impl NodeTrail {
         let mut new_trail = self.clone();
         new_trail.insert(node);
         new_trail
+    }
+}
+
+/// Request-scoped cache for permission check results.
+///
+/// Caches the result of permission evaluations within a single top-level check
+/// to avoid redundant computations when the same (resource, object_id, relation)
+/// is checked multiple times during recursive evaluation.
+///
+/// The cache key includes the subject DID to ensure correct behavior when
+/// checking permissions for different subjects.
+#[derive(Debug, Default)]
+struct CheckCache {
+    /// Cache: (resource, object_id, relation, subject_hash) -> result
+    results: RwLock<HashMap<String, bool>>,
+}
+
+impl CheckCache {
+    fn new() -> Self {
+        Self {
+            results: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Generate a cache key for a permission check.
+    fn cache_key(resource: &str, object_id: &str, relation: &str, subject: &Did) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(resource.as_bytes());
+        hasher.update(b"/");
+        hasher.update(object_id.as_bytes());
+        hasher.update(b"#");
+        hasher.update(relation.as_bytes());
+        hasher.update(b"@");
+        hasher.update(subject.to_string().as_bytes());
+        let result = hasher.finalize();
+        format!("{:x}", result)
+    }
+
+    /// Get a cached result if available.
+    async fn get(
+        &self,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        subject: &Did,
+    ) -> Option<bool> {
+        let key = Self::cache_key(resource, object_id, relation, subject);
+        self.results.read().await.get(&key).copied()
+    }
+
+    /// Store a result in the cache.
+    async fn set(
+        &self,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        subject: &Did,
+        result: bool,
+    ) {
+        let key = Self::cache_key(resource, object_id, relation, subject);
+        self.results.write().await.insert(key, result);
     }
 }
 
@@ -104,6 +172,11 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         self.lookup.remove_policy(policy_id);
     }
 
+    /// Update (reload) a policy in the engine's lookup table.
+    pub fn update_policy(&mut self, policy: &Policy) {
+        self.lookup.update_policy(policy);
+    }
+
     /// Load policies from the store into the lookup table.
     pub async fn load_policy(&mut self, policy_id: &str) -> Result<()> {
         if let Some(policy) = self.store.get_policy(policy_id).await? {
@@ -112,9 +185,22 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         Ok(())
     }
 
+    /// Reload a policy from the store (invalidates cache and reloads).
+    pub async fn reload_policy(&mut self, policy_id: &str) -> Result<()> {
+        self.lookup.remove_policy(policy_id);
+        self.load_policy(policy_id).await
+    }
+
+    /// Clear all cached policies.
+    pub fn clear_cache(&mut self) {
+        self.lookup.clear();
+    }
+
     /// Check if subject has permission on object.
     ///
     /// This is the main entry point for permission evaluation.
+    /// Creates a request-scoped cache to avoid redundant evaluations
+    /// during recursive permission checks.
     pub async fn check(
         &self,
         policy_id: &str,
@@ -130,15 +216,18 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         let node_id = NodeId::new(resource, object_id, relation);
         let trail = NodeTrail::new().with_node(node_id);
 
-        self.evaluate_expr(
-            policy_id, resource, object_id, relation, subject, expression, trail,
+        // Create request-scoped cache for this check
+        let cache = Arc::new(CheckCache::new());
+
+        self.evaluate_expr_cached(
+            policy_id, resource, object_id, relation, subject, expression, trail, cache,
         )
         .await
     }
 
-    /// Evaluate an expression without adding to trail (for sub-expressions).
+    /// Evaluate an expression with caching support.
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_expr<'a>(
+    fn evaluate_expr_cached<'a>(
         &'a self,
         policy_id: &'a str,
         resource: &'a str,
@@ -147,6 +236,47 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         subject: &'a Did,
         expression: &'a RelationExpression,
         trail: NodeTrail,
+        cache: Arc<CheckCache>,
+    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+        Box::pin(async move {
+            // Check cache first (for ComputedUserset which may re-evaluate same relation)
+            if let Some(cached) = cache.get(resource, object_id, relation, subject).await {
+                return Ok(cached);
+            }
+
+            // Evaluate the expression
+            let result = self
+                .evaluate_expr_inner(
+                    policy_id,
+                    resource,
+                    object_id,
+                    relation,
+                    subject,
+                    expression,
+                    trail,
+                    cache.clone(),
+                )
+                .await?;
+
+            // Cache the result
+            cache.set(resource, object_id, relation, subject, result).await;
+
+            Ok(result)
+        })
+    }
+
+    /// Inner expression evaluation with caching support.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_expr_inner<'a>(
+        &'a self,
+        policy_id: &'a str,
+        resource: &'a str,
+        object_id: &'a str,
+        relation: &'a str,
+        subject: &'a Did,
+        expression: &'a RelationExpression,
+        trail: NodeTrail,
+        cache: Arc<CheckCache>,
     ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
         Box::pin(async move {
             match expression {
@@ -173,7 +303,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                         self.lookup
                             .get_expression(policy_id, resource, computed_rel)?;
 
-                    self.evaluate_expr(
+                    self.evaluate_expr_cached(
                         policy_id,
                         resource,
                         object_id,
@@ -181,6 +311,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                         subject,
                         computed_expr,
                         new_trail,
+                        cache,
                     )
                     .await
                 }
@@ -211,7 +342,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                         )?;
 
                         if self
-                            .evaluate_expr(
+                            .evaluate_expr_cached(
                                 policy_id,
                                 &target.resource,
                                 &target.object_id,
@@ -219,6 +350,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                                 subject,
                                 target_expr,
                                 new_trail,
+                                cache.clone(),
                             )
                             .await?
                         {
@@ -257,7 +389,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                                 )?;
 
                                 if self
-                                    .evaluate_expr(
+                                    .evaluate_expr_cached(
                                         policy_id,
                                         &target_resource,
                                         &target_object_id,
@@ -265,6 +397,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                                         subject,
                                         target_expr,
                                         new_trail,
+                                        cache.clone(),
                                     )
                                     .await?
                                 {
@@ -290,7 +423,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                     // OR with short-circuit: return true if any matches
                     for expr in exprs {
                         if self
-                            .evaluate_expr(
+                            .evaluate_expr_inner(
                                 policy_id,
                                 resource,
                                 object_id,
@@ -298,6 +431,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                                 subject,
                                 expr,
                                 trail.clone(),
+                                cache.clone(),
                             )
                             .await?
                         {
@@ -311,7 +445,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                     // AND: return true only if all match
                     for expr in exprs {
                         if !self
-                            .evaluate_expr(
+                            .evaluate_expr_inner(
                                 policy_id,
                                 resource,
                                 object_id,
@@ -319,6 +453,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                                 subject,
                                 expr,
                                 trail.clone(),
+                                cache.clone(),
                             )
                             .await?
                         {
@@ -331,7 +466,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                 RelationExpression::Difference { base, subtract } => {
                     // Base AND NOT subtract
                     let base_result = self
-                        .evaluate_expr(
+                        .evaluate_expr_inner(
                             policy_id,
                             resource,
                             object_id,
@@ -339,6 +474,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                             subject,
                             base,
                             trail.clone(),
+                            cache.clone(),
                         )
                         .await?;
 
@@ -347,8 +483,9 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                     }
 
                     let subtract_result = self
-                        .evaluate_expr(
+                        .evaluate_expr_inner(
                             policy_id, resource, object_id, relation, subject, subtract, trail,
+                            cache,
                         )
                         .await?;
 

@@ -73,6 +73,97 @@ impl Policy {
         Ok(())
     }
 
+    /// Validate DPI (DefraDB Policy Interface) compliance.
+    ///
+    /// DPI rules (from Go DefraDB):
+    /// - Every resource MUST have an 'owner' relation
+    /// - Computed permission expressions MUST include 'owner' (directly or via computed userset)
+    /// - Only union (+) operations are allowed, not intersection (&) or difference (-)
+    ///
+    /// Note: Direct relations (This) are relationship holders, not permissions,
+    /// so they don't need to include owner. Only computed relations need owner inclusion.
+    pub fn validate_dpi(&self) -> Result<()> {
+        for resource in &self.resources {
+            // Rule 1: Every resource must have an 'owner' relation
+            if resource.get_relation("owner").is_none() {
+                return Err(Error::DpiMissingOwner {
+                    resource: resource.name.clone(),
+                });
+            }
+
+            // Check non-owner relations for DPI compliance
+            for relation in &resource.relations {
+                if relation.name == "owner" {
+                    // Owner relation itself doesn't need to reference owner
+                    continue;
+                }
+
+                // Skip direct relations (This) - they are relationship holders, not permissions
+                if relation.expression.is_this() {
+                    continue;
+                }
+
+                // Rule 2: Computed expressions must include 'owner'
+                if !Self::expression_includes_owner(&relation.expression) {
+                    return Err(Error::DpiExpressionMissingOwner {
+                        resource: resource.name.clone(),
+                        relation: relation.name.clone(),
+                    });
+                }
+
+                // Rule 3: Only union operations allowed
+                if let Some(op) = Self::find_disallowed_operation(&relation.expression) {
+                    return Err(Error::DpiDisallowedOperation {
+                        resource: resource.name.clone(),
+                        relation: relation.name.clone(),
+                        operation: op,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if an expression includes 'owner' (either directly or via computed userset).
+    fn expression_includes_owner(expr: &RelationExpression) -> bool {
+        match expr {
+            RelationExpression::This => false,
+            RelationExpression::ComputedUserset { relation } => relation == "owner",
+            RelationExpression::TupleToUserset {
+                computed_relation, ..
+            } => computed_relation == "owner",
+            RelationExpression::Union(exprs) => {
+                exprs.iter().any(Self::expression_includes_owner)
+            }
+            RelationExpression::Intersection(exprs) => {
+                exprs.iter().any(Self::expression_includes_owner)
+            }
+            RelationExpression::Difference { base, subtract } => {
+                Self::expression_includes_owner(base) || Self::expression_includes_owner(subtract)
+            }
+        }
+    }
+
+    /// Find any disallowed operation in an expression.
+    /// Returns the operation name if found, None otherwise.
+    fn find_disallowed_operation(expr: &RelationExpression) -> Option<String> {
+        match expr {
+            RelationExpression::This => None,
+            RelationExpression::ComputedUserset { .. } => None,
+            RelationExpression::TupleToUserset { .. } => None,
+            RelationExpression::Union(exprs) => {
+                for e in exprs {
+                    if let Some(op) = Self::find_disallowed_operation(e) {
+                        return Some(op);
+                    }
+                }
+                None
+            }
+            RelationExpression::Intersection(_) => Some("intersection (&)".to_string()),
+            RelationExpression::Difference { .. } => Some("difference (-)".to_string()),
+        }
+    }
+
     fn validate_expression(&self, resource_name: &str, expr: &RelationExpression) -> Result<()> {
         match expr {
             RelationExpression::This => Ok(()),
@@ -871,5 +962,148 @@ mod tests {
             "Expected SubjectRestrictionViolation, got {:?}",
             result2
         );
+    }
+
+    // ==========================================================================
+    // DPI Compliance Validation Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dpi_valid_policy() {
+        // A valid DPI-compliant policy
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::computed(
+                    "reader",
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::computed_userset("owner"),
+                    ]),
+                ))
+                .with_relation(Relation::computed(
+                    "updater",
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::computed_userset("owner"),
+                    ]),
+                )),
+        );
+
+        assert!(policy.validate_dpi().is_ok());
+    }
+
+    #[test]
+    fn test_dpi_missing_owner_relation() {
+        // Policy without owner relation violates DPI
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document").with_relation(Relation::direct("reader")),
+        );
+
+        let result = policy.validate_dpi();
+        assert!(
+            matches!(result, Err(Error::DpiMissingOwner { .. })),
+            "Expected DpiMissingOwner, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dpi_expression_missing_owner() {
+        // Policy with computed relation that doesn't include owner
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("contributor"))
+                .with_relation(Relation::computed(
+                    "reader",
+                    // This computed expression doesn't include owner!
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::computed_userset("contributor"), // No owner reference
+                    ]),
+                )),
+        );
+
+        let result = policy.validate_dpi();
+        assert!(
+            matches!(result, Err(Error::DpiExpressionMissingOwner { .. })),
+            "Expected DpiExpressionMissingOwner, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dpi_disallowed_intersection() {
+        // Policy using intersection violates DPI
+        // The expression includes owner but uses disallowed intersection operation
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("approved"))
+                .with_relation(Relation::computed(
+                    "editor",
+                    // This includes owner but uses intersection (disallowed)
+                    RelationExpression::intersection(vec![
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("approved"),
+                    ]),
+                )),
+        );
+
+        let result = policy.validate_dpi();
+        assert!(
+            matches!(result, Err(Error::DpiDisallowedOperation { .. })),
+            "Expected DpiDisallowedOperation, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dpi_disallowed_difference() {
+        // Policy using difference violates DPI
+        // The expression includes owner but uses disallowed difference operation
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("banned"))
+                .with_relation(Relation::computed(
+                    "viewer",
+                    // This includes owner but uses difference (disallowed)
+                    RelationExpression::difference(
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("banned"),
+                    ),
+                )),
+        );
+
+        let result = policy.validate_dpi();
+        assert!(
+            matches!(result, Err(Error::DpiDisallowedOperation { .. })),
+            "Expected DpiDisallowedOperation, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dpi_owner_via_ttu() {
+        // Policy with owner via TTU is valid
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(
+                Resource::new("file")
+                    .with_relation(Relation::direct("owner"))
+                    .with_relation(Relation::direct("parent"))
+                    .with_relation(Relation::computed(
+                        "reader",
+                        RelationExpression::union(vec![
+                            RelationExpression::this(),
+                            RelationExpression::computed_userset("owner"),
+                            RelationExpression::tuple_to_userset("parent", "owner"),
+                        ]),
+                    )),
+            )
+            .with_resource(Resource::new("folder").with_relation(Relation::direct("owner")));
+
+        assert!(policy.validate_dpi().is_ok());
     }
 }

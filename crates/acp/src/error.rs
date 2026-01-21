@@ -32,9 +32,25 @@ pub enum Error {
     #[error("invalid policy: {0}")]
     InvalidPolicy(String),
 
-    /// Storage operation failed
+    /// Storage operation failed (generic)
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// Storage read operation failed
+    #[error("storage read error: {operation} - {details}")]
+    StorageRead { operation: String, details: String },
+
+    /// Storage write operation failed
+    #[error("storage write error: {operation} - {details}")]
+    StorageWrite { operation: String, details: String },
+
+    /// Storage transaction failed
+    #[error("storage transaction error: {operation} - {details}")]
+    StorageTransaction { operation: String, details: String },
+
+    /// Storage iteration failed
+    #[error("storage iteration error: {operation} - {details}")]
+    StorageIteration { operation: String, details: String },
 
     /// Serialization/deserialization error
     #[error("serialization error: {0}")]
@@ -67,10 +83,60 @@ pub enum Error {
     /// Subject restriction violation
     #[error("subject restriction violated: {message}")]
     SubjectRestrictionViolation { message: String },
+
+    /// DPI compliance violation: missing owner relation
+    #[error("DPI violation: resource '{resource}' must have an 'owner' relation")]
+    DpiMissingOwner { resource: String },
+
+    /// DPI compliance violation: expression doesn't start with owner
+    #[error("DPI violation: permission '{relation}' on resource '{resource}' must include 'owner' in its expression")]
+    DpiExpressionMissingOwner { resource: String, relation: String },
+
+    /// DPI compliance violation: disallowed operation
+    #[error("DPI violation: resource '{resource}' relation '{relation}' uses disallowed operation '{operation}' (only union allowed)")]
+    DpiDisallowedOperation {
+        resource: String,
+        relation: String,
+        operation: String,
+    },
 }
 
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
         Error::Serialization(err.to_string())
+    }
+}
+
+impl Error {
+    /// Create a storage read error with context.
+    pub fn storage_read(operation: impl Into<String>, err: impl std::fmt::Display) -> Self {
+        Self::StorageRead {
+            operation: operation.into(),
+            details: err.to_string(),
+        }
+    }
+
+    /// Create a storage write error with context.
+    pub fn storage_write(operation: impl Into<String>, err: impl std::fmt::Display) -> Self {
+        Self::StorageWrite {
+            operation: operation.into(),
+            details: err.to_string(),
+        }
+    }
+
+    /// Create a storage transaction error with context.
+    pub fn storage_txn(operation: impl Into<String>, err: impl std::fmt::Display) -> Self {
+        Self::StorageTransaction {
+            operation: operation.into(),
+            details: err.to_string(),
+        }
+    }
+
+    /// Create a storage iteration error with context.
+    pub fn storage_iter(operation: impl Into<String>, err: impl std::fmt::Display) -> Self {
+        Self::StorageIteration {
+            operation: operation.into(),
+            details: err.to_string(),
+        }
     }
 }

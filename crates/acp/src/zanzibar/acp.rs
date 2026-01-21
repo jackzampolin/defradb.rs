@@ -129,6 +129,26 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
             DocumentPermission::Delete => DELETER_RELATION,
         }
     }
+
+    /// Invalidate cached policy, forcing reload on next access.
+    ///
+    /// Call this after modifying a policy to ensure the cache is updated.
+    pub async fn invalidate_policy_cache(&self, policy_id: &str) {
+        let mut engine = self.engine.write().await;
+        engine.remove_policy(policy_id);
+    }
+
+    /// Reload a policy from the store, updating the cache.
+    pub async fn reload_policy(&self, policy_id: &str) -> Result<()> {
+        let mut engine = self.engine.write().await;
+        engine.reload_policy(policy_id).await
+    }
+
+    /// Clear all cached policies.
+    pub async fn clear_policy_cache(&self) {
+        let mut engine = self.engine.write().await;
+        engine.clear_cache();
+    }
 }
 
 #[async_trait]
@@ -276,6 +296,10 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool> {
+        // In DPI model, collection_id serves as both policy_id and resource_name
+        // Ensure the policy exists before operating on relationships
+        self.ensure_policy(collection_id, collection_id).await?;
+
         // Only owner can add relationships
         if !self
             .is_owner(requestor, collection_id, collection_id, doc_id)
@@ -353,6 +377,10 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool> {
+        // In DPI model, collection_id serves as both policy_id and resource_name
+        // Ensure the policy exists before operating on relationships
+        self.ensure_policy(collection_id, collection_id).await?;
+
         // Only owner can delete relationships
         if !self
             .is_owner(requestor, collection_id, collection_id, doc_id)

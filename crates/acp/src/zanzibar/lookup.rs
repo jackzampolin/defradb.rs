@@ -48,6 +48,18 @@ impl PolicyLookupTable {
         self.policies.remove(policy_id);
     }
 
+    /// Update (reload) a policy in the lookup table.
+    /// Removes the old version and adds the new one.
+    pub fn update_policy(&mut self, policy: &Policy) {
+        self.remove_policy(&policy.id);
+        self.add_policy(policy);
+    }
+
+    /// Clear all policies from the lookup table.
+    pub fn clear(&mut self) {
+        self.policies.clear();
+    }
+
     /// Look up a relation expression.
     ///
     /// Returns the expression for the given (policy_id, resource, relation) tuple.
