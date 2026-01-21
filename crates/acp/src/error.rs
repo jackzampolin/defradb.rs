@@ -39,6 +39,26 @@ pub enum Error {
     /// Serialization/deserialization error
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    /// Policy not found
+    #[error("policy not found: {0}")]
+    PolicyNotFound(String),
+
+    /// Relation not found in policy
+    #[error("relation not found: {relation} in resource {resource}")]
+    RelationNotFound { resource: String, relation: String },
+
+    /// Cycle detected in permission evaluation
+    #[error("cycle detected in permission evaluation: {0}")]
+    CycleDetected(String),
+
+    /// Invalid expression
+    #[error("invalid expression: {0}")]
+    InvalidExpression(String),
+
+    /// Resource not found in policy
+    #[error("resource not found: {0}")]
+    ResourceNotFound(String),
 }
 
 impl From<serde_json::Error> for Error {

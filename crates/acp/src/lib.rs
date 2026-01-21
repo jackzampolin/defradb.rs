@@ -32,6 +32,7 @@ mod permission;
 mod persistent;
 mod relation;
 mod store;
+pub mod zanzibar;
 
 pub use dac::DocumentACP;
 pub use error::{Error, Result};
@@ -43,3 +44,9 @@ pub use relation::{
     RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
 };
 pub use store::AcpStore;
+
+// Re-export key zanzibar types
+pub use zanzibar::{
+    MemoryZanzibarStore, PermissionEngine, PersistentZanzibarStore, Policy, Relation,
+    RelationExpression, Relationship, Resource, Subject, ZanzibarDocumentACP, ZanzibarStore,
+};
