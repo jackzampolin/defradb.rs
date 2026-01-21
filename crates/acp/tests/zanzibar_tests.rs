@@ -347,7 +347,13 @@ async fn test_zanzibar_document_acp_basic() {
     let identity = Identity::Authenticated(owner.clone());
 
     assert!(acp
-        .check_doc_access(&identity, DocumentPermission::Read, "policy1", "documents", "doc1",)
+        .check_doc_access(
+            &identity,
+            DocumentPermission::Read,
+            "policy1",
+            "documents",
+            "doc1",
+        )
         .await
         .unwrap());
     assert!(acp
@@ -454,7 +460,13 @@ async fn test_local_document_acp_still_works() {
     let identity = Identity::Authenticated(owner.clone());
 
     assert!(acp
-        .check_doc_access(&identity, DocumentPermission::Read, "policy1", "documents", "doc1",)
+        .check_doc_access(
+            &identity,
+            DocumentPermission::Read,
+            "policy1",
+            "documents",
+            "doc1",
+        )
         .await
         .unwrap());
     assert!(acp
@@ -491,8 +503,8 @@ async fn test_relation_not_found_error() {
     let store = Arc::new(MemoryZanzibarStore::new());
     let mut engine = PermissionEngine::new(store);
 
-    let policy =
-        Policy::new("policy1", "Test").with_resource(Resource::new("document").with_relation(Relation::direct("owner")));
+    let policy = Policy::new("policy1", "Test")
+        .with_resource(Resource::new("document").with_relation(Relation::direct("owner")));
 
     engine.add_policy(&policy);
 
