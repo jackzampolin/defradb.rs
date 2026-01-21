@@ -170,6 +170,60 @@ pub struct ImportResult {
     pub errors: Vec<String>,
 }
 
+/// Re-export NAC types from the acp crate for convenience.
+pub use acp::nac::{NacStatus, NodePermission};
+
+/// Trait for Node Access Control (NAC) operations.
+///
+/// NAC provides node-level access control using the Zanzibar permission model.
+/// When enabled, node operations require authentication and authorization.
+#[async_trait::async_trait]
+pub trait NodeAcpOperations: Send + Sync {
+    /// Check if an identity has a specific node permission.
+    ///
+    /// Returns `true` if:
+    /// - NAC is not enabled (all operations allowed)
+    /// - The identity has the required permission
+    async fn check_permission(
+        &self,
+        identity: &identity::Did,
+        permission: NodePermission,
+    ) -> Result<bool, String>;
+
+    /// Get the current NAC status.
+    async fn get_status(&self) -> NacStatus;
+
+    /// Get the owner identity.
+    async fn owner(&self) -> Option<identity::Did>;
+
+    /// Check if an identity is an admin.
+    async fn is_admin(&self, identity: &identity::Did) -> Result<bool, String>;
+
+    /// Add an admin relationship.
+    async fn add_admin(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+    ) -> Result<bool, String>;
+
+    /// Remove an admin relationship.
+    async fn remove_admin(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+    ) -> Result<bool, String>;
+}
+
+/// NAC status information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NacStatusInfo {
+    /// Current NAC status (not_configured, enabled, disabled_temporarily)
+    pub status: String,
+    /// Owner DID if NAC is enabled
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
 /// Trait for schema operations.
 ///
 /// Enables adding and managing collection schemas via SDL.
@@ -220,6 +274,7 @@ pub struct AppState {
     pub index: Option<Arc<dyn IndexOperations>>,
     pub backup: Option<Arc<dyn BackupOperations>>,
     pub schema: Option<Arc<dyn SchemaOperations>>,
+    pub nac: Option<Arc<dyn NodeAcpOperations>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -238,6 +293,7 @@ impl std::fmt::Debug for AppState {
                 "schema",
                 &self.schema.as_ref().map(|_| "<SchemaOperations>"),
             )
+            .field("nac", &self.nac.as_ref().map(|_| "<NodeAcpOperations>"))
             .finish()
     }
 }
@@ -287,6 +343,15 @@ impl AppState {
             )
         })
     }
+
+    /// Get NAC operations or return ServiceUnavailable error.
+    pub fn require_nac(&self) -> Result<&Arc<dyn NodeAcpOperations>, crate::error::HttpError> {
+        self.nac.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "NAC (Node Access Control) is not enabled. Start the server with --acp-node-enable to use this feature.".into()
+            )
+        })
+    }
 }
 
 /// Builder for constructing AppState with optional components.
@@ -298,6 +363,7 @@ pub struct AppStateBuilder {
     index: Option<Arc<dyn IndexOperations>>,
     backup: Option<Arc<dyn BackupOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
+    nac: Option<Arc<dyn NodeAcpOperations>>,
 }
 
 impl AppStateBuilder {
@@ -311,6 +377,7 @@ impl AppStateBuilder {
             index: None,
             backup: None,
             schema: None,
+            nac: None,
         }
     }
 
@@ -350,6 +417,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set NAC (Node Access Control) operations.
+    pub fn with_nac(mut self, nac: Arc<dyn NodeAcpOperations>) -> Self {
+        self.nac = Some(nac);
+        self
+    }
+
     /// Build the AppState.
     pub fn build(self) -> AppState {
         AppState {
@@ -360,6 +433,7 @@ impl AppStateBuilder {
             index: self.index,
             backup: self.backup,
             schema: self.schema,
+            nac: self.nac,
         }
     }
 }
@@ -437,6 +511,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/export", get(handlers::backup::export))
         .route("/import", post(handlers::backup::import));
 
+    // NAC (Node Access Control) routes
+    let nac_routes = Router::new()
+        .route("/status", get(handlers::nac::get_status))
+        .route("/admin", post(handlers::nac::add_admin))
+        .route("/admin", delete(handlers::nac::remove_admin));
+
     // API v0 routes
     let api_routes = Router::new()
         // GraphQL endpoints
@@ -457,6 +537,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/index", index_routes)
         // Backup endpoints
         .nest("/backup", backup_routes)
+        // NAC endpoints
+        .nest("/nac", nac_routes)
         .with_state(state);
 
     root_routes.nest("/api/v0", api_routes)

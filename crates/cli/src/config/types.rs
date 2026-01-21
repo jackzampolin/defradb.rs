@@ -151,6 +151,43 @@ pub enum DatastoreType {
     Memory,
 }
 
+/// Document ACP (Access Control Policy) type options.
+///
+/// - `None`: No document-level access control (default)
+/// - `Local`: Local Zanzibar-based ACP
+/// - `SourceHub`: Remote SourceHub ACP (future)
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AcpDocumentType {
+    #[default]
+    None,
+    Local,
+    SourceHub,
+}
+
+impl std::fmt::Display for AcpDocumentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcpDocumentType::None => write!(f, "none"),
+            AcpDocumentType::Local => write!(f, "local"),
+            AcpDocumentType::SourceHub => write!(f, "source-hub"),
+        }
+    }
+}
+
+impl std::str::FromStr for AcpDocumentType {
+    type Err = Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().replace('-', "").as_str() {
+            "none" | "" => Ok(AcpDocumentType::None),
+            "local" => Ok(AcpDocumentType::Local),
+            "sourcehub" => Ok(AcpDocumentType::SourceHub),
+            _ => Err(Error::InvalidAcpType(s.to_string())),
+        }
+    }
+}
+
 impl std::fmt::Display for DatastoreType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

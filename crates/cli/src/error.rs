@@ -65,6 +65,9 @@ pub enum Error {
     #[error("invalid datastore type: {0}")]
     InvalidDatastore(String),
 
+    #[error("invalid ACP type: {0}")]
+    InvalidAcpType(String),
+
     #[error("storage error: {0}")]
     Storage(#[from] storage::Error),
 

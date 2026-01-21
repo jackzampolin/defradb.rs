@@ -56,6 +56,7 @@ pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
 pub mod index_manager;
+pub mod nac;
 pub mod peer_identity;
 pub mod schema_loader;
 pub mod txn;
@@ -87,6 +88,9 @@ pub use schema_loader::load_active_collections;
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};
+
+// NAC exports
+pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager};
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};

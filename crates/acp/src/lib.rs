@@ -28,6 +28,7 @@ mod dac;
 mod error;
 mod identity;
 mod local;
+pub mod nac;
 mod permission;
 mod persistent;
 mod relation;
@@ -51,4 +52,11 @@ pub use zanzibar::{
     PermissionExplanation, PersistentZanzibarStore, Policy, Relation, RelationExpression,
     Relationship, Resource, StepResult, StorePolicyOptions, Subject, SubjectRestriction,
     ZanzibarDocumentACP, ZanzibarStore,
+};
+
+// Re-export NAC types
+pub use nac::{
+    create_node_policy, validate_node_policy, NacStatus, NodeACP, NodeAcpOperations,
+    NodePermission, ADMIN_RELATION as NAC_ADMIN_RELATION, NODE_OBJECT_ID, NODE_POLICY_ID,
+    NODE_RESOURCE_NAME, OWNER_RELATION as NAC_OWNER_RELATION,
 };

@@ -14,7 +14,9 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput};
+use super::types::{
+    AcpDocumentType, DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput,
+};
 use crate::error::{Error, Result};
 
 /// Logging configuration
@@ -173,6 +175,36 @@ impl Default for KeyringConfig {
             path: "keys".to_string(),
             namespace: "defradb".to_string(),
             disabled: false,
+        }
+    }
+}
+
+/// Access Control Policy (ACP) configuration.
+///
+/// ACP provides two levels of access control:
+/// - Node Access Control (NAC): Controls access to node-level operations
+/// - Document Access Control (DAC): Controls access to individual documents
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpConfig {
+    /// Enable Node Access Control (NAC).
+    ///
+    /// When enabled, node operations require authentication and authorization.
+    /// Default: false (all operations allowed without authentication)
+    pub node_enable: bool,
+
+    /// Document ACP type.
+    ///
+    /// - `none`: No document-level access control (default)
+    /// - `local`: Local Zanzibar-based access control
+    /// - `source-hub`: Remote SourceHub access control
+    pub document_type: AcpDocumentType,
+}
+
+impl Default for AcpConfig {
+    fn default() -> Self {
+        Self {
+            node_enable: false,
+            document_type: AcpDocumentType::None,
         }
     }
 }

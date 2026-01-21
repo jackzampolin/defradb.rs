@@ -28,8 +28,8 @@ use crate::cli::Cli;
 use crate::error::{Error, Result};
 
 // Re-export types and sections for external use
-pub use sections::{ApiConfig, DatastoreConfig, KeyringConfig, LogConfig, NetConfig};
-pub use types::{DatastoreType, LogFormat, LogLevel, LogOutput};
+pub use sections::{AcpConfig, ApiConfig, DatastoreConfig, KeyringConfig, LogConfig, NetConfig};
+pub use types::{AcpDocumentType, DatastoreType, LogFormat, LogLevel, LogOutput};
 // KeyringBackend is available but not currently used externally
 #[allow(unused_imports)]
 pub use types::KeyringBackend;
@@ -44,6 +44,8 @@ pub struct Config {
     pub datastore: DatastoreConfig,
     pub net: NetConfig,
     pub keyring: KeyringConfig,
+    #[serde(default)]
+    pub acp: AcpConfig,
     pub development: bool,
     pub secret_file: String,
     pub telemetry_disabled: bool,
@@ -60,6 +62,7 @@ impl Default for Config {
             datastore: DatastoreConfig::default(),
             net: NetConfig::default(),
             keyring: KeyringConfig::default(),
+            acp: AcpConfig::default(),
             development: false,
             secret_file: ".env".to_string(),
             telemetry_disabled: false,
@@ -185,6 +188,14 @@ impl Config {
         // Other
         if let Some(ref secret_file) = cli.secret_file {
             self.secret_file = secret_file.clone();
+        }
+
+        // ACP
+        if let Some(node_enable) = cli.acp_node_enable {
+            self.acp.node_enable = node_enable;
+        }
+        if let Some(ref doc_type) = cli.acp_document_type {
+            self.acp.document_type = doc_type.parse()?;
         }
 
         Ok(())

@@ -84,6 +84,17 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_SECRET_FILE")]
     pub secret_file: Option<String>,
 
+    /// Enable Node Access Control (NAC).
+    ///
+    /// When enabled, node operations require authentication and authorization
+    /// based on the node's identity from the keyring.
+    #[arg(long, global = true, env = "DEFRA_ACP_NODE_ENABLE")]
+    pub acp_node_enable: Option<bool>,
+
+    /// Document ACP type. Options are none, local, or source-hub
+    #[arg(long, global = true, env = "DEFRA_ACP_DOCUMENT_TYPE")]
+    pub acp_document_type: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
