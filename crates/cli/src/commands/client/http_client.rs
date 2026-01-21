@@ -17,6 +17,7 @@ use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use url::Url;
+use urlencoding::encode;
 
 use crate::error::{Error, Result};
 
@@ -213,6 +214,7 @@ impl HttpClient {
                         req
                     }
                 }
+                "DELETE" => self.add_auth_header(self.client.delete(url)),
                 _ => {
                     return Err(Error::Server(format!(
                         "Unsupported HTTP method: {}",
@@ -266,7 +268,24 @@ impl HttpClient {
         }
 
         // All retries exhausted
-        Err(last_error.unwrap_or_else(|| Error::Server("Request failed after retries".to_string())))
+        Err(last_error.unwrap_or_else(|| {
+            Error::Server(format!(
+                "{} {} failed after {} retries",
+                method, url, MAX_RETRIES
+            ))
+        }))
+    }
+
+    /// Extract error details from a failed response and return an error.
+    ///
+    /// This helper reduces code duplication for error handling across HTTP client methods.
+    async fn extract_error(response: Response) -> Error {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("[failed to read body: {}]", e));
+        Error::Server(format!("HTTP {}: {}", status, body.trim()))
     }
 
     /// Execute a GraphQL query
@@ -288,15 +307,7 @@ impl HttpClient {
         let response = self.send_with_retry("POST", &url, Some(&body)).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let result: GraphQLResponse = response.json().await?;
@@ -309,15 +320,7 @@ impl HttpClient {
         let response = self.send_with_retry("GET", &url, None).await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
-            return Err(Error::Server(format!("HTTP {}: {}", status, body.trim())));
+            return Err(Self::extract_error(response).await);
         }
 
         let schema = response.text().await?;
@@ -356,21 +359,14 @@ impl HttpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body_text = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    eprintln!("Warning: Failed to read error response body: {}", e);
-                    String::new()
-                }
-            };
+            let body_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("[failed to read body: {}]", e));
             if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body_text) {
                 return Err(Error::Server(err.error));
             }
-            return Err(Error::Server(format!(
-                "HTTP {}: {}",
-                status,
-                body_text.trim()
-            )));
+            return Err(Error::Server(format!("HTTP {}: {}", status, body_text.trim())));
         }
 
         let result: T = response.json().await?;
@@ -391,5 +387,440 @@ impl GraphQLResponse {
             .map(|e| e.message.as_str())
             .collect::<Vec<_>>()
             .join("; ")
+    }
+}
+
+/// ACP policy add request
+#[derive(Debug, Serialize)]
+pub struct AcpAddPolicyRequest {
+    pub policy: String,
+}
+
+/// ACP policy add response
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AcpAddPolicyResponse {
+    #[serde(rename = "PolicyID")]
+    pub policy_id: String,
+}
+
+/// ACP policy info from list/describe
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AcpPolicy {
+    /// Policy ID
+    #[serde(rename = "id", alias = "ID")]
+    pub id: String,
+
+    /// Policy name (if available)
+    #[serde(rename = "name", alias = "Name", default)]
+    pub name: Option<String>,
+
+    /// Policy description (if available)
+    #[serde(rename = "description", alias = "Description", default)]
+    pub description: Option<String>,
+
+    /// Resources defined in the policy
+    #[serde(rename = "resources", alias = "Resources", default)]
+    pub resources: Option<JsonValue>,
+
+    /// Actor definitions
+    #[serde(rename = "actor", alias = "Actor", default)]
+    pub actor: Option<JsonValue>,
+
+    /// Creation time (if available)
+    #[serde(rename = "creationTime", alias = "CreationTime", default)]
+    pub creation_time: Option<String>,
+}
+
+impl HttpClient {
+    /// Add a new ACP policy
+    pub async fn acp_add_policy(&self, policy: &str) -> Result<AcpAddPolicyResponse> {
+        let url = format!("{}/api/v0/acp/policy", self.base_url);
+        let request = AcpAddPolicyRequest {
+            policy: policy.to_string(),
+        };
+        self.post_json(&url, &request).await
+    }
+
+    /// List all ACP policies
+    pub async fn acp_list_policies(&self) -> Result<Vec<AcpPolicy>> {
+        let url = format!("{}/api/v0/acp/policy", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let policies: Vec<AcpPolicy> = response.json().await?;
+        Ok(policies)
+    }
+
+    /// Get a specific ACP policy by ID
+    pub async fn acp_get_policy(&self, policy_id: &str) -> Result<AcpPolicy> {
+        // URL-encode the policy ID to handle special characters safely
+        let url = format!("{}/api/v0/acp/policy/{}", self.base_url, encode(policy_id));
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let policy: AcpPolicy = response.json().await?;
+        Ok(policy)
+    }
+
+    /// Export database backup
+    pub async fn backup_export(
+        &self,
+        collections: Option<&[String]>,
+        pretty: bool,
+    ) -> Result<String> {
+        let mut url = format!("{}/api/v0/backup/export", self.base_url);
+
+        // Build query parameters with URL encoding
+        let mut params = Vec::new();
+        if let Some(cols) = collections {
+            for col in cols {
+                params.push(format!("collections={}", encode(col)));
+            }
+        }
+        if pretty {
+            params.push("pretty=true".to_string());
+        }
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let data = response.text().await?;
+        Ok(data)
+    }
+
+    /// Import database backup
+    pub async fn backup_import(&self, data: &str) -> Result<()> {
+        let url = format!("{}/api/v0/backup/import", self.base_url);
+        let response = self.send_with_retry("POST", &url, Some(data)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Create an index on a collection
+    pub async fn index_create(
+        &self,
+        collection: &str,
+        fields: &[String],
+        name: Option<&str>,
+        unique: bool,
+    ) -> Result<IndexInfo> {
+        let url = format!("{}/api/v0/index", self.base_url);
+        let request = IndexCreateRequest {
+            collection: collection.to_string(),
+            fields: fields.to_vec(),
+            name: name.map(|s| s.to_string()),
+            unique,
+        };
+        self.post_json(&url, &request).await
+    }
+
+    /// List indexes (optionally filtered by collection)
+    pub async fn index_list(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>> {
+        let url = match collection {
+            Some(col) => format!("{}/api/v0/index?collection={}", self.base_url, encode(col)),
+            None => format!("{}/api/v0/index", self.base_url),
+        };
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let indexes: Vec<IndexInfo> = response.json().await?;
+        Ok(indexes)
+    }
+
+    /// Drop an index by name
+    pub async fn index_drop(&self, collection: &str, name: &str) -> Result<()> {
+        let url = format!(
+            "{}/api/v0/index?collection={}&name={}",
+            self.base_url,
+            encode(collection),
+            encode(name)
+        );
+        let response = self.send_with_retry("DELETE", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+}
+
+/// Index create request
+#[derive(Debug, Serialize)]
+pub struct IndexCreateRequest {
+    pub collection: String,
+    pub fields: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unique: bool,
+}
+
+/// Index info from list/create
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IndexInfo {
+    /// Index name
+    #[serde(rename = "name", alias = "Name")]
+    pub name: String,
+
+    /// Collection name
+    #[serde(rename = "collection", alias = "Collection")]
+    pub collection: String,
+
+    /// Fields in the index
+    #[serde(rename = "fields", alias = "Fields")]
+    pub fields: Vec<IndexFieldInfo>,
+
+    /// Whether the index is unique
+    #[serde(rename = "unique", alias = "Unique", default)]
+    pub unique: bool,
+}
+
+/// Index field info
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IndexFieldInfo {
+    /// Field name
+    #[serde(rename = "name", alias = "Name")]
+    pub name: String,
+
+    /// Sort direction (ASC or DESC)
+    #[serde(rename = "direction", alias = "Direction", default)]
+    pub direction: Option<String>,
+}
+
+/// P2P node info
+#[derive(Debug, Deserialize, Serialize)]
+pub struct P2pInfo {
+    /// Peer ID
+    #[serde(rename = "id", alias = "ID", alias = "peerId", alias = "PeerID")]
+    pub id: String,
+
+    /// Listen addresses
+    #[serde(rename = "addresses", alias = "Addresses", default)]
+    pub addresses: Vec<String>,
+}
+
+/// P2P peer info
+#[derive(Debug, Deserialize, Serialize)]
+pub struct P2pPeerInfo {
+    /// Peer ID
+    #[serde(rename = "id", alias = "ID")]
+    pub id: String,
+
+    /// Peer address
+    #[serde(rename = "address", alias = "Address", default)]
+    pub address: Option<String>,
+}
+
+/// P2P replicator info
+#[derive(Debug, Deserialize, Serialize)]
+pub struct P2pReplicatorInfo {
+    /// Peer ID
+    #[serde(rename = "id", alias = "ID", default)]
+    pub id: Option<String>,
+
+    /// Collections being replicated
+    #[serde(rename = "collections", alias = "Collections", default)]
+    pub collections: Vec<String>,
+
+    /// Peer address
+    #[serde(rename = "address", alias = "Address", default)]
+    pub address: Option<String>,
+}
+
+/// P2P replicator request
+#[derive(Debug, Serialize)]
+pub struct P2pReplicatorRequest {
+    pub collections: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+/// P2P collection request
+#[derive(Debug, Serialize)]
+pub struct P2pCollectionRequest {
+    pub collections: Vec<String>,
+}
+
+/// P2P peer add request
+#[derive(Debug, Serialize)]
+pub struct P2pPeerAddRequest {
+    pub address: String,
+}
+
+impl HttpClient {
+    /// Get P2P node info
+    pub async fn p2p_info(&self) -> Result<P2pInfo> {
+        let url = format!("{}/api/v0/p2p/info", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let info: P2pInfo = response.json().await?;
+        Ok(info)
+    }
+
+    /// List connected peers
+    pub async fn p2p_peers_list(&self) -> Result<Vec<P2pPeerInfo>> {
+        let url = format!("{}/api/v0/p2p/peers", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let peers: Vec<P2pPeerInfo> = response.json().await?;
+        Ok(peers)
+    }
+
+    /// Connect to a peer
+    pub async fn p2p_peers_add(&self, address: &str) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/peers", self.base_url);
+        let request = P2pPeerAddRequest {
+            address: address.to_string(),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// List replicators
+    pub async fn p2p_replicator_list(&self) -> Result<Vec<P2pReplicatorInfo>> {
+        let url = format!("{}/api/v0/p2p/replicator", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let replicators: Vec<P2pReplicatorInfo> = response.json().await?;
+        Ok(replicators)
+    }
+
+    /// Add a replicator
+    pub async fn p2p_replicator_add(
+        &self,
+        collections: &[String],
+        address: Option<&str>,
+    ) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/replicator", self.base_url);
+        let request = P2pReplicatorRequest {
+            collections: collections.to_vec(),
+            address: address.map(|s| s.to_string()),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Delete a replicator
+    pub async fn p2p_replicator_delete(
+        &self,
+        collections: &[String],
+        address: Option<&str>,
+    ) -> Result<()> {
+        let mut url = format!("{}/api/v0/p2p/replicator", self.base_url);
+
+        // Build query parameters with URL encoding
+        let mut params = Vec::new();
+        for col in collections {
+            params.push(format!("collections={}", encode(col)));
+        }
+        if let Some(addr) = address {
+            params.push(format!("address={}", encode(addr)));
+        }
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        let response = self.send_with_retry("DELETE", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// List P2P collections
+    pub async fn p2p_collection_list(&self) -> Result<Vec<String>> {
+        let url = format!("{}/api/v0/p2p/collections", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let collections: Vec<String> = response.json().await?;
+        Ok(collections)
+    }
+
+    /// Add collections to P2P
+    pub async fn p2p_collection_add(&self, collections: &[String]) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/collections", self.base_url);
+        let request = P2pCollectionRequest {
+            collections: collections.to_vec(),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Remove collections from P2P
+    pub async fn p2p_collection_remove(&self, collections: &[String]) -> Result<()> {
+        let mut url = format!("{}/api/v0/p2p/collections", self.base_url);
+
+        // Build query parameters with URL encoding
+        let params: Vec<String> = collections
+            .iter()
+            .map(|c| format!("collections={}", encode(c)))
+            .collect();
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        let response = self.send_with_retry("DELETE", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
     }
 }

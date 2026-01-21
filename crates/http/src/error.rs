@@ -21,6 +21,9 @@ pub enum HttpError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -40,6 +43,7 @@ impl IntoResponse for HttpError {
             HttpError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             HttpError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             HttpError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            HttpError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             HttpError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             HttpError::QueryExecution(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
         };

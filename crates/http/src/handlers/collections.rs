@@ -76,29 +76,25 @@ mod tests {
     use super::*;
     use crate::identity_extractor::ExtractIdentity;
     use crate::mock::{FailingMockRestOperations, MockQueryExecutor, MockRestOperations};
+    use crate::router::AppStateBuilder;
     use query::executor::QueryExecutor;
     use query::rest::RestOperations;
     use std::sync::Arc;
 
     fn create_state() -> AppState {
-        AppState {
-            executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-            rest: Some(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>),
-        }
+        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+            .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
+            .build()
     }
 
     fn create_state_without_rest() -> AppState {
-        AppState {
-            executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-            rest: None,
-        }
+        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>).build()
     }
 
     fn create_failing_state() -> AppState {
-        AppState {
-            executor: Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
-            rest: Some(Arc::new(FailingMockRestOperations::new("test error"))),
-        }
+        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
+            .with_rest(Arc::new(FailingMockRestOperations::new("test error")))
+            .build()
     }
 
     #[tokio::test]
