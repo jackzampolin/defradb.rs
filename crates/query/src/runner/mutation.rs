@@ -93,11 +93,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         use acp::Identity;
 
-        // Validate collection exists
-        let collection = self
-            .collections
-            .get(&mutation.collection_name)
-            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+        // Validate collection exists - resolve on-demand from provider
+        let collection = self.get_collection(&mutation.collection_name).await?;
 
         // Build document mapping from requested fields
         let mapping = self.build_mutation_mapping(mutation)?;
@@ -360,11 +357,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             _ => return Ok(None),
         };
 
-        // Get the collection schema to build a mapping
-        let collection = self
-            .collections
-            .get(&mutation.collection_name)
-            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+        // Get the collection schema on-demand from provider
+        let collection = self.get_collection(&mutation.collection_name).await?;
 
         // Build mapping from collection schema
         let mut mapping = DocumentMapping::new();

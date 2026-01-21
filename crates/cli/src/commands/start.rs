@@ -493,26 +493,14 @@ impl Node {
             // Create transaction registry for explicit transaction support
             let registry = db::DbTransactionRegistry::new(database.clone());
 
-            // Get collection schemas for the query runner
-            let collection_names = database
-                .list_collections()
-                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
-
-            let mut collections: Vec<schema::CollectionVersion> = Vec::new();
-            for name in &collection_names {
-                match database.get_collection(name) {
-                    Ok(Some(c)) => collections.push(c.schema().clone()),
-                    Ok(None) => {
-                        warn!("Collection '{}' listed but not found", name);
-                    }
-                    Err(e) => {
-                        return Err(Error::Storage(storage::Error::Other(format!(
-                            "failed to load collection '{}': {}",
-                            name, e
-                        ))));
-                    }
-                }
-            }
+            // Create collection provider for on-demand schema resolution
+            // This ensures newly added schemas are immediately available for queries
+            let collection_provider: Arc<dyn query::CollectionProvider> =
+                db::DbCollectionProvider::new_arc(database.clone());
+            info!(
+                "Collection provider configured ({} collection(s) available)",
+                database.list_collections().map(|c| c.len()).unwrap_or(0)
+            );
 
             // Create LocalDocumentACP with the provided store
             let document_acp: Arc<dyn acp::DocumentACP> =
@@ -520,10 +508,14 @@ impl Node {
             info!("Document ACP configured");
 
             // Create query runner with transaction, mutation, and ACP support
-            let mut query_runner =
-                query::QueryRunner::with_registry(fetcher, collections, registry)
-                    .with_mutator(mutator)
-                    .with_acp(document_acp);
+            // Use the collection provider for on-demand schema resolution
+            let mut query_runner = query::QueryRunner::with_registry_and_provider(
+                fetcher,
+                collection_provider,
+                registry,
+            )
+            .with_mutator(mutator)
+            .with_acp(document_acp);
 
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {

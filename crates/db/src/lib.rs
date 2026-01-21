@@ -50,6 +50,7 @@ pub mod collection_acp;
 pub mod collection_cache;
 pub(crate) mod collection_loader;
 pub mod collection_name;
+pub mod collection_provider;
 pub mod collection_snapshot;
 pub mod database;
 pub mod doc_fetcher;
@@ -75,6 +76,7 @@ pub use collection_acp::{
 };
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;
+pub use collection_provider::DbCollectionProvider;
 pub use collection_snapshot::CollectionSnapshot;
 pub use database::{DbOptions, DB};
 pub use doc_fetcher::DbDocFetcher;

@@ -39,6 +39,7 @@ pub mod txn;
 pub use document::{DocumentMapping, RenderKey};
 pub use error::{QueryError, Result, TransactionError};
 pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
+pub use fetcher::{CollectionProvider, StaticCollectionProvider};
 pub use mapper::{Filter, Mutation, MutationType, Select};
 pub use mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 pub use plan::{
