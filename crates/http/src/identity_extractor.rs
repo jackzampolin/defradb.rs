@@ -64,6 +64,41 @@ pub enum IdentityExtractionError {
     /// Token verification failed (expired, not yet valid, or audience mismatch).
     /// Returns 403 Forbidden to match Go DefraDB behavior.
     TokenVerificationFailed(String),
+    /// Missing or invalid Host header for authenticated request.
+    /// Returns 403 Forbidden because audience verification cannot proceed.
+    MissingHost(String),
+}
+
+/// Result of extracting and validating the Host header.
+#[derive(Debug)]
+enum HostHeaderResult {
+    /// Valid Host header value (lowercased).
+    Valid(String),
+    /// Host header is missing.
+    Missing,
+    /// Host header contains invalid (non-ASCII) characters.
+    Invalid,
+}
+
+/// Extract and validate the Host header from request parts.
+fn extract_host_header(parts: &Parts) -> HostHeaderResult {
+    match parts.headers.get(HOST) {
+        Some(value) => match value.to_str() {
+            Ok(s) if !s.is_empty() => HostHeaderResult::Valid(s.to_lowercase()),
+            Ok(_) => {
+                tracing::warn!("Empty Host header in request");
+                HostHeaderResult::Missing
+            }
+            Err(_) => {
+                tracing::warn!("Host header contains non-ASCII characters");
+                HostHeaderResult::Invalid
+            }
+        },
+        None => {
+            tracing::warn!("Missing Host header in request");
+            HostHeaderResult::Missing
+        }
+    }
 }
 
 impl IntoResponse for IdentityExtractionError {
@@ -78,6 +113,10 @@ impl IntoResponse for IdentityExtractionError {
                 StatusCode::FORBIDDEN,
                 format!("Token verification failed: {}", msg),
             ),
+            // Missing/invalid Host header for authenticated request returns 403
+            IdentityExtractionError::MissingHost(msg) => {
+                (StatusCode::FORBIDDEN, format!("Host header error: {}", msg))
+            }
         };
 
         (status, Json(ErrorResponse { error: message })).into_response()
@@ -168,17 +207,42 @@ where
                 None => Ok(None),
             };
 
+        // Check if request has an Authorization header with a token
+        let has_auth_token = match &auth_result {
+            Ok(Some(auth)) => {
+                let trimmed = auth
+                    .strip_prefix("Bearer ")
+                    .or_else(|| auth.strip_prefix("bearer "));
+                trimmed.map(|t| !t.trim().is_empty()).unwrap_or(false)
+            }
+            _ => false,
+        };
+
         // Get Host header for audience verification (matches Go DefraDB behavior)
         // Go uses strings.ToLower(req.Host) as the expected audience
-        let host = parts
-            .headers
-            .get(HOST)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
+        let host_result = extract_host_header(parts);
 
         Box::pin(async move {
             let auth_value = auth_result?;
+
+            // For authenticated requests, require a valid Host header
+            // This prevents token bypass via missing/malformed Host header
+            let host = match host_result {
+                HostHeaderResult::Valid(h) => h,
+                HostHeaderResult::Missing if has_auth_token => {
+                    return Err(IdentityExtractionError::MissingHost(
+                        "Host header required for authenticated requests".to_string(),
+                    ));
+                }
+                HostHeaderResult::Invalid if has_auth_token => {
+                    return Err(IdentityExtractionError::MissingHost(
+                        "valid Host header required for authenticated requests".to_string(),
+                    ));
+                }
+                // Anonymous requests don't need Host header
+                _ => String::new(),
+            };
+
             let result = extract_identity_from_auth_header(auth_value.as_deref(), &host)?;
             Ok(ExtractIdentity(result))
         })
@@ -302,16 +366,41 @@ where
                 None => Ok(None),
             };
 
+        // Check if request has an Authorization header with a token
+        let has_auth_token = match &auth_result {
+            Ok(Some(auth)) => {
+                let trimmed = auth
+                    .strip_prefix("Bearer ")
+                    .or_else(|| auth.strip_prefix("bearer "));
+                trimmed.map(|t| !t.trim().is_empty()).unwrap_or(false)
+            }
+            _ => false,
+        };
+
         // Get Host header for audience verification (matches Go DefraDB behavior)
-        let host = parts
-            .headers
-            .get(HOST)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
+        let host_result = extract_host_header(parts);
 
         Box::pin(async move {
             let auth_value = auth_result?;
+
+            // For authenticated requests, require a valid Host header
+            // This prevents token bypass via missing/malformed Host header
+            let host = match host_result {
+                HostHeaderResult::Valid(h) => h,
+                HostHeaderResult::Missing if has_auth_token => {
+                    return Err(IdentityExtractionError::MissingHost(
+                        "Host header required for authenticated requests".to_string(),
+                    ));
+                }
+                HostHeaderResult::Invalid if has_auth_token => {
+                    return Err(IdentityExtractionError::MissingHost(
+                        "valid Host header required for authenticated requests".to_string(),
+                    ));
+                }
+                // Anonymous requests don't need Host header
+                _ => String::new(),
+            };
+
             let result = extract_token_identity_from_auth_header(auth_value.as_deref(), &host)?;
             Ok(ExtractTokenIdentity(result))
         })
