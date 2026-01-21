@@ -545,8 +545,15 @@ impl Node {
             // Create HTTP server with REST endpoints enabled
             // Cast the Arc<QueryRunner> to Arc<dyn QueryExecutor> for the server
             let executor: Arc<dyn query::executor::QueryExecutor> = runner;
-            let server = defra_http::Server::from_arc_with_config(executor, server_config)
+            let mut server = defra_http::Server::from_arc_with_config(executor, server_config)
                 .with_rest(rest_ops);
+
+            // Wire P2P to HTTP server if enabled
+            if let Some(ref p2p_handle) = p2p {
+                let p2p_adapter = crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone());
+                server = server.with_p2p_arc(p2p_adapter);
+                info!("P2P HTTP endpoints enabled");
+            }
 
             info!(
                 "HTTP server configured on {} with REST endpoints enabled",
@@ -572,6 +579,9 @@ impl Node {
             None => p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?,
         };
 
+        // Spawn the host event loop FIRST - it must be running to process commands
+        tokio::spawn(host.run());
+
         // Start listening on configured addresses
         for addr_str in &config.net.p2p_addresses {
             let addr: p2p::Multiaddr = addr_str
@@ -581,9 +591,6 @@ impl Node {
             handle.listen(addr.clone()).await.map_err(Error::P2P)?;
             info!("P2P listening on {}", addr);
         }
-
-        // Spawn the host event loop
-        tokio::spawn(host.run());
 
         // Spawn event handler
         tokio::spawn(async move {

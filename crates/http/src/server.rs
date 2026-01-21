@@ -14,7 +14,7 @@ use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
 use crate::error::Result;
-use crate::router::{create_router, create_router_with_rest};
+use crate::router::{AppStateBuilder, P2POperations, create_router_with_state};
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -40,6 +40,7 @@ pub struct Server {
     config: ServerConfig,
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
+    p2p: Option<Arc<dyn P2POperations>>,
 }
 
 impl Server {
@@ -49,6 +50,7 @@ impl Server {
             config: ServerConfig::default(),
             executor: Arc::new(executor),
             rest: None,
+            p2p: None,
         }
     }
 
@@ -58,6 +60,7 @@ impl Server {
             config,
             executor: Arc::new(executor),
             rest: None,
+            p2p: None,
         }
     }
 
@@ -67,6 +70,7 @@ impl Server {
             config: ServerConfig::default(),
             executor,
             rest: None,
+            p2p: None,
         }
     }
 
@@ -76,6 +80,7 @@ impl Server {
             config,
             executor,
             rest: None,
+            p2p: None,
         }
     }
 
@@ -99,6 +104,24 @@ impl Server {
         self
     }
 
+    /// Set P2P operations for peer-to-peer networking endpoints.
+    ///
+    /// When P2P operations are configured, the server enables additional endpoints:
+    /// - `GET /api/v0/p2p/info` - Get P2P node info (peer ID, addresses)
+    /// - `GET /api/v0/p2p/peers` - List connected peers
+    /// - `POST /api/v0/p2p/peers` - Connect to a peer
+    /// - And other P2P management endpoints
+    pub fn with_p2p<P: P2POperations + 'static>(mut self, p2p: P) -> Self {
+        self.p2p = Some(Arc::new(p2p));
+        self
+    }
+
+    /// Set P2P operations from an Arc.
+    pub fn with_p2p_arc(mut self, p2p: Arc<dyn P2POperations>) -> Self {
+        self.p2p = Some(p2p);
+        self
+    }
+
     /// Build the router with all routes and middleware.
     ///
     /// CORS configuration matches Go DefraDB behavior:
@@ -110,10 +133,16 @@ impl Server {
     pub fn router(&self) -> Result<Router> {
         let cors = self.build_cors_layer()?;
 
-        let router = match &self.rest {
-            Some(rest) => create_router_with_rest(Arc::clone(&self.executor), Arc::clone(rest)),
-            None => create_router(Arc::clone(&self.executor)),
-        };
+        // Build state with all configured components
+        let mut builder = AppStateBuilder::new(Arc::clone(&self.executor));
+        if let Some(ref rest) = self.rest {
+            builder = builder.with_rest(Arc::clone(rest));
+        }
+        if let Some(ref p2p) = self.p2p {
+            builder = builder.with_p2p(Arc::clone(p2p));
+        }
+        let state = builder.build();
+        let router = create_router_with_state(state);
 
         Ok(router.layer(TraceLayer::new_for_http()).layer(cors))
     }
