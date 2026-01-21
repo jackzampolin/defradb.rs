@@ -156,6 +156,20 @@ pub struct IndexFieldInfo {
     pub direction: Option<String>,
 }
 
+/// Result of a backup import operation.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImportResult {
+    /// Number of documents successfully imported.
+    pub documents_imported: u64,
+    /// Number of documents skipped (e.g., duplicates).
+    pub documents_skipped: u64,
+    /// Collections that were affected by the import.
+    pub collections_affected: Vec<String>,
+    /// Errors encountered during import (non-fatal).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
 /// Trait for backup operations.
 ///
 /// Enables exporting and importing database state as JSON. Export produces
@@ -179,8 +193,9 @@ pub trait BackupOperations: Send + Sync {
     /// Import database from JSON.
     ///
     /// The `data` parameter should be valid JSON matching the export format.
-    /// Returns an error if the JSON is malformed or references invalid collections.
-    async fn import(&self, data: &str) -> Result<(), String>;
+    /// Returns `ImportResult` with details about what was imported, skipped, and any errors.
+    /// A fatal error (e.g., completely malformed data) returns `Err(message)`.
+    async fn import(&self, data: &str) -> Result<ImportResult, String>;
 }
 
 /// Application state shared across handlers.

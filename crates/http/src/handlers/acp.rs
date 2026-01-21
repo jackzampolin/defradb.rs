@@ -37,7 +37,7 @@ pub async fn add_policy(
     let acp = state
         .acp
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("ACP not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("ACP (Access Control Policy) is not enabled. Start the server with ACP enabled to use this feature.".into()))?;
 
     if request.policy.trim().is_empty() {
         return Err(HttpError::BadRequest("policy cannot be empty".into()));
@@ -60,7 +60,7 @@ pub async fn list_policies(
     let acp = state
         .acp
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("ACP not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("ACP (Access Control Policy) is not enabled. Start the server with ACP enabled to use this feature.".into()))?;
 
     let policies = acp
         .list_policies()
@@ -80,7 +80,7 @@ pub async fn get_policy(
     let acp = state
         .acp
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("ACP not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("ACP (Access Control Policy) is not enabled. Start the server with ACP enabled to use this feature.".into()))?;
 
     let policy = acp
         .get_policy(&id)

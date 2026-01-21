@@ -63,6 +63,7 @@ async fn test_collections_route_without_rest() {
         .unwrap();
 
     // Should return 500 because REST operations are not configured
+    // (REST uses Internal error, unlike P2P/ACP/Index/Backup which use ServiceUnavailable)
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 

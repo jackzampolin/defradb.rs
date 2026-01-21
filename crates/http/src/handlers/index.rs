@@ -50,7 +50,7 @@ pub async fn create_index(
     let index_ops = state
         .index
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("Index operations not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()))?;
 
     // Validate collection name
     validate_identifier(&request.collection).map_err(|_| {
@@ -109,12 +109,22 @@ pub async fn list_indexes(
     let index_ops = state
         .index
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("Index operations not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()))?;
+
+    // Validate collection name if provided
+    if let Some(ref col) = query.collection {
+        validate_identifier(col).map_err(|_| {
+            HttpError::BadRequest(format!(
+                "invalid collection name '{}': must match [A-Za-z_][A-Za-z0-9_]*",
+                col
+            ))
+        })?;
+    }
 
     let indexes = index_ops
         .list_indexes(query.collection.as_deref())
         .await
-        .map_err(HttpError::Internal)?;
+        .map_err(HttpError::BadRequest)?;
 
     Ok(Json(indexes))
 }
@@ -129,7 +139,7 @@ pub async fn drop_index(
     let index_ops = state
         .index
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("Index operations not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()))?;
 
     // Validate collection name
     validate_identifier(&query.collection).map_err(|_| {

@@ -47,7 +47,7 @@ pub struct ReplicatorInfoResponse {
     pub address: Option<String>,
 }
 
-/// Request to add/remove a replicator.
+/// Request to add a replicator.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReplicatorRequest {
     pub collections: Vec<String>,
@@ -64,7 +64,7 @@ pub struct ReplicatorDeleteQuery {
     pub address: Option<String>,
 }
 
-/// Request to add/remove P2P collections.
+/// Request to add P2P collections.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CollectionsRequest {
     pub collections: Vec<String>,
@@ -84,7 +84,7 @@ pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoRespo
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     let peer_id = p2p
         .local_peer_id()
@@ -109,7 +109,7 @@ pub async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<PeerIn
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     let peers = p2p
         .connected_peers()
@@ -134,7 +134,7 @@ pub async fn connect_peer(
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     // Validate the multiaddr format
     validate_multiaddr(&request.address)?;
@@ -155,7 +155,7 @@ pub async fn list_replicators(
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     let replicators = p2p
         .get_replicators()
@@ -184,7 +184,7 @@ pub async fn add_replicator(
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     if request.collections.is_empty() {
         return Err(HttpError::BadRequest(
@@ -219,7 +219,7 @@ pub async fn remove_replicator(
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     if query.collections.is_empty() {
         return Err(HttpError::BadRequest(
@@ -253,7 +253,7 @@ pub async fn list_collections(
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     let collections = p2p
         .get_collections()
@@ -273,7 +273,7 @@ pub async fn add_collections(
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     if request.collections.is_empty() {
         return Err(HttpError::BadRequest(
@@ -303,7 +303,7 @@ pub async fn remove_collections(
     let p2p = state
         .p2p
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("P2P not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("P2P networking is not enabled. Start the server with P2P enabled to use this feature.".into()))?;
 
     if query.collections.is_empty() {
         return Err(HttpError::BadRequest(

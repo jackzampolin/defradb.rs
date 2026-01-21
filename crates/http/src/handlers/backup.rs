@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::error::HttpError;
-use crate::router::AppState;
+use crate::router::{AppState, ImportResult};
 use crate::validation::validate_collection_name;
 
 /// Query parameters for export.
@@ -38,7 +38,7 @@ pub async fn export(
     let backup = state
         .backup
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("Backup operations not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("Backup operations are not enabled. Start the server with backup enabled to use this feature.".into()))?;
 
     // Validate collection names if provided
     for col in &query.collections {
@@ -75,7 +75,7 @@ pub async fn import(
     let backup = state
         .backup
         .as_ref()
-        .ok_or_else(|| HttpError::Internal("Backup operations not configured".into()))?;
+        .ok_or_else(|| HttpError::ServiceUnavailable("Backup operations are not enabled. Start the server with backup enabled to use this feature.".into()))?;
 
     if body.trim().is_empty() {
         return Err(HttpError::BadRequest("import data cannot be empty".into()));
@@ -92,23 +92,58 @@ pub async fn import(
         ));
     }
 
-    backup
+    // Reject empty objects or arrays
+    let is_empty = match &parsed {
+        serde_json::Value::Object(obj) => obj.is_empty(),
+        serde_json::Value::Array(arr) => arr.is_empty(),
+        _ => false,
+    };
+    if is_empty {
+        return Err(HttpError::BadRequest(
+            "backup data is empty - nothing to import".into(),
+        ));
+    }
+
+    let result = backup
         .import(&body)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(ImportResponse { success: true }))
+    Ok(Json(ImportResponse::from(result)))
 }
 
 /// Response for import operation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ImportResponse {
+    /// Whether the import completed successfully.
     pub success: bool,
+    /// Number of documents imported.
+    pub documents_imported: u64,
+    /// Number of documents skipped.
+    pub documents_skipped: u64,
+    /// Collections affected by the import.
+    pub collections_affected: Vec<String>,
+    /// Non-fatal errors encountered during import.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+impl From<ImportResult> for ImportResponse {
+    fn from(result: ImportResult) -> Self {
+        Self {
+            success: result.errors.is_empty(),
+            documents_imported: result.documents_imported,
+            documents_skipped: result.documents_skipped,
+            collections_affected: result.collections_affected,
+            errors: result.errors,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::router::ImportResult;
 
     #[test]
     fn test_export_query_empty() {
@@ -127,9 +162,49 @@ mod tests {
 
     #[test]
     fn test_import_response_serialize() {
-        let response = ImportResponse { success: true };
+        let response = ImportResponse {
+            success: true,
+            documents_imported: 10,
+            documents_skipped: 2,
+            collections_affected: vec!["Users".to_string(), "Posts".to_string()],
+            errors: vec![],
+        };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("success"));
         assert!(json.contains("true"));
+        assert!(json.contains("documents_imported"));
+        assert!(json.contains("10"));
+        assert!(json.contains("collections_affected"));
+        // errors should be omitted when empty
+        assert!(!json.contains("errors"));
+    }
+
+    #[test]
+    fn test_import_response_with_errors() {
+        let response = ImportResponse {
+            success: false,
+            documents_imported: 5,
+            documents_skipped: 0,
+            collections_affected: vec!["Users".to_string()],
+            errors: vec!["Failed to import document bae-123".to_string()],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"success\":false"));
+        assert!(json.contains("errors"));
+        assert!(json.contains("Failed to import"));
+    }
+
+    #[test]
+    fn test_import_response_from_import_result() {
+        let result = ImportResult {
+            documents_imported: 15,
+            documents_skipped: 3,
+            collections_affected: vec!["Users".to_string()],
+            errors: vec![],
+        };
+        let response = ImportResponse::from(result);
+        assert!(response.success);
+        assert_eq!(response.documents_imported, 15);
+        assert_eq!(response.documents_skipped, 3);
     }
 }

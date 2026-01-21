@@ -16,7 +16,7 @@ use clap::{Args, Subcommand};
 
 use super::http_client::HttpClient;
 use super::{get_data_from_args, ClientContext};
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Interact with Access Control Policies
 #[derive(Args, Debug)]
@@ -102,6 +102,13 @@ impl AcpListArgs {
 impl AcpDescribeArgs {
     /// Execute the acp describe command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        // Validate policy ID is not empty
+        if self.id.trim().is_empty() {
+            return Err(Error::InvalidIdentifier(
+                "policy ID cannot be empty".to_string(),
+            ));
+        }
+
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 
 use super::http_client::HttpClient;
-use super::ClientContext;
+use super::{validate_identifier, ClientContext};
 use crate::error::{Error, Result};
 
 /// Manage database backups
@@ -71,6 +71,11 @@ impl BackupArgs {
 impl BackupExportArgs {
     /// Execute the backup export command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        // Validate collection names before making the request
+        for col in &self.collections {
+            validate_identifier(col)?;
+        }
+
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);

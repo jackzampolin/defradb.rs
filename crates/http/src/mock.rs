@@ -529,3 +529,424 @@ impl RestOperations for FailingMockRestOperations {
         Err(self.error.clone())
     }
 }
+
+// ============================================================================
+// Mock P2P Operations
+// ============================================================================
+
+use crate::router::{
+    AcpOperations, BackupOperations, ImportResult, IndexFieldInfo, IndexInfo, IndexOperations,
+    P2POperations, PolicyInfo, ReplicatorInfo,
+};
+
+/// Mock P2P operations for testing P2P handlers.
+#[derive(Debug)]
+pub struct MockP2POperations {
+    peer_id: String,
+    addresses: Vec<String>,
+    peers: Arc<RwLock<Vec<String>>>,
+    replicators: Arc<RwLock<Vec<ReplicatorInfo>>>,
+    collections: Arc<RwLock<Vec<String>>>,
+}
+
+impl Clone for MockP2POperations {
+    fn clone(&self) -> Self {
+        Self {
+            peer_id: self.peer_id.clone(),
+            addresses: self.addresses.clone(),
+            peers: Arc::clone(&self.peers),
+            replicators: Arc::clone(&self.replicators),
+            collections: Arc::clone(&self.collections),
+        }
+    }
+}
+
+impl Default for MockP2POperations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockP2POperations {
+    /// Create a new mock P2P operations instance.
+    pub fn new() -> Self {
+        Self {
+            peer_id: "12D3KooWMockPeerId123456789".to_string(),
+            addresses: vec!["/ip4/127.0.0.1/tcp/9000".to_string()],
+            peers: Arc::new(RwLock::new(vec![])),
+            replicators: Arc::new(RwLock::new(vec![])),
+            collections: Arc::new(RwLock::new(vec![])),
+        }
+    }
+
+    /// Create with a connected peer.
+    pub fn with_peer(self, peer_id: &str) -> Self {
+        self.peers.write().unwrap().push(peer_id.to_string());
+        self
+    }
+
+    /// Create with a replicator.
+    pub fn with_replicator(self, collections: Vec<String>, address: Option<String>) -> Self {
+        self.replicators.write().unwrap().push(ReplicatorInfo {
+            id: Some("12D3KooWReplicator".to_string()),
+            collections,
+            address,
+        });
+        self
+    }
+
+    /// Create with P2P collections.
+    pub fn with_collections(self, collections: Vec<String>) -> Self {
+        *self.collections.write().unwrap() = collections;
+        self
+    }
+}
+
+#[async_trait]
+impl P2POperations for MockP2POperations {
+    async fn local_peer_id(&self) -> std::result::Result<String, String> {
+        Ok(self.peer_id.clone())
+    }
+
+    async fn listen_addresses(&self) -> std::result::Result<Vec<String>, String> {
+        Ok(self.addresses.clone())
+    }
+
+    async fn connected_peers(&self) -> std::result::Result<Vec<String>, String> {
+        Ok(self.peers.read().unwrap().clone())
+    }
+
+    async fn connect_peer(&self, addr: &str) -> std::result::Result<(), String> {
+        // Extract a mock peer ID from the address
+        let peer_id = if addr.contains("/p2p/") {
+            addr.split("/p2p/").last().unwrap_or("unknown").to_string()
+        } else {
+            format!("peer-{}", addr.len())
+        };
+        self.peers.write().unwrap().push(peer_id);
+        Ok(())
+    }
+
+    async fn get_replicators(&self) -> std::result::Result<Vec<ReplicatorInfo>, String> {
+        Ok(self.replicators.read().unwrap().clone())
+    }
+
+    async fn add_replicator(
+        &self,
+        collections: Vec<String>,
+        addr: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        self.replicators.write().unwrap().push(ReplicatorInfo {
+            id: Some("12D3KooWNewReplicator".to_string()),
+            collections,
+            address: addr.map(|s| s.to_string()),
+        });
+        Ok(())
+    }
+
+    async fn remove_replicator(
+        &self,
+        collections: Vec<String>,
+        _addr: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        let mut replicators = self.replicators.write().unwrap();
+        replicators.retain(|r| !collections.iter().all(|c| r.collections.contains(c)));
+        Ok(())
+    }
+
+    async fn get_collections(&self) -> std::result::Result<Vec<String>, String> {
+        Ok(self.collections.read().unwrap().clone())
+    }
+
+    async fn add_collections(&self, collections: Vec<String>) -> std::result::Result<(), String> {
+        let mut existing = self.collections.write().unwrap();
+        for col in collections {
+            if !existing.contains(&col) {
+                existing.push(col);
+            }
+        }
+        Ok(())
+    }
+
+    async fn remove_collections(&self, collections: Vec<String>) -> std::result::Result<(), String> {
+        let mut existing = self.collections.write().unwrap();
+        existing.retain(|c| !collections.contains(c));
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Mock ACP Operations
+// ============================================================================
+
+/// Mock ACP operations for testing ACP handlers.
+#[derive(Debug)]
+pub struct MockAcpOperations {
+    policies: Arc<RwLock<Vec<PolicyInfo>>>,
+    next_id: Arc<RwLock<u64>>,
+}
+
+impl Clone for MockAcpOperations {
+    fn clone(&self) -> Self {
+        Self {
+            policies: Arc::clone(&self.policies),
+            next_id: Arc::clone(&self.next_id),
+        }
+    }
+}
+
+impl Default for MockAcpOperations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockAcpOperations {
+    /// Create a new mock ACP operations instance.
+    pub fn new() -> Self {
+        Self {
+            policies: Arc::new(RwLock::new(vec![])),
+            next_id: Arc::new(RwLock::new(1)),
+        }
+    }
+
+    /// Create with a pre-existing policy.
+    pub fn with_policy(self, id: &str, name: Option<&str>) -> Self {
+        self.policies.write().unwrap().push(PolicyInfo {
+            id: id.to_string(),
+            name: name.map(|s| s.to_string()),
+            description: None,
+            resources: None,
+            actor: None,
+            creation_time: Some("2024-01-01T00:00:00Z".to_string()),
+        });
+        self
+    }
+}
+
+#[async_trait]
+impl AcpOperations for MockAcpOperations {
+    async fn add_policy(&self, _policy: &str) -> std::result::Result<String, String> {
+        let mut id = self.next_id.write().unwrap();
+        let policy_id = format!("policy-{:04}", *id);
+        *id += 1;
+
+        self.policies.write().unwrap().push(PolicyInfo {
+            id: policy_id.clone(),
+            name: Some("Test Policy".to_string()),
+            description: Some("A test policy".to_string()),
+            resources: None,
+            actor: None,
+            creation_time: Some("2024-01-01T00:00:00Z".to_string()),
+        });
+
+        Ok(policy_id)
+    }
+
+    async fn list_policies(&self) -> std::result::Result<Vec<PolicyInfo>, String> {
+        Ok(self.policies.read().unwrap().clone())
+    }
+
+    async fn get_policy(&self, id: &str) -> std::result::Result<Option<PolicyInfo>, String> {
+        let policies = self.policies.read().unwrap();
+        Ok(policies.iter().find(|p| p.id == id).cloned())
+    }
+}
+
+// ============================================================================
+// Mock Index Operations
+// ============================================================================
+
+/// Mock index operations for testing index handlers.
+#[derive(Debug)]
+pub struct MockIndexOperations {
+    indexes: Arc<RwLock<Vec<IndexInfo>>>,
+    next_id: Arc<RwLock<u64>>,
+}
+
+impl Clone for MockIndexOperations {
+    fn clone(&self) -> Self {
+        Self {
+            indexes: Arc::clone(&self.indexes),
+            next_id: Arc::clone(&self.next_id),
+        }
+    }
+}
+
+impl Default for MockIndexOperations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockIndexOperations {
+    /// Create a new mock index operations instance.
+    pub fn new() -> Self {
+        Self {
+            indexes: Arc::new(RwLock::new(vec![])),
+            next_id: Arc::new(RwLock::new(1)),
+        }
+    }
+
+    /// Create with a pre-existing index.
+    pub fn with_index(self, collection: &str, name: &str, fields: Vec<&str>, unique: bool) -> Self {
+        self.indexes.write().unwrap().push(IndexInfo {
+            name: name.to_string(),
+            collection: collection.to_string(),
+            fields: fields
+                .into_iter()
+                .map(|f| IndexFieldInfo {
+                    name: f.to_string(),
+                    direction: Some("ASC".to_string()),
+                })
+                .collect(),
+            unique,
+        });
+        self
+    }
+}
+
+#[async_trait]
+impl IndexOperations for MockIndexOperations {
+    async fn create_index(
+        &self,
+        collection: &str,
+        fields: Vec<String>,
+        name: Option<&str>,
+        unique: bool,
+    ) -> std::result::Result<IndexInfo, String> {
+        let index_name = match name {
+            Some(n) => n.to_string(),
+            None => {
+                let mut id = self.next_id.write().unwrap();
+                let name = format!("idx_{}_{}", collection.to_lowercase(), *id);
+                *id += 1;
+                name
+            }
+        };
+
+        let index = IndexInfo {
+            name: index_name,
+            collection: collection.to_string(),
+            fields: fields
+                .into_iter()
+                .map(|f| IndexFieldInfo {
+                    name: f,
+                    direction: Some("ASC".to_string()),
+                })
+                .collect(),
+            unique,
+        };
+
+        self.indexes.write().unwrap().push(index.clone());
+        Ok(index)
+    }
+
+    async fn list_indexes(&self, collection: Option<&str>) -> std::result::Result<Vec<IndexInfo>, String> {
+        let indexes = self.indexes.read().unwrap();
+        match collection {
+            Some(col) => Ok(indexes.iter().filter(|i| i.collection == col).cloned().collect()),
+            None => Ok(indexes.clone()),
+        }
+    }
+
+    async fn drop_index(&self, collection: &str, name: &str) -> std::result::Result<(), String> {
+        let mut indexes = self.indexes.write().unwrap();
+        let initial_len = indexes.len();
+        indexes.retain(|i| !(i.collection == collection && i.name == name));
+        if indexes.len() < initial_len {
+            Ok(())
+        } else {
+            Err(format!("index '{}' not found in collection '{}'", name, collection))
+        }
+    }
+}
+
+// ============================================================================
+// Mock Backup Operations
+// ============================================================================
+
+/// Mock backup operations for testing backup handlers.
+#[derive(Debug)]
+pub struct MockBackupOperations {
+    data: Arc<RwLock<String>>,
+}
+
+impl Clone for MockBackupOperations {
+    fn clone(&self) -> Self {
+        Self {
+            data: Arc::clone(&self.data),
+        }
+    }
+}
+
+impl Default for MockBackupOperations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockBackupOperations {
+    /// Create a new mock backup operations instance.
+    pub fn new() -> Self {
+        Self {
+            data: Arc::new(RwLock::new(r#"{"Users": [{"_docID": "bae-123", "name": "Alice"}]}"#.to_string())),
+        }
+    }
+
+    /// Create with custom backup data.
+    pub fn with_data(data: &str) -> Self {
+        Self {
+            data: Arc::new(RwLock::new(data.to_string())),
+        }
+    }
+}
+
+#[async_trait]
+impl BackupOperations for MockBackupOperations {
+    async fn export(
+        &self,
+        _collections: Option<Vec<String>>,
+        pretty: bool,
+    ) -> std::result::Result<String, String> {
+        let data = self.data.read().unwrap().clone();
+        if pretty {
+            // Format the JSON nicely
+            let parsed: serde_json::Value = serde_json::from_str(&data)
+                .map_err(|e| format!("invalid JSON: {}", e))?;
+            serde_json::to_string_pretty(&parsed)
+                .map_err(|e| format!("failed to serialize: {}", e))
+        } else {
+            Ok(data)
+        }
+    }
+
+    async fn import(&self, data: &str) -> std::result::Result<ImportResult, String> {
+        // Parse the incoming data to validate it
+        let parsed: serde_json::Value = serde_json::from_str(data)
+            .map_err(|e| format!("invalid JSON: {}", e))?;
+
+        // Count documents and collections
+        let mut documents_imported = 0u64;
+        let mut collections_affected = Vec::new();
+
+        if let Some(obj) = parsed.as_object() {
+            for (collection, docs) in obj {
+                collections_affected.push(collection.clone());
+                if let Some(arr) = docs.as_array() {
+                    documents_imported += arr.len() as u64;
+                }
+            }
+        }
+
+        // Store the new data
+        *self.data.write().unwrap() = data.to_string();
+
+        Ok(ImportResult {
+            documents_imported,
+            documents_skipped: 0,
+            collections_affected,
+            errors: vec![],
+        })
+    }
+}

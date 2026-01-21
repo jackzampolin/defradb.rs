@@ -268,7 +268,12 @@ impl HttpClient {
         }
 
         // All retries exhausted
-        Err(last_error.unwrap_or_else(|| Error::Server("Request failed after retries".to_string())))
+        Err(last_error.unwrap_or_else(|| {
+            Error::Server(format!(
+                "{} {} failed after {} retries",
+                method, url, MAX_RETRIES
+            ))
+        }))
     }
 
     /// Extract error details from a failed response and return an error.

@@ -86,5 +86,6 @@ pub use server::{Server, ServerConfig};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use mock::{
-    FailingMockExecutor, FailingMockRestOperations, MockQueryExecutor, MockRestOperations,
+    FailingMockExecutor, FailingMockRestOperations, MockAcpOperations, MockBackupOperations,
+    MockIndexOperations, MockP2POperations, MockQueryExecutor, MockRestOperations,
 };
