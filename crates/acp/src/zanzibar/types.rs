@@ -132,9 +132,7 @@ impl Policy {
             RelationExpression::TupleToUserset {
                 computed_relation, ..
             } => computed_relation == "owner",
-            RelationExpression::Union(exprs) => {
-                exprs.iter().any(Self::expression_includes_owner)
-            }
+            RelationExpression::Union(exprs) => exprs.iter().any(Self::expression_includes_owner),
             RelationExpression::Intersection(exprs) => {
                 exprs.iter().any(Self::expression_includes_owner)
             }
@@ -996,9 +994,8 @@ mod tests {
     #[test]
     fn test_dpi_missing_owner_relation() {
         // Policy without owner relation violates DPI
-        let policy = Policy::new("policy1", "Test").with_resource(
-            Resource::new("document").with_relation(Relation::direct("reader")),
-        );
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(Relation::direct("reader")));
 
         let result = policy.validate_dpi();
         assert!(

@@ -18,6 +18,109 @@ use super::store::ZanzibarStore;
 use super::types::{Policy, Subject};
 use crate::error::Result;
 
+/// A request for a permission check (used in batch operations).
+#[derive(Debug, Clone)]
+pub struct PermissionCheckRequest<'a> {
+    pub policy_id: &'a str,
+    pub resource: &'a str,
+    pub object_id: &'a str,
+    pub relation: &'a str,
+    pub subject: &'a Did,
+}
+
+impl<'a> PermissionCheckRequest<'a> {
+    pub fn new(
+        policy_id: &'a str,
+        resource: &'a str,
+        object_id: &'a str,
+        relation: &'a str,
+        subject: &'a Did,
+    ) -> Self {
+        Self {
+            policy_id,
+            resource,
+            object_id,
+            relation,
+            subject,
+        }
+    }
+}
+
+/// Explanation of a permission decision, including the evaluation trace.
+#[derive(Debug, Clone)]
+pub struct PermissionExplanation {
+    /// Whether permission was granted.
+    pub granted: bool,
+    /// The resource type checked.
+    pub resource: String,
+    /// The object ID checked.
+    pub object_id: String,
+    /// The relation checked.
+    pub relation: String,
+    /// The subject (DID) checked.
+    pub subject: String,
+    /// Detailed trace of the evaluation.
+    pub trace: EvaluationTrace,
+}
+
+/// Trace of permission evaluation steps.
+#[derive(Debug, Clone, Default)]
+pub struct EvaluationTrace {
+    /// Steps taken during evaluation, in order.
+    pub steps: Vec<EvaluationStep>,
+}
+
+impl EvaluationTrace {
+    fn new() -> Self {
+        Self { steps: Vec::new() }
+    }
+
+    fn add_step(&mut self, step: EvaluationStep) {
+        self.steps.push(step);
+    }
+}
+
+/// A single step in permission evaluation.
+#[derive(Debug, Clone)]
+pub struct EvaluationStep {
+    /// Type of expression evaluated.
+    pub expression_type: String,
+    /// Resource being evaluated.
+    pub resource: String,
+    /// Object ID being evaluated.
+    pub object_id: String,
+    /// Relation being evaluated.
+    pub relation: String,
+    /// Result of this step.
+    pub result: StepResult,
+    /// Additional context/details.
+    pub details: Option<String>,
+}
+
+/// Result of an evaluation step.
+#[derive(Debug, Clone)]
+pub enum StepResult {
+    /// Step succeeded (returned true).
+    Granted,
+    /// Step failed (returned false).
+    Denied,
+    /// Step was skipped (e.g., due to cycle detection).
+    Skipped,
+    /// Step is continuing to evaluate sub-expressions.
+    Continuing,
+}
+
+impl std::fmt::Display for StepResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StepResult::Granted => write!(f, "GRANTED"),
+            StepResult::Denied => write!(f, "DENIED"),
+            StepResult::Skipped => write!(f, "SKIPPED"),
+            StepResult::Continuing => write!(f, "..."),
+        }
+    }
+}
+
 /// Node identifier for cycle detection.
 ///
 /// Uniquely identifies a permission check node in the evaluation tree.
@@ -225,6 +328,94 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         .await
     }
 
+    /// Check multiple permissions in a single batch operation.
+    ///
+    /// This is more efficient than calling `check` multiple times when checking
+    /// the same subject against multiple resources/relations, as it shares the
+    /// request-scoped cache across all checks.
+    ///
+    /// Returns a vector of results in the same order as the input requests.
+    pub async fn check_many(&self, requests: &[PermissionCheckRequest<'_>]) -> Vec<Result<bool>> {
+        // Create a shared cache for all checks in this batch
+        let cache = Arc::new(CheckCache::new());
+
+        let mut results = Vec::with_capacity(requests.len());
+
+        for req in requests {
+            let result = self
+                .check_with_cache(
+                    req.policy_id,
+                    req.resource,
+                    req.object_id,
+                    req.relation,
+                    req.subject,
+                    cache.clone(),
+                )
+                .await;
+            results.push(result);
+        }
+
+        results
+    }
+
+    /// Check permission with an existing cache (for batch operations).
+    async fn check_with_cache(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        subject: &Did,
+        cache: Arc<CheckCache>,
+    ) -> Result<bool> {
+        let expression = self.lookup.get_expression(policy_id, resource, relation)?;
+
+        let node_id = NodeId::new(resource, object_id, relation);
+        let trail = NodeTrail::new().with_node(node_id);
+
+        self.evaluate_expr_cached(
+            policy_id, resource, object_id, relation, subject, expression, trail, cache,
+        )
+        .await
+    }
+
+    /// Check permission and return an explanation of the decision.
+    ///
+    /// This is useful for debugging and auditing. Returns a `PermissionExplanation`
+    /// that describes why access was granted or denied, including the evaluation path.
+    pub async fn explain(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        subject: &Did,
+    ) -> Result<PermissionExplanation> {
+        let expression = self.lookup.get_expression(policy_id, resource, relation)?;
+
+        let node_id = NodeId::new(resource, object_id, relation);
+        let trail = NodeTrail::new().with_node(node_id);
+
+        let cache = Arc::new(CheckCache::new());
+        let mut trace = EvaluationTrace::new();
+
+        let granted = self
+            .evaluate_expr_with_trace(
+                policy_id, resource, object_id, relation, subject, expression, trail, cache,
+                &mut trace,
+            )
+            .await?;
+
+        Ok(PermissionExplanation {
+            granted,
+            resource: resource.to_string(),
+            object_id: object_id.to_string(),
+            relation: relation.to_string(),
+            subject: subject.to_string(),
+            trace,
+        })
+    }
+
     /// Evaluate an expression with caching support.
     #[allow(clippy::too_many_arguments)]
     fn evaluate_expr_cached<'a>(
@@ -259,7 +450,9 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                 .await?;
 
             // Cache the result
-            cache.set(resource, object_id, relation, subject, result).await;
+            cache
+                .set(resource, object_id, relation, subject, result)
+                .await;
 
             Ok(result)
         })
@@ -490,6 +683,424 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                         .await?;
 
                     Ok(!subtract_result)
+                }
+            }
+        })
+    }
+
+    /// Evaluate expression with trace collection for explain API.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_expr_with_trace<'a>(
+        &'a self,
+        policy_id: &'a str,
+        resource: &'a str,
+        object_id: &'a str,
+        relation: &'a str,
+        subject: &'a Did,
+        expression: &'a RelationExpression,
+        trail: NodeTrail,
+        cache: Arc<CheckCache>,
+        trace: &'a mut EvaluationTrace,
+    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+        Box::pin(async move {
+            match expression {
+                RelationExpression::This => {
+                    let result = self
+                        .store
+                        .check_permission_direct(policy_id, resource, object_id, relation, subject)
+                        .await?;
+
+                    trace.add_step(EvaluationStep {
+                        expression_type: "This (direct lookup)".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: if result {
+                            StepResult::Granted
+                        } else {
+                            StepResult::Denied
+                        },
+                        details: Some(format!("Direct tuple check for subject {}", subject)),
+                    });
+
+                    Ok(result)
+                }
+
+                RelationExpression::ComputedUserset {
+                    relation: computed_rel,
+                } => {
+                    let node_id = NodeId::new(resource, object_id, computed_rel);
+                    if trail.contains(&node_id) {
+                        trace.add_step(EvaluationStep {
+                            expression_type: "ComputedUserset".to_string(),
+                            resource: resource.to_string(),
+                            object_id: object_id.to_string(),
+                            relation: computed_rel.to_string(),
+                            result: StepResult::Skipped,
+                            details: Some("Cycle detected, returning false".to_string()),
+                        });
+                        return Ok(false);
+                    }
+                    let new_trail = trail.with_node(node_id);
+
+                    trace.add_step(EvaluationStep {
+                        expression_type: "ComputedUserset".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: computed_rel.to_string(),
+                        result: StepResult::Continuing,
+                        details: Some(format!(
+                            "Checking relation '{}' on same object",
+                            computed_rel
+                        )),
+                    });
+
+                    let computed_expr =
+                        self.lookup
+                            .get_expression(policy_id, resource, computed_rel)?;
+
+                    let result = self
+                        .evaluate_expr_with_trace(
+                            policy_id,
+                            resource,
+                            object_id,
+                            computed_rel,
+                            subject,
+                            computed_expr,
+                            new_trail,
+                            cache,
+                            trace,
+                        )
+                        .await?;
+
+                    trace.add_step(EvaluationStep {
+                        expression_type: "ComputedUserset (result)".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: computed_rel.to_string(),
+                        result: if result {
+                            StepResult::Granted
+                        } else {
+                            StepResult::Denied
+                        },
+                        details: None,
+                    });
+
+                    Ok(result)
+                }
+
+                RelationExpression::TupleToUserset {
+                    tuple_relation,
+                    computed_relation,
+                } => {
+                    trace.add_step(EvaluationStep {
+                        expression_type: "TupleToUserset".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: StepResult::Continuing,
+                        details: Some(format!(
+                            "Following '{}' to check '{}'",
+                            tuple_relation, computed_relation
+                        )),
+                    });
+
+                    let targets = self
+                        .store
+                        .get_relation_targets(policy_id, resource, object_id, tuple_relation)
+                        .await?;
+
+                    for target in targets {
+                        let node_id =
+                            NodeId::new(&target.resource, &target.object_id, computed_relation);
+                        if trail.contains(&node_id) {
+                            trace.add_step(EvaluationStep {
+                                expression_type: "TTU target".to_string(),
+                                resource: target.resource.clone(),
+                                object_id: target.object_id.clone(),
+                                relation: computed_relation.to_string(),
+                                result: StepResult::Skipped,
+                                details: Some("Cycle detected".to_string()),
+                            });
+                            continue;
+                        }
+                        let new_trail = trail.with_node(node_id);
+
+                        let target_expr = self.lookup.get_expression(
+                            policy_id,
+                            &target.resource,
+                            computed_relation,
+                        )?;
+
+                        if self
+                            .evaluate_expr_cached(
+                                policy_id,
+                                &target.resource,
+                                &target.object_id,
+                                computed_relation,
+                                subject,
+                                target_expr,
+                                new_trail,
+                                cache.clone(),
+                            )
+                            .await?
+                        {
+                            trace.add_step(EvaluationStep {
+                                expression_type: "TTU target match".to_string(),
+                                resource: target.resource.clone(),
+                                object_id: target.object_id.clone(),
+                                relation: computed_relation.to_string(),
+                                result: StepResult::Granted,
+                                details: Some(format!(
+                                    "Found permission via {}:{}#{}",
+                                    target.resource, target.object_id, computed_relation
+                                )),
+                            });
+                            return Ok(true);
+                        }
+                    }
+
+                    // Check entity set subjects
+                    let subjects = self
+                        .store
+                        .get_relation_subjects(policy_id, resource, object_id, tuple_relation)
+                        .await?;
+
+                    for subj in subjects {
+                        match subj {
+                            Subject::EntitySet {
+                                resource: target_resource,
+                                object_id: target_object_id,
+                                relation: _,
+                            } => {
+                                let node_id = NodeId::new(
+                                    &target_resource,
+                                    &target_object_id,
+                                    computed_relation,
+                                );
+                                if trail.contains(&node_id) {
+                                    continue;
+                                }
+                                let new_trail = trail.with_node(node_id);
+
+                                let target_expr = self.lookup.get_expression(
+                                    policy_id,
+                                    &target_resource,
+                                    computed_relation,
+                                )?;
+
+                                if self
+                                    .evaluate_expr_cached(
+                                        policy_id,
+                                        &target_resource,
+                                        &target_object_id,
+                                        computed_relation,
+                                        subject,
+                                        target_expr,
+                                        new_trail,
+                                        cache.clone(),
+                                    )
+                                    .await?
+                                {
+                                    trace.add_step(EvaluationStep {
+                                        expression_type: "TTU EntitySet match".to_string(),
+                                        resource: target_resource.clone(),
+                                        object_id: target_object_id.clone(),
+                                        relation: computed_relation.to_string(),
+                                        result: StepResult::Granted,
+                                        details: Some(format!(
+                                            "Found permission via EntitySet {}:{}#{}",
+                                            target_resource, target_object_id, computed_relation
+                                        )),
+                                    });
+                                    return Ok(true);
+                                }
+                            }
+                            Subject::Wildcard | Subject::TypedWildcard { .. } => {
+                                trace.add_step(EvaluationStep {
+                                    expression_type: "TTU Wildcard".to_string(),
+                                    resource: resource.to_string(),
+                                    object_id: object_id.to_string(),
+                                    relation: tuple_relation.to_string(),
+                                    result: StepResult::Granted,
+                                    details: Some(
+                                        "Wildcard on tuple relation grants access".to_string(),
+                                    ),
+                                });
+                                return Ok(true);
+                            }
+                            Subject::Entity(_) => continue,
+                        }
+                    }
+
+                    trace.add_step(EvaluationStep {
+                        expression_type: "TupleToUserset (result)".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: StepResult::Denied,
+                        details: Some("No matching TTU path found".to_string()),
+                    });
+
+                    Ok(false)
+                }
+
+                RelationExpression::Union(exprs) => {
+                    trace.add_step(EvaluationStep {
+                        expression_type: "Union".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: StepResult::Continuing,
+                        details: Some(format!("Evaluating {} branches (OR)", exprs.len())),
+                    });
+
+                    for (i, expr) in exprs.iter().enumerate() {
+                        if self
+                            .evaluate_expr_inner(
+                                policy_id,
+                                resource,
+                                object_id,
+                                relation,
+                                subject,
+                                expr,
+                                trail.clone(),
+                                cache.clone(),
+                            )
+                            .await?
+                        {
+                            trace.add_step(EvaluationStep {
+                                expression_type: format!("Union branch {}", i + 1),
+                                resource: resource.to_string(),
+                                object_id: object_id.to_string(),
+                                relation: relation.to_string(),
+                                result: StepResult::Granted,
+                                details: Some("Branch succeeded, short-circuiting".to_string()),
+                            });
+                            return Ok(true);
+                        }
+                    }
+
+                    trace.add_step(EvaluationStep {
+                        expression_type: "Union (result)".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: StepResult::Denied,
+                        details: Some("All branches failed".to_string()),
+                    });
+
+                    Ok(false)
+                }
+
+                RelationExpression::Intersection(exprs) => {
+                    trace.add_step(EvaluationStep {
+                        expression_type: "Intersection".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: StepResult::Continuing,
+                        details: Some(format!("Evaluating {} branches (AND)", exprs.len())),
+                    });
+
+                    for (i, expr) in exprs.iter().enumerate() {
+                        if !self
+                            .evaluate_expr_inner(
+                                policy_id,
+                                resource,
+                                object_id,
+                                relation,
+                                subject,
+                                expr,
+                                trail.clone(),
+                                cache.clone(),
+                            )
+                            .await?
+                        {
+                            trace.add_step(EvaluationStep {
+                                expression_type: format!("Intersection branch {}", i + 1),
+                                resource: resource.to_string(),
+                                object_id: object_id.to_string(),
+                                relation: relation.to_string(),
+                                result: StepResult::Denied,
+                                details: Some("Branch failed, short-circuiting".to_string()),
+                            });
+                            return Ok(false);
+                        }
+                    }
+
+                    trace.add_step(EvaluationStep {
+                        expression_type: "Intersection (result)".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: StepResult::Granted,
+                        details: Some("All branches succeeded".to_string()),
+                    });
+
+                    Ok(true)
+                }
+
+                RelationExpression::Difference { base, subtract } => {
+                    trace.add_step(EvaluationStep {
+                        expression_type: "Difference".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: StepResult::Continuing,
+                        details: Some("Evaluating base AND NOT subtract".to_string()),
+                    });
+
+                    let base_result = self
+                        .evaluate_expr_inner(
+                            policy_id,
+                            resource,
+                            object_id,
+                            relation,
+                            subject,
+                            base,
+                            trail.clone(),
+                            cache.clone(),
+                        )
+                        .await?;
+
+                    if !base_result {
+                        trace.add_step(EvaluationStep {
+                            expression_type: "Difference (base)".to_string(),
+                            resource: resource.to_string(),
+                            object_id: object_id.to_string(),
+                            relation: relation.to_string(),
+                            result: StepResult::Denied,
+                            details: Some("Base expression failed".to_string()),
+                        });
+                        return Ok(false);
+                    }
+
+                    let subtract_result = self
+                        .evaluate_expr_inner(
+                            policy_id, resource, object_id, relation, subject, subtract, trail,
+                            cache,
+                        )
+                        .await?;
+
+                    let final_result = !subtract_result;
+                    trace.add_step(EvaluationStep {
+                        expression_type: "Difference (result)".to_string(),
+                        resource: resource.to_string(),
+                        object_id: object_id.to_string(),
+                        relation: relation.to_string(),
+                        result: if final_result {
+                            StepResult::Granted
+                        } else {
+                            StepResult::Denied
+                        },
+                        details: Some(format!(
+                            "Base=true, Subtract={}, Result={}",
+                            subtract_result, final_result
+                        )),
+                    });
+
+                    Ok(final_result)
                 }
             }
         })
@@ -855,5 +1466,129 @@ mod tests {
             .await
             .unwrap();
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_check_many_batch() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let mut engine = PermissionEngine::new(store.clone());
+
+        // Create policy with owner and reader
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::computed(
+                    "reader",
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::computed_userset("owner"),
+                    ]),
+                )),
+        );
+
+        engine.add_policy(&policy);
+
+        let owner = test_did();
+        let reader = test_did2();
+
+        // Store owner relationship
+        let rel = Relationship::with_entity("document", "doc1", "owner", owner.clone());
+        store.store_relationship("policy1", &rel).await.unwrap();
+
+        // Store reader relationship
+        let rel = Relationship::with_entity("document", "doc2", "reader", reader.clone());
+        store.store_relationship("policy1", &rel).await.unwrap();
+
+        // Batch check multiple permissions
+        let requests = vec![
+            PermissionCheckRequest::new("policy1", "document", "doc1", "owner", &owner),
+            PermissionCheckRequest::new("policy1", "document", "doc1", "reader", &owner),
+            PermissionCheckRequest::new("policy1", "document", "doc2", "reader", &reader),
+            PermissionCheckRequest::new("policy1", "document", "doc2", "reader", &owner), // Should be false
+        ];
+
+        let results = engine.check_many(&requests).await;
+
+        assert_eq!(results.len(), 4);
+        assert!(results[0].as_ref().unwrap()); // owner has owner
+        assert!(results[1].as_ref().unwrap()); // owner has reader (via owner)
+        assert!(results[2].as_ref().unwrap()); // reader has reader
+        assert!(!results[3].as_ref().unwrap()); // owner doesn't have reader on doc2
+    }
+
+    #[tokio::test]
+    async fn test_explain_granted() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let mut engine = PermissionEngine::new(store.clone());
+
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::computed(
+                    "reader",
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::computed_userset("owner"),
+                    ]),
+                )),
+        );
+
+        engine.add_policy(&policy);
+
+        let owner = test_did();
+        let rel = Relationship::with_entity("document", "doc1", "owner", owner.clone());
+        store.store_relationship("policy1", &rel).await.unwrap();
+
+        // Explain why owner has reader permission
+        let explanation = engine
+            .explain("policy1", "document", "doc1", "reader", &owner)
+            .await
+            .unwrap();
+
+        assert!(explanation.granted);
+        assert_eq!(explanation.resource, "document");
+        assert_eq!(explanation.object_id, "doc1");
+        assert_eq!(explanation.relation, "reader");
+        assert!(!explanation.trace.steps.is_empty());
+
+        // The trace should show the evaluation path
+        let granted_steps: Vec<_> = explanation
+            .trace
+            .steps
+            .iter()
+            .filter(|s| matches!(s.result, StepResult::Granted))
+            .collect();
+        assert!(!granted_steps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_explain_denied() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let mut engine = PermissionEngine::new(store.clone());
+
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(Relation::direct("owner")));
+
+        engine.add_policy(&policy);
+
+        let user = test_did();
+
+        // Don't store any relationships - user shouldn't have permission
+        let explanation = engine
+            .explain("policy1", "document", "doc1", "owner", &user)
+            .await
+            .unwrap();
+
+        assert!(!explanation.granted);
+        assert!(!explanation.trace.steps.is_empty());
+
+        // Should have a denied step
+        let denied_steps: Vec<_> = explanation
+            .trace
+            .steps
+            .iter()
+            .filter(|s| matches!(s.result, StepResult::Denied))
+            .collect();
+        assert!(!denied_steps.is_empty());
     }
 }

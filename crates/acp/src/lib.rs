@@ -47,7 +47,8 @@ pub use store::AcpStore;
 
 // Re-export key zanzibar types
 pub use zanzibar::{
-    MemoryZanzibarStore, PermissionEngine, PersistentZanzibarStore, Policy, Relation,
-    RelationExpression, Relationship, Resource, Subject, SubjectRestriction, ZanzibarDocumentACP,
-    ZanzibarStore,
+    EvaluationStep, EvaluationTrace, MemoryZanzibarStore, PermissionCheckRequest, PermissionEngine,
+    PermissionExplanation, PersistentZanzibarStore, Policy, Relation, RelationExpression,
+    Relationship, Resource, StepResult, StorePolicyOptions, Subject, SubjectRestriction,
+    ZanzibarDocumentACP, ZanzibarStore,
 };

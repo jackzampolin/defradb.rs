@@ -14,8 +14,13 @@ mod store;
 mod types;
 
 pub use acp::ZanzibarDocumentACP;
-pub use engine::PermissionEngine;
+pub use engine::{
+    EvaluationStep, EvaluationTrace, PermissionCheckRequest, PermissionEngine,
+    PermissionExplanation, StepResult,
+};
 pub use expression::RelationExpression;
 pub use lookup::PolicyLookupTable;
-pub use store::{MemoryZanzibarStore, PersistentZanzibarStore, ZanzibarStore};
+pub use store::{
+    MemoryZanzibarStore, PersistentZanzibarStore, StorePolicyOptions, ZanzibarStore,
+};
 pub use types::{Policy, Relation, Relationship, Resource, Subject, SubjectRestriction};

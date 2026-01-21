@@ -16,6 +16,38 @@ use storage::RedbStore;
 use super::types::{ObjectRef, Policy, Relationship, Subject};
 use crate::error::{Error, Result};
 
+/// Options for storing a policy.
+#[derive(Debug, Clone, Default)]
+pub struct StorePolicyOptions {
+    /// If true, validate the policy structure before storing.
+    pub validate: bool,
+    /// If true, enforce DPI (DefraDB Policy Interface) compliance.
+    /// DPI rules:
+    /// - Every resource must have an 'owner' relation
+    /// - Computed expressions must include 'owner'
+    /// - Only union operations are allowed
+    pub enforce_dpi: bool,
+}
+
+impl StorePolicyOptions {
+    /// Create options with no validation.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable basic policy validation.
+    pub fn with_validation(mut self) -> Self {
+        self.validate = true;
+        self
+    }
+
+    /// Enable DPI compliance enforcement.
+    pub fn with_dpi_enforcement(mut self) -> Self {
+        self.enforce_dpi = true;
+        self
+    }
+}
+
 /// Trait for Zanzibar policy and relationship storage.
 ///
 /// Provides operations for:
@@ -26,6 +58,24 @@ use crate::error::{Error, Result};
 pub trait ZanzibarStore: Send + Sync {
     /// Store a policy.
     async fn store_policy(&self, policy: &Policy) -> Result<()>;
+
+    /// Store a policy with validation options.
+    ///
+    /// If `options.validate` is true, validates the policy structure before storing.
+    /// If `options.enforce_dpi` is true, also validates DPI compliance.
+    async fn store_policy_with_options(
+        &self,
+        policy: &Policy,
+        options: &StorePolicyOptions,
+    ) -> Result<()> {
+        if options.validate {
+            policy.validate()?;
+        }
+        if options.enforce_dpi {
+            policy.validate_dpi()?;
+        }
+        self.store_policy(policy).await
+    }
 
     /// Get a policy by ID.
     async fn get_policy(&self, policy_id: &str) -> Result<Option<Policy>>;
@@ -670,6 +720,8 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zanzibar::expression::RelationExpression;
+    use crate::zanzibar::types::{Relation, Resource};
 
     fn test_did() -> Did {
         Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
@@ -856,5 +908,128 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].resource, "folder");
         assert_eq!(targets[0].object_id, "folder1");
+    }
+
+    #[tokio::test]
+    async fn test_store_policy_with_validation() {
+        let store = MemoryZanzibarStore::new();
+
+        // Valid policy
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(Relation::direct("owner")));
+
+        // Should succeed with validation
+        let options = StorePolicyOptions::new().with_validation();
+        store
+            .store_policy_with_options(&policy, &options)
+            .await
+            .unwrap();
+
+        // Verify policy was stored
+        let loaded = store.get_policy("policy1").await.unwrap();
+        assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_store_policy_with_dpi_enforcement_valid() {
+        let store = MemoryZanzibarStore::new();
+
+        // DPI-compliant policy
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::computed(
+                    "reader",
+                    RelationExpression::union(vec![
+                        RelationExpression::this(),
+                        RelationExpression::computed_userset("owner"),
+                    ]),
+                )),
+        );
+
+        // Should succeed with DPI enforcement
+        let options = StorePolicyOptions::new()
+            .with_validation()
+            .with_dpi_enforcement();
+        store
+            .store_policy_with_options(&policy, &options)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_policy_with_dpi_enforcement_rejects_missing_owner() {
+        let store = MemoryZanzibarStore::new();
+
+        // Policy without owner relation (violates DPI)
+        let policy = Policy::new("policy1", "Test")
+            .with_resource(Resource::new("document").with_relation(Relation::direct("reader")));
+
+        let options = StorePolicyOptions::new()
+            .with_validation()
+            .with_dpi_enforcement();
+
+        let result = store.store_policy_with_options(&policy, &options).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::error::Error::DpiMissingOwner { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_store_policy_with_dpi_enforcement_rejects_intersection() {
+        let store = MemoryZanzibarStore::new();
+
+        // Policy with intersection (violates DPI)
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("approved"))
+                .with_relation(Relation::computed(
+                    "editor",
+                    RelationExpression::intersection(vec![
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("approved"),
+                    ]),
+                )),
+        );
+
+        let options = StorePolicyOptions::new()
+            .with_validation()
+            .with_dpi_enforcement();
+
+        let result = store.store_policy_with_options(&policy, &options).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::error::Error::DpiDisallowedOperation { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_store_policy_without_dpi_allows_intersection() {
+        let store = MemoryZanzibarStore::new();
+
+        // Policy with intersection (allowed without DPI enforcement)
+        let policy = Policy::new("policy1", "Test").with_resource(
+            Resource::new("document")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("approved"))
+                .with_relation(Relation::computed(
+                    "editor",
+                    RelationExpression::intersection(vec![
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("approved"),
+                    ]),
+                )),
+        );
+
+        // Without DPI enforcement, this should succeed
+        let options = StorePolicyOptions::new().with_validation();
+        store
+            .store_policy_with_options(&policy, &options)
+            .await
+            .unwrap();
     }
 }
