@@ -56,10 +56,7 @@ pub async fn list_policies(
 ) -> Result<Json<Vec<PolicyInfo>>, HttpError> {
     let acp = state.require_acp()?;
 
-    let policies = acp
-        .list_policies()
-        .await
-        .map_err(HttpError::Internal)?;
+    let policies = acp.list_policies().await.map_err(HttpError::Internal)?;
 
     Ok(Json(policies))
 }

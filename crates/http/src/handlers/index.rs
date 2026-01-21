@@ -163,8 +163,7 @@ mod tests {
 
     #[test]
     fn test_create_index_request_deserialize() {
-        let json =
-            r#"{"collection": "Users", "fields": ["name", "email"], "name": "idx_name_email", "unique": true}"#;
+        let json = r#"{"collection": "Users", "fields": ["name", "email"], "name": "idx_name_email", "unique": true}"#;
         let request: CreateIndexRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.collection, "Users");
         assert_eq!(request.fields.len(), 2);

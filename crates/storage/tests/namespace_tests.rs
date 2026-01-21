@@ -17,6 +17,7 @@ fn test_namespace_prefix() {
     assert_eq!(Namespace::Systemstore.prefix(), b's');
     assert_eq!(Namespace::Peerstore.prefix(), b'p');
     assert_eq!(Namespace::Encstore.prefix(), b'e');
+    assert_eq!(Namespace::Acpstore.prefix(), b'a');
 }
 
 #[test]
@@ -27,6 +28,7 @@ fn test_namespace_name() {
     assert_eq!(Namespace::Systemstore.name(), "systemstore");
     assert_eq!(Namespace::Peerstore.name(), "peerstore");
     assert_eq!(Namespace::Encstore.name(), "encstore");
+    assert_eq!(Namespace::Acpstore.name(), "acpstore");
 }
 
 #[tokio::test]

@@ -434,9 +434,8 @@ async fn test_index_create_invalid_collection_name() {
 #[tokio::test]
 async fn test_index_list() {
     let executor = Arc::new(MockQueryExecutor::new());
-    let index = Arc::new(
-        MockIndexOperations::new().with_index("Users", "idx_name", vec!["name"], false),
-    );
+    let index =
+        Arc::new(MockIndexOperations::new().with_index("Users", "idx_name", vec!["name"], false));
     let state = AppStateBuilder::new(executor).with_index(index).build();
     let router = create_router_with_state(state);
 
@@ -513,9 +512,8 @@ async fn test_index_list_invalid_collection_name() {
 #[tokio::test]
 async fn test_index_drop() {
     let executor = Arc::new(MockQueryExecutor::new());
-    let index = Arc::new(
-        MockIndexOperations::new().with_index("Users", "idx_name", vec!["name"], false),
-    );
+    let index =
+        Arc::new(MockIndexOperations::new().with_index("Users", "idx_name", vec!["name"], false));
     let state = AppStateBuilder::new(executor).with_index(index).build();
     let router = create_router_with_state(state);
 

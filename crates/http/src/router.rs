@@ -217,7 +217,10 @@ impl std::fmt::Debug for AppState {
             .field("p2p", &self.p2p.as_ref().map(|_| "<P2POperations>"))
             .field("acp", &self.acp.as_ref().map(|_| "<AcpOperations>"))
             .field("index", &self.index.as_ref().map(|_| "<IndexOperations>"))
-            .field("backup", &self.backup.as_ref().map(|_| "<BackupOperations>"))
+            .field(
+                "backup",
+                &self.backup.as_ref().map(|_| "<BackupOperations>"),
+            )
             .finish()
     }
 }
