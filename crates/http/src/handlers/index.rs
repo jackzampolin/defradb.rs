@@ -4,6 +4,8 @@
 //! - Create index
 //! - List indexes
 //! - Drop index
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{
     extract::{Query, State},
@@ -12,7 +14,9 @@ use axum::{
 use serde::Deserialize;
 
 use crate::error::HttpError;
-use crate::router::{AppState, IndexInfo};
+use crate::identity_extractor::ExtractIdentity;
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, IndexInfo, NodePermission};
 use crate::validation::validate_identifier;
 
 /// Request to create a new index.
@@ -43,10 +47,15 @@ pub struct DropIndexQuery {
 /// Create a new index.
 ///
 /// POST /api/v0/index
+///
+/// Requires `IndexCreate` permission when NAC is enabled.
 pub async fn create_index(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<CreateIndexRequest>,
 ) -> Result<Json<IndexInfo>, HttpError> {
+    require_permission(&state, &identity, NodePermission::IndexCreate).await?;
+
     let index_ops = state.require_index()?;
 
     // Validate collection name
@@ -99,10 +108,15 @@ pub async fn create_index(
 /// List indexes, optionally filtered by collection.
 ///
 /// GET /api/v0/index
+///
+/// Requires `IndexList` permission when NAC is enabled.
 pub async fn list_indexes(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Query(query): Query<ListIndexesQuery>,
 ) -> Result<Json<Vec<IndexInfo>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::IndexList).await?;
+
     let index_ops = state.require_index()?;
 
     // Validate collection name if provided
@@ -126,10 +140,15 @@ pub async fn list_indexes(
 /// Drop an index.
 ///
 /// DELETE /api/v0/index
+///
+/// Requires `IndexDrop` permission when NAC is enabled.
 pub async fn drop_index(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Query(query): Query<DropIndexQuery>,
 ) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::IndexDrop).await?;
+
     let index_ops = state.require_index()?;
 
     // Validate collection name

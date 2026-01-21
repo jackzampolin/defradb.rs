@@ -35,6 +35,8 @@ fn cli_with_defaults() -> Cli {
         no_keyring: None,
         source_hub_address: None,
         secret_file: None,
+        acp_node_enable: None,
+        acp_document_type: None,
         command: Command::Version(VersionArgs {
             format: "text".to_string(),
             full: false,

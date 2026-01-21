@@ -5,6 +5,8 @@
 //! - Peer management (list, connect)
 //! - Replicator management (list, add, remove)
 //! - P2P collection management (list, add, remove)
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{
     extract::{Query, State},
@@ -13,7 +15,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
-use crate::router::AppState;
+use crate::identity_extractor::ExtractIdentity;
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, NodePermission};
 use crate::validation::{validate_collection_name, validate_multiaddr};
 
 /// Response for P2P node info (Go-compatible format).
@@ -84,7 +88,14 @@ pub struct CollectionsDeleteQuery {
 ///
 /// Returns array of full multiaddrs with peer ID embedded.
 /// Example: ["/ip4/127.0.0.1/tcp/9181/p2p/12D3KooWxyz..."]
-pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoResponse>, HttpError> {
+///
+/// Requires `P2pPeerConnect` permission when NAC is enabled.
+pub async fn get_info(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<P2pInfoResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
+
     let p2p = state.require_p2p()?;
 
     let peer_id = p2p.local_peer_id().await.map_err(HttpError::Internal)?;
@@ -103,7 +114,14 @@ pub async fn get_info(State(state): State<AppState>) -> Result<Json<P2pInfoRespo
 /// List connected peers.
 ///
 /// GET /api/v0/p2p/peers
-pub async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<PeerInfo>>, HttpError> {
+///
+/// Requires `P2pPeerConnect` permission when NAC is enabled.
+pub async fn list_peers(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<PeerInfo>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
+
     let p2p = state.require_p2p()?;
 
     let peers = p2p.connected_peers().await.map_err(HttpError::Internal)?;
@@ -121,10 +139,15 @@ pub async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<PeerIn
 /// POST /api/v0/p2p/peers
 ///
 /// Body: {"address": "/ip4/..."}
+///
+/// Requires `P2pPeerConnect` permission when NAC is enabled.
 pub async fn connect_peer(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<ConnectPeerRequest>,
 ) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
+
     let p2p = state.require_p2p()?;
 
     // Validate the multiaddr format
@@ -142,10 +165,15 @@ pub async fn connect_peer(
 /// POST /api/v0/p2p/connect
 ///
 /// Body: ["/ip4/.../p2p/...", ...]
+///
+/// Requires `P2pPeerConnect` permission when NAC is enabled.
 pub async fn connect(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(addresses): Json<Vec<String>>,
 ) -> Result<(), HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
+
     let p2p = state.require_p2p()?;
 
     for addr in &addresses {
@@ -161,9 +189,14 @@ pub async fn connect(
 /// List replicators.
 ///
 /// GET /api/v0/p2p/replicator
+///
+/// Requires `P2pReplicatorList` permission when NAC is enabled.
 pub async fn list_replicators(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
 ) -> Result<Json<Vec<ReplicatorInfoResponse>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pReplicatorList).await?;
+
     let p2p = state.require_p2p()?;
 
     let replicators = p2p.get_replicators().await.map_err(HttpError::Internal)?;
@@ -185,10 +218,15 @@ pub async fn list_replicators(
 /// POST /api/v0/p2p/replicators
 ///
 /// Body: {"Addresses": ["..."], "Collections": ["..."]}
+///
+/// Requires `P2pReplicatorCreate` permission when NAC is enabled.
 pub async fn add_replicator(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<ReplicatorRequest>,
 ) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pReplicatorCreate).await?;
+
     let p2p = state.require_p2p()?;
 
     if request.collections.is_empty() {
@@ -220,10 +258,15 @@ pub async fn add_replicator(
 /// Remove a replicator.
 ///
 /// DELETE /api/v0/p2p/replicator
+///
+/// Requires `P2pReplicatorDelete` permission when NAC is enabled.
 pub async fn remove_replicator(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Query(query): Query<ReplicatorDeleteQuery>,
 ) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pReplicatorDelete).await?;
+
     let p2p = state.require_p2p()?;
 
     if query.collections.is_empty() {
@@ -252,9 +295,14 @@ pub async fn remove_replicator(
 /// List P2P collections.
 ///
 /// GET /api/v0/p2p/collections
+///
+/// Requires `P2pCollectionList` permission when NAC is enabled.
 pub async fn list_collections(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
 ) -> Result<Json<Vec<String>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pCollectionList).await?;
+
     let p2p = state.require_p2p()?;
 
     let collections = p2p.get_collections().await.map_err(HttpError::Internal)?;
@@ -265,10 +313,15 @@ pub async fn list_collections(
 /// Add collections to P2P.
 ///
 /// POST /api/v0/p2p/collections
+///
+/// Requires `P2pCollectionCreate` permission when NAC is enabled.
 pub async fn add_collections(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<CollectionsRequest>,
 ) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pCollectionCreate).await?;
+
     let p2p = state.require_p2p()?;
 
     if request.collections.is_empty() {
@@ -292,10 +345,15 @@ pub async fn add_collections(
 /// Remove collections from P2P.
 ///
 /// DELETE /api/v0/p2p/collections
+///
+/// Requires `P2pCollectionDelete` permission when NAC is enabled.
 pub async fn remove_collections(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Query(query): Query<CollectionsDeleteQuery>,
 ) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pCollectionDelete).await?;
+
     let p2p = state.require_p2p()?;
 
     if query.collections.is_empty() {

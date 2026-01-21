@@ -2,11 +2,15 @@
 //!
 //! These handlers provide HTTP access to schema management:
 //! - Add schema (POST /schema)
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{extract::State, Json};
 
 use crate::error::HttpError;
-use crate::router::AppState;
+use crate::identity_extractor::ExtractIdentity;
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, NodePermission};
 use schema::CollectionVersion;
 
 /// Add a schema (Go-compatible format).
@@ -15,10 +19,15 @@ use schema::CollectionVersion;
 ///
 /// Body: SDL text (text/plain)
 /// Returns: Array of created CollectionVersions
+///
+/// Requires `CollectionPatch` permission when NAC is enabled.
 pub async fn add_schema(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     body: String,
 ) -> Result<Json<Vec<CollectionVersion>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
     let schema_ops = state.require_schema()?;
 
     let collections = schema_ops

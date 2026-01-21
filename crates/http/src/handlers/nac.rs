@@ -3,12 +3,15 @@
 //! These handlers provide HTTP endpoints for managing NAC, including:
 //! - Getting NAC status
 //! - Adding/removing admin relationships
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{extract::State, response::IntoResponse, Json};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
-use crate::router::{AppState, NacStatusInfo};
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, NacStatusInfo, NodePermission};
 
 /// Request body for adding/removing admin.
 #[derive(Debug, serde::Deserialize)]
@@ -29,7 +32,14 @@ pub struct AdminResponse {
 /// GET /api/v0/nac/status
 ///
 /// Get the current NAC status including whether it's enabled and who the owner is.
-pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Requires `NacStatus` permission when NAC is enabled.
+pub async fn get_status(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<impl IntoResponse, HttpError> {
+    require_permission(&state, &identity, NodePermission::NacStatus).await?;
+
     // NAC status is available even if NAC is not configured
     match &state.nac {
         Some(nac) => {
@@ -41,7 +51,7 @@ pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
                 owner: owner.map(|d| d.to_string()),
             };
 
-            Json(info).into_response()
+            Ok(Json(info).into_response())
         }
         None => {
             // NAC not configured - return status as "not_configured"
@@ -49,7 +59,7 @@ pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
                 status: "not_configured".to_string(),
                 owner: None,
             };
-            Json(info).into_response()
+            Ok(Json(info).into_response())
         }
     }
 }
@@ -57,11 +67,15 @@ pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
 /// POST /api/v0/nac/admin
 ///
 /// Add a new admin. The requestor must be an existing admin.
+///
+/// Requires `NacRelationAdd` permission when NAC is enabled.
 pub async fn add_admin(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(body): Json<AdminRequest>,
 ) -> Result<impl IntoResponse, HttpError> {
+    require_permission(&state, &identity, NodePermission::NacRelationAdd).await?;
+
     // Require NAC to be available
     let nac = state.require_nac()?;
 
@@ -97,11 +111,15 @@ pub async fn add_admin(
 ///
 /// Remove an admin. The requestor must be an existing admin.
 /// The owner cannot be removed.
+///
+/// Requires `NacRelationDelete` permission when NAC is enabled.
 pub async fn remove_admin(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(body): Json<AdminRequest>,
 ) -> Result<impl IntoResponse, HttpError> {
+    require_permission(&state, &identity, NodePermission::NacRelationDelete).await?;
+
     // Require NAC to be available
     let nac = state.require_nac()?;
 

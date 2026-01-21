@@ -5,12 +5,24 @@
 //! - Permission checking for node operations
 //! - Managing admin relationships
 //! - NAC lifecycle (enable, disable, purge)
+//!
+//! ## Security Features
+//!
+//! - **Write blocking when disabled**: All relationship modifications are blocked
+//!   when NAC is disabled to prevent privilege escalation attacks.
+//! - **Automatic re-enable timeout**: NAC automatically re-enables after a
+//!   configurable timeout period to prevent indefinite disabled states.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use identity::Did;
 use tokio::sync::RwLock;
+
+/// Default timeout for automatic NAC re-enable (1 hour).
+/// This prevents operators from accidentally leaving NAC disabled indefinitely.
+pub const DEFAULT_DISABLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 use super::permission::NodePermission;
 use super::policy::{
@@ -51,24 +63,45 @@ impl std::fmt::Display for NacStatus {
 ///
 /// NAC uses a local Zanzibar store to manage node-level permissions.
 /// Unlike DAC, NAC is always local (no SourceHub option).
+///
+/// ## Automatic Re-enable
+///
+/// When NAC is disabled, it will automatically re-enable after the configured
+/// timeout (default: 1 hour). This prevents operators from accidentally leaving
+/// NAC disabled indefinitely.
 pub struct NodeACP<S: ZanzibarStore> {
     store: Arc<S>,
     engine: RwLock<PermissionEngine<S>>,
     status: RwLock<NacStatus>,
     /// The owner identity (set when NAC is enabled)
     owner: RwLock<Option<Did>>,
+    /// When NAC was disabled (for automatic re-enable timeout)
+    disabled_at: RwLock<Option<Instant>>,
+    /// Timeout duration for automatic re-enable
+    disable_timeout: Duration,
 }
 
 impl<S: ZanzibarStore> NodeACP<S> {
     /// Create a new NodeACP with the given store.
     ///
     /// The NAC starts in NotConfigured status. Call `enable()` to activate it.
+    /// Uses the default disable timeout (1 hour).
     pub fn new(store: Arc<S>) -> Self {
+        Self::with_timeout(store, DEFAULT_DISABLE_TIMEOUT)
+    }
+
+    /// Create a new NodeACP with a custom disable timeout.
+    ///
+    /// The timeout controls how long NAC can remain disabled before it
+    /// automatically re-enables. Use `Duration::MAX` to disable auto-re-enable.
+    pub fn with_timeout(store: Arc<S>, disable_timeout: Duration) -> Self {
         Self {
             store: store.clone(),
             engine: RwLock::new(PermissionEngine::new(store)),
             status: RwLock::new(NacStatus::NotConfigured),
             owner: RwLock::new(None),
+            disabled_at: RwLock::new(None),
+            disable_timeout,
         }
     }
 
@@ -173,7 +206,20 @@ impl<S: ZanzibarStore> NodeACP<S> {
     /// Temporarily disable NAC.
     ///
     /// Preserves all state but stops enforcing permissions.
-    /// Only the owner can re-enable NAC after this.
+    /// NAC will automatically re-enable after the configured timeout
+    /// (default: 1 hour) to prevent indefinite disabled states.
+    ///
+    /// Write operations (adding/removing admins, granting/revoking permissions)
+    /// are blocked while NAC is disabled to prevent privilege escalation.
+    ///
+    /// # Security Warning
+    ///
+    /// **This method does NOT perform authorization checks.** Callers MUST verify
+    /// the requestor has admin permissions before calling this method.
+    ///
+    /// In production code, use `NacManager::disable()` instead, which wraps
+    /// this method with proper authorization checks.
+    #[doc(hidden)]
     pub async fn disable(&self) -> Result<()> {
         let status = *self.status.read().await;
         if status != NacStatus::Enabled {
@@ -183,17 +229,58 @@ impl<S: ZanzibarStore> NodeACP<S> {
         }
 
         *self.status.write().await = NacStatus::DisabledTemporarily;
+        *self.disabled_at.write().await = Some(Instant::now());
 
         tracing::info!(
             target: "nac::audit",
             event = "nac_disabled",
-            "Node Access Control temporarily disabled"
+            timeout_secs = self.disable_timeout.as_secs(),
+            "Node Access Control temporarily disabled (will auto-re-enable after timeout)"
         );
 
         Ok(())
     }
 
+    /// Check if NAC should be automatically re-enabled due to timeout.
+    ///
+    /// If NAC is disabled and the timeout has elapsed, this method will
+    /// automatically re-enable NAC and return true.
+    async fn check_auto_reenable(&self) -> bool {
+        let status = *self.status.read().await;
+        if status != NacStatus::DisabledTemporarily {
+            return false;
+        }
+
+        let disabled_at = *self.disabled_at.read().await;
+        if let Some(disabled_at) = disabled_at {
+            if disabled_at.elapsed() >= self.disable_timeout {
+                // Auto re-enable
+                *self.status.write().await = NacStatus::Enabled;
+                *self.disabled_at.write().await = None;
+
+                tracing::warn!(
+                    target: "nac::audit",
+                    event = "nac_auto_reenabled",
+                    "Node Access Control automatically re-enabled due to timeout"
+                );
+
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Re-enable NAC after temporary disable.
+    ///
+    /// # Security Warning
+    ///
+    /// **This method does NOT perform authorization checks.** Callers MUST verify
+    /// the requestor has admin permissions before calling this method.
+    ///
+    /// In production code, use `NacManager::re_enable()` instead, which wraps
+    /// this method with proper authorization checks.
+    #[doc(hidden)]
     pub async fn re_enable(&self) -> Result<()> {
         let status = *self.status.read().await;
         if status != NacStatus::DisabledTemporarily {
@@ -203,6 +290,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
         }
 
         *self.status.write().await = NacStatus::Enabled;
+        *self.disabled_at.write().await = None;
 
         tracing::info!(
             target: "nac::audit",
@@ -215,7 +303,18 @@ impl<S: ZanzibarStore> NodeACP<S> {
 
     /// Purge all NAC data and reset to NotConfigured.
     ///
-    /// This is a destructive operation and should only be allowed in dev mode.
+    /// This is a destructive operation that deletes all NAC relationships
+    /// and policies. After purging, NAC must be re-enabled from scratch.
+    ///
+    /// # Security Warning
+    ///
+    /// **This method does NOT perform authorization checks.** Callers MUST verify:
+    /// 1. The requestor has admin permissions
+    /// 2. The node is running in dev mode
+    ///
+    /// In production code, use `NacManager::purge()` instead, which wraps
+    /// this method with proper authorization and dev-mode checks.
+    #[doc(hidden)]
     pub async fn purge(&self) -> Result<()> {
         // Delete all relationships for the node object
         self.store
@@ -249,11 +348,16 @@ impl<S: ZanzibarStore> NodeACP<S> {
     /// Returns `true` if:
     /// - NAC is not enabled (all operations allowed)
     /// - The identity has the required permission (via owner or admin)
+    ///
+    /// This method also checks for automatic re-enable due to timeout.
     pub async fn check_permission(
         &self,
         identity: &Did,
         permission: NodePermission,
     ) -> Result<bool> {
+        // Check for automatic re-enable due to timeout
+        self.check_auto_reenable().await;
+
         let status = *self.status.read().await;
 
         // If NAC is not enabled, allow all operations
@@ -304,7 +408,12 @@ impl<S: ZanzibarStore> NodeACP<S> {
     }
 
     /// Check if an identity is an admin (owner or has admin relation).
+    ///
+    /// This method also checks for automatic re-enable due to timeout.
     pub async fn is_admin(&self, identity: &Did) -> Result<bool> {
+        // Check for automatic re-enable due to timeout
+        self.check_auto_reenable().await;
+
         let status = *self.status.read().await;
         if status != NacStatus::Enabled {
             return Ok(true); // Everyone is admin when NAC is disabled
@@ -331,7 +440,16 @@ impl<S: ZanzibarStore> NodeACP<S> {
     /// Add an admin relationship.
     ///
     /// Only the owner or existing admins can add new admins.
+    /// Write operations are blocked when NAC is disabled to prevent privilege escalation.
     pub async fn add_admin(&self, requestor: &Did, target: &Did) -> Result<bool> {
+        // Block write operations when disabled to prevent privilege escalation
+        let status = *self.status.read().await;
+        if status == NacStatus::DisabledTemporarily {
+            return Err(Error::InvalidPolicy(
+                "cannot modify relationships while NAC is disabled - re-enable NAC first".into(),
+            ));
+        }
+
         // Check if requestor can manage admin relation
         if !self.is_admin(requestor).await? {
             return Err(Error::NotOwner {
@@ -384,7 +502,16 @@ impl<S: ZanzibarStore> NodeACP<S> {
     ///
     /// Only the owner or existing admins can remove admins.
     /// The owner cannot be removed.
+    /// Write operations are blocked when NAC is disabled to prevent privilege escalation.
     pub async fn remove_admin(&self, requestor: &Did, target: &Did) -> Result<bool> {
+        // Block write operations when disabled to prevent privilege escalation
+        let status = *self.status.read().await;
+        if status == NacStatus::DisabledTemporarily {
+            return Err(Error::InvalidPolicy(
+                "cannot modify relationships while NAC is disabled - re-enable NAC first".into(),
+            ));
+        }
+
         // Cannot remove owner
         if self.is_owner(target).await {
             return Err(Error::InvalidRelation(
@@ -427,12 +554,21 @@ impl<S: ZanzibarStore> NodeACP<S> {
     /// Add a direct permission grant to an identity.
     ///
     /// This is for granting individual permissions rather than full admin access.
+    /// Write operations are blocked when NAC is disabled to prevent privilege escalation.
     pub async fn add_permission_grant(
         &self,
         requestor: &Did,
         target: &Did,
         permission: NodePermission,
     ) -> Result<bool> {
+        // Block write operations when disabled to prevent privilege escalation
+        let status = *self.status.read().await;
+        if status == NacStatus::DisabledTemporarily {
+            return Err(Error::InvalidPolicy(
+                "cannot modify relationships while NAC is disabled - re-enable NAC first".into(),
+            ));
+        }
+
         // Only admins can grant permissions
         if !self.is_admin(requestor).await? {
             return Err(Error::NotOwner {
@@ -479,12 +615,22 @@ impl<S: ZanzibarStore> NodeACP<S> {
     }
 
     /// Remove a direct permission grant from an identity.
+    ///
+    /// Write operations are blocked when NAC is disabled to prevent privilege escalation.
     pub async fn remove_permission_grant(
         &self,
         requestor: &Did,
         target: &Did,
         permission: NodePermission,
     ) -> Result<bool> {
+        // Block write operations when disabled to prevent privilege escalation
+        let status = *self.status.read().await;
+        if status == NacStatus::DisabledTemporarily {
+            return Err(Error::InvalidPolicy(
+                "cannot modify relationships while NAC is disabled - re-enable NAC first".into(),
+            ));
+        }
+
         // Only admins can revoke permissions
         if !self.is_admin(requestor).await? {
             return Err(Error::NotOwner {
@@ -762,5 +908,122 @@ mod tests {
             assert_eq!(nac.status().await, NacStatus::Enabled);
             assert_eq!(nac.owner().await, Some(test_did()));
         }
+    }
+
+    #[tokio::test]
+    async fn test_write_operations_blocked_when_disabled() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let nac = NodeACP::new(store);
+
+        let owner = test_did();
+        let other = test_did2();
+        nac.enable(&owner).await.unwrap();
+
+        // Disable NAC
+        nac.disable().await.unwrap();
+        assert_eq!(nac.status().await, NacStatus::DisabledTemporarily);
+
+        // Attempting to add admin while disabled should fail
+        let result = nac.add_admin(&owner, &other).await;
+        assert!(
+            result.is_err(),
+            "add_admin should be blocked when NAC is disabled"
+        );
+
+        // Attempting to remove admin while disabled should fail
+        let result = nac.remove_admin(&owner, &other).await;
+        assert!(
+            result.is_err(),
+            "remove_admin should be blocked when NAC is disabled"
+        );
+
+        // Attempting to grant permission while disabled should fail
+        let result = nac
+            .add_permission_grant(&owner, &other, NodePermission::DacBypass)
+            .await;
+        assert!(
+            result.is_err(),
+            "add_permission_grant should be blocked when NAC is disabled"
+        );
+
+        // Attempting to revoke permission while disabled should fail
+        let result = nac
+            .remove_permission_grant(&owner, &other, NodePermission::DacBypass)
+            .await;
+        assert!(
+            result.is_err(),
+            "remove_permission_grant should be blocked when NAC is disabled"
+        );
+
+        // Re-enable and verify writes work again
+        nac.re_enable().await.unwrap();
+
+        // Now add admin should work
+        let result = nac.add_admin(&owner, &other).await;
+        assert!(result.is_ok(), "add_admin should work when NAC is enabled");
+    }
+
+    #[tokio::test]
+    async fn test_auto_reenable_after_timeout() {
+        use std::time::Duration;
+
+        let store = Arc::new(MemoryZanzibarStore::new());
+        // Create NAC with a very short timeout (1ms) for testing
+        let nac = NodeACP::with_timeout(store, Duration::from_millis(1));
+
+        let owner = test_did();
+        let other = test_did2();
+        nac.enable(&owner).await.unwrap();
+
+        // Disable NAC
+        nac.disable().await.unwrap();
+        assert_eq!(nac.status().await, NacStatus::DisabledTemporarily);
+
+        // Wait for the timeout to elapse
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Calling check_permission should trigger auto-reenable
+        let allowed = nac
+            .check_permission(&other, NodePermission::DacBypass)
+            .await
+            .unwrap();
+
+        // After auto-reenable, non-owner should be denied
+        assert!(
+            !allowed,
+            "after auto-reenable, non-owner should be denied permission"
+        );
+
+        // Status should be back to Enabled
+        assert_eq!(nac.status().await, NacStatus::Enabled);
+    }
+
+    #[tokio::test]
+    async fn test_no_auto_reenable_before_timeout() {
+        use std::time::Duration;
+
+        let store = Arc::new(MemoryZanzibarStore::new());
+        // Create NAC with a very long timeout
+        let nac = NodeACP::with_timeout(store, Duration::from_secs(3600));
+
+        let owner = test_did();
+        let other = test_did2();
+        nac.enable(&owner).await.unwrap();
+
+        // Disable NAC
+        nac.disable().await.unwrap();
+        assert_eq!(nac.status().await, NacStatus::DisabledTemporarily);
+
+        // Calling check_permission should NOT trigger auto-reenable (timeout not elapsed)
+        let allowed = nac
+            .check_permission(&other, NodePermission::DacBypass)
+            .await
+            .unwrap();
+
+        // While disabled, everyone is allowed
+        assert!(allowed, "while disabled, everyone should be allowed");
+
+        // Status should still be DisabledTemporarily
+        assert_eq!(nac.status().await, NacStatus::DisabledTemporarily);
     }
 }

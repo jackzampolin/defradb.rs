@@ -3,6 +3,10 @@
 //! These handlers provide HTTP access to database backup operations:
 //! - Export database to JSON
 //! - Import database from JSON
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
+//! Export requires `DocumentRead` permission.
+//! Import requires `DocumentUpdate` permission.
 
 use axum::{
     body::{Body, Bytes},
@@ -14,7 +18,9 @@ use axum::{
 use serde::Deserialize;
 
 use crate::error::HttpError;
-use crate::router::{AppState, ImportResult};
+use crate::identity_extractor::ExtractIdentity;
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, ImportResult, NodePermission};
 use crate::validation::validate_collection_name;
 
 /// Maximum size for backup import data (100 MB).
@@ -37,10 +43,15 @@ pub struct ExportQuery {
 /// Export the database.
 ///
 /// GET /api/v0/backup/export
+///
+/// Requires `DocumentRead` permission when NAC is enabled.
 pub async fn export(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+
     let backup = state.require_backup()?;
 
     // Validate collection count limit
@@ -79,10 +90,15 @@ pub async fn export(
 /// Import the database.
 ///
 /// POST /api/v0/backup/import
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
 pub async fn import(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     body: Bytes,
 ) -> Result<Json<ImportResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
     let backup = state.require_backup()?;
 
     // Check body size limit

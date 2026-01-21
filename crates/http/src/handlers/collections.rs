@@ -2,6 +2,8 @@
 //!
 //! These handlers extract identity from the Authorization header and pass it
 //! to the REST operations layer for ACP (Access Control Policy) enforcement.
+//!
+//! All endpoints enforce NAC permissions when NAC is enabled.
 
 use axum::{
     extract::{Path, State},
@@ -11,7 +13,8 @@ use serde::Serialize;
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
-use crate::router::AppState;
+use crate::nac_guard::require_permission;
+use crate::router::{AppState, NodePermission};
 
 /// Response for listing collections.
 #[derive(Debug, Clone, Serialize)]
@@ -28,9 +31,14 @@ pub struct DocIdsResponse {
 /// List all collection names.
 ///
 /// GET /api/v0/collections
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
 pub async fn list_collections(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
 ) -> Result<Json<CollectionsResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
     let rest = state
         .rest
         .as_ref()
@@ -52,11 +60,15 @@ pub async fn list_collections(
 /// Identity is extracted from the Authorization header and used to filter
 /// documents based on read permissions (protected documents will only be
 /// visible if the identity has read access).
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
 pub async fn get_collection_doc_ids(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(name): Path<String>,
 ) -> Result<Json<DocIdsResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
     let rest = state
         .rest
         .as_ref()
@@ -100,7 +112,8 @@ mod tests {
     #[tokio::test]
     async fn test_list_collections() {
         let state = create_state();
-        let result = list_collections(State(state)).await;
+        let identity = ExtractIdentity::anonymous();
+        let result = list_collections(State(state), identity).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.collections.contains(&"Users".to_string()));
@@ -110,14 +123,16 @@ mod tests {
     #[tokio::test]
     async fn test_list_collections_no_rest() {
         let state = create_state_without_rest();
-        let result = list_collections(State(state)).await;
+        let identity = ExtractIdentity::anonymous();
+        let result = list_collections(State(state), identity).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_list_collections_error() {
         let state = create_failing_state();
-        let result = list_collections(State(state)).await;
+        let identity = ExtractIdentity::anonymous();
+        let result = list_collections(State(state), identity).await;
         assert!(result.is_err());
     }
 
