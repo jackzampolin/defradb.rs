@@ -246,6 +246,14 @@ impl CollectionVersion {
     pub fn validate(&self) -> Result<()> {
         self.validate_no_duplicate_names()?;
         self.validate_fields()?;
+        self.validate_policy()?;
+        Ok(())
+    }
+
+    fn validate_policy(&self) -> Result<()> {
+        if let Some(ref policy) = self.policy {
+            policy.validate()?;
+        }
         Ok(())
     }
 

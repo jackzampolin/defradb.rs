@@ -69,8 +69,8 @@ pub use auto_commit_mutator::AutoCommitMutator;
 pub use collection::Collection;
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
-    register_doc_if_needed, unregister_doc_if_needed, warn_on_unsafe_policy_transition,
-    AcpContext, PolicyTransitionCheck,
+    register_doc_if_needed, unregister_doc_if_needed, warn_on_unsafe_policy_transition, AcpContext,
+    PolicyTransitionCheck,
 };
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;
@@ -80,7 +80,9 @@ pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
-pub use peer_identity::{create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError};
+pub use peer_identity::{
+    create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
+};
 pub use schema_loader::load_active_collections;
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;

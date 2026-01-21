@@ -107,19 +107,29 @@ impl<H> AcpMergeHandler<H> {
     }
 
     /// Convert a peer ID to a DID if possible.
+    ///
+    /// If peer identity cannot be determined, logs a warning and returns Anonymous.
+    /// This warning helps operators detect:
+    /// - Misconfigured peer_to_did mappings
+    /// - Unknown peers attempting to sync with protected documents
     fn peer_to_identity(&self, peer_id: &str) -> Identity {
         match &self.peer_to_did {
             Some(f) => match f(peer_id) {
                 Some(did) => Identity::Authenticated(did),
                 None => {
-                    tracing::debug!(peer_id = %peer_id, "No DID mapping for peer, treating as anonymous");
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        "No DID mapping for peer - treating as anonymous. \
+                         Protected documents will reject this peer's updates."
+                    );
                     Identity::Anonymous
                 }
             },
             None => {
-                tracing::debug!(
+                tracing::warn!(
                     peer_id = %peer_id,
-                    "No peer_to_did function configured, treating as anonymous"
+                    "No peer_to_did function configured - treating all peers as anonymous. \
+                     Configure peer identity mapping for authenticated P2P sync."
                 );
                 Identity::Anonymous
             }
@@ -194,18 +204,16 @@ where
         }
 
         // For normal operations, metadata must be present
-        let (creator, collection_id, doc_id) = match (
-            metadata.creator,
-            metadata.collection_id,
-            metadata.doc_id,
-        ) {
-            (Some(c), Some(col), Some(d)) => (c, col, d),
-            _ => {
-                return Err(AcpMergeError::MissingMetadata(
-                    "creator, collection_id, and doc_id required for non-recovery merge".to_string(),
-                ));
-            }
-        };
+        let (creator, collection_id, doc_id) =
+            match (metadata.creator, metadata.collection_id, metadata.doc_id) {
+                (Some(c), Some(col), Some(d)) => (c, col, d),
+                _ => {
+                    return Err(AcpMergeError::MissingMetadata(
+                        "creator, collection_id, and doc_id required for non-recovery merge"
+                            .to_string(),
+                    ));
+                }
+            };
 
         // Check ACP permission before merging
         let permitted = self
@@ -299,15 +307,14 @@ mod tests {
             Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
         let did_clone = test_did.clone();
 
-        let handler = AcpMergeHandler::new(mock, local_acp, collections).with_peer_to_did(
-            move |peer_id| {
+        let handler =
+            AcpMergeHandler::new(mock, local_acp, collections).with_peer_to_did(move |peer_id| {
                 if peer_id == "12D3KooWTest" {
                     Some(did_clone.clone())
                 } else {
                     None
                 }
-            },
-        );
+            });
 
         // Should return authenticated identity for known peer
         let identity = handler.peer_to_identity("12D3KooWTest");

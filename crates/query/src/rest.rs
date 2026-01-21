@@ -452,7 +452,9 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
     ) -> RestResult<Vec<JsonValue>> {
         let mut results = Vec::with_capacity(data.len());
         for item in data {
-            let result = self.create_document(collection, item.clone(), identity).await?;
+            let result = self
+                .create_document(collection, item.clone(), identity)
+                .await?;
             results.push(result);
         }
         Ok(results)
@@ -470,7 +472,9 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         }
 
         // Check if document exists first (with identity for permission check)
-        let existing = self.fetch_full_document(collection, doc_id, identity).await?;
+        let existing = self
+            .fetch_full_document(collection, doc_id, identity)
+            .await?;
         if existing.is_none() {
             return Err(RestError::document_not_found(doc_id));
         }
@@ -496,7 +500,9 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
             return Err(RestError::collection_not_found(collection));
         }
 
-        let existing = self.fetch_full_document(collection, doc_id, identity).await?;
+        let existing = self
+            .fetch_full_document(collection, doc_id, identity)
+            .await?;
         if existing.is_none() {
             return Ok(false);
         }

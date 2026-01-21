@@ -36,7 +36,10 @@ pub async fn get_document(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.get_document(&collection, &doc_id, identity.did()).await {
+    match rest
+        .get_document(&collection, &doc_id, identity.did())
+        .await
+    {
         Ok(Some(doc)) => Ok(Json(doc)),
         Ok(None) => Err(HttpError::NotFound(format!(
             "Document '{}' not found in collection '{}'",
@@ -78,7 +81,8 @@ pub async fn create_document(
             .as_array()
             .ok_or_else(|| HttpError::BadRequest("Expected array of documents".into()))?
             .clone();
-        rest.create_documents(&collection, docs, identity.did()).await
+        rest.create_documents(&collection, docs, identity.did())
+            .await
     } else {
         rest.create_document(&collection, body, identity.did())
             .await
@@ -126,7 +130,10 @@ pub async fn update_document(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.update_document(&collection, &doc_id, patch, identity.did()).await {
+    match rest
+        .update_document(&collection, &doc_id, patch, identity.did())
+        .await
+    {
         Ok(doc) => {
             tracing::info!(
                 collection = %collection,
@@ -163,7 +170,10 @@ pub async fn delete_document(
         .as_ref()
         .ok_or_else(|| HttpError::Internal("REST operations not configured".into()))?;
 
-    match rest.delete_document(&collection, &doc_id, identity.did()).await {
+    match rest
+        .delete_document(&collection, &doc_id, identity.did())
+        .await
+    {
         Ok(deleted) => {
             if deleted {
                 tracing::info!(

@@ -8,7 +8,8 @@
 //! - Serialization roundtrip
 
 use schema::{
-    CType, CollectionBuilder, CollectionVersion, FieldDescription, FieldKind, SchemaError,
+    CType, CollectionBuilder, CollectionVersion, FieldDescription, FieldKind, PolicyDescription,
+    SchemaError,
 };
 use std::collections::HashMap;
 
@@ -142,6 +143,68 @@ fn test_validate_invalid_crdt_fails() {
 fn test_validate_valid_collection() {
     let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields());
     assert!(coll.validate().is_ok());
+}
+
+// ============================================================================
+// Policy Validation Tests
+// ============================================================================
+
+#[test]
+fn test_validate_collection_with_valid_policy() {
+    let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields())
+        .with_policy(PolicyDescription::new("policy-123", "users"));
+    assert!(coll.validate().is_ok());
+}
+
+#[test]
+fn test_validate_collection_with_invalid_policy_path_separator() {
+    let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields())
+        .with_policy(PolicyDescription::new("policy/traversal", "users"));
+    let result = coll.validate();
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), SchemaError::InvalidPolicy(_)));
+}
+
+#[test]
+fn test_validate_collection_with_invalid_policy_dotdot() {
+    let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields())
+        .with_policy(PolicyDescription::new("policy..secret", "users"));
+    let result = coll.validate();
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, SchemaError::InvalidPolicy(_)));
+    assert!(err.to_string().contains("'..'"));
+}
+
+#[test]
+fn test_validate_collection_with_invalid_policy_null_byte() {
+    let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields())
+        .with_policy(PolicyDescription::new("policy\0123", "users"));
+    let result = coll.validate();
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, SchemaError::InvalidPolicy(_)));
+    assert!(err.to_string().contains("null bytes"));
+}
+
+#[test]
+fn test_validate_collection_with_empty_policy_id() {
+    let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields())
+        .with_policy(PolicyDescription::new("", "users"));
+    let result = coll.validate();
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), SchemaError::InvalidPolicy(_)));
+}
+
+#[test]
+fn test_validate_collection_with_whitespace_policy_id() {
+    let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields())
+        .with_policy(PolicyDescription::new("   ", "users"));
+    let result = coll.validate();
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, SchemaError::InvalidPolicy(_)));
+    assert!(err.to_string().contains("whitespace-only"));
 }
 
 // ============================================================================

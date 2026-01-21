@@ -49,6 +49,9 @@ pub enum SchemaError {
 
     #[error("internal error: {0}")]
     InternalError(String),
+
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(String),
 }
 
 impl From<serde_json::Error> for SchemaError {
