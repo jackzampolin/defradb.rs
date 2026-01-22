@@ -1,6 +1,35 @@
 # Development Principles
 
-## 0. Information Hygiene (Context Clarity as First Principle)
+## 0. The North Star: Go Behavioral Compatibility
+
+**This Rust implementation must behave identically to Go DefraDB.**
+
+Every feature we build is validated against the Go implementation. The `tests/interop/` test suite is the ultimate arbiter of correctness. If a Rust node and Go node produce different results for the same operation, the Rust implementation is wrong.
+
+### What "Compatible" Means
+
+- Same GraphQL query → Same results (field values, ordering, errors)
+- Same document content → Same document ID (content-addressed CIDs)
+- Same CRDT operations → Same merged state (convergence)
+- Same P2P protocol → Nodes can discover, connect, and replicate
+
+### Running Interop Tests
+
+```bash
+cd tests/interop
+
+# Set path to Go DefraDB (default assumes sibling repo structure)
+export DEFRA_GO_PATH=/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb
+
+make build-all    # Build both Rust and Go binaries
+make test         # Run all interop tests (connection + sync)
+```
+
+**Run these before any PR that touches:** P2P, query, schema, CRDT, or document handling.
+
+---
+
+## 1. Information Hygiene (Context Clarity as First Principle)
 
 This codebase is designed for **AI-human pair programming**. Every structural choice optimizes for **rapid context acquisition**.
 
@@ -17,7 +46,7 @@ Large files with mixed concepts create noise:
 
 Clear context → Fast understanding → Confident changes → Productive iteration.
 
-## 1. Cordon Sanitaire (Temporal Boundaries)
+## 2. Cordon Sanitaire (Temporal Boundaries)
 
 **Three temporal zones. No leakage into the working tree.**
 
@@ -55,7 +84,7 @@ Inline safety warnings are present-tense information about current behavior:
 // CRITICAL: Must be called with priority > 0
 ```
 
-## 2. No Documentation Files (Unless Explicitly Requested)
+## 3. No Documentation Files (Unless Explicitly Requested)
 
 **DO NOT create markdown documentation files.**
 
@@ -81,32 +110,36 @@ Rationale: Documentation becomes stale quickly and creates maintenance burden.
 - Cross-implementation testing plans
 - Any speculative planning documents
 
-## 3. File Organization
+## 4. File Organization
 
 **One concept per file. Small files over large files.**
 
-### Rust Crate Structure
+### Rust Crate Structure (16 crates)
 
 ```
 crates/
-├── crdt/
-│   ├── src/
-│   │   ├── traits.rs       # Core CRDT traits only
-│   │   ├── priority.rs     # Priority encoding only
-│   │   ├── lww.rs          # LWW Register + tests
-│   │   ├── counter.rs      # Counter CRDT + tests
-│   │   ├── composite.rs    # Composite CRDT + tests
-│   │   └── lib.rs          # Module exports only
-│   ├── tests/
-│   │   └── property_tests.rs  # Property-based tests
-│   └── Cargo.toml
-└── storage/
-    ├── src/
-    │   ├── backends/       # redb, leveldb, memory backends
-    │   ├── corekv/         # Core KV traits (Store, Txn, Reader, Writer)
-    │   ├── stores/         # Multi-store coordination
-    │   └── lib.rs
-    └── Cargo.toml
+├── acp/             # Access Control Policy (Zanzibar model, NAC/FAC)
+├── blockstore/      # IPLD block storage
+├── cli/             # Command-line interface
+├── crdt/            # CRDT implementations (LWW registers, counters)
+├── crypto/          # Cryptographic operations
+├── datastore/       # Data persistence abstractions
+├── db/              # Database core (collections, merge handling)
+├── defra-core/      # Core types, traits, IPLD encoding
+├── document/        # Document handling
+├── http/            # HTTP API server (REST + GraphQL)
+├── identity/        # Identity and JWT token management
+├── keyring/         # Key storage and management
+├── p2p/             # P2P networking (libp2p, Bitswap, sync protocol)
+├── query/           # Query engine (GraphQL parsing, planning, execution)
+├── schema/          # Schema validation, SDL parsing, CID generation
+└── storage/         # Storage backends (redb, memory)
+
+tests/
+└── interop/         # Go/Rust interoperability tests (CRITICAL)
+    ├── framework/   # Test utilities (node management, HTTP client)
+    ├── connection_test.go  # P2P connectivity tests
+    └── sync_test.go        # Data replication tests
 ```
 
 ### File Size Guidelines
@@ -122,7 +155,7 @@ crates/
 - Tests inline (`#[cfg(test)] mod tests`) or separate `tests/` directory
 - `lib.rs` only contains module declarations and re-exports
 
-## 4. Naming Conventions
+## 5. Naming Conventions
 
 **Consistent naming prevents bugs and enables discovery.**
 
@@ -156,7 +189,7 @@ src/
 └── composite.rs     # Composite DAG
 ```
 
-## 5. Comments Policy
+## 6. Comments Policy
 
 **Minimal comments. Code should be self-documenting.**
 
@@ -200,7 +233,7 @@ let new_value = current + increment;  // Add increment to current
 // John changed this on 2024-01-15
 ```
 
-## 6. Test Organization
+## 7. Test Organization
 
 **Tests are documentation. Keep them clear and focused.**
 
@@ -241,7 +274,7 @@ Critical for CRDTs. Use `proptest` to verify:
 - Idempotence
 - Convergence
 
-## 7. Git Worktree Workflow
+## 8. Git Worktree Workflow
 
 **Multiple subsystems = multiple worktrees.**
 
@@ -254,7 +287,7 @@ cd ../defradb.rs-crypto   # Crypto work
 
 Each worktree is isolated, no branch switching overhead.
 
-## 8. Code-First Development
+## 9. Code-First Development
 
 **Order of implementation:**
 
@@ -286,14 +319,39 @@ Each worktree is isolated, no branch switching overhead.
    - Commit frequently with clear messages
 
 3. **Before committing**
-   - Tests pass: `cargo test`
+   - Rust tests pass: `cargo test`
    - No warnings: `cargo clippy`
    - Formatted: `cargo fmt`
+   - **Interop tests pass** (if touching P2P, query, schema, CRDT): `cd tests/interop && make test`
    - No extra markdown files created
 
 ## Common Commands
 
-### Testing
+### Go/Rust Interop Tests (Most Important)
+
+```bash
+cd tests/interop
+
+# Set Go DefraDB path
+export DEFRA_GO_PATH=/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb
+
+# Build both implementations
+make build-all
+
+# Run ALL interop tests (connection + sync)
+make test
+
+# Run just Rust-to-Rust connection tests (faster)
+make test-connection
+
+# Run cross-implementation tests (Go ↔ Rust)
+make test-cross
+
+# Clean test cache
+make clean
+```
+
+### Rust Unit Tests
 
 ```bash
 # Run all tests in workspace
