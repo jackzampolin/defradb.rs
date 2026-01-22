@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_select_source_error_propagation() {
+    async fn test_select_source_null_filter_returns_no_match() {
         let collection = make_test_collection();
         let mapping = make_test_mapping();
 
@@ -217,7 +217,7 @@ mod tests {
             None, // age is null
         ])];
 
-        // Add filter on scan that will error
+        // Filter with _gt on null returns false (Go DefraDB behavior), not error
         let filter =
             Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
 
@@ -230,10 +230,9 @@ mod tests {
         select.init().await.unwrap();
         select.start().await.unwrap();
 
+        // With Go DefraDB compatibility, null comparison returns false (no match)
         let result = select.next().await;
-        assert!(
-            result.is_err(),
-            "Source error should propagate through select"
-        );
+        assert!(result.is_ok(), "null comparison should not error");
+        assert!(!result.unwrap(), "null _gt 25 should not match");
     }
 }

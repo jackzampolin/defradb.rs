@@ -13,7 +13,7 @@ use crate::planner::{Doc, PlanNode};
 /// - Without GROUP BY: Computes average of all documents and yields a single result
 /// - With GROUP BY: For each group, adds the average to the document
 ///
-/// Null values are skipped. Returns null if no values to average (SQL semantics).
+/// Null values are skipped. Returns 0 if no values to average (Go DefraDB semantics).
 /// Always returns f64 for precision.
 pub struct AverageNode {
     source: Box<dyn PlanNode>,
@@ -67,8 +67,8 @@ impl AverageNode {
     }
 
     /// Compute average of a slice of documents
-    /// Returns None if no values (SQL semantics: AVG of empty set is NULL)
-    fn compute_average(&self, docs: &[Doc]) -> Option<f64> {
+    /// Returns 0.0 if no values (Go DefraDB semantics: AVG of empty set is 0)
+    fn compute_average(&self, docs: &[Doc]) -> f64 {
         let mut sum = 0.0;
         let mut count = 0usize;
 
@@ -83,25 +83,20 @@ impl AverageNode {
         }
 
         if count == 0 {
-            None
+            0.0 // Go DefraDB returns 0 for empty set, not null
         } else {
-            Some(sum / count as f64)
+            sum / count as f64
         }
     }
 
-    /// Convert average to JSON value (null for empty, f64 otherwise)
+    /// Convert average to JSON value
     /// Returns Null for NaN/Infinity to prevent silent data corruption
-    fn avg_to_json(avg: Option<f64>) -> JsonValue {
-        match avg {
-            None => JsonValue::Null,
-            Some(val) => {
-                // NaN and Infinity cannot be represented in JSON - return null
-                // This is safer than silently returning 0
-                serde_json::Number::from_f64(val)
-                    .map(JsonValue::Number)
-                    .unwrap_or(JsonValue::Null)
-            }
-        }
+    fn avg_to_json(avg: f64) -> JsonValue {
+        // NaN and Infinity cannot be represented in JSON - return 0
+        // This matches Go DefraDB behavior
+        serde_json::Number::from_f64(avg)
+            .map(JsonValue::Number)
+            .unwrap_or_else(|| JsonValue::Number(serde_json::Number::from(0)))
     }
 }
 
@@ -134,10 +129,11 @@ impl PlanNode for AverageNode {
                 if !self.grouped_mode && !self.done {
                     // Non-grouped mode: Return the single result
                     self.done = true;
+                    // Go DefraDB returns 0 for empty set, not null
                     let avg = if self.count == 0 {
-                        None
+                        0.0
                     } else {
-                        Some(self.sum / self.count as f64)
+                        self.sum / self.count as f64
                     };
                     let num_fields = self
                         .document_mapping
@@ -159,9 +155,6 @@ impl PlanNode for AverageNode {
 
                 // Clone the current doc from source and add the average
                 let mut doc = self.source.value().deep_clone();
-                if doc.num_fields() <= self.aggregate_index {
-                    doc.set(self.aggregate_index, JsonValue::Null);
-                }
                 doc.set(self.aggregate_index, Self::avg_to_json(group_avg));
                 self.current_doc = doc;
                 return Ok(true);
@@ -289,8 +282,10 @@ mod tests {
 
         assert!(avg_node.next().await.unwrap());
         let result = avg_node.value();
-        // Should return null for empty set (SQL semantics)
-        assert_eq!(result.get(3), Some(&JsonValue::Null));
+        // Go DefraDB returns 0 for empty set, not null
+        let avg_val = result.get(3).unwrap();
+        assert!(avg_val.is_number(), "AVG of empty set should return 0, not null");
+        assert_eq!(avg_val.as_f64().unwrap(), 0.0);
 
         avg_node.close().await.unwrap();
     }

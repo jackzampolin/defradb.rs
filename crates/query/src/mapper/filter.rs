@@ -290,10 +290,11 @@ impl Filter {
         match op {
             FilterOp::Eq => Ok(Self::values_equal(actual, expected)),
             FilterOp::Ne => Ok(!Self::values_equal(actual, expected)),
-            FilterOp::Gt => self.compare(actual, expected).map(|ord| ord.is_gt()),
-            FilterOp::Gte => self.compare(actual, expected).map(|ord| ord.is_ge()),
-            FilterOp::Lt => self.compare(actual, expected).map(|ord| ord.is_lt()),
-            FilterOp::Lte => self.compare(actual, expected).map(|ord| ord.is_le()),
+            // Comparison operators: None (from null or NaN) returns false (Go DefraDB behavior)
+            FilterOp::Gt => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_gt())),
+            FilterOp::Gte => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_ge())),
+            FilterOp::Lt => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_lt())),
+            FilterOp::Lte => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_le())),
             FilterOp::In => {
                 let arr = expected
                     .as_array()
@@ -379,8 +380,15 @@ impl Filter {
         }
     }
 
-    fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<std::cmp::Ordering> {
+    /// Compare two values for ordering.
+    /// Returns None for null comparisons (Go DefraDB behavior: null comparisons return false).
+    /// Supports int/float coercion (Go DefraDB uses numbers.TryUpcast).
+    fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<Option<std::cmp::Ordering>> {
         match (a, b) {
+            // Null comparisons: Go DefraDB returns false for null vs anything in ordering comparisons
+            (JsonValue::Null, _) | (_, JsonValue::Null) => Ok(None),
+
+            // Number comparisons: support int/float coercion (Go's numbers.TryUpcast behavior)
             (JsonValue::Number(a), JsonValue::Number(b)) => {
                 let a_val = a.as_f64().ok_or_else(|| {
                     QueryError::invalid_filter(format!("number {} cannot be compared", a))
@@ -388,11 +396,13 @@ impl Filter {
                 let b_val = b.as_f64().ok_or_else(|| {
                     QueryError::invalid_filter(format!("number {} cannot be compared", b))
                 })?;
-                a_val
-                    .partial_cmp(&b_val)
-                    .ok_or_else(|| QueryError::invalid_filter("cannot compare NaN values"))
+                Ok(a_val.partial_cmp(&b_val)) // Returns None for NaN, which becomes false
             }
-            (JsonValue::String(a), JsonValue::String(b)) => Ok(a.cmp(b)),
+
+            // String comparisons
+            (JsonValue::String(a), JsonValue::String(b)) => Ok(Some(a.cmp(b))),
+
+            // Type mismatch
             _ => Err(QueryError::TypeMismatch {
                 expected: "comparable types".to_string(),
                 actual: format!("{:?} vs {:?}", a, b),
@@ -409,7 +419,7 @@ impl Filter {
     ) -> Result<bool> {
         // Null fields never match (standard database behavior, matches Go DefraDB)
         if actual.is_null() {
-            return Ok(if negate { true } else { false });
+            return Ok(negate);
         }
 
         let op_name = if case_insensitive { "_ilike" } else { "_like" };
@@ -985,8 +995,8 @@ mod tests {
     }
 
     #[test]
-    fn test_null_field_gt_comparison_error() {
-        // Comparing null with _gt should fail with type mismatch
+    fn test_null_field_gt_comparison_returns_false() {
+        // Go DefraDB behavior: null _gt 25 returns false (not error)
         let filter =
             Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
         let mapping = make_mapping();
@@ -997,7 +1007,8 @@ mod tests {
             Some(json!(true)),
         ];
         let result = filter.matches(&fields, &mapping);
-        assert!(result.is_err());
+        assert!(result.is_ok(), "null _gt comparison should not error");
+        assert!(!result.unwrap(), "null _gt 25 should return false");
     }
 
     #[test]

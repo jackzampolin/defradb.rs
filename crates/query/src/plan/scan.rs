@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scan_filter_error_propagation() {
+    async fn test_scan_filter_null_comparison_returns_no_match() {
         use std::collections::HashMap;
 
         let collection = make_test_collection();
@@ -381,7 +381,7 @@ mod tests {
             None, // age is null
         ])];
 
-        // Filter with _gt on null will error
+        // Filter with _gt on null returns false (Go DefraDB behavior), not error
         let filter =
             Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
 
@@ -392,10 +392,10 @@ mod tests {
         scan.init().await.unwrap();
         scan.start().await.unwrap();
 
+        // With Go DefraDB compatibility, null _gt 25 returns false (no match),
+        // so next() should return Ok(false) - no documents found
         let result = scan.next().await;
-        assert!(
-            result.is_err(),
-            "Filter error should propagate through scan"
-        );
+        assert!(result.is_ok(), "null comparison should not error");
+        assert!(!result.unwrap(), "null _gt 25 should not match");
     }
 }
