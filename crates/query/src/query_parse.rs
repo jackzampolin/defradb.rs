@@ -7,7 +7,7 @@ use graphql_parser::query::{
     SelectionSet, Value,
 };
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -44,29 +44,56 @@ fn parse_selection_to_selects<'a>(
     variables: Option<&HashMap<String, JsonValue>>,
     fragments: &FragmentMap<'a>,
     selects: &mut Vec<Select>,
+    visiting: &mut HashSet<String>,
 ) -> Result<()> {
     match selection {
         Selection::Field(field) => {
-            let select = parse_field_to_select(field, variables, fragments)?;
+            let select = parse_field_to_select(field, variables, fragments, visiting)?;
             selects.push(select);
         }
         Selection::FragmentSpread(spread) => {
+            // Check for circular fragment reference
+            if visiting.contains(&spread.fragment_name) {
+                return Err(QueryError::parse(format!(
+                    "circular fragment reference detected: '{}'",
+                    spread.fragment_name
+                )));
+            }
+
             // Look up the fragment by name
             let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
                 QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
             })?;
 
+            // Mark this fragment as being visited
+            visiting.insert(spread.fragment_name.clone());
+
             // Process each selection in the fragment's selection set
             for frag_selection in &frag.selection_set.items {
-                parse_selection_to_selects(frag_selection, variables, fragments, selects)?;
+                parse_selection_to_selects(
+                    frag_selection,
+                    variables,
+                    fragments,
+                    selects,
+                    visiting,
+                )?;
             }
+
+            // Unmark after processing
+            visiting.remove(&spread.fragment_name);
         }
         Selection::InlineFragment(inline) => {
             // Inline fragments: ... on Type { fields }
             // For now, we ignore the type condition and just expand the fields
             // (DefraDB doesn't have interface/union types yet)
             for inline_selection in &inline.selection_set.items {
-                parse_selection_to_selects(inline_selection, variables, fragments, selects)?;
+                parse_selection_to_selects(
+                    inline_selection,
+                    variables,
+                    fragments,
+                    selects,
+                    visiting,
+                )?;
             }
         }
     }
@@ -151,24 +178,28 @@ pub fn parse_request_with_variables(
                         if has_explain_directive(&q.directives) {
                             explain = true;
                         }
+                        let mut visiting = HashSet::new();
                         for selection in &q.selection_set.items {
                             parse_selection_to_selects(
                                 selection,
                                 variables,
                                 &fragments,
                                 &mut selects,
+                                &mut visiting,
                             )?;
                         }
                     }
                     OperationDefinition::SelectionSet(ss) => {
                         // Bare selection set is treated as query
                         has_query = true;
+                        let mut visiting = HashSet::new();
                         for selection in &ss.items {
                             parse_selection_to_selects(
                                 selection,
                                 variables,
                                 &fragments,
                                 &mut selects,
+                                &mut visiting,
                             )?;
                         }
                     }
@@ -211,6 +242,7 @@ fn parse_field_to_select(
     field: &Field<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
     fragments: &FragmentMap<'_>,
+    visiting: &mut HashSet<String>,
 ) -> Result<Select> {
     let collection_name = field.name.clone();
     let alias = field.alias.clone();
@@ -277,8 +309,13 @@ fn parse_field_to_select(
     }
 
     // Parse selection set (child fields)
-    let (fields, mapping) =
-        parse_selection_set(&field.selection_set, &collection_name, variables, fragments)?;
+    let (fields, mapping) = parse_selection_set(
+        &field.selection_set,
+        &collection_name,
+        variables,
+        fragments,
+        visiting,
+    )?;
     select.fields = fields;
     select.document_mapping = mapping;
 
@@ -291,6 +328,7 @@ fn parse_selection_set(
     _collection_name: &str,
     variables: Option<&HashMap<String, JsonValue>>,
     fragments: &FragmentMap<'_>,
+    visiting: &mut HashSet<String>,
 ) -> Result<(Vec<Requestable>, DocumentMapping)> {
     let mut fields = Vec::new();
     let mut mapping = DocumentMapping::new();
@@ -318,7 +356,7 @@ fn parse_selection_set(
                     fields.push(Requestable::Aggregate(aggregate));
                 } else if !field.selection_set.items.is_empty() {
                     // This is a nested select (relation)
-                    let nested = parse_field_to_select(field, variables, fragments)?;
+                    let nested = parse_field_to_select(field, variables, fragments, visiting)?;
 
                     // Add nested select to document mapping
                     // Use field name for internal indexing, output_name (alias) for rendering
@@ -344,10 +382,21 @@ fn parse_selection_set(
                 }
             }
             Selection::FragmentSpread(spread) => {
+                // Check for circular fragment reference
+                if visiting.contains(&spread.fragment_name) {
+                    return Err(QueryError::parse(format!(
+                        "circular fragment reference detected: '{}'",
+                        spread.fragment_name
+                    )));
+                }
+
                 // Look up the fragment by name
                 let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
                     QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
                 })?;
+
+                // Mark this fragment as being visited
+                visiting.insert(spread.fragment_name.clone());
 
                 // Recursively parse the fragment's selection set
                 let (frag_fields, _frag_mapping) = parse_selection_set(
@@ -355,7 +404,11 @@ fn parse_selection_set(
                     _collection_name,
                     variables,
                     fragments,
+                    visiting,
                 )?;
+
+                // Unmark after processing
+                visiting.remove(&spread.fragment_name);
 
                 // Merge fragment fields and mapping into our current sets
                 for frag_field in frag_fields {
@@ -387,6 +440,7 @@ fn parse_selection_set(
                     _collection_name,
                     variables,
                     fragments,
+                    visiting,
                 )?;
 
                 // Merge inline fragment fields into our current sets
@@ -943,12 +997,15 @@ fn parse_field_to_mutation(
 
     // Parse selection set (fields to return after mutation)
     // For mutations, we don't support fragments in return fields
+    // For mutations, we don't support fragments in return fields
     let empty_fragments: FragmentMap<'_> = HashMap::new();
+    let mut empty_visiting = HashSet::new();
     let (fields, mapping) = parse_selection_set(
         &field.selection_set,
         &collection_name,
         variables,
         &empty_fragments,
+        &mut empty_visiting,
     )?;
     mutation.fields = fields;
     mutation.document_mapping = mapping;

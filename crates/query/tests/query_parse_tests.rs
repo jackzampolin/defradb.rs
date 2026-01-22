@@ -273,6 +273,43 @@ fn test_parse_nested_fragment_works() {
 }
 
 #[test]
+fn test_parse_circular_fragment_returns_error() {
+    // Fragment A references B, B references A
+    let query = r#"
+        fragment A on User { name ...B }
+        fragment B on User { age ...A }
+        query { Users { ...A } }
+    "#;
+    let result = parse_query(query);
+    assert!(result.is_err(), "Circular fragment should error");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("circular fragment reference"),
+        "Expected error about circular fragment"
+    );
+}
+
+#[test]
+fn test_parse_self_referential_fragment_returns_error() {
+    // Fragment that references itself
+    let query = r#"
+        fragment A on User { name ...A }
+        query { Users { ...A } }
+    "#;
+    let result = parse_query(query);
+    assert!(result.is_err(), "Self-referential fragment should error");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("circular fragment reference"),
+        "Expected error about circular fragment"
+    );
+}
+
+#[test]
 fn test_parse_negative_limit_returns_error() {
     let query = "{ Users(limit: -1) { name } }";
     let result = parse_query(query);
