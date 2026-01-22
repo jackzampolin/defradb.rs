@@ -479,6 +479,378 @@ proptest! {
             assert_eq!(value, base.wrapping_add(-decrement));
         });
     }
+
+    // ------------------------------------------------------------------------
+    // Full Convergence Tests (All Permutations)
+    // ------------------------------------------------------------------------
+
+    /// Property: LWW convergence - all 6 permutations of 3 deltas produce same result
+    #[test]
+    fn test_lww_full_convergence(
+        p1 in 0..1000u64,
+        p2 in 0..1000u64,
+        p3 in 0..1000u64,
+        v1 in prop::collection::vec(0..255u8, 1..30),
+        v2 in prop::collection::vec(0..255u8, 1..30),
+        v3 in prop::collection::vec(0..255u8, 1..30)
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let delta1 = LwwDelta::new(
+                b"doc1".to_vec(),
+                "name".to_string(),
+                p1,
+                "v1".to_string(),
+                v1.clone(),
+            ).unwrap();
+
+            let delta2 = LwwDelta::new(
+                b"doc1".to_vec(),
+                "name".to_string(),
+                p2,
+                "v1".to_string(),
+                v2.clone(),
+            ).unwrap();
+
+            let delta3 = LwwDelta::new(
+                b"doc1".to_vec(),
+                "name".to_string(),
+                p3,
+                "v1".to_string(),
+                v3.clone(),
+            ).unwrap();
+
+            // All 6 permutations of applying 3 deltas
+            let permutations: Vec<Vec<&LwwDelta>> = vec![
+                vec![&delta1, &delta2, &delta3],
+                vec![&delta1, &delta3, &delta2],
+                vec![&delta2, &delta1, &delta3],
+                vec![&delta2, &delta3, &delta1],
+                vec![&delta3, &delta1, &delta2],
+                vec![&delta3, &delta2, &delta1],
+            ];
+
+            let mut results = Vec::new();
+            for perm in permutations {
+                let store = MemoryStore::new();
+                let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
+                let mut txn = store.new_txn(false).await.unwrap();
+                for delta in perm {
+                    lww.merge(&mut *txn, &ctx, delta).await.unwrap();
+                }
+                results.push(lww.value(&*txn).await.ok());
+            }
+
+            // All 6 replicas should converge to identical state
+            for i in 1..results.len() {
+                assert_eq!(results[0], results[i], "Permutation {} diverged", i);
+            }
+        });
+    }
+
+    /// Property: Counter convergence - all 6 permutations of 3 deltas produce same result
+    #[test]
+    fn test_counter_full_convergence(
+        inc1 in -500i64..500i64,
+        inc2 in -500i64..500i64,
+        inc3 in -500i64..500i64,
+        nonce1 in 0..10000i64,
+        nonce2 in 10000..20000i64,
+        nonce3 in 20000..30000i64
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let delta1 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            ).unwrap();
+
+            let delta2 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            ).unwrap();
+
+            let delta3 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                30,
+                nonce3,
+                "v1".to_string(),
+                inc3,
+            ).unwrap();
+
+            // All 6 permutations
+            let permutations: Vec<Vec<&CounterDelta>> = vec![
+                vec![&delta1, &delta2, &delta3],
+                vec![&delta1, &delta3, &delta2],
+                vec![&delta2, &delta1, &delta3],
+                vec![&delta2, &delta3, &delta1],
+                vec![&delta3, &delta1, &delta2],
+                vec![&delta3, &delta2, &delta1],
+            ];
+
+            let mut results = Vec::new();
+            for perm in permutations {
+                let store = MemoryStore::new();
+                let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+                let mut txn = store.new_txn(false).await.unwrap();
+                for delta in perm {
+                    counter.merge(&mut *txn, &ctx, delta).await.unwrap();
+                }
+                results.push(counter.value(&*txn).await.ok());
+            }
+
+            // All 6 replicas should converge to identical state
+            for i in 1..results.len() {
+                assert_eq!(results[0], results[i], "Permutation {} diverged", i);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------------
+    // PCounter (positive-only) Specific Tests
+    // ------------------------------------------------------------------------
+
+    /// Property: PCounter (allow_decrement=false) commutativity
+    #[test]
+    fn test_pcounter_commutativity(
+        inc1 in 1i64..1000i64,
+        inc2 in 1i64..1000i64,
+        nonce1 in 0..10000i64,
+        nonce2 in 10000..20000i64
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let delta1 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            ).unwrap();
+
+            let delta2 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            ).unwrap();
+
+            // Store 1: delta1 then delta2
+            let store1 = MemoryStore::new();
+            let counter1 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
+            let mut txn1 = store1.new_txn(false).await.unwrap();
+            counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
+            counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
+            let val1 = counter1.value(&*txn1).await.ok();
+
+            // Store 2: delta2 then delta1
+            let store2 = MemoryStore::new();
+            let counter2 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
+            let mut txn2 = store2.new_txn(false).await.unwrap();
+            counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
+            counter2.merge(&mut *txn2, &ctx, &delta1).await.unwrap();
+            let val2 = counter2.value(&*txn2).await.ok();
+
+            assert_eq!(val1, val2);
+        });
+    }
+
+    /// Property: PCounter convergence - all permutations produce same result
+    #[test]
+    fn test_pcounter_full_convergence(
+        inc1 in 1i64..500i64,
+        inc2 in 1i64..500i64,
+        inc3 in 1i64..500i64,
+        nonce1 in 0..10000i64,
+        nonce2 in 10000..20000i64,
+        nonce3 in 20000..30000i64
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let delta1 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            ).unwrap();
+
+            let delta2 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            ).unwrap();
+
+            let delta3 = CounterDelta::new_int64(
+                b"doc1".to_vec(),
+                "count".to_string(),
+                30,
+                nonce3,
+                "v1".to_string(),
+                inc3,
+            ).unwrap();
+
+            let permutations: Vec<Vec<&CounterDelta>> = vec![
+                vec![&delta1, &delta2, &delta3],
+                vec![&delta1, &delta3, &delta2],
+                vec![&delta2, &delta1, &delta3],
+                vec![&delta2, &delta3, &delta1],
+                vec![&delta3, &delta1, &delta2],
+                vec![&delta3, &delta2, &delta1],
+            ];
+
+            let mut results = Vec::new();
+            for perm in permutations {
+                let store = MemoryStore::new();
+                let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
+                let mut txn = store.new_txn(false).await.unwrap();
+                for delta in perm {
+                    counter.merge(&mut *txn, &ctx, delta).await.unwrap();
+                }
+                results.push(counter.value(&*txn).await.ok());
+            }
+
+            for i in 1..results.len() {
+                assert_eq!(results[0], results[i], "PCounter permutation {} diverged", i);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------------
+    // Float64 Counter Property Tests
+    // ------------------------------------------------------------------------
+
+    /// Property: Float64 counter commutativity
+    #[test]
+    fn test_float64_counter_commutativity(
+        inc1 in -1000.0f64..1000.0f64,
+        inc2 in -1000.0f64..1000.0f64,
+        nonce1 in 0..10000i64,
+        nonce2 in 10000..20000i64
+    ) {
+        // Skip NaN and infinite values
+        prop_assume!(inc1.is_finite() && inc2.is_finite());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let delta1 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "amount".to_string(),
+                10,
+                nonce1,
+                "v1".to_string(),
+                inc1,
+            ).unwrap();
+
+            let delta2 = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "amount".to_string(),
+                20,
+                nonce2,
+                "v1".to_string(),
+                inc2,
+            ).unwrap();
+
+            // Store 1: delta1 then delta2
+            let store1 = MemoryStore::new();
+            let counter1 = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
+            let mut txn1 = store1.new_txn(false).await.unwrap();
+            counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
+            counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
+            let val1 = counter1.value(&*txn1).await.ok();
+
+            // Store 2: delta2 then delta1
+            let store2 = MemoryStore::new();
+            let counter2 = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
+            let mut txn2 = store2.new_txn(false).await.unwrap();
+            counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
+            counter2.merge(&mut *txn2, &ctx, &delta1).await.unwrap();
+            let val2 = counter2.value(&*txn2).await.ok();
+
+            assert_eq!(val1, val2);
+        });
+    }
+
+    /// Property: Float64 counter idempotence
+    #[test]
+    fn test_float64_counter_idempotence(
+        increment in -1000.0f64..1000.0f64,
+        nonce in 0..10000i64
+    ) {
+        prop_assume!(increment.is_finite());
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let ctx = Context {
+                doc_id: DocId::new("doc1"),
+                schema_version: "v1".to_string(),
+            };
+
+            let delta = CounterDelta::new_float64(
+                b"doc1".to_vec(),
+                "amount".to_string(),
+                10,
+                nonce,
+                "v1".to_string(),
+                increment,
+            ).unwrap();
+
+            let store = MemoryStore::new();
+            let counter = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
+            let mut txn = store.new_txn(false).await.unwrap();
+
+            // Apply once
+            counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+            let val1 = counter.value(&*txn).await.ok();
+
+            // Apply again (should be idempotent due to nonce)
+            counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+            let val2 = counter.value(&*txn).await.ok();
+
+            assert_eq!(val1, val2);
+        });
+    }
 }
 
 // ============================================================================
