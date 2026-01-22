@@ -115,27 +115,14 @@ pub async fn schema(
         Ok(sdl) => Ok((StatusCode::OK, sdl).into_response()),
         Err(e) => {
             tracing::error!(error = %e, "Schema retrieval failed");
-            let user_message = categorize_schema_error(&e);
             Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::error::ErrorResponse {
-                    error: user_message,
+                    error: "Failed to retrieve schema".to_string(),
                 }),
             )
                 .into_response())
         }
-    }
-}
-
-fn categorize_schema_error(e: &query::error::QueryError) -> String {
-    use query::error::QueryError;
-    match e {
-        QueryError::Storage(_) => {
-            "Schema unavailable due to storage error. Please try again.".to_string()
-        }
-        QueryError::Schema(_) => "Schema validation error. Check schema definition.".to_string(),
-        QueryError::Parse(_) => "Schema parse error. Check schema syntax.".to_string(),
-        _ => "Failed to retrieve schema. Check server logs for details.".to_string(),
     }
 }
 

@@ -443,3 +443,147 @@ async fn test_nac_status_endpoint_allowed_for_owner() {
 
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// ============================================================================
+// Schema Endpoint NAC Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_schema_endpoint_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // Anonymous request to schema endpoint should be rejected when NAC is enabled
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/schema")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_schema_endpoint_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // Owner request to schema endpoint should succeed
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/schema")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_schema_endpoint_rejects_non_owner() {
+    let (_, owner_did) = create_test_identity();
+    let (other_identity, _) = create_test_identity();
+    let other_token = create_test_token(&other_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // Non-owner request to schema endpoint should be rejected
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/schema")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", other_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_schema_endpoint_allows_user_with_collection_get_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant only CollectionGet permission to the user
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::CollectionGet);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // User with CollectionGet permission can access schema
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/schema")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_schema_endpoint_allows_anonymous_when_nac_not_configured() {
+    // NAC not configured = permissive default
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new())).build();
+
+    let app = create_router_with_state(state);
+
+    // Anonymous request should succeed when NAC is not configured
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/schema")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
