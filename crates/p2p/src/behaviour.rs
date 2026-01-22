@@ -46,7 +46,7 @@ use libp2p::{
     mdns,
     request_response::{self, ProtocolSupport},
     swarm::NetworkBehaviour,
-    Multiaddr, PeerId, StreamProtocol,
+    PeerId, StreamProtocol,
 };
 use libp2p_stream as stream;
 

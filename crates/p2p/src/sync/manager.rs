@@ -104,7 +104,7 @@ pub enum SyncEvent {
     ///
     /// All missing blocks have been fetched. The database layer should now
     /// process the complete DAG for CRDT merge.
-    DAGReady {
+    DagReady {
         /// Root CID of the completed DAG
         root_cid: Cid,
         /// Document ID
@@ -814,7 +814,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         );
 
         // Emit event that DAG is ready for merge
-        let _ = self.event_tx.send(SyncEvent::DAGReady {
+        let _ = self.event_tx.send(SyncEvent::DagReady {
             root_cid: *root_cid,
             doc_id: info.doc_id.clone(),
             collection_id: info.collection_id.clone(),

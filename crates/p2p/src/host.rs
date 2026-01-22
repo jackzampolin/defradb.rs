@@ -24,7 +24,6 @@ use libp2p::{
     gossipsub, identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use std::collections::HashSet;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -608,6 +607,10 @@ pub struct P2PHost<S: Store> {
     two_stream_handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
     /// Receiver for two-stream events
     two_stream_event_rx: mpsc::Receiver<TwoStreamEvent>,
+    /// Tracked spawned tasks for graceful shutdown
+    spawned_tasks: tokio::task::JoinSet<()>,
+    /// Bitswap query abort handles for cancellation support
+    bitswap_queries: HashMap<QueryId, tokio::task::AbortHandle>,
 }
 
 impl<S: Store> P2PHost<S> {
@@ -733,6 +736,8 @@ impl<S: Store> P2PHost<S> {
             replicators: Arc::clone(&replicators),
             two_stream_handler,
             two_stream_event_rx,
+            spawned_tasks: tokio::task::JoinSet::new(),
+            bitswap_queries: HashMap::new(),
         };
 
         Ok((host, handle, event_rx, replicators))
@@ -945,7 +950,32 @@ impl<S: Store> P2PHost<S> {
             }
 
             HostCommand::Shutdown => {
-                info!("Shutdown requested");
+                info!("Shutdown requested, waiting for {} spawned tasks to complete", self.spawned_tasks.len());
+                // Wait for all spawned tasks to complete with a timeout
+                let timeout_duration = std::time::Duration::from_secs(5);
+                let shutdown_start = std::time::Instant::now();
+                while !self.spawned_tasks.is_empty() {
+                    if shutdown_start.elapsed() > timeout_duration {
+                        warn!("Shutdown timeout exceeded, aborting {} remaining tasks", self.spawned_tasks.len());
+                        self.spawned_tasks.abort_all();
+                        break;
+                    }
+                    // Try to join tasks with a short timeout
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        self.spawned_tasks.join_next(),
+                    ).await {
+                        Ok(Some(Ok(()))) => {
+                            debug!("Spawned task completed during shutdown");
+                        }
+                        Ok(Some(Err(e))) => {
+                            warn!("Spawned task failed during shutdown: {}", e);
+                        }
+                        Ok(None) => break, // No more tasks
+                        Err(_) => continue, // Timeout, check again
+                    }
+                }
+                info!("All spawned tasks completed or aborted");
                 return false;
             }
 
@@ -973,8 +1003,8 @@ impl<S: Store> P2PHost<S> {
                 let missing_cids: Vec<Cid> = missing;
                 let providers_list = providers;
 
-                // Spawn async task to fetch blocks
-                tokio::spawn(async move {
+                // Spawn async task to fetch blocks (with cancellation support)
+                let task_handle = tokio::spawn(async move {
                     info!(
                         query_id = query_id.0,
                         missing_count = missing_cids.len(),
@@ -1061,16 +1091,24 @@ impl<S: Store> P2PHost<S> {
                     }
                 });
 
+                // Store the abort handle for cancellation support
+                self.bitswap_queries.insert(query_id, task_handle.abort_handle());
+
                 if response.send(Ok(query_id)).is_err() {
                     debug!(cid = %cid, "BitswapSync command response dropped - caller cancelled");
                 }
             }
 
             HostCommand::BitswapCancel { query_id, response } => {
-                debug!(query_id = ?query_id, "Cancelling Bitswap query (no-op for iroh-bitswap)");
-                // iroh-bitswap doesn't have direct query cancellation at the behaviour level
-                // Cancellation happens through the Client API
-                if response.send(false).is_err() {
+                let cancelled = if let Some(abort_handle) = self.bitswap_queries.remove(&query_id) {
+                    debug!(query_id = ?query_id, "Cancelling Bitswap query");
+                    abort_handle.abort();
+                    true
+                } else {
+                    debug!(query_id = ?query_id, "Bitswap query not found for cancellation");
+                    false
+                };
+                if response.send(cancelled).is_err() {
                     debug!(query_id = ?query_id, "BitswapCancel command response dropped - caller cancelled");
                 }
             }
@@ -1120,7 +1158,7 @@ impl<S: Store> P2PHost<S> {
                 response,
             } => {
                 let handler = self.two_stream_handler.clone();
-                tokio::spawn(async move {
+                self.spawned_tasks.spawn(async move {
                     let mut h = handler.lock().await;
                     let result = h.send_response(peer_id, reply).await.map_err(|e| e);
                     if response.send(result).is_err() {
@@ -1135,7 +1173,7 @@ impl<S: Store> P2PHost<S> {
                 response,
             } => {
                 let handler = self.two_stream_handler.clone();
-                tokio::spawn(async move {
+                self.spawned_tasks.spawn(async move {
                     let mut h = handler.lock().await;
                     let result = h.send_request(peer_id, request).await.map_err(|e| e);
                     if response.send(result).is_err() {

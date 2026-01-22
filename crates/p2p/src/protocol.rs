@@ -39,14 +39,6 @@ pub const BASE_PROTOCOL_ID: &str = "/defra/0.0.1";
 /// Matches Go's `protocolBase = "/defradb/"`.
 pub const PROTOCOL_BASE: &str = "/defradb/";
 
-/// Protocol request suffix format.
-/// Matches Go's `protocolRequestSuffix = "_req/" + protocolVersion`.
-pub const PROTOCOL_REQUEST_SUFFIX: &str = "_req/0.0.1";
-
-/// Protocol response suffix format.
-/// Matches Go's `protocolResponseSuffix = "_resp/" + protocolVersion`.
-pub const PROTOCOL_RESPONSE_SUFFIX: &str = "_resp/0.0.1";
-
 /// Message version string used in wire messages.
 /// Matches Go's `messageVersion = "/defradb/0.0.1"`.
 pub const MESSAGE_VERSION: &str = "/defradb/0.0.1";
@@ -86,21 +78,6 @@ pub fn pushlog_response_protocol() -> StreamProtocol {
     rep_response_protocol()
 }
 
-/// StreamProtocol for identity exchange.
-pub fn identity_protocol() -> StreamProtocol {
-    StreamProtocol::new("/defra/identify/0.0.1")
-}
-
-/// Build a request protocol ID for a given channel name.
-pub fn request_protocol(name: &str) -> String {
-    format!("{}{}{}", PROTOCOL_BASE, name, PROTOCOL_REQUEST_SUFFIX)
-}
-
-/// Build a response protocol ID for a given channel name.
-pub fn response_protocol(name: &str) -> String {
-    format!("{}{}{}", PROTOCOL_BASE, name, PROTOCOL_RESPONSE_SUFFIX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,14 +96,6 @@ mod tests {
     fn test_rep_protocols() {
         assert_eq!(rep_request_protocol().as_ref(), "/defradb/rep_req/0.0.1");
         assert_eq!(rep_response_protocol().as_ref(), "/defradb/rep_resp/0.0.1");
-    }
-
-    #[test]
-    fn test_protocol_builders() {
-        assert_eq!(request_protocol("rep"), "/defradb/rep_req/0.0.1");
-        assert_eq!(response_protocol("rep"), "/defradb/rep_resp/0.0.1");
-        assert_eq!(request_protocol("ident"), "/defradb/ident_req/0.0.1");
-        assert_eq!(response_protocol("ident"), "/defradb/ident_resp/0.0.1");
     }
 
     #[test]

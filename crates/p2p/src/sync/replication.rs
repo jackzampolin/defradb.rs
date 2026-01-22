@@ -217,7 +217,7 @@ impl ReplicationLoop {
                 // Initiate Bitswap fetch for missing blocks
                 Self::handle_dag_needs_fetch(coordinator, root_cid, missing, providers).await
             }
-            SyncEvent::DAGReady {
+            SyncEvent::DagReady {
                 root_cid,
                 doc_id,
                 collection_id,
@@ -451,7 +451,7 @@ impl ReplicationLoop {
                             Self::handle_dag_needs_fetch(&coordinator, root_cid, missing, providers)
                                 .await
                         }
-                        SyncEvent::DAGReady {
+                        SyncEvent::DagReady {
                             root_cid,
                             doc_id,
                             collection_id,

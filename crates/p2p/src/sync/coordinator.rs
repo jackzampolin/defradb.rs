@@ -95,7 +95,7 @@ use libp2p::PeerId;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
-use crate::message::{Message, PushLogBroadcast, PushLogReply};
+use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
 
@@ -682,21 +682,52 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ///
     /// After subscribing, updates to any document in the collection will be
     /// received and processed. The subscription is persisted to storage.
+    ///
+    /// # Ordering
+    ///
+    /// Storage is persisted BEFORE subscribing to GossipSub to ensure consistency.
+    /// If storage fails, we don't subscribe (avoiding inconsistent state where
+    /// we receive messages for a collection we haven't recorded).
     pub async fn subscribe_collection(&self, collection_id: &str) -> Result<bool> {
-        let result = self.broadcaster.subscribe_collection(collection_id).await?;
-        if result {
-            // Persist to storage first
-            self.collection_store.add_collection(collection_id).await?;
-
-            // Update in-memory cache
-            self.subscribed_collections
-                .write()
-                .await
-                .insert(collection_id.to_string());
-
-            tracing::debug!(collection_id = %collection_id, "Subscribed to collection (persisted)");
+        // Check if already subscribed in cache (fast path)
+        if self.subscribed_collections.read().await.contains(collection_id) {
+            return Ok(false);
         }
-        Ok(result)
+
+        // Persist to storage FIRST (before GossipSub subscription)
+        // This ensures we don't end up in an inconsistent state where we're
+        // subscribed to the topic but haven't recorded it in storage.
+        self.collection_store.add_collection(collection_id).await?;
+
+        // Now subscribe to GossipSub
+        let result = self.broadcaster.subscribe_collection(collection_id).await;
+
+        match result {
+            Ok(subscribed) => {
+                // Update in-memory cache regardless of whether it's new or already subscribed
+                self.subscribed_collections
+                    .write()
+                    .await
+                    .insert(collection_id.to_string());
+
+                if subscribed {
+                    tracing::debug!(collection_id = %collection_id, "Subscribed to collection (persisted)");
+                }
+                Ok(subscribed)
+            }
+            Err(e) => {
+                // GossipSub subscription failed - remove from storage to stay consistent
+                if let Err(remove_err) = self.collection_store.remove_collection(collection_id).await {
+                    tracing::error!(
+                        collection_id = %collection_id,
+                        subscribe_error = %e,
+                        remove_error = %remove_err,
+                        "Failed to rollback storage after GossipSub subscription failure"
+                    );
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Subscribe to a specific document for sync.

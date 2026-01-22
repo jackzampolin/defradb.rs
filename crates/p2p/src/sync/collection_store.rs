@@ -30,11 +30,6 @@ impl P2PCollectionKey {
         }
     }
 
-    /// Get the prefix for all P2P collection keys
-    pub fn prefix() -> &'static [u8] {
-        P2P_COLLECTION_PREFIX
-    }
-
     /// Parse a collection ID from a key
     pub fn parse_collection_id(key: &[u8]) -> Option<String> {
         if key.starts_with(P2P_COLLECTION_PREFIX) {

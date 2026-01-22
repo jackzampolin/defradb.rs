@@ -12,15 +12,41 @@
 //!
 //! Messages are CBOR encoded for wire compatibility with the Go implementation.
 //! CBOR byte strings (major type 2) require serde_bytes annotations for Vec<u8>.
+//!
+//! # CBOR Serialization Guide
+//!
+//! Go's fxamacker/cbor has specific behaviors for `[]byte` that Rust must match:
+//!
+//! | Rust Type | Go Equivalent | Serializer | When to Use |
+//! |-----------|---------------|------------|-------------|
+//! | `Vec<u8>` | `[]byte` (non-nil) | `serde_bytes` | Required bytes field |
+//! | `Option<Vec<u8>>` | `[]byte` (nullable) | `optional_bytes` | Optional signature field |
+//! | `Vec<u8>` (may be empty) | `[]byte` (nil=null) | `nullable_bytes` | Public key (empty→CBOR null) |
+//!
+//! ## `serde_bytes`
+//! Standard CBOR byte string encoding. Use for `Vec<u8>` fields that always contain data.
+//! Example: CID bytes, block data.
+//!
+//! ## `optional_bytes`
+//! Handles `Option<Vec<u8>>` where `None` → CBOR null, `Some(bytes)` → CBOR byte string.
+//! Use for fields that are conditionally present (e.g., signature before signing).
+//!
+//! ## `nullable_bytes`
+//! Handles `Vec<u8>` where empty `Vec` → CBOR null (matching Go's `nil []byte`).
+//! Use for fields like pubkey where Go sends CBOR null for unset values.
+//! WARNING: On round-trip, empty bytes become CBOR null which becomes empty bytes.
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::MESSAGE_VERSION;
 
 /// Custom serialization for Option<Vec<u8>> as CBOR byte strings.
-/// Needed because serde_bytes doesn't directly support Option<Vec<u8>>.
+///
+/// Use this for optional byte fields like signatures that may or may not be present.
+/// - `None` serializes to CBOR null
+/// - `Some(bytes)` serializes to CBOR byte string
 mod optional_bytes {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -42,9 +68,15 @@ mod optional_bytes {
     }
 }
 
-/// Custom serialization for Vec<u8> that handles CBOR null as empty bytes.
-/// Go's fxamacker/cbor sends nil []byte as CBOR null instead of empty byte string.
-/// We serialize empty Vec<u8> as CBOR null to match Go's behavior.
+/// Custom serialization for Vec<u8> that treats empty as CBOR null.
+///
+/// Go's fxamacker/cbor sends `nil []byte` as CBOR null instead of empty byte string.
+/// This serializer matches that behavior:
+/// - Empty `Vec<u8>` serializes to CBOR null
+/// - Non-empty `Vec<u8>` serializes to CBOR byte string
+/// - CBOR null deserializes to empty `Vec<u8>`
+///
+/// Use for fields like pubkey where Go may send CBOR null for unset values.
 mod nullable_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
