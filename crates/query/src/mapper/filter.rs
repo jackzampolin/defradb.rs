@@ -47,6 +47,15 @@ pub enum FilterOp {
     /// Negated case-insensitive pattern match (_nilike)
     #[serde(rename = "_nilike")]
     Nilike,
+    /// Array contains value (_contains)
+    #[serde(rename = "_contains")]
+    Contains,
+    /// Array is contained in given array (_contained_in)
+    #[serde(rename = "_contained_in")]
+    ContainedIn,
+    /// Object/map has key (_has_key)
+    #[serde(rename = "_has_key")]
+    HasKey,
     /// Logical AND (_and)
     #[serde(rename = "_and")]
     And,
@@ -74,6 +83,9 @@ impl FilterOp {
             "_nlike" => Some(Self::Nlike),
             "_ilike" => Some(Self::Ilike),
             "_nilike" => Some(Self::Nilike),
+            "_contains" => Some(Self::Contains),
+            "_contained_in" => Some(Self::ContainedIn),
+            "_has_key" => Some(Self::HasKey),
             "_and" => Some(Self::And),
             "_or" => Some(Self::Or),
             "_not" => Some(Self::Not),
@@ -96,6 +108,9 @@ impl FilterOp {
             Self::Nlike => "_nlike",
             Self::Ilike => "_ilike",
             Self::Nilike => "_nilike",
+            Self::Contains => "_contains",
+            Self::ContainedIn => "_contained_in",
+            Self::HasKey => "_has_key",
             Self::And => "_and",
             Self::Or => "_or",
             Self::Not => "_not",
@@ -293,6 +308,35 @@ impl Filter {
             FilterOp::Nlike => self.like_match(actual, expected, true, false),
             FilterOp::Ilike => self.like_match(actual, expected, false, true),
             FilterOp::Nilike => self.like_match(actual, expected, true, true),
+            FilterOp::Contains => {
+                // Array field contains the expected value
+                let arr = actual
+                    .as_array()
+                    .ok_or_else(|| QueryError::invalid_filter("_contains requires array field"))?;
+                Ok(arr.iter().any(|v| Self::values_equal(v, expected)))
+            }
+            FilterOp::ContainedIn => {
+                // All elements of actual array are in expected array (actual is subset of expected)
+                let actual_arr = actual.as_array().ok_or_else(|| {
+                    QueryError::invalid_filter("_contained_in requires array field")
+                })?;
+                let expected_arr = expected.as_array().ok_or_else(|| {
+                    QueryError::invalid_filter("_contained_in requires array value")
+                })?;
+                Ok(actual_arr
+                    .iter()
+                    .all(|v| expected_arr.iter().any(|e| Self::values_equal(v, e))))
+            }
+            FilterOp::HasKey => {
+                // Object/map has the specified key
+                let key = expected
+                    .as_str()
+                    .ok_or_else(|| QueryError::invalid_filter("_has_key requires string key"))?;
+                let obj = actual
+                    .as_object()
+                    .ok_or_else(|| QueryError::invalid_filter("_has_key requires object field"))?;
+                Ok(obj.contains_key(key))
+            }
             FilterOp::And | FilterOp::Or | FilterOp::Not => Err(QueryError::internal(
                 "logical ops should be handled at top level",
             )),
@@ -659,12 +703,154 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Helper to create mapping with array and object fields for testing
+    fn make_extended_mapping() -> DocumentMapping {
+        let mut m = DocumentMapping::new();
+        m.add(0, "_docID");
+        m.add(1, "name");
+        m.add(2, "age");
+        m.add(3, "active");
+        m.add(4, "tags"); // Array field
+        m.add(5, "metadata"); // Object field
+        m
+    }
+
+    fn make_extended_fields() -> Vec<Option<JsonValue>> {
+        vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            Some(json!(30)),
+            Some(json!(true)),
+            Some(json!(["rust", "database", "graphql"])), // tags array
+            Some(json!({"version": "1.0", "author": "Alice"})), // metadata object
+        ]
+    }
+
+    #[test]
+    fn test_contains_filter_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_filter_no_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "python"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_filter_non_array_error() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires array field"));
+    }
+
+    #[test]
+    fn test_contained_in_filter_match() {
+        // All elements of tags are in the given array
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["rust", "database", "graphql", "sql", "nosql"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_filter_no_match() {
+        // Not all elements of tags are in the given array (missing "graphql")
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["rust", "database"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_filter_empty_field_array() {
+        // Empty array is contained in any array
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["anything"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!([])); // Empty tags array
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_filter_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": "version"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_filter_no_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": "nonexistent"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_filter_non_object_error() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_has_key": "version"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires object field"));
+    }
+
     #[test]
     fn test_filter_op_parse() {
         assert_eq!(FilterOp::parse("_eq"), Some(FilterOp::Eq));
         assert_eq!(FilterOp::parse("_and"), Some(FilterOp::And));
         assert_eq!(FilterOp::parse("_ilike"), Some(FilterOp::Ilike));
         assert_eq!(FilterOp::parse("_nilike"), Some(FilterOp::Nilike));
+        assert_eq!(FilterOp::parse("_contains"), Some(FilterOp::Contains));
+        assert_eq!(
+            FilterOp::parse("_contained_in"),
+            Some(FilterOp::ContainedIn)
+        );
+        assert_eq!(FilterOp::parse("_has_key"), Some(FilterOp::HasKey));
         assert_eq!(FilterOp::parse("invalid"), None);
     }
 
