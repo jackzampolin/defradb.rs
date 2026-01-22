@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 
-use defra_http::router::{P2POperations, P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo};
+use defra_http::router::{P2POperations, ReplicatorInfo};
 use p2p::sync::SyncCoordinator;
 use p2p::P2PHostHandle;
 
@@ -320,29 +320,29 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         }
     }
 
-    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String> {
-        // Document-level replication not yet implemented
+    async fn get_documents(&self) -> Result<Vec<defra_http::router::P2pDocumentInfo>, String> {
+        // Document-level P2P replication not yet implemented
         Ok(Vec::new())
     }
 
-    async fn add_documents(&self, _docs: Vec<P2pDocumentRequest>) -> Result<(), String> {
-        // Document-level replication not yet implemented
-        Err("document-level replication not yet implemented".to_string())
+    async fn add_documents(&self, _docs: Vec<defra_http::router::P2pDocumentRequest>) -> Result<(), String> {
+        // Document-level P2P replication not yet implemented
+        Err("document-level P2P replication not yet implemented".to_string())
     }
 
-    async fn remove_documents(&self, _docs: Vec<P2pDocumentRequest>) -> Result<(), String> {
-        // Document-level replication not yet implemented
-        Err("document-level replication not yet implemented".to_string())
+    async fn remove_documents(&self, _docs: Vec<defra_http::router::P2pDocumentRequest>) -> Result<(), String> {
+        // Document-level P2P replication not yet implemented
+        Err("document-level P2P replication not yet implemented".to_string())
     }
 
     async fn sync_collections(&self) -> Result<(), String> {
-        // Sync happens automatically via gossipsub; manual trigger not yet implemented
-        Ok(())
+        // Trigger immediate collection sync - not yet implemented
+        Err("sync_collections not yet implemented".to_string())
     }
 
     async fn sync_documents(&self) -> Result<(), String> {
-        // Document-level sync not yet implemented
-        Err("document-level sync not yet implemented".to_string())
+        // Trigger immediate document sync - not yet implemented
+        Err("sync_documents not yet implemented".to_string())
     }
 }
 
