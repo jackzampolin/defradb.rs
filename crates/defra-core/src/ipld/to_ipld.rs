@@ -89,14 +89,15 @@ impl TryFrom<&CrdtDelta> for Ipld {
                 map.insert("fieldDefinition".to_string(), Ipld::from(payload));
             }
             CrdtDelta::CollectionDefinition(payload) => {
-                map.insert("collectionDefinition".to_string(), Ipld::from(payload));
+                map.insert("collectionDefinition".to_string(), Ipld::try_from(payload)?);
             }
         }
         Ok(Ipld::Map(map))
     }
 }
 
-// Payload types don't contain CIDs, so they can use infallible From
+// Most payload types don't contain CIDs, so they can use infallible From.
+// CollectionDefinitionDeltaPayload is an exception (has query_transform CID).
 
 impl From<&LwwDeltaPayload> for Ipld {
     fn from(payload: &LwwDeltaPayload) -> Self {
@@ -199,8 +200,10 @@ impl From<&FieldDefinitionDeltaPayload> for Ipld {
     }
 }
 
-impl From<&CollectionDefinitionDeltaPayload> for Ipld {
-    fn from(payload: &CollectionDefinitionDeltaPayload) -> Self {
+impl TryFrom<&CollectionDefinitionDeltaPayload> for Ipld {
+    type Error = Error;
+
+    fn try_from(payload: &CollectionDefinitionDeltaPayload) -> Result<Self> {
         let mut map = BTreeMap::new();
         map.insert(
             "priority".to_string(),
@@ -209,7 +212,16 @@ impl From<&CollectionDefinitionDeltaPayload> for Ipld {
         if let Some(ref name) = payload.name {
             map.insert("name".to_string(), Ipld::String(name.clone()));
         }
-        Ipld::Map(map)
+        if let Some(ref query_select) = payload.query_select {
+            map.insert("querySelect".to_string(), Ipld::Bytes(query_select.clone()));
+        }
+        if let Some(ref query_transform) = payload.query_transform {
+            map.insert(
+                "queryTransform".to_string(),
+                Ipld::Link(cid_to_libipld(query_transform)?),
+            );
+        }
+        Ok(Ipld::Map(map))
     }
 }
 

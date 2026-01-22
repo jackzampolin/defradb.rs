@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::document::DocumentMapping;
-use crate::error::Result;
+use crate::error::{QueryError, Result};
+use crate::fetcher::{CollectionProvider, StaticCollectionProvider};
 use crate::mapper::Select;
 use crate::mutator::DocMutator;
 use crate::planner::Doc;
@@ -36,8 +37,8 @@ pub use crate::fetcher::{DocFetcher, FetchByIdsResult};
 pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRegistry> {
     /// Document fetcher for storage access (used for non-transactional queries)
     pub(crate) fetcher: Arc<F>,
-    /// Collection schemas by name
-    pub(crate) collections: HashMap<String, Arc<CollectionVersion>>,
+    /// Collection provider for on-demand schema resolution
+    pub(crate) collection_provider: Arc<dyn CollectionProvider>,
     /// Transaction registry for transaction lifecycle management
     pub(crate) registry: Arc<R>,
     /// Document mutator for mutation operations (optional)
@@ -57,13 +58,24 @@ impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
     /// This creates a runner without transaction support. Use `with_registry`
     /// to enable transaction support.
     pub fn new(fetcher: F, collections: Vec<CollectionVersion>) -> Self {
-        let collections_map = collections
-            .iter()
-            .map(|c| (c.name.clone(), Arc::new(c.clone())))
-            .collect();
         Self {
             fetcher: Arc::new(fetcher),
-            collections: collections_map,
+            collection_provider: Arc::new(StaticCollectionProvider::new(collections)),
+            registry: Arc::new(NoOpTransactionRegistry),
+            mutator: None,
+            acp: None,
+            default_identity: None,
+        }
+    }
+
+    /// Create a new query runner with a collection provider.
+    ///
+    /// This creates a runner without transaction support. The provider is used
+    /// to resolve collections on-demand, enabling dynamic schema updates.
+    pub fn with_provider(fetcher: F, provider: Arc<dyn CollectionProvider>) -> Self {
+        Self {
+            fetcher: Arc::new(fetcher),
+            collection_provider: provider,
             registry: Arc::new(NoOpTransactionRegistry),
             mutator: None,
             acp: None,
@@ -74,14 +86,33 @@ impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
 
 impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     /// Create a new query runner with transaction support.
+    ///
+    /// This uses a static collection provider for backward compatibility.
+    /// For dynamic schema updates, use `with_registry_and_provider`.
     pub fn with_registry(fetcher: F, collections: Vec<CollectionVersion>, registry: R) -> Self {
-        let collections_map = collections
-            .iter()
-            .map(|c| (c.name.clone(), Arc::new(c.clone())))
-            .collect();
         Self {
             fetcher: Arc::new(fetcher),
-            collections: collections_map,
+            collection_provider: Arc::new(StaticCollectionProvider::new(collections)),
+            registry: Arc::new(registry),
+            mutator: None,
+            acp: None,
+            default_identity: None,
+        }
+    }
+
+    /// Create a new query runner with transaction support and a collection provider.
+    ///
+    /// This is the recommended constructor for production use. The provider resolves
+    /// collections on-demand from the database, ensuring newly added schemas are
+    /// immediately available for queries.
+    pub fn with_registry_and_provider(
+        fetcher: F,
+        provider: Arc<dyn CollectionProvider>,
+        registry: R,
+    ) -> Self {
+        Self {
+            fetcher: Arc::new(fetcher),
+            collection_provider: provider,
             registry: Arc::new(registry),
             mutator: None,
             acp: None,
@@ -132,15 +163,44 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     /// Get the names of all collections.
     ///
     /// Returns a sorted list of collection names registered with this runner.
-    pub fn collection_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.collections.keys().cloned().collect();
+    pub async fn collection_names(&self) -> Result<Vec<String>> {
+        let mut names = self.collection_provider.list_collections().await?;
         names.sort();
-        names
+        Ok(names)
     }
 
     /// Check if a collection exists.
-    pub fn has_collection(&self, name: &str) -> bool {
-        self.collections.contains_key(name)
+    pub async fn has_collection(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .collection_provider
+            .get_collection(name)
+            .await?
+            .is_some())
+    }
+
+    /// Resolve a collection on-demand from the provider.
+    ///
+    /// Returns the collection schema or an error if not found.
+    pub(crate) async fn get_collection(&self, name: &str) -> Result<Arc<CollectionVersion>> {
+        self.collection_provider
+            .get_collection(name)
+            .await?
+            .ok_or_else(|| QueryError::collection_not_found(name))
+    }
+
+    /// Get all collections as a HashMap for operations that need multiple collections.
+    ///
+    /// This is used internally for plan building which requires access to multiple
+    /// collection schemas simultaneously (e.g., for joins).
+    pub(crate) async fn collections_map(&self) -> Result<HashMap<String, Arc<CollectionVersion>>> {
+        let names = self.collection_provider.list_collections().await?;
+        let mut map = HashMap::new();
+        for name in names {
+            if let Some(coll) = self.collection_provider.get_collection(&name).await? {
+                map.insert(name, coll);
+            }
+        }
+        Ok(map)
     }
 
     /// Convert a plan Doc to JSON for output.
@@ -154,11 +214,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     /// the relation definition in the parent collection's schema.
     ///
     /// Returns Some(collection_name) if an ACP-protected collection is found, None otherwise.
-    pub(crate) fn find_acp_collection_in_nested(
+    pub(crate) async fn find_acp_collection_in_nested(
         &self,
         select: &Select,
         parent_collection: &CollectionVersion,
-    ) -> Option<String> {
+    ) -> Result<Option<String>> {
         use crate::mapper::Requestable;
 
         for field in &select.fields {
@@ -176,22 +236,27 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                     // Get the target collection name from the relation field's kind
                     if let Some(target_coll_name) = relation_field.kind.relation_collection_id() {
                         // Check if target collection has ACP
-                        if let Some(target_coll) = self.collections.get(target_coll_name) {
+                        if let Some(target_coll) = self
+                            .collection_provider
+                            .get_collection(target_coll_name)
+                            .await?
+                        {
                             if target_coll.policy.is_some() {
-                                return Some(target_coll.name.clone());
+                                return Ok(Some(target_coll.name.clone()));
                             }
 
                             // Recursively check deeper nested selections
                             if let Some(deep_acp) =
-                                self.find_acp_collection_in_nested(nested, target_coll)
+                                Box::pin(self.find_acp_collection_in_nested(nested, &target_coll))
+                                    .await?
                             {
-                                return Some(deep_acp);
+                                return Ok(Some(deep_acp));
                             }
                         }
                     }
                 }
             }
         }
-        None
+        Ok(None)
     }
 }

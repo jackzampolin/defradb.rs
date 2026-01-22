@@ -891,7 +891,7 @@ async fn test_execute_create_mutation() {
         .unwrap();
 
     assert!(result.is_object());
-    let users = result.get("Users").unwrap().as_array().unwrap();
+    let users = result.get("create_Users").unwrap().as_array().unwrap();
     assert_eq!(users.len(), 1);
     assert!(users[0].get("_docID").is_some());
     assert_eq!(users[0].get("name").unwrap(), "Alice");
@@ -920,7 +920,7 @@ async fn test_execute_create_multiple_documents() {
         .await
         .unwrap();
 
-    let users = result.get("Users").unwrap().as_array().unwrap();
+    let users = result.get("create_Users").unwrap().as_array().unwrap();
     assert_eq!(users.len(), 2);
 
     let names: Vec<&str> = users
@@ -955,7 +955,7 @@ async fn test_execute_delete_mutation() {
     );
     let result = runner.execute_mutation(&mutation).await.unwrap();
 
-    let users = result.get("Users").unwrap().as_array().unwrap();
+    let users = result.get("delete_Users").unwrap().as_array().unwrap();
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].get("_docID").unwrap().as_str().unwrap(), doc_id);
 
@@ -1033,7 +1033,7 @@ async fn test_execute_update_mutation() {
     );
     let result = runner.execute_mutation(&mutation).await.unwrap();
 
-    let users = result.get("Users").unwrap().as_array().unwrap();
+    let users = result.get("update_Users").unwrap().as_array().unwrap();
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].get("_docID").unwrap().as_str().unwrap(), doc_id);
     assert_eq!(users[0].get("name").unwrap(), "Alice Updated");

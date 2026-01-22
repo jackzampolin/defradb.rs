@@ -84,19 +84,6 @@ impl ReplicatorInfo {
         Ok(Self::new(peer_id, collections))
     }
 
-    /// Create a new replicator info with addresses.
-    pub fn with_addresses(
-        peer_id: PeerId,
-        collections: Vec<String>,
-        addresses: Vec<Multiaddr>,
-    ) -> Self {
-        Self {
-            peer_id_str: peer_id.to_string(),
-            collections,
-            addresses_str: addresses.into_iter().map(|a| a.to_string()).collect(),
-        }
-    }
-
     /// Create from raw strings (for deserialization or testing).
     ///
     /// This is useful when loading from storage where the peer ID might be invalid.

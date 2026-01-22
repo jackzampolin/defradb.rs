@@ -708,6 +708,29 @@ impl<S: Store> DB<S> {
         Ok(cache.contains_key(name))
     }
 
+    /// Find a collection by its collection ID (schema version ID).
+    ///
+    /// This is useful for P2P sync where we receive blocks with schema_version_id
+    /// and need to find the corresponding collection.
+    ///
+    /// Uses the process-wide cache.
+    pub fn find_collection_by_id(&self, collection_id: &str) -> Result<Option<Collection>> {
+        let cache = self.collections.read().map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_id = %collection_id,
+                "Collection cache lock poisoned during find_collection_by_id"
+            );
+            Error::LockPoisoned(
+                "collection cache lock poisoned during find_collection_by_id".into(),
+            )
+        })?;
+        Ok(cache
+            .values()
+            .find(|c| c.collection_id() == collection_id)
+            .cloned())
+    }
+
     /// Get a snapshot of all collections (for use by DbTransactionRegistry).
     ///
     /// Returns an immutable snapshot that provides snapshot isolation for transactions.

@@ -45,17 +45,21 @@
 pub mod acp_merge_handler;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
+pub mod block_builder;
+pub mod broadcast_mutator;
 pub mod collection;
 pub mod collection_acp;
 pub mod collection_cache;
 pub(crate) mod collection_loader;
 pub mod collection_name;
+pub mod collection_provider;
 pub mod collection_snapshot;
 pub mod database;
 pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
 pub mod index_manager;
+pub mod merge_handler;
 pub mod nac;
 pub mod peer_identity;
 pub mod schema_loader;
@@ -67,6 +71,10 @@ pub mod txn_registry;
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
+#[allow(deprecated)]
+pub use block_builder::build_block_from_document;
+pub use block_builder::{build_blocks_from_document, BlockResult};
+pub use broadcast_mutator::BroadcastMutator;
 pub use collection::Collection;
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
@@ -75,12 +83,14 @@ pub use collection_acp::{
 };
 pub use collection_cache::CollectionCache;
 pub use collection_name::CollectionName;
+pub use collection_provider::DbCollectionProvider;
 pub use collection_snapshot::CollectionSnapshot;
 pub use database::{DbOptions, DB};
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
+pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };

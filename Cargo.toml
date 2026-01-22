@@ -30,7 +30,6 @@ repository = "https://github.com/sourcenetwork/defradb.rs"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
-tokio-util = "0.7"
 async-trait = "0.1"
 futures = "0.3"
 
@@ -39,11 +38,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_cbor = "0.11"
 serde_bytes = "0.11"
+ciborium = "0.2"
 
 # P2P networking
-# Note: Using 0.53 to match libp2p-bitswap-next's dependency
+# Note: Using 0.53 to match iroh-bitswap's dependency
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "mdns"] }
-libp2p-bitswap-next = "0.26"
+iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", branch = "main" }
+libp2p-stream = "0.1.0-alpha.1"
 multiaddr = "0.18"
 
 # Storage
@@ -77,12 +78,11 @@ hyper = "1.0"
 thiserror = "1.0"
 anyhow = "1.0"
 
+# Bytes
+bytes = "1.5"
+
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# CLI
-clap = { version = "4.5", features = ["derive"] }
 
 # Testing
 proptest = "1.4"

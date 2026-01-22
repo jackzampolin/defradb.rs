@@ -556,6 +556,38 @@ impl Collection {
         datastore.has(&key).await.map_err(Error::Storage)
     }
 
+    /// Save a document (create or update) using a NamespaceView directly.
+    ///
+    /// This method takes `NamespaceView` instead of `&DbTxn` to allow
+    /// use in async contexts where `Send` futures are required.
+    ///
+    /// Unlike `create_with_datastore`, this performs an upsert - it will
+    /// create the document if it doesn't exist, or update it if it does.
+    ///
+    /// Note: Validation is skipped for P2P-synced documents since they
+    /// may have been created with a different schema version.
+    pub async fn save_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+    ) -> Result<DocID> {
+        let doc_id = doc
+            .id()
+            .cloned()
+            .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
+
+        let key = self.doc_key(&doc_id);
+
+        // Serialize and store (upsert)
+        let data = doc
+            .to_cbor()
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+
+        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        Ok(doc_id)
+    }
+
     /// Generate the storage key for a document.
     fn doc_key(&self, doc_id: &DocID) -> Vec<u8> {
         let mut key = Vec::new();

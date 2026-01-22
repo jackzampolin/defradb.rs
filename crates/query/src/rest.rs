@@ -379,7 +379,10 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
 #[async_trait]
 impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImpl<F, R> {
     async fn list_collections(&self) -> RestResult<Vec<String>> {
-        Ok(self.runner.collection_names())
+        self.runner
+            .collection_names()
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))
     }
 
     async fn get_collection_doc_ids(
@@ -387,7 +390,12 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         collection: &str,
         identity: Option<&Did>,
     ) -> RestResult<Vec<String>> {
-        if !self.runner.has_collection(collection) {
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
             return Err(RestError::collection_not_found(collection));
         }
 
@@ -405,7 +413,12 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         doc_id: &str,
         identity: Option<&Did>,
     ) -> RestResult<Option<JsonValue>> {
-        if !self.runner.has_collection(collection) {
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
             return Err(RestError::collection_not_found(collection));
         }
 
@@ -418,7 +431,12 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         data: JsonValue,
         identity: Option<&Did>,
     ) -> RestResult<JsonValue> {
-        if !self.runner.has_collection(collection) {
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
             return Err(RestError::collection_not_found(collection));
         }
 
@@ -467,7 +485,12 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         patch: JsonValue,
         identity: Option<&Did>,
     ) -> RestResult<JsonValue> {
-        if !self.runner.has_collection(collection) {
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
             return Err(RestError::collection_not_found(collection));
         }
 
@@ -496,7 +519,12 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImp
         doc_id: &str,
         identity: Option<&Did>,
     ) -> RestResult<bool> {
-        if !self.runner.has_collection(collection) {
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
             return Err(RestError::collection_not_found(collection));
         }
 

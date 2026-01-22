@@ -230,12 +230,23 @@ impl StartArgs {
     }
 }
 
+/// Tracks spawned P2P background tasks for graceful shutdown.
+struct P2PTasks {
+    /// P2P host event loop task
+    host_task: JoinHandle<()>,
+    /// Replication loop task (processes incoming blocks)
+    replication_task: JoinHandle<()>,
+    /// Host event handler task (processes P2P events through coordinator)
+    event_handler_task: Option<JoinHandle<()>>,
+}
+
 /// DefraDB Node
 /// Node manages the DefraDB server lifecycle.
 #[doc(hidden)]
 pub struct Node {
     config: Config,
     p2p_handle: Option<p2p::P2PHostHandle>,
+    p2p_tasks: Option<P2PTasks>,
     http_server: Option<defra_http::Server>,
     /// Shutdown signal sender (for tests)
     #[doc(hidden)]
@@ -269,7 +280,7 @@ impl Node {
         };
 
         // Initialize storage, database, and set up P2P and HTTP server
-        let (p2p_handle, http_server) = match config.datastore.store {
+        let (p2p_handle, p2p_tasks, http_server) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
@@ -308,6 +319,7 @@ impl Node {
         Ok(Self {
             config,
             p2p_handle,
+            p2p_tasks,
             http_server: Some(http_server),
             shutdown_tx,
             shutdown_rx,
@@ -413,13 +425,20 @@ impl Node {
     ///
     /// This function creates the database, loads collections, sets up the query
     /// runner with proper transaction support, and returns the HTTP server.
+    ///
+    /// Returns a tuple of (P2PHostHandle, P2PTasks, HTTP Server) where the tasks
+    /// are tracked for graceful shutdown.
     async fn init_store_and_server<S>(
         store: Arc<S>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         acp_store: Arc<dyn acp::AcpStore>,
-    ) -> Result<(Option<p2p::P2PHostHandle>, defra_http::Server)>
+    ) -> Result<(
+        Option<p2p::P2PHostHandle>,
+        Option<P2PTasks>,
+        defra_http::Server,
+    )>
     where
         S: storage::corekv::Store + 'static,
     {
@@ -459,17 +478,21 @@ impl Node {
         info!("Loaded {} collection schema(s)", collection_count);
 
         // Set up P2P if enabled
-        let p2p = if config.net.p2p_disabled {
-            None
+        // Clone store before potential move for sync coordinator blockstore
+        let store_for_sync = store.clone();
+        let (p2p, mut p2p_events, p2p_host_task) = if config.net.p2p_disabled {
+            (None, None, None)
         } else {
             info!("Initializing P2P network");
             let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
             let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            Some(Self::start_p2p(config, bitswap_store, peer_keypair).await?)
+            let (handle, events, host_task) =
+                Self::start_p2p(config, bitswap_store, peer_keypair).await?;
+            (Some(handle), Some(events), Some(host_task))
         };
 
         // Create HTTP server with database-backed query runner
-        let http_server = {
+        let (http_server, p2p_tasks) = {
             let api_address: SocketAddr =
                 config
                     .api
@@ -487,32 +510,154 @@ impl Node {
             // Create auto-committing fetcher for non-transactional queries
             let fetcher = db::AutoCommitFetcher::new(database.clone());
 
-            // Create auto-committing mutator for non-transactional mutations
-            let mutator = std::sync::Arc::new(db::AutoCommitMutator::new(database.clone()));
+            // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
+            // Also captures task handles for graceful shutdown
+            let (sync_coordinator, replication_task, event_handler_task) =
+                if let Some(ref p2p_handle) = p2p {
+                    let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
+                        store_for_sync.clone(),
+                        false,
+                    ));
+
+                    // Clone blockstore for merge handler (before moving into coordinator)
+                    let merge_blockstore = sync_blockstore.clone();
+
+                    // Create persistent collection store for P2P subscriptions
+                    let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
+                        Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
+
+                    let (coordinator, sync_events) =
+                        p2p::sync::SyncCoordinator::with_collection_store(
+                            p2p_handle.clone(),
+                            sync_blockstore,
+                            p2p::sync::SyncConfig::default(),
+                            collection_store,
+                        )
+                        .await
+                        .map_err(Error::P2P)?;
+
+                    let coordinator = Arc::new(coordinator);
+
+                    // Load persisted P2P collection subscriptions
+                    match coordinator.load_p2p_collections().await {
+                        Ok(count) => {
+                            if count > 0 {
+                                info!("Loaded {} persisted P2P collection subscription(s)", count);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to load persisted P2P collections: {}", e);
+                        }
+                    }
+
+                    // Create merge handler for CRDT merging
+                    let merge_handler =
+                        Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
+
+                    // Spawn replication loop to process incoming blocks
+                    // Track the task handle for graceful shutdown
+                    let coordinator_for_replication = coordinator.clone();
+                    let replication_config = p2p::sync::ReplicationConfig {
+                        continue_on_error: true,
+                        rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
+                    };
+                    let replication_task = tokio::spawn(async move {
+                        info!("Starting replication loop for P2P sync");
+                        p2p::sync::ReplicationLoop::run(
+                            coordinator_for_replication,
+                            sync_events,
+                            merge_handler,
+                            replication_config,
+                        )
+                        .await;
+                        info!("Replication loop stopped");
+                    });
+
+                    // Spawn host event handler to process incoming P2P events through coordinator
+                    // Track the task handle for graceful shutdown
+                    let event_handler_task = if let Some(mut events) = p2p_events.take() {
+                        let coordinator_for_events = coordinator.clone();
+                        Some(tokio::spawn(async move {
+                            while let Some(event) = events.recv().await {
+                                // Log events for visibility
+                                match &event {
+                                    p2p::HostEvent::PeerConnected(peer) => {
+                                        info!("Peer connected: {}", peer);
+                                    }
+                                    p2p::HostEvent::PeerDisconnected(peer) => {
+                                        info!("Peer disconnected: {}", peer);
+                                    }
+                                    p2p::HostEvent::PeerDiscovered(peer) => {
+                                        info!("Peer discovered: {}", peer);
+                                    }
+                                    p2p::HostEvent::Listening(addr) => {
+                                        info!("Now listening on: {}", addr);
+                                    }
+                                    p2p::HostEvent::GossipMessage {
+                                        propagation_source,
+                                        topic,
+                                        ..
+                                    } => {
+                                        info!(
+                                            "Received gossip message on {} from {}",
+                                            topic, propagation_source
+                                        );
+                                    }
+                                    p2p::HostEvent::TwoStreamRequest { peer_id, request } => {
+                                        info!(
+                                            peer_id = %peer_id,
+                                            message_id = %request.metadata.message_id,
+                                            doc_id = %request.doc_id,
+                                            "Processing TwoStreamRequest through coordinator"
+                                        );
+                                    }
+                                    _ => {}
+                                }
+
+                                // Process event through coordinator for response handling
+                                if let Err(e) =
+                                    coordinator_for_events.handle_host_event(event).await
+                                {
+                                    error!("Failed to handle host event: {}", e);
+                                }
+                            }
+                        }))
+                    } else {
+                        None
+                    };
+
+                    info!("P2P sync coordinator initialized");
+                    (
+                        Some(coordinator),
+                        Some(replication_task),
+                        event_handler_task,
+                    )
+                } else {
+                    (None, None, None)
+                };
+
+            // Create mutator - use BroadcastMutator if P2P is enabled for network propagation
+            let mutator: Arc<dyn query::mutator::DocMutator> =
+                if let Some(ref coordinator) = sync_coordinator {
+                    Arc::new(db::BroadcastMutator::new(
+                        database.clone(),
+                        coordinator.clone(),
+                    ))
+                } else {
+                    Arc::new(db::AutoCommitMutator::new(database.clone()))
+                };
 
             // Create transaction registry for explicit transaction support
             let registry = db::DbTransactionRegistry::new(database.clone());
 
-            // Get collection schemas for the query runner
-            let collection_names = database
-                .list_collections()
-                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
-
-            let mut collections: Vec<schema::CollectionVersion> = Vec::new();
-            for name in &collection_names {
-                match database.get_collection(name) {
-                    Ok(Some(c)) => collections.push(c.schema().clone()),
-                    Ok(None) => {
-                        warn!("Collection '{}' listed but not found", name);
-                    }
-                    Err(e) => {
-                        return Err(Error::Storage(storage::Error::Other(format!(
-                            "failed to load collection '{}': {}",
-                            name, e
-                        ))));
-                    }
-                }
-            }
+            // Create collection provider for on-demand schema resolution
+            // This ensures newly added schemas are immediately available for queries
+            let collection_provider: Arc<dyn query::CollectionProvider> =
+                db::DbCollectionProvider::new_arc(database.clone());
+            info!(
+                "Collection provider configured ({} collection(s) available)",
+                database.list_collections().map(|c| c.len()).unwrap_or(0)
+            );
 
             // Create LocalDocumentACP with the provided store
             let document_acp: Arc<dyn acp::DocumentACP> =
@@ -520,10 +665,14 @@ impl Node {
             info!("Document ACP configured");
 
             // Create query runner with transaction, mutation, and ACP support
-            let mut query_runner =
-                query::QueryRunner::with_registry(fetcher, collections, registry)
-                    .with_mutator(mutator)
-                    .with_acp(document_acp);
+            // Use the collection provider for on-demand schema resolution
+            let mut query_runner = query::QueryRunner::with_registry_and_provider(
+                fetcher,
+                collection_provider,
+                registry,
+            )
+            .with_mutator(mutator)
+            .with_acp(document_acp);
 
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {
@@ -544,7 +693,20 @@ impl Node {
 
             // Wire P2P to HTTP server if enabled
             if let Some(ref p2p_handle) = p2p {
-                let p2p_adapter = crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone());
+                let p2p_adapter = if let Some(ref coordinator) = sync_coordinator {
+                    // Use sync coordinator for replicator operations (enables auto-subscribe)
+                    // Also provide collection lookup so we can resolve names to CollectionIDs
+                    // for topic subscription (matching Go DefraDB behavior)
+                    let collection_lookup =
+                        crate::p2p_adapter::DbCollectionLookup::new_arc(database.clone());
+                    crate::p2p_adapter::P2PAdapter::with_sync_coordinator_and_lookup_arc(
+                        p2p_handle.clone(),
+                        coordinator.clone(),
+                        collection_lookup,
+                    )
+                } else {
+                    crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone())
+                };
                 server = server.with_p2p_arc(p2p_adapter);
                 info!("P2P HTTP endpoints enabled");
             }
@@ -558,28 +720,49 @@ impl Node {
                 "HTTP server configured on {} with REST endpoints enabled",
                 api_address
             );
-            server
+
+            // Build P2PTasks if P2P is enabled with all required task handles
+            let p2p_tasks = match (p2p_host_task, replication_task) {
+                (Some(host_task), Some(replication_task)) => Some(P2PTasks {
+                    host_task,
+                    replication_task,
+                    event_handler_task,
+                }),
+                _ => None,
+            };
+
+            (server, p2p_tasks)
         };
 
-        Ok((p2p, http_server))
+        Ok((p2p, p2p_tasks, http_server))
     }
 
     /// Start P2P networking with the given bitswap store and optional keypair.
     ///
     /// If a keypair is provided, it will be used for the P2P identity.
     /// Otherwise, an ephemeral keypair will be generated.
-    async fn start_p2p<S: p2p::BitswapStore<Params = libipld::DefaultParams>>(
+    ///
+    /// Returns the handle, events receiver, and host task handle so that the caller
+    /// can connect events to the sync coordinator and track the host task for shutdown.
+    async fn start_p2p<S: p2p::BitswapStore>(
         config: &Config,
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
-    ) -> Result<p2p::P2PHostHandle> {
-        let (host, handle, mut events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).map_err(Error::P2P)?,
-            None => p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?,
+    ) -> Result<(
+        p2p::P2PHostHandle,
+        tokio::sync::mpsc::Receiver<p2p::HostEvent>,
+        JoinHandle<()>,
+    )> {
+        let (host, handle, events, _replicators) = match keypair {
+            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store)
+                .await
+                .map_err(Error::P2P)?,
+            None => p2p::P2PHost::new(bitswap_store).await.map_err(Error::P2P)?,
         };
 
         // Spawn the host event loop FIRST - it must be running to process commands
-        tokio::spawn(host.run());
+        // Track the task handle for graceful shutdown
+        let host_task = tokio::spawn(host.run());
 
         // Start listening on configured addresses
         for addr_str in &config.net.p2p_addresses {
@@ -590,39 +773,6 @@ impl Node {
             handle.listen(addr.clone()).await.map_err(Error::P2P)?;
             info!("P2P listening on {}", addr);
         }
-
-        // Spawn event handler
-        tokio::spawn(async move {
-            while let Some(event) = events.recv().await {
-                match event {
-                    p2p::HostEvent::PeerConnected(peer) => {
-                        info!("Peer connected: {}", peer);
-                    }
-                    p2p::HostEvent::PeerDisconnected(peer) => {
-                        info!("Peer disconnected: {}", peer);
-                    }
-                    p2p::HostEvent::PeerDiscovered(peer) => {
-                        info!("Peer discovered: {}", peer);
-                    }
-                    p2p::HostEvent::Listening(addr) => {
-                        info!("Now listening on: {}", addr);
-                    }
-                    p2p::HostEvent::GossipMessage {
-                        propagation_source,
-                        topic,
-                        ..
-                    } => {
-                        info!(
-                            "Received gossip message on {} from {}",
-                            topic, propagation_source
-                        );
-                    }
-                    other => {
-                        tracing::debug!("Unhandled P2P event: {:?}", other);
-                    }
-                }
-            }
-        });
 
         // Log bootstrap peers (connection will be handled by mDNS discovery)
         if !config.net.peers.is_empty() {
@@ -636,7 +786,7 @@ impl Node {
             Err(e) => error!("Failed to get local peer ID: {}", e),
         }
 
-        Ok(handle)
+        Ok((handle, events, host_task))
     }
 
     /// Run the node until shutdown
@@ -751,11 +901,29 @@ impl Node {
             }
         }
 
-        // Shutdown P2P
+        // Shutdown P2P tasks first, then the handle
         // Note: We log but don't return errors here because:
         // 1. The user's intent (stop the node) is still fulfilled
         // 2. The node is already stopping - failing would just add noise
         // 3. P2P cleanup issues don't affect data integrity
+        if let Some(tasks) = self.p2p_tasks.take() {
+            info!("Stopping P2P background tasks...");
+
+            // Abort all tasks - they will stop when the channel closes
+            tasks.replication_task.abort();
+            tasks.host_task.abort();
+            if let Some(event_task) = tasks.event_handler_task {
+                event_task.abort();
+            }
+
+            // Wait briefly for tasks to complete with timeout
+            let timeout = std::time::Duration::from_secs(2);
+            let _ = tokio::time::timeout(timeout, tasks.replication_task).await;
+            let _ = tokio::time::timeout(timeout, tasks.host_task).await;
+
+            info!("P2P background tasks stopped");
+        }
+
         if let Some(handle) = &self.p2p_handle {
             if let Err(e) = handle.shutdown().await {
                 warn!("P2P shutdown encountered an issue: {}", e);

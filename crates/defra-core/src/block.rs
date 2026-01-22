@@ -478,6 +478,23 @@ pub struct CollectionDefinitionDeltaPayload {
     /// Collection name (optional for updates)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// Query select for view collections (JSON-encoded query definition)
+    #[serde(
+        rename = "querySelect",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub query_select: Option<Vec<u8>>,
+
+    /// Query transform CID for view collections (link to lens transform)
+    #[serde(
+        rename = "queryTransform",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub query_transform: Option<Cid>,
 }
 
 impl CollectionDefinitionDeltaPayload {
@@ -486,12 +503,26 @@ impl CollectionDefinitionDeltaPayload {
         Self {
             priority,
             name: None,
+            query_select: None,
+            query_transform: None,
         }
     }
 
     /// Set the collection name
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Set the query select (for view collections)
+    pub fn with_query_select(mut self, query: Vec<u8>) -> Self {
+        self.query_select = Some(query);
+        self
+    }
+
+    /// Set the query transform CID (for view collections with lens transforms)
+    pub fn with_query_transform(mut self, transform_cid: Cid) -> Self {
+        self.query_transform = Some(transform_cid);
         self
     }
 }

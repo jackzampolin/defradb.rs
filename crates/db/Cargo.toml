@@ -18,6 +18,7 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_cbor.workspace = true
+ciborium.workspace = true
 
 # Error handling
 thiserror.workspace = true
@@ -27,6 +28,10 @@ tracing.workspace = true
 
 # IPLD
 cid.workspace = true
+multihash.workspace = true
+
+# Hashing
+sha2.workspace = true
 
 # P2P
 libp2p.workspace = true
@@ -43,6 +48,7 @@ defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
 p2p = { path = "../p2p" }
+crdt = { path = "../crdt" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -10,7 +10,7 @@
 
 //! BitswapStore adapter for DefraBlockstore.
 //!
-//! This module implements the `BitswapStore` trait from libp2p-bitswap-next
+//! This module implements the `Store` trait from iroh-bitswap
 //! for our async `DefraBlockstore`. The trait methods are async, which maps
 //! directly to our async blockstore interface.
 //!
@@ -19,23 +19,27 @@
 //! Go DefraDB uses Bitswap for block exchange. This adapter enables the same
 //! block exchange protocol in Rust, ensuring interoperability.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use libipld::{Block, Cid, DefaultParams, Result as IpldResult};
-use libp2p_bitswap_next::BitswapStore;
+use bytes::Bytes;
+use cid::Cid;
+use iroh_bitswap::{Block, Store};
 
 use blockstore::Blockstore;
 
-/// Adapter that implements `BitswapStore` for any `Blockstore`.
+/// Adapter that implements iroh_bitswap::Store for any `Blockstore`.
 ///
-/// The BitswapStore trait from libp2p-bitswap-next uses async methods,
+/// The Store trait from iroh-bitswap uses async methods,
 /// which maps directly to our async DefraBlockstore interface.
 ///
 /// # Thread Safety
 ///
 /// This adapter is thread-safe and can be cloned. The underlying blockstore
 /// is shared via `Arc`.
+#[derive(Debug)]
 pub struct BitswapStoreAdapter<B: Blockstore> {
     blockstore: Arc<B>,
 }
@@ -60,53 +64,34 @@ impl<B: Blockstore> BitswapStoreAdapter<B> {
 }
 
 #[async_trait]
-impl<B: Blockstore + 'static> BitswapStore for BitswapStoreAdapter<B> {
-    type Params = DefaultParams;
-
-    /// Check if the blockstore contains a block with the given CID.
-    async fn contains(&mut self, cid: &Cid) -> IpldResult<bool> {
-        self.blockstore
-            .has(cid)
-            .await
-            .map_err(|e| libipld::error::Error::msg(e.to_string()))
-    }
-
-    /// Get block data by CID.
-    async fn get(&mut self, cid: &Cid) -> IpldResult<Option<Vec<u8>>> {
+impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
+    /// Get the size of a block by CID.
+    async fn get_size(&self, cid: &Cid) -> Result<usize> {
         self.blockstore
             .get(cid)
             .await
-            .map_err(|e| libipld::error::Error::msg(e.to_string()))
+            .map_err(|e| anyhow!("blockstore error: {}", e))?
+            .map(|data| data.len())
+            .ok_or_else(|| anyhow!("block not found: {}", cid))
     }
 
-    /// Insert a block into the blockstore.
-    ///
-    /// This is called when receiving blocks from other peers via Bitswap.
-    async fn insert(&mut self, block: &Block<Self::Params>) -> IpldResult<()> {
-        self.blockstore
-            .put(block.cid(), block.data())
+    /// Get block data by CID.
+    async fn get(&self, cid: &Cid) -> Result<Block> {
+        let data = self
+            .blockstore
+            .get(cid)
             .await
-            .map_err(|e| libipld::error::Error::msg(e.to_string()))
+            .map_err(|e| anyhow!("blockstore error: {}", e))?
+            .ok_or_else(|| anyhow!("block not found: {}", cid))?;
+
+        Ok(Block::new(Bytes::from(data), *cid))
     }
 
-    /// Find missing blocks in a DAG starting from the given CID.
-    ///
-    /// This traverses the block's IPLD links and returns CIDs of blocks
-    /// that are not present in the blockstore. Used for DAG synchronization.
-    async fn missing_blocks(&mut self, cid: &Cid) -> IpldResult<Vec<Cid>> {
-        let mut stack = vec![*cid];
-        let mut missing = vec![];
-
-        while let Some(cid) = stack.pop() {
-            if let Some(data) = self.get(&cid).await? {
-                // Parse block and extract references
-                let block = Block::<Self::Params>::new_unchecked(cid, data);
-                block.references(&mut stack)?;
-            } else {
-                missing.push(cid);
-            }
-        }
-
-        Ok(missing)
+    /// Check if the blockstore contains a block with the given CID.
+    async fn has(&self, cid: &Cid) -> Result<bool> {
+        self.blockstore
+            .has(cid)
+            .await
+            .map_err(|e| anyhow!("blockstore error: {}", e))
     }
 }

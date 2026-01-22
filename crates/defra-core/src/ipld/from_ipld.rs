@@ -286,6 +286,8 @@ impl TryFrom<&Ipld> for CollectionDefinitionDeltaPayload {
         Ok(CollectionDefinitionDeltaPayload {
             priority: parse_u64(map, "priority")?,
             name: parse_optional_string(map, "name")?,
+            query_select: parse_optional_bytes(map, "querySelect")?,
+            query_transform: parse_optional_cid(map, "queryTransform")?,
         })
     }
 }
@@ -581,6 +583,32 @@ fn parse_optional_i32(map: &BTreeMap<String, Ipld>, key: &str) -> Result<Option<
         }
         Some(other) => Err(Error::IpldError(format!(
             "Field '{}' expected Integer, got {}",
+            key,
+            ipld_type_name(other)
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Parse an optional bytes field. Returns error if field exists but has wrong type.
+fn parse_optional_bytes(map: &BTreeMap<String, Ipld>, key: &str) -> Result<Option<Vec<u8>>> {
+    match map.get(key) {
+        Some(Ipld::Bytes(b)) => Ok(Some(b.clone())),
+        Some(other) => Err(Error::IpldError(format!(
+            "Field '{}' expected Bytes, got {}",
+            key,
+            ipld_type_name(other)
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Parse an optional CID/Link field. Returns error if field exists but has wrong type.
+fn parse_optional_cid(map: &BTreeMap<String, Ipld>, key: &str) -> Result<Option<cid::Cid>> {
+    match map.get(key) {
+        Some(Ipld::Link(c)) => Ok(Some(cid_from_libipld(c)?)),
+        Some(other) => Err(Error::IpldError(format!(
+            "Field '{}' expected Link, got {}",
             key,
             ipld_type_name(other)
         ))),

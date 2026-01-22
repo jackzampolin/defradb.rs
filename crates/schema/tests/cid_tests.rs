@@ -143,3 +143,100 @@ fn test_cid_string_format() {
         cid_str
     );
 }
+
+// ============================================================================
+// Debug Test - Print CIDs for Users schema
+// ============================================================================
+
+#[test]
+fn debug_users_schema_cids() {
+    use schema::generate_field_cid_with_priority;
+
+    println!("\n=== Debug: Users schema CID generation ===");
+
+    // Field 1: _docID (priority 1)
+    let doc_id = FieldDescription::new("1", "_docID", FieldKind::doc_id());
+    let doc_id_cid = generate_field_cid_with_priority(&doc_id, 1).unwrap();
+    println!(
+        "_docID (p=1): {} crdt={}",
+        doc_id_cid, doc_id.crdt_type as u8
+    );
+
+    // Field 2: name (priority 2)
+    let name = FieldDescription::new("2", "name", FieldKind::string());
+    let name_cid = generate_field_cid_with_priority(&name, 2).unwrap();
+    println!("name (p=2): {} crdt={}", name_cid, name.crdt_type as u8);
+
+    // Field 3: age (priority 3)
+    let age = FieldDescription::new("3", "age", FieldKind::int());
+    let age_cid = generate_field_cid_with_priority(&age, 3).unwrap();
+    println!("age (p=3): {} crdt={}", age_cid, age.crdt_type as u8);
+
+    // Collection with field links
+    let field_cids = vec![doc_id_cid, name_cid, age_cid];
+    let collection_cid = generate_collection_cid("Users", &field_cids).unwrap();
+    println!("Collection 'Users': {}", collection_cid);
+
+    // Also test without field CIDs
+    let collection_cid_no_fields = generate_collection_cid("Users", &[]).unwrap();
+    println!(
+        "Collection 'Users' (no fields): {}",
+        collection_cid_no_fields
+    );
+
+    println!();
+}
+#[test]
+fn debug_detailed_field_encoding() {
+    use schema::{generate_field_cid_with_priority, CType, FieldDescription, FieldKind};
+
+    println!("\n=== Detailed Field Debug ===");
+
+    // _docID with CType::None (like Go)
+    let doc_id =
+        FieldDescription::new("1", "_docID", FieldKind::doc_id()).with_crdt_type(CType::None);
+    let doc_id_cid = generate_field_cid_with_priority(&doc_id, 1).unwrap();
+    println!(
+        "_docID: crdt={}, scalarKind={:?}, cid={}",
+        doc_id.crdt_type as u8,
+        match &doc_id.kind {
+            schema::FieldKind::Scalar(k) => *k as u8,
+            _ => 255,
+        },
+        doc_id_cid
+    );
+
+    // age with CType::LwwRegister (default)
+    let age = FieldDescription::new("2", "age", FieldKind::int());
+    let age_cid = generate_field_cid_with_priority(&age, 2).unwrap();
+    println!(
+        "age: crdt={}, scalarKind={:?}, cid={}",
+        age.crdt_type as u8,
+        match &age.kind {
+            schema::FieldKind::Scalar(k) => *k as u8,
+            _ => 255,
+        },
+        age_cid
+    );
+
+    // name with CType::LwwRegister (default)
+    let name = FieldDescription::new("3", "name", FieldKind::string());
+    let name_cid = generate_field_cid_with_priority(&name, 3).unwrap();
+    println!(
+        "name: crdt={}, scalarKind={:?}, cid={}",
+        name.crdt_type as u8,
+        match &name.kind {
+            schema::FieldKind::Scalar(k) => *k as u8,
+            _ => 255,
+        },
+        name_cid
+    );
+
+    // Collection with sorted fields
+    let collection_cid =
+        schema::generate_collection_cid("Users", &[doc_id_cid, age_cid, name_cid]).unwrap();
+    println!("\nCollection 'Users': {}", collection_cid);
+
+    // Compare with Go expected
+    println!("\nGo expected: bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq");
+}

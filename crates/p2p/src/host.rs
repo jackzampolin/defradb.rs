@@ -19,14 +19,15 @@ use std::time::Duration;
 
 use cid::Cid;
 use futures::StreamExt;
-use libipld::DefaultParams;
+use iroh_bitswap::{BitswapEvent, Store};
 use libp2p::{
     gossipsub, identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use libp2p_bitswap_next::{BitswapEvent, BitswapStore, QueryId};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
+
+use crate::QueryId;
 
 use crate::behaviour::{DefraBehaviour, DefraEvent};
 use crate::bitswap::ReplicatorRegistry;
@@ -34,6 +35,7 @@ use crate::error::{Error, Result};
 use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
+use crate::two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};
 
 /// Default idle connection timeout.
 const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -140,6 +142,16 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Remove specific collections from a replicator.
+    ///
+    /// If the replicator has no collections left after removal, they are deleted.
+    /// This matches Go DefraDB's partial removal behavior.
+    RemoveReplicatorCollections {
+        peer_id: PeerId,
+        collections: Vec<String>,
+        response: oneshot::Sender<Result<bool>>, // true if replicator was fully deleted
+    },
+
     /// Get all registered replicators.
     GetAllReplicators {
         response: oneshot::Sender<Vec<ReplicatorInfo>>,
@@ -149,6 +161,20 @@ pub enum HostCommand {
     GetReplicator {
         peer_id: PeerId,
         response: oneshot::Sender<Option<ReplicatorInfo>>,
+    },
+
+    /// Send a PushLog response via two-stream protocol (Go compatibility).
+    SendTwoStreamResponse {
+        peer_id: PeerId,
+        reply: PushLogReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a PushLog request via two-stream protocol (Go compatibility).
+    SendTwoStreamRequest {
+        peer_id: PeerId,
+        request: PushLogRequest,
+        response: oneshot::Sender<Result<PushLogReply>>,
     },
 }
 
@@ -204,6 +230,19 @@ pub enum HostEvent {
         success: bool,
         error: Option<String>,
     },
+
+    /// Block received via Bitswap - needs to be stored and processed.
+    BitswapBlockReceived {
+        query_id: QueryId,
+        cid: Cid,
+        data: Vec<u8>,
+    },
+
+    /// Received a PushLog request via two-stream protocol (Go compatibility).
+    TwoStreamRequest {
+        peer_id: PeerId,
+        request: PushLogRequest,
+    },
 }
 
 /// Opaque response channel for sending PushLog responses.
@@ -214,9 +253,34 @@ pub struct ResponseChannel(request_response::ResponseChannel<PushLogReply>);
 #[derive(Clone)]
 pub struct P2PHostHandle {
     command_tx: mpsc::Sender<HostCommand>,
+    /// Local public key encoded as protobuf (for use in P2P message metadata).
+    local_public_key_proto: Vec<u8>,
+    /// Local peer ID for message metadata.
+    local_peer_id: PeerId,
+    /// Keypair for signing messages.
+    keypair: Keypair,
 }
 
 impl P2PHostHandle {
+    /// Get the local public key encoded as protobuf.
+    ///
+    /// This is used for setting the pubkey field in P2P message metadata.
+    pub fn local_public_key_proto(&self) -> &[u8] {
+        &self.local_public_key_proto
+    }
+
+    /// Get the local peer ID.
+    ///
+    /// This is synchronous since we cache the peer ID in the handle.
+    pub fn local_peer_id_cached(&self) -> PeerId {
+        self.local_peer_id
+    }
+
+    /// Get a reference to the keypair for signing messages.
+    pub fn keypair(&self) -> &Keypair {
+        &self.keypair
+    }
+
     /// Start listening on the given multiaddress.
     pub async fn listen(&self, addr: Multiaddr) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -471,6 +535,30 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Remove specific collections from a replicator.
+    ///
+    /// This matches Go DefraDB's partial removal behavior:
+    /// - Removes only the specified collections from the replicator
+    /// - If the replicator has no collections left, they are fully deleted
+    ///
+    /// Returns `true` if the replicator was fully deleted (no collections remain).
+    pub async fn remove_replicator_collections(
+        &self,
+        peer_id: PeerId,
+        collections: Vec<String>,
+    ) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::RemoveReplicatorCollections {
+                peer_id,
+                collections,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Get all registered replicators.
     pub async fn get_all_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -497,11 +585,51 @@ impl P2PHostHandle {
             .map_err(|_| Error::ChannelSend)?;
         response_rx.await.map_err(|_| Error::ChannelReceive)
     }
+
+    /// Send a PushLog response via two-stream protocol (Go compatibility).
+    ///
+    /// This sends a response on a NEW stream, matching Go's two-stream pattern.
+    pub async fn send_two_stream_response(
+        &self,
+        peer_id: PeerId,
+        reply: PushLogReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendTwoStreamResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a PushLog request via two-stream protocol and wait for response.
+    ///
+    /// This uses Go's two-stream pattern: request on one stream, response on another.
+    pub async fn send_two_stream_request(
+        &self,
+        peer_id: PeerId,
+        request: PushLogRequest,
+    ) -> Result<PushLogReply> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendTwoStreamRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
 }
 
 /// P2P Host that manages the libp2p swarm.
-pub struct P2PHost {
-    swarm: Swarm<DefraBehaviour>,
+pub struct P2PHost<S: Store> {
+    swarm: Swarm<DefraBehaviour<S>>,
     keypair: Keypair,
     command_rx: mpsc::Receiver<HostCommand>,
     event_tx: mpsc::Sender<HostEvent>,
@@ -509,9 +637,17 @@ pub struct P2PHost {
         HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<PushLogReply>>>,
     /// Replicator registry for access control
     replicators: Arc<ReplicatorRegistry>,
+    /// Two-stream handler for Go compatibility
+    two_stream_handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
+    /// Receiver for two-stream events
+    two_stream_event_rx: mpsc::Receiver<TwoStreamEvent>,
+    /// Tracked spawned tasks for graceful shutdown
+    spawned_tasks: tokio::task::JoinSet<()>,
+    /// Bitswap query abort handles for cancellation support
+    bitswap_queries: HashMap<QueryId, tokio::task::AbortHandle>,
 }
 
-impl P2PHost {
+impl<S: Store> P2PHost<S> {
     /// Create a new P2P host with a generated identity and the given blockstore.
     ///
     /// # Arguments
@@ -522,7 +658,7 @@ impl P2PHost {
     ///
     /// A tuple of (P2PHost, P2PHostHandle, HostEvent receiver, ReplicatorRegistry).
     /// The ReplicatorRegistry is shared and can be used for access control decisions.
-    pub fn new<S: BitswapStore<Params = DefaultParams>>(
+    pub async fn new(
         bitswap_store: S,
     ) -> Result<(
         Self,
@@ -531,7 +667,7 @@ impl P2PHost {
         Arc<ReplicatorRegistry>,
     )> {
         let keypair = Keypair::generate_ed25519();
-        Self::with_keypair(keypair, bitswap_store)
+        Self::with_keypair(keypair, bitswap_store).await
     }
 
     /// Create a new P2P host with the given keypair and blockstore.
@@ -549,8 +685,8 @@ impl P2PHost {
     /// # Note
     ///
     /// This must be called within a tokio runtime context as Bitswap spawns
-    /// a background task for database operations.
-    pub fn with_keypair<S: BitswapStore<Params = DefaultParams>>(
+    /// background tasks for operations.
+    pub async fn with_keypair(
         keypair: Keypair,
         bitswap_store: S,
     ) -> Result<(
@@ -562,15 +698,20 @@ impl P2PHost {
         let local_peer_id = keypair.public().to_peer_id();
         let local_public_key = keypair.public();
 
+        // Encode the public key as protobuf for use in P2P message metadata
+        let local_public_key_proto = local_public_key.encode_protobuf();
+
         info!("Local peer ID: {}", local_peer_id);
 
         // Pass keypair and blockstore to behaviour for message signing and block exchange
+        // DefraBehaviour::new is now async
         let behaviour = DefraBehaviour::new(
             local_peer_id,
             local_public_key,
             keypair.clone(),
             bitswap_store,
         )
+        .await
         .map_err(|e| Error::Behaviour(e.to_string()))?;
 
         let swarm = SwarmBuilder::with_existing_identity(keypair.clone())
@@ -589,10 +730,36 @@ impl P2PHost {
         let (command_tx, command_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
 
-        let handle = P2PHostHandle { command_tx };
+        let handle = P2PHostHandle {
+            command_tx,
+            local_public_key_proto,
+            local_peer_id,
+            keypair: keypair.clone(),
+        };
 
         // Create the replicator registry for access control
         let replicators = Arc::new(ReplicatorRegistry::new());
+
+        // Set up two-stream protocol for Go compatibility
+        let mut control = swarm.behaviour().stream.new_control();
+        let request_streams = control
+            .accept(TwoStreamHandler::request_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register request protocol".into()))?;
+        let response_streams = control
+            .accept(TwoStreamHandler::response_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register response protocol".into()))?;
+
+        let two_stream_handler = Arc::new(tokio::sync::Mutex::new(TwoStreamHandler::new(control)));
+        let (two_stream_event_tx, two_stream_event_rx) = mpsc::channel(256);
+
+        // Spawn the two-stream runner as a background task
+        let runner = TwoStreamRunner::new(
+            Arc::clone(&two_stream_handler),
+            request_streams,
+            response_streams,
+            two_stream_event_tx,
+        );
+        tokio::spawn(runner.run());
 
         let host = Self {
             swarm,
@@ -601,6 +768,10 @@ impl P2PHost {
             event_tx,
             pending_requests: HashMap::new(),
             replicators: Arc::clone(&replicators),
+            two_stream_handler,
+            two_stream_event_rx,
+            spawned_tasks: tokio::task::JoinSet::new(),
+            bitswap_queries: HashMap::new(),
         };
 
         Ok((host, handle, event_rx, replicators))
@@ -638,10 +809,48 @@ impl P2PHost {
                 event = self.swarm.select_next_some() => {
                     self.handle_swarm_event(event).await;
                 }
+                // Handle two-stream protocol events (Go compatibility)
+                Some(two_stream_event) = self.two_stream_event_rx.recv() => {
+                    self.handle_two_stream_event(two_stream_event).await;
+                }
             }
         }
 
         info!("P2P host shutdown complete");
+    }
+
+    /// Handle two-stream protocol events.
+    async fn handle_two_stream_event(&mut self, event: TwoStreamEvent) {
+        match event {
+            TwoStreamEvent::InboundRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.metadata.message_id,
+                    doc_id = %request.doc_id,
+                    "Host received PushLog request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::TwoStreamRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send TwoStreamRequest event - receiver dropped"
+                    );
+                } else {
+                    info!(peer_id = %peer_id, "Forwarded TwoStreamRequest event to coordinator");
+                }
+            }
+            TwoStreamEvent::DecodeError { peer_id, error } => {
+                warn!(
+                    peer_id = %peer_id,
+                    error = %error,
+                    "Failed to decode two-stream message"
+                );
+            }
+        }
     }
 
     /// Handle a command from the handle.
@@ -693,7 +902,7 @@ impl P2PHost {
                     .behaviour_mut()
                     .send_pushlog_response(channel.0, reply)
                     .map(|_| ())
-                    .map_err(|resp| Error::ResponseSend(format!("{:?}", resp.metadata)));
+                    .map_err(|resp| Error::ResponseSend(format!("message_id={}", resp.message_id)));
                 if response.send(result).is_err() {
                     debug!("SendPushLogResponse command response dropped - caller cancelled");
                 }
@@ -775,7 +984,40 @@ impl P2PHost {
             }
 
             HostCommand::Shutdown => {
-                info!("Shutdown requested");
+                info!(
+                    "Shutdown requested, waiting for {} spawned tasks to complete",
+                    self.spawned_tasks.len()
+                );
+                // Wait for all spawned tasks to complete with a timeout
+                let timeout_duration = std::time::Duration::from_secs(5);
+                let shutdown_start = std::time::Instant::now();
+                while !self.spawned_tasks.is_empty() {
+                    if shutdown_start.elapsed() > timeout_duration {
+                        warn!(
+                            "Shutdown timeout exceeded, aborting {} remaining tasks",
+                            self.spawned_tasks.len()
+                        );
+                        self.spawned_tasks.abort_all();
+                        break;
+                    }
+                    // Try to join tasks with a short timeout
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        self.spawned_tasks.join_next(),
+                    )
+                    .await
+                    {
+                        Ok(Some(Ok(()))) => {
+                            debug!("Spawned task completed during shutdown");
+                        }
+                        Ok(Some(Err(e))) => {
+                            warn!("Spawned task failed during shutdown: {}", e);
+                        }
+                        Ok(None) => break,  // No more tasks
+                        Err(_) => continue, // Timeout, check again
+                    }
+                }
+                info!("All spawned tasks completed or aborted");
                 return false;
             }
 
@@ -785,24 +1027,147 @@ impl P2PHost {
                 missing,
                 response,
             } => {
-                debug!(
+                // Generate a query ID for tracking
+                static QUERY_COUNTER: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let query_id =
+                    QueryId(QUERY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+
+                info!(
                     cid = %cid,
                     providers = ?providers,
                     missing_count = missing.len(),
-                    "Starting Bitswap sync"
+                    query_id = query_id.0,
+                    "Starting Bitswap block fetch via Client API"
                 );
-                let query_id =
-                    self.swarm
-                        .behaviour_mut()
-                        .bitswap_sync(cid, providers, missing.into_iter());
+
+                // Clone the client for use in the spawned task
+                let client = self.swarm.behaviour().bitswap.client().clone();
+                let event_tx = self.event_tx.clone();
+                let missing_cids: Vec<Cid> = missing;
+                let providers_list = providers;
+
+                // Spawn async task to fetch blocks (with cancellation support)
+                let task_handle = tokio::spawn(async move {
+                    info!(
+                        query_id = query_id.0,
+                        missing_count = missing_cids.len(),
+                        providers = ?providers_list,
+                        "Bitswap fetch task started"
+                    );
+
+                    // Create a session and add providers for each CID
+                    let session = client.new_session().await;
+
+                    // Add each provider for each missing CID
+                    for cid in &missing_cids {
+                        for provider in &providers_list {
+                            info!(
+                                query_id = query_id.0,
+                                cid = %cid,
+                                provider = %provider,
+                                "Adding Bitswap provider for CID"
+                            );
+                            session.add_provider(cid, *provider).await;
+                        }
+                    }
+
+                    match session.get_blocks(&missing_cids).await {
+                        Ok(receiver) => {
+                            // Use into_parts() to get the underlying channel
+                            // BlockReceiver only implements Deref (not DerefMut), so we can't call recv() through it
+                            let (chan, _guard) = receiver.into_parts();
+                            let mut fetched = 0;
+
+                            while let Ok(block) = chan.recv().await {
+                                fetched += 1;
+                                let block_cid = *block.cid();
+                                let block_data = block.data().to_vec();
+
+                                info!(
+                                    query_id = query_id.0,
+                                    cid = %block_cid,
+                                    fetched = fetched,
+                                    total = missing_cids.len(),
+                                    data_len = block_data.len(),
+                                    "Bitswap fetched block"
+                                );
+
+                                // Send block to coordinator for storage
+                                if let Err(e) = event_tx
+                                    .send(HostEvent::BitswapBlockReceived {
+                                        query_id,
+                                        cid: block_cid,
+                                        data: block_data,
+                                    })
+                                    .await
+                                {
+                                    warn!(
+                                        query_id = query_id.0,
+                                        cid = %block_cid,
+                                        error = %e,
+                                        "Failed to send BitswapBlockReceived event"
+                                    );
+                                }
+                            }
+
+                            let success = fetched == missing_cids.len();
+                            info!(
+                                query_id = query_id.0,
+                                fetched = fetched,
+                                total = missing_cids.len(),
+                                success = success,
+                                "Bitswap fetch complete"
+                            );
+
+                            // Notify completion
+                            let _ = event_tx
+                                .send(HostEvent::BitswapComplete {
+                                    query_id,
+                                    success,
+                                    error: if success {
+                                        None
+                                    } else {
+                                        Some(format!(
+                                            "Only fetched {} of {} blocks",
+                                            fetched,
+                                            missing_cids.len()
+                                        ))
+                                    },
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            warn!(query_id = query_id.0, error = %e, "Bitswap fetch failed");
+                            let _ = event_tx
+                                .send(HostEvent::BitswapComplete {
+                                    query_id,
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                })
+                                .await;
+                        }
+                    }
+                });
+
+                // Store the abort handle for cancellation support
+                self.bitswap_queries
+                    .insert(query_id, task_handle.abort_handle());
+
                 if response.send(Ok(query_id)).is_err() {
                     debug!(cid = %cid, "BitswapSync command response dropped - caller cancelled");
                 }
             }
 
             HostCommand::BitswapCancel { query_id, response } => {
-                debug!(query_id = ?query_id, "Cancelling Bitswap query");
-                let cancelled = self.swarm.behaviour_mut().bitswap_cancel(query_id);
+                let cancelled = if let Some(abort_handle) = self.bitswap_queries.remove(&query_id) {
+                    debug!(query_id = ?query_id, "Cancelling Bitswap query");
+                    abort_handle.abort();
+                    true
+                } else {
+                    debug!(query_id = ?query_id, "Bitswap query not found for cancellation");
+                    false
+                };
                 if response.send(cancelled).is_err() {
                     debug!(query_id = ?query_id, "BitswapCancel command response dropped - caller cancelled");
                 }
@@ -833,6 +1198,37 @@ impl P2PHost {
                 }
             }
 
+            HostCommand::RemoveReplicatorCollections {
+                peer_id,
+                collections,
+                response,
+            } => {
+                debug!(
+                    peer_id = %peer_id,
+                    collections = ?collections,
+                    "Removing collections from replicator"
+                );
+
+                // Remove specific collections from the replicator
+                for collection_id in &collections {
+                    self.replicators.remove_replicator(collection_id, &peer_id);
+                }
+
+                // Check if the replicator still has any collections
+                let fully_deleted = !self.replicators.is_any_replicator(&peer_id);
+
+                if fully_deleted {
+                    debug!(peer_id = %peer_id, "Replicator fully deleted (no collections remain)");
+                }
+
+                if response.send(Ok(fully_deleted)).is_err() {
+                    debug!(
+                        peer_id = %peer_id,
+                        "RemoveReplicatorCollections command response dropped - caller cancelled"
+                    );
+                }
+            }
+
             HostCommand::GetAllReplicators { response } => {
                 let infos = self.replicators.get_all_replicator_info();
                 if response.send(infos).is_err() {
@@ -845,6 +1241,36 @@ impl P2PHost {
                 if response.send(info).is_err() {
                     debug!(peer_id = %peer_id, "GetReplicator command response dropped - caller cancelled");
                 }
+            }
+
+            HostCommand::SendTwoStreamResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_response(peer_id, reply).await.map_err(|e| e);
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendTwoStreamResponse command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::SendTwoStreamRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_request(peer_id, request).await.map_err(|e| e);
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendTwoStreamRequest command response dropped - caller cancelled");
+                    }
+                });
             }
         }
         true
@@ -1024,11 +1450,23 @@ impl P2PHost {
         match event {
             libp2p::identify::Event::Received { peer_id, info, .. } => {
                 debug!(
-                    "Identified peer {}: {} with {} addresses",
+                    "Identified peer {}: {} with {} addresses, {} protocols",
                     peer_id,
                     info.agent_version,
-                    info.listen_addrs.len()
+                    info.listen_addrs.len(),
+                    info.protocols.len()
                 );
+
+                // Inform Bitswap about the peer's supported protocols
+                // This is critical for Bitswap to know this peer can serve blocks
+                let protocols: Vec<String> = info.protocols.iter().map(|p| p.to_string()).collect();
+                debug!(
+                    peer_id = %peer_id,
+                    protocols = ?protocols,
+                    "Informing Bitswap of peer protocols"
+                );
+                self.swarm.behaviour().on_identify(&peer_id, &protocols);
+
                 for addr in &info.listen_addrs {
                     debug!(peer_id = %peer_id, address = %addr, "Adding external address from identify");
                 }
@@ -1124,8 +1562,11 @@ impl P2PHost {
                 );
 
                 // Decode the message payload
-                match serde_cbor::from_slice::<PushLogBroadcast>(&message.data) {
-                    Ok(broadcast) => {
+                // Go sends PushLogRequest with MetaData, then we convert to PushLogBroadcast
+                match serde_cbor::from_slice::<PushLogRequest>(&message.data) {
+                    Ok(request) => {
+                        // Convert to broadcast format (strips metadata)
+                        let broadcast = PushLogBroadcast::from_request(&request);
                         if self
                             .event_tx
                             .send(HostEvent::GossipMessage {
@@ -1195,56 +1636,27 @@ impl P2PHost {
 
     /// Handle Bitswap events.
     async fn handle_bitswap_event(&mut self, event: BitswapEvent) {
+        // iroh-bitswap events are for higher-level coordination
+        // Block exchange happens transparently through the Client
         match event {
-            BitswapEvent::Progress(query_id, missing_count) => {
-                debug!(
-                    query_id = ?query_id,
-                    missing_count = missing_count,
-                    "Bitswap sync progress"
-                );
-                if self
-                    .event_tx
-                    .send(HostEvent::BitswapProgress {
-                        query_id,
-                        missing_count,
-                    })
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        query_id = ?query_id,
-                        "Failed to send BitswapProgress event - receiver dropped"
-                    );
-                }
+            BitswapEvent::Provide { key } => {
+                debug!(cid = %key, "Bitswap requests to provide block");
+                // Could integrate with Kademlia DHT to provide this key
             }
-
-            BitswapEvent::Complete(query_id, result) => {
-                let (success, error) = match result {
-                    Ok(()) => {
-                        debug!(query_id = ?query_id, "Bitswap sync completed successfully");
-                        (true, None)
-                    }
-                    Err(e) => {
-                        warn!(query_id = ?query_id, error = %e, "Bitswap sync failed");
-                        (false, Some(e.to_string()))
-                    }
-                };
-
-                if self
-                    .event_tx
-                    .send(HostEvent::BitswapComplete {
-                        query_id,
-                        success,
-                        error,
-                    })
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        query_id = ?query_id,
-                        "Failed to send BitswapComplete event - receiver dropped"
-                    );
-                }
+            BitswapEvent::FindProviders {
+                key,
+                response,
+                limit,
+            } => {
+                debug!(cid = %key, limit = limit, "Bitswap requests to find providers");
+                // Could query Kademlia DHT to find providers
+                // For now, send empty set (peer discovery via mDNS/manual dial)
+                let _ = response.send(Ok(std::collections::HashSet::new())).await;
+            }
+            BitswapEvent::Ping { peer, response } => {
+                debug!(peer_id = %peer, "Bitswap ping request");
+                // Could implement ping latency measurement
+                let _ = response.send(None);
             }
         }
     }
@@ -1301,7 +1713,10 @@ impl P2PHost {
             .behaviour_mut()
             .send_pushlog_response(channel.0, response)
         {
-            error!("Failed to send PushLog response: {:?}", resp.metadata);
+            error!(
+                "Failed to send PushLog response: message_id={}",
+                resp.message_id
+            );
         }
     }
 }

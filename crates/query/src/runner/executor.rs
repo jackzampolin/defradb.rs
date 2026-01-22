@@ -148,8 +148,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
     }
 
     async fn schema(&self) -> Result<String> {
+        let collections = self.collections_map().await?;
         let mut schema_str = String::new();
-        for collection in self.collections.values() {
+        for collection in collections.values() {
             schema_str.push_str(&format!("type {} {{\n", collection.name));
             for field in &collection.fields {
                 let gql_type = field.kind.graphql_type_name();

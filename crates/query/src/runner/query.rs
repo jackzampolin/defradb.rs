@@ -311,14 +311,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
-        // Get collection schema
-        let collection = self
-            .collections
-            .get(&select.collection_name)
-            .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
+        // Get collection schema on-demand from provider
+        let collection = self.get_collection(&select.collection_name).await?;
 
         // Validate unsupported features and field references
-        plan::validate_select(select, collection)?;
+        plan::validate_select(select, &collection)?;
 
         // Check if this query has nested selections (relations)
         let has_nested = select
@@ -340,7 +337,10 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             }
 
             // Check nested collections by resolving relation targets from parent collection
-            if let Some(acp_coll) = self.find_acp_collection_in_nested(select, collection) {
+            if let Some(acp_coll) = self
+                .find_acp_collection_in_nested(select, &collection)
+                .await?
+            {
                 return Err(QueryError::execution(format!(
                     "Nested queries on ACP-protected collections are not yet supported. \
                      Collection '{}' has an ACP policy. Remove nested selections or use \
@@ -358,7 +358,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 .await
         } else {
             // Use the optimized path for simple queries
-            self.execute_simple_select(select, fetcher, collection, caller_identity)
+            self.execute_simple_select(select, fetcher, &collection, caller_identity)
                 .await
         }
     }
@@ -382,8 +382,10 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let fetcher_arc = FetcherWrapper::new(fetcher);
 
         // Build the plan using the Planner with fetcher support
+        // Get all collections from provider for join planning
+        let collections_map = self.collections_map().await?;
         let collections: Vec<CollectionVersion> =
-            self.collections.values().map(|c| (**c).clone()).collect();
+            collections_map.values().map(|c| (**c).clone()).collect();
 
         let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
         let plan_result = planner.plan_with_index_info(select)?;
@@ -437,14 +439,17 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             fetcher.get_all(&select.collection_name).await?
         };
 
+        // Get all collections for mapping and plan building
+        let collections_map = self.collections_map().await?;
+
         // Build document mapping
-        let mapping = plan::build_mapping(select, collection, &self.collections)?;
+        let mapping = plan::build_mapping(select, collection, &collections_map)?;
 
         // Convert storage documents to plan docs
         let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
 
         // Build and execute the plan
-        let mut plan = plan::build_plan(select, plan_docs, mapping.clone(), &self.collections)?;
+        let mut plan = plan::build_plan(select, plan_docs, mapping.clone(), &collections_map)?;
 
         // Wrap with permission filter if collection has ACP policy and ACP is configured
         if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {

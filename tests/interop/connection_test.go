@@ -27,27 +27,32 @@ func dumpLogsOnFailure(t *testing.T, name string, node *framework.Node) {
 // TestConnectionTwoRustNodesConnect tests that two Rust nodes can discover
 // and connect to each other via P2P.
 func TestConnectionTwoRustNodesConnect(t *testing.T) {
+	t.Parallel() // Safe for parallel execution with ReserveNodePorts
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Allocate ports for both nodes
-	http1, p2p1, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for node1")
+	// Reserve ports for both nodes (held until Release)
+	ports1, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for node1")
+	defer ports1.Release()
 
-	http2, p2p2, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for node2")
+	ports2, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for node2")
+	defer ports2.Release()
 
 	// Start node1
 	node1 := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     http1,
-		P2PPort:      p2p1,
+		HTTPPort:     ports1.HTTPPort,
+		P2PPort:      ports1.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting node1...")
+	ports1.Release() // Release ports before starting node
 	require.NoError(t, node1.Start(ctx), "failed to start node1")
 	defer node1.Stop()
 	dumpLogsOnFailure(t, "node1", node1)
@@ -57,14 +62,15 @@ func TestConnectionTwoRustNodesConnect(t *testing.T) {
 	// Start node2
 	node2 := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     http2,
-		P2PPort:      p2p2,
+		HTTPPort:     ports2.HTTPPort,
+		P2PPort:      ports2.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting node2...")
+	ports2.Release() // Release ports before starting node
 	require.NoError(t, node2.Start(ctx), "failed to start node2")
 	defer node2.Stop()
 	dumpLogsOnFailure(t, "node2", node2)
@@ -110,17 +116,17 @@ func TestConnectionTwoRustNodesConnect(t *testing.T) {
 func setupConnectedRustNodes(t *testing.T, ctx context.Context) (node1, node2 *framework.Node, cleanup func()) {
 	t.Helper()
 
-	// Allocate ports
-	http1, p2p1, err := framework.AllocateNodePorts()
+	// Reserve ports
+	ports1, err := framework.ReserveNodePorts()
 	require.NoError(t, err)
-	http2, p2p2, err := framework.AllocateNodePorts()
+	ports2, err := framework.ReserveNodePorts()
 	require.NoError(t, err)
 
 	// Create nodes
 	node1 = framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     http1,
-		P2PPort:      p2p1,
+		HTTPPort:     ports1.HTTPPort,
+		P2PPort:      ports1.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
@@ -128,17 +134,19 @@ func setupConnectedRustNodes(t *testing.T, ctx context.Context) (node1, node2 *f
 
 	node2 = framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     http2,
-		P2PPort:      p2p2,
+		HTTPPort:     ports2.HTTPPort,
+		P2PPort:      ports2.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
-	// Start nodes
+	// Release ports and start nodes
+	ports1.Release()
 	require.NoError(t, node1.Start(ctx), "failed to start node1")
 	dumpLogsOnFailure(t, "node1", node1)
 
+	ports2.Release()
 	require.NoError(t, node2.Start(ctx), "failed to start node2")
 	dumpLogsOnFailure(t, "node2", node2)
 
@@ -160,21 +168,25 @@ func setupConnectedRustNodes(t *testing.T, ctx context.Context) (node1, node2 *f
 
 // TestConnectionNodeInfo verifies the P2P info endpoint returns valid data.
 func TestConnectionNodeInfo(t *testing.T) {
+	t.Parallel() // Safe for parallel execution with ReserveNodePorts
+
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()
 
-	http1, p2p1, err := framework.AllocateNodePorts()
+	ports, err := framework.ReserveNodePorts()
 	require.NoError(t, err)
+	defer ports.Release()
 
 	node := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     http1,
-		P2PPort:      p2p1,
+		HTTPPort:     ports.HTTPPort,
+		P2PPort:      ports.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
+	ports.Release() // Release ports before starting node
 	require.NoError(t, node.Start(ctx))
 	defer node.Stop()
 	dumpLogsOnFailure(t, "node", node)
@@ -195,27 +207,32 @@ func TestConnectionNodeInfo(t *testing.T) {
 
 // TestCrossRustToGoConnect tests that a Rust node can connect to a Go node.
 func TestCrossRustToGoConnect(t *testing.T) {
+	t.Parallel() // Safe for parallel execution with ReserveNodePorts
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Allocate ports for both nodes
-	httpRust, p2pRust, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Rust node")
+	// Reserve ports for both nodes
+	rustPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Rust node")
+	defer rustPorts.Release()
 
-	httpGo, p2pGo, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Go node")
+	goPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Go node")
+	defer goPorts.Release()
 
 	// Start Go node first (server)
 	goNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeGo,
-		HTTPPort:     httpGo,
-		P2PPort:      p2pGo,
+		HTTPPort:     goPorts.HTTPPort,
+		P2PPort:      goPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Go node...")
+	goPorts.Release() // Release ports before starting node
 	require.NoError(t, goNode.Start(ctx), "failed to start Go node")
 	defer goNode.Stop()
 	dumpLogsOnFailure(t, "go-node", goNode)
@@ -225,14 +242,15 @@ func TestCrossRustToGoConnect(t *testing.T) {
 	// Start Rust node (client)
 	rustNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     httpRust,
-		P2PPort:      p2pRust,
+		HTTPPort:     rustPorts.HTTPPort,
+		P2PPort:      rustPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Rust node...")
+	rustPorts.Release() // Release ports before starting node
 	require.NoError(t, rustNode.Start(ctx), "failed to start Rust node")
 	defer rustNode.Stop()
 	dumpLogsOnFailure(t, "rust-node", rustNode)
@@ -269,27 +287,32 @@ func TestCrossRustToGoConnect(t *testing.T) {
 
 // TestCrossGoToRustConnect tests that a Go node can connect to a Rust node.
 func TestCrossGoToRustConnect(t *testing.T) {
+	t.Parallel() // Safe for parallel execution with ReserveNodePorts
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Allocate ports for both nodes
-	httpRust, p2pRust, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Rust node")
+	// Reserve ports for both nodes
+	rustPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Rust node")
+	defer rustPorts.Release()
 
-	httpGo, p2pGo, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Go node")
+	goPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Go node")
+	defer goPorts.Release()
 
 	// Start Rust node first (server)
 	rustNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     httpRust,
-		P2PPort:      p2pRust,
+		HTTPPort:     rustPorts.HTTPPort,
+		P2PPort:      rustPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Rust node...")
+	rustPorts.Release() // Release ports before starting node
 	require.NoError(t, rustNode.Start(ctx), "failed to start Rust node")
 	defer rustNode.Stop()
 	dumpLogsOnFailure(t, "rust-node", rustNode)
@@ -299,14 +322,15 @@ func TestCrossGoToRustConnect(t *testing.T) {
 	// Start Go node (client)
 	goNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeGo,
-		HTTPPort:     httpGo,
-		P2PPort:      p2pGo,
+		HTTPPort:     goPorts.HTTPPort,
+		P2PPort:      goPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Go node...")
+	goPorts.Release() // Release ports before starting node
 	require.NoError(t, goNode.Start(ctx), "failed to start Go node")
 	defer goNode.Stop()
 	dumpLogsOnFailure(t, "go-node", goNode)

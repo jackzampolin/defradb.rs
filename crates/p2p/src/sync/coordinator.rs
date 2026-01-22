@@ -97,6 +97,9 @@ use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
 use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::replicator::ReplicatorInfo;
+use crate::signing::sign_message;
+
+use super::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
 
 /// Result of setting a replicator with auto-subscribe.
 #[derive(Debug, Clone)]
@@ -160,6 +163,12 @@ pub struct SyncCoordinator<B: Blockstore> {
 
     /// Replicator registry for access control checks
     replicators: Arc<ReplicatorRegistry>,
+
+    /// Set of subscribed collection IDs for P2P sync (in-memory cache)
+    subscribed_collections: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+
+    /// Persistent storage for P2P collection subscriptions
+    collection_store: Arc<dyn P2PCollectionStorage>,
 }
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
@@ -168,8 +177,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Returns the coordinator and a receiver for sync events.
     ///
     /// This constructor creates the coordinator without access control
-    /// (AccessMode::Open). Use `with_access_control` for production deployments
-    /// where access control is required.
+    /// (AccessMode::Open) and no persistent storage for collections.
+    /// Use `with_collection_store` for production deployments with persistence.
     pub async fn new(
         host: P2PHostHandle,
         blockstore: Arc<B>,
@@ -181,6 +190,37 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             config,
             AccessMode::Open,
             Arc::new(ReplicatorRegistry::new()),
+            Arc::new(NoOpCollectionStorage),
+        )
+        .await
+    }
+
+    /// Create a new sync coordinator with a collection store for persistence.
+    ///
+    /// Returns the coordinator and a receiver for sync events.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - Handle to the P2P host
+    /// * `blockstore` - Shared blockstore for storing blocks
+    /// * `config` - Sync configuration
+    /// * `collection_store` - Persistent storage for P2P collection subscriptions
+    ///
+    /// This constructor enables persistent storage for P2P collection subscriptions.
+    /// Collections will be saved to storage when subscribed and loaded on startup.
+    pub async fn with_collection_store(
+        host: P2PHostHandle,
+        blockstore: Arc<B>,
+        config: SyncConfig,
+        collection_store: Arc<dyn P2PCollectionStorage>,
+    ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
+        Self::with_access_control(
+            host,
+            blockstore,
+            config,
+            AccessMode::Open,
+            Arc::new(ReplicatorRegistry::new()),
+            collection_store,
         )
         .await
     }
@@ -196,6 +236,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// * `config` - Sync configuration
     /// * `access_mode` - Access control mode (Open or Controlled)
     /// * `replicators` - Registry of authorized replicator peers
+    /// * `collection_store` - Persistent storage for P2P collection subscriptions
     ///
     /// When `access_mode` is `AccessMode::Controlled`, incoming PushLog requests
     /// and GossipSub messages are checked against the replicator registry. Only
@@ -206,6 +247,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         config: SyncConfig,
         access_mode: AccessMode,
         replicators: Arc<ReplicatorRegistry>,
+        collection_store: Arc<dyn P2PCollectionStorage>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = host.local_peer_id().await?.to_string();
         let broadcaster = Broadcaster::new(host.clone());
@@ -221,6 +263,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 local_peer_id,
                 access_mode,
                 replicators,
+                subscribed_collections: Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashSet::new(),
+                )),
+                collection_store,
             },
             events,
         ))
@@ -431,6 +477,208 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 // Propagate the processing error if there was one
                 process_result?;
             }
+            HostEvent::TwoStreamRequest { peer_id, request } => {
+                // Handle request via Go's two-stream protocol
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    doc_id = %request.doc_id,
+                    message_id = %request.metadata.message_id,
+                    "Received PushLog request via two-stream protocol (Go compatibility)"
+                );
+
+                // Access control check
+                if let Err(e) = self.check_access(&peer_id, &request.collection_id) {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        collection_id = %request.collection_id,
+                        doc_id = %request.doc_id,
+                        "Rejecting two-stream request from unauthorized peer"
+                    );
+                    let mut reply = PushLogReply::error(
+                        &request.metadata.message_id,
+                        &format!(
+                            "access denied: not authorized for collection {}",
+                            request.collection_id
+                        ),
+                    );
+                    // Sign the error response
+                    if let Err(sign_err) = sign_message(self.host.keypair(), &mut reply) {
+                        tracing::error!(error = %sign_err, "Failed to sign access denied response");
+                    }
+                    if let Err(send_err) = self.host.send_two_stream_response(peer_id, reply).await
+                    {
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            error = %send_err,
+                            "Failed to send access denied response via two-stream"
+                        );
+                    }
+                    return Err(e);
+                }
+
+                // Parse CID - if invalid, send error response and return early
+                let cid = match Cid::try_from(request.cid.as_slice()) {
+                    Ok(cid) => {
+                        self.peer_state.peer_has_cid(&peer_id, cid);
+                        cid
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Failed to parse CID: {}", e);
+                        tracing::warn!(
+                            peer_id = %peer_id,
+                            cid_bytes_len = request.cid.len(),
+                            error = %e,
+                            "Failed to parse CID from two-stream request - sending error response"
+                        );
+                        let mut reply =
+                            PushLogReply::error(&request.metadata.message_id, &error_msg);
+                        // Sign the error response
+                        if let Err(sign_err) = sign_message(self.host.keypair(), &mut reply) {
+                            tracing::error!(error = %sign_err, "Failed to sign invalid CID response");
+                        }
+                        if let Err(send_err) =
+                            self.host.send_two_stream_response(peer_id, reply).await
+                        {
+                            tracing::warn!(
+                                peer_id = %peer_id,
+                                error = %send_err,
+                                "Failed to send error response for invalid CID via two-stream"
+                            );
+                        }
+                        return Err(crate::error::Error::InvalidCid(error_msg));
+                    }
+                };
+
+                // Log that we have a valid CID
+                tracing::trace!(?cid, "Parsed valid CID from two-stream request");
+
+                // Convert request to broadcast format and process
+                let broadcast = PushLogBroadcast::from_request(&request);
+                let process_result = self.manager.process_pushlog(&broadcast).await;
+
+                // Send response via two-stream protocol (on a NEW stream)
+                let mut reply = match &process_result {
+                    Ok(()) => PushLogReply::success(&request.metadata.message_id),
+                    Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
+                };
+
+                // Sign the response (required for Go compatibility)
+                if let Err(e) = sign_message(self.host.keypair(), &mut reply) {
+                    tracing::error!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to sign two-stream response"
+                    );
+                    return Err(e);
+                }
+
+                if let Err(e) = self.host.send_two_stream_response(peer_id, reply).await {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        doc_id = %request.doc_id,
+                        error = %e,
+                        "Failed to send two-stream response"
+                    );
+                } else {
+                    tracing::trace!(
+                        peer_id = %peer_id,
+                        doc_id = %request.doc_id,
+                        "Sent two-stream response"
+                    );
+                }
+
+                // Propagate the processing error if there was one
+                process_result?;
+            }
+            HostEvent::BitswapBlockReceived {
+                query_id,
+                cid,
+                data,
+            } => {
+                tracing::info!(
+                    query_id = query_id.0,
+                    cid = %cid,
+                    data_len = data.len(),
+                    "Storing Bitswap block in blockstore"
+                );
+
+                // Store the block in the blockstore
+                match self.manager.store_bitswap_block(&cid, &data).await {
+                    Ok(true) => {
+                        tracing::debug!(
+                            query_id = query_id.0,
+                            cid = %cid,
+                            "Bitswap block stored successfully"
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            query_id = query_id.0,
+                            cid = %cid,
+                            "Bitswap block was already in blockstore"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            query_id = query_id.0,
+                            cid = %cid,
+                            error = %e,
+                            "Failed to store Bitswap block"
+                        );
+                        return Err(e);
+                    }
+                }
+            }
+            HostEvent::BitswapComplete {
+                query_id,
+                success,
+                error,
+            } => {
+                tracing::info!(
+                    query_id = query_id.0,
+                    success = success,
+                    error = ?error,
+                    "Bitswap fetch completed"
+                );
+
+                if success {
+                    // Try to retry pending DAGs that were waiting for these blocks
+                    let pending_dags: Vec<Cid> = self.manager.pending_dag_cids();
+
+                    for root_cid in pending_dags {
+                        match self.manager.retry_pending_dag(&root_cid).await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    query_id = query_id.0,
+                                    root_cid = %root_cid,
+                                    "Pending DAG completed after Bitswap fetch"
+                                );
+                            }
+                            Ok(false) => {
+                                tracing::debug!(
+                                    query_id = query_id.0,
+                                    root_cid = %root_cid,
+                                    "Pending DAG still has missing links"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    query_id = query_id.0,
+                                    root_cid = %root_cid,
+                                    error = %e,
+                                    "Failed to retry pending DAG"
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(ref err) = error {
+                    tracing::warn!(
+                        query_id = query_id.0,
+                        error = %err,
+                        "Bitswap fetch failed"
+                    );
+                }
+            }
             other => {
                 // Other events (peer discovery, listening, etc.) don't need sync handling
                 tracing::trace!(event = ?other, "Ignoring non-sync host event");
@@ -442,9 +690,60 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Subscribe to a collection for sync.
     ///
     /// After subscribing, updates to any document in the collection will be
-    /// received and processed.
+    /// received and processed. The subscription is persisted to storage.
+    ///
+    /// # Ordering
+    ///
+    /// Storage is persisted BEFORE subscribing to GossipSub to ensure consistency.
+    /// If storage fails, we don't subscribe (avoiding inconsistent state where
+    /// we receive messages for a collection we haven't recorded).
     pub async fn subscribe_collection(&self, collection_id: &str) -> Result<bool> {
-        self.broadcaster.subscribe_collection(collection_id).await
+        // Check if already subscribed in cache (fast path)
+        if self
+            .subscribed_collections
+            .read()
+            .await
+            .contains(collection_id)
+        {
+            return Ok(false);
+        }
+
+        // Persist to storage FIRST (before GossipSub subscription)
+        // This ensures we don't end up in an inconsistent state where we're
+        // subscribed to the topic but haven't recorded it in storage.
+        self.collection_store.add_collection(collection_id).await?;
+
+        // Now subscribe to GossipSub
+        let result = self.broadcaster.subscribe_collection(collection_id).await;
+
+        match result {
+            Ok(subscribed) => {
+                // Update in-memory cache regardless of whether it's new or already subscribed
+                self.subscribed_collections
+                    .write()
+                    .await
+                    .insert(collection_id.to_string());
+
+                if subscribed {
+                    tracing::debug!(collection_id = %collection_id, "Subscribed to collection (persisted)");
+                }
+                Ok(subscribed)
+            }
+            Err(e) => {
+                // GossipSub subscription failed - remove from storage to stay consistent
+                if let Err(remove_err) =
+                    self.collection_store.remove_collection(collection_id).await
+                {
+                    tracing::error!(
+                        collection_id = %collection_id,
+                        subscribe_error = %e,
+                        remove_error = %remove_err,
+                        "Failed to rollback storage after GossipSub subscription failure"
+                    );
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Subscribe to a specific document for sync.
@@ -453,13 +752,94 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     }
 
     /// Unsubscribe from a collection.
+    ///
+    /// Removes the collection subscription from both memory and persistent storage.
     pub async fn unsubscribe_collection(&self, collection_id: &str) -> Result<bool> {
-        self.broadcaster.unsubscribe_collection(collection_id).await
+        let result = self
+            .broadcaster
+            .unsubscribe_collection(collection_id)
+            .await?;
+        if result {
+            // Remove from persistent storage first
+            self.collection_store
+                .remove_collection(collection_id)
+                .await?;
+
+            // Update in-memory cache
+            self.subscribed_collections
+                .write()
+                .await
+                .remove(collection_id);
+
+            tracing::debug!(collection_id = %collection_id, "Unsubscribed from collection (persisted)");
+        }
+        Ok(result)
     }
 
     /// Unsubscribe from a document.
     pub async fn unsubscribe_document(&self, doc_id: &str) -> Result<bool> {
         self.broadcaster.unsubscribe_document(doc_id).await
+    }
+
+    /// Get the list of subscribed collection IDs.
+    pub async fn get_subscribed_collections(&self) -> Result<Vec<String>> {
+        let collections = self.subscribed_collections.read().await;
+        Ok(collections.iter().cloned().collect())
+    }
+
+    /// Load and subscribe to all persisted P2P collections.
+    ///
+    /// This should be called during startup to restore collection subscriptions
+    /// from persistent storage. It loads collection IDs from storage, populates
+    /// the in-memory cache, and subscribes to the GossipSub topics.
+    ///
+    /// Returns the number of collections loaded.
+    pub async fn load_p2p_collections(&self) -> Result<usize> {
+        let collections = self.collection_store.get_all_collections().await?;
+        let count = collections.len();
+
+        if count == 0 {
+            tracing::debug!("No persisted P2P collections to load");
+            return Ok(0);
+        }
+
+        tracing::info!(count = count, "Loading persisted P2P collections");
+
+        let mut loaded = 0;
+        for collection_id in collections {
+            // Subscribe to the GossipSub topic
+            match self.broadcaster.subscribe_collection(&collection_id).await {
+                Ok(true) => {
+                    // Update in-memory cache
+                    self.subscribed_collections
+                        .write()
+                        .await
+                        .insert(collection_id.clone());
+                    loaded += 1;
+                    tracing::debug!(collection_id = %collection_id, "Loaded P2P collection subscription");
+                }
+                Ok(false) => {
+                    // Already subscribed (shouldn't happen on startup, but handle gracefully)
+                    self.subscribed_collections
+                        .write()
+                        .await
+                        .insert(collection_id.clone());
+                    loaded += 1;
+                    tracing::debug!(collection_id = %collection_id, "P2P collection already subscribed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        collection_id = %collection_id,
+                        error = %e,
+                        "Failed to subscribe to persisted P2P collection"
+                    );
+                    // Continue loading other collections
+                }
+            }
+        }
+
+        tracing::info!(loaded = loaded, "Finished loading P2P collections");
+        Ok(loaded)
     }
 
     /// Broadcast a local update to the network.
@@ -627,6 +1007,49 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         self.host.delete_replicator(peer_id).await?;
         tracing::info!(peer_id = %peer_id, "Deleted replicator");
         Ok(())
+    }
+
+    /// Remove specific collections from a replicator.
+    ///
+    /// This matches Go DefraDB's partial removal behavior:
+    /// - If `collections` is empty: deletes the entire replicator (all collections)
+    /// - If `collections` is non-empty: removes only those collections, keeping the
+    ///   replicator if other collections remain
+    ///
+    /// Returns `true` if the replicator was fully deleted (no collections remain).
+    pub async fn remove_replicator_collections(
+        &self,
+        peer_id: PeerId,
+        collections: Vec<String>,
+    ) -> Result<bool> {
+        // Go behavior: empty collections = delete all
+        if collections.is_empty() {
+            self.host.delete_replicator(peer_id).await?;
+            tracing::info!(peer_id = %peer_id, "Deleted replicator (empty collections = delete all)");
+            return Ok(true);
+        }
+
+        // Partial removal
+        let fully_deleted = self
+            .host
+            .remove_replicator_collections(peer_id, collections.clone())
+            .await?;
+
+        if fully_deleted {
+            tracing::info!(
+                peer_id = %peer_id,
+                collections = ?collections,
+                "Replicator fully deleted (no collections remain after removal)"
+            );
+        } else {
+            tracing::info!(
+                peer_id = %peer_id,
+                collections = ?collections,
+                "Removed collections from replicator (replicator still has other collections)"
+            );
+        }
+
+        Ok(fully_deleted)
     }
 
     /// Get all registered replicators.

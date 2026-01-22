@@ -83,6 +83,18 @@ where
         )
     })?;
 
+    // Log first bytes for debugging CBOR encoding issues
+    let hex_preview: String = data
+        .iter()
+        .take(100)
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    tracing::info!(
+        cbor_len = data.len(),
+        cbor_hex_preview = %hex_preview,
+        "Writing CBOR message"
+    );
+
     writer.write_all(&data).await?;
     writer.close().await?;
 

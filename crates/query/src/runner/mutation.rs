@@ -77,8 +77,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             let result = self
                 .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone())
                 .await?;
-            // Use collection name as key (Go behavior)
-            results.insert(mutation.collection_name.clone(), result);
+            // Use full mutation name as key (e.g., "create_Users")
+            let key = format!(
+                "{}_{}",
+                mutation.mutation_type.as_prefix(),
+                mutation.collection_name
+            );
+            results.insert(key, result);
         }
 
         Ok(JsonValue::Object(results))
@@ -93,11 +98,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         use acp::Identity;
 
-        // Validate collection exists
-        let collection = self
-            .collections
-            .get(&mutation.collection_name)
-            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+        // Validate collection exists - resolve on-demand from provider
+        let collection = self.get_collection(&mutation.collection_name).await?;
 
         // Build document mapping from requested fields
         let mapping = self.build_mutation_mapping(mutation)?;
@@ -360,11 +362,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             _ => return Ok(None),
         };
 
-        // Get the collection schema to build a mapping
-        let collection = self
-            .collections
-            .get(&mutation.collection_name)
-            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+        // Get the collection schema on-demand from provider
+        let collection = self.get_collection(&mutation.collection_name).await?;
 
         // Build mapping from collection schema
         let mut mapping = DocumentMapping::new();

@@ -75,6 +75,7 @@ pub mod sync;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testutil;
 pub mod topics;
+pub mod two_stream;
 
 // Re-export main types for convenience
 pub use error::{Error, Result};
@@ -104,10 +105,18 @@ pub use sync::{
 
 // Re-export bitswap types
 pub use bitswap::{AccessMode, BitswapStoreAdapter, ReplicatorRegistry};
-pub use libp2p_bitswap_next::{BitswapStore, QueryId};
+pub use iroh_bitswap::Store as BitswapStore;
+
+/// Query ID for tracking Bitswap operations.
+/// This is a simple wrapper that allows correlating sync requests with completions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryId(pub u64);
 
 // Re-export replicator types
 pub use replicator::ReplicatorInfo;
+
+// Re-export two-stream protocol types
+pub use two_stream::{TwoStreamEvent, TwoStreamHandler, TwoStreamRunner};
 
 // Re-export commonly used libp2p types
 pub use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};

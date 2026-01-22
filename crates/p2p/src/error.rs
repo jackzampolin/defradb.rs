@@ -194,6 +194,10 @@ pub enum Error {
         /// The collection they tried to access
         collection_id: String,
     },
+
+    /// Storage error during P2P operation.
+    #[error("storage error: {0}")]
+    Storage(String),
 }
 
 impl From<serde_cbor::Error> for Error {

@@ -30,10 +30,10 @@
 
 use std::sync::Arc;
 
+use crate::QueryId;
 use blockstore::Blockstore;
 use cid::Cid;
 use libp2p::PeerId;
-use libp2p_bitswap_next::QueryId;
 use tokio::sync::mpsc;
 
 use super::coordinator::SyncCoordinator;
@@ -216,6 +216,27 @@ impl ReplicationLoop {
             } => {
                 // Initiate Bitswap fetch for missing blocks
                 Self::handle_dag_needs_fetch(coordinator, root_cid, missing, providers).await
+            }
+            SyncEvent::DagReady {
+                root_cid,
+                doc_id,
+                collection_id,
+                schema_version_id,
+            } => {
+                // DAG is complete after Bitswap fetch - process as block received
+                tracing::info!(
+                    cid = %root_cid,
+                    doc_id = %doc_id,
+                    "DAG ready for merge after Bitswap fetch"
+                );
+                Self::handle_block_received(
+                    coordinator,
+                    handler,
+                    config,
+                    root_cid,
+                    BlockMetadata::normal(&doc_id, &collection_id, &schema_version_id),
+                )
+                .await
             }
         }
     }
@@ -429,6 +450,21 @@ impl ReplicationLoop {
                         } => {
                             Self::handle_dag_needs_fetch(&coordinator, root_cid, missing, providers)
                                 .await
+                        }
+                        SyncEvent::DagReady {
+                            root_cid,
+                            doc_id,
+                            collection_id,
+                            schema_version_id,
+                        } => {
+                            Self::handle_block_received(
+                                &coordinator,
+                                handler.as_ref(),
+                                &config,
+                                root_cid,
+                                BlockMetadata::normal(&doc_id, &collection_id, &schema_version_id),
+                            )
+                            .await
                         }
                     };
                     results.push(result);

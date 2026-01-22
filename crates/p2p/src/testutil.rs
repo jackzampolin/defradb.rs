@@ -12,17 +12,20 @@
 //!
 //! This module provides common test helpers and mocks used across unit and integration tests.
 
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use libipld::{Block, Cid, DefaultParams, Result as IpldResult};
-use libp2p_bitswap_next::BitswapStore;
+use bytes::Bytes;
+use cid::Cid;
+use iroh_bitswap::{Block, Store};
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
 /// Mock BitswapStore for testing.
 ///
-/// A simple in-memory implementation of BitswapStore that can be used
+/// A simple in-memory implementation of iroh_bitswap::Store that can be used
 /// in unit and integration tests without requiring a real blockstore.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MockBitswapStore {
     blocks: Arc<Mutex<HashMap<Cid, Vec<u8>>>>,
 }
@@ -59,31 +62,29 @@ impl Default for MockBitswapStore {
 }
 
 #[async_trait]
-impl BitswapStore for MockBitswapStore {
-    type Params = DefaultParams;
-
-    async fn contains(&mut self, cid: &Cid) -> IpldResult<bool> {
-        Ok(self.blocks.lock().unwrap().contains_key(cid))
-    }
-
-    async fn get(&mut self, cid: &Cid) -> IpldResult<Option<Vec<u8>>> {
-        Ok(self.blocks.lock().unwrap().get(cid).cloned())
-    }
-
-    async fn insert(&mut self, block: &Block<Self::Params>) -> IpldResult<()> {
+impl Store for MockBitswapStore {
+    async fn get_size(&self, cid: &Cid) -> Result<usize> {
         self.blocks
             .lock()
             .unwrap()
-            .insert(*block.cid(), block.data().to_vec());
-        Ok(())
+            .get(cid)
+            .map(|data| data.len())
+            .ok_or_else(|| anyhow!("block not found: {}", cid))
     }
 
-    async fn missing_blocks(&mut self, cid: &Cid) -> IpldResult<Vec<Cid>> {
-        if self.blocks.lock().unwrap().contains_key(cid) {
-            Ok(vec![])
-        } else {
-            Ok(vec![*cid])
-        }
+    async fn get(&self, cid: &Cid) -> Result<Block> {
+        let data = self
+            .blocks
+            .lock()
+            .unwrap()
+            .get(cid)
+            .cloned()
+            .ok_or_else(|| anyhow!("block not found: {}", cid))?;
+        Ok(Block::new(Bytes::from(data), *cid))
+    }
+
+    async fn has(&self, cid: &Cid) -> Result<bool> {
+        Ok(self.blocks.lock().unwrap().contains_key(cid))
     }
 }
 
@@ -93,19 +94,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_store_basic_operations() {
-        let mut store = MockBitswapStore::new();
+        let store = MockBitswapStore::new();
         assert!(store.is_empty());
 
         // Create a test CID
         let cid =
             Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
 
-        // Check missing
-        assert!(!store.contains(&cid).await.unwrap());
-        assert_eq!(store.missing_blocks(&cid).await.unwrap(), vec![cid]);
+        // Check not present
+        assert!(!store.has(&cid).await.unwrap());
 
-        // Get missing
-        assert!(store.get(&cid).await.unwrap().is_none());
+        // Get missing returns error
+        assert!(store.get(&cid).await.is_err());
     }
 
     #[test]
