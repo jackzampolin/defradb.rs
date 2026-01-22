@@ -46,7 +46,7 @@ pub use plan::{
     TypeJoinMany, TypeJoinOne, UpdateInput, UpdateNode, UpsertAction, UpsertInput, UpsertNode,
 };
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
-pub use query_parse::{parse_mutations, parse_query, parse_request, ParsedOperation};
+pub use query_parse::{parse_mutations, parse_query, parse_request, ExplainType, ParsedOperation};
 pub use rest::{RestError, RestOperations, RestOperationsImpl, RestResult};
 pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::parse_sdl;

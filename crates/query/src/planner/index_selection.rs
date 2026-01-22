@@ -81,13 +81,32 @@ impl FieldCondition {
                             continue;
                         }
                     }
-                    FilterOp::Like | FilterOp::Nlike => {
+                    FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
                         if let Some(s) = value.as_str() {
                             ConditionValue::Pattern(s.to_string())
                         } else {
                             continue;
                         }
                     }
+                    FilterOp::ContainedIn => {
+                        // _contained_in expects an array value
+                        if let Some(arr) = value.as_array() {
+                            ConditionValue::Multiple(
+                                arr.iter().filter_map(json_to_normal_value).collect(),
+                            )
+                        } else {
+                            continue;
+                        }
+                    }
+                    FilterOp::HasKey => {
+                        // _has_key expects a string key
+                        if let Some(s) = value.as_str() {
+                            ConditionValue::Pattern(s.to_string())
+                        } else {
+                            continue;
+                        }
+                    }
+                    // _contains and other operators expect single values
                     _ => {
                         if let Some(nv) = json_to_normal_value(value) {
                             ConditionValue::Single(nv)

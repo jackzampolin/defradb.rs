@@ -12,7 +12,7 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
 use crate::planner::Planner;
-use crate::query_parse::parse_query;
+use crate::query_parse::{parse_query, ExplainType};
 use crate::txn::TransactionRegistry;
 
 use super::fetcher::FetcherWrapper;
@@ -34,6 +34,249 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         self.execute_query_internal(query, self.fetcher.as_ref(), caller_identity)
             .await
+    }
+
+    /// Generate an explanation of the query plan.
+    ///
+    /// Used when queries include the @explain directive.
+    /// Supports three modes:
+    /// - Simple: Query plan structure without execution
+    /// - Execute: Run the query and return plan structure with execution metrics
+    /// - Debug: All plan nodes including internal ones
+    pub async fn explain_query_with_identity(
+        &self,
+        query: &str,
+        caller_identity: Option<Did>,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
+        match explain_type {
+            ExplainType::Simple | ExplainType::Debug => {
+                // Simple and Debug modes: explain without execution
+                let selects = parse_query(query)?;
+                let mut results = Map::new();
+
+                for select in selects {
+                    let explanation = self.explain_select(&select, explain_type)?;
+                    let key = select.field.output_name();
+                    results.insert(key.to_string(), explanation);
+                }
+
+                Ok(serde_json::json!({ "explain": results }))
+            }
+            ExplainType::Execute => {
+                // Execute mode: run the query and collect metrics
+                self.execute_explain(query, caller_identity).await
+            }
+        }
+    }
+
+    /// Execute the query and return explain output with execution metrics.
+    /// Format matches Go DefraDB's executeAndExplainRequest output.
+    async fn execute_explain(
+        &self,
+        query: &str,
+        caller_identity: Option<Did>,
+    ) -> Result<JsonValue> {
+        let selects = parse_query(query)?;
+
+        let mut explain_result = Map::new();
+        let mut total_executions: u64 = 0;
+        let mut total_docs: usize = 0;
+        let mut execution_success = true;
+        let mut execution_errors: Vec<String> = Vec::new();
+
+        for select in selects {
+            // Execute the select and collect metrics
+            match self
+                .execute_select_with_metrics(&select, caller_identity.clone())
+                .await
+            {
+                Ok((explanation, doc_count, exec_count)) => {
+                    // Merge the plan tree into explain result (Go format)
+                    if let Some(obj) = explanation.as_object() {
+                        for (key, value) in obj {
+                            explain_result.insert(key.clone(), value.clone());
+                        }
+                    }
+                    total_docs += doc_count;
+                    total_executions += exec_count;
+                }
+                Err(e) => {
+                    execution_success = false;
+                    execution_errors.push(e.to_string());
+                }
+            }
+        }
+
+        // Add execution metrics (Go format)
+        explain_result.insert(
+            "executionSuccess".to_string(),
+            serde_json::json!(execution_success),
+        );
+        explain_result.insert(
+            "planExecutions".to_string(),
+            serde_json::json!(total_executions),
+        );
+        explain_result.insert(
+            "sizeOfResult".to_string(),
+            serde_json::json!(total_docs),
+        );
+
+        if !execution_errors.is_empty() {
+            explain_result.insert(
+                "executionErrors".to_string(),
+                serde_json::json!(execution_errors),
+            );
+        }
+
+        Ok(serde_json::json!({ "explain": JsonValue::Object(explain_result) }))
+    }
+
+    /// Execute a select and return the explain output with metrics.
+    /// Format matches Go DefraDB's collectExecuteExplainInfo output.
+    async fn execute_select_with_metrics(
+        &self,
+        select: &Select,
+        caller_identity: Option<Did>,
+    ) -> Result<(JsonValue, usize, u64)> {
+        // Get collection schema
+        let collection = self
+            .collections
+            .get(&select.collection_name)
+            .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
+
+        // Build document mapping and plan
+        let mapping = plan::build_mapping(select, collection, &self.collections)?;
+
+        // Fetch documents
+        let fetcher = self.fetcher.as_ref();
+        let docs = if let Some(ref doc_ids) = select.doc_ids {
+            let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            result.into_docs()
+        } else {
+            fetcher.get_all(&select.collection_name).await?
+        };
+
+        // Convert to plan docs
+        let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
+        let doc_count = plan_docs.len();
+
+        // Build the plan
+        let mut plan =
+            plan::build_plan(select, plan_docs.clone(), mapping.clone(), &self.collections)?;
+
+        // Wrap with permission filter if needed
+        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            plan = Box::new(PermissionFilterNode::new(
+                plan,
+                acp.clone(),
+                Identity::from(caller_identity),
+                &policy.id,
+                &policy.resource_name,
+            ));
+        }
+
+        // Execute the plan and count iterations
+        plan.init().await?;
+        plan.start().await?;
+
+        let mut iterations: u64 = 0;
+        let mut result_count = 0;
+
+        while plan.next().await? {
+            iterations += 1;
+            result_count += 1;
+        }
+
+        plan.close().await?;
+
+        // Get the execution explain from the plan (Go format: { "nodeKind": { ... } })
+        let explanation = plan.explain();
+
+        // Go adds iterations to each node during execute explain
+        // For now, we add it to the outermost node
+        let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+
+        Ok((explanation, result_count, iterations))
+    }
+
+    /// Add execution metrics to the explain output (Go format).
+    fn add_iterations_to_explain(mut explanation: JsonValue, iterations: u64, doc_fetches: usize) -> JsonValue {
+        // The explanation is { "nodeKind": { ... } }
+        // We need to add iterations to the inner object
+        if let Some(obj) = explanation.as_object_mut() {
+            if let Some((_, inner)) = obj.iter_mut().next() {
+                if let Some(inner_obj) = inner.as_object_mut() {
+                    inner_obj.insert("iterations".to_string(), serde_json::json!(iterations));
+                    inner_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+                }
+            }
+        }
+        explanation
+    }
+
+    /// Generate an explanation of a single Select operation.
+    fn explain_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
+        // Get collection schema
+        let collection = self
+            .collections
+            .get(&select.collection_name)
+            .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
+
+        // Check if this query has nested selections (relations)
+        let has_nested = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
+
+        if has_nested {
+            // Use the Planner for queries with nested selections
+            self.explain_nested_select(select, explain_type)
+        } else {
+            // Explain simple query plan
+            self.explain_simple_select(select, collection, explain_type)
+        }
+    }
+
+    /// Generate an explanation for a query with nested selections.
+    fn explain_nested_select(
+        &self,
+        select: &Select,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
+        // Build the plan using the Planner
+        let collections: Vec<CollectionVersion> =
+            self.collections.values().map(|c| (**c).clone()).collect();
+
+        let planner = Planner::new(collections);
+        let plan_result = planner.plan_with_index_info(select)?;
+        let plan = plan_result.plan;
+
+        // Return the plan explanation based on type
+        match explain_type {
+            ExplainType::Debug => Ok(plan.explain_debug()),
+            _ => Ok(plan.explain()),
+        }
+    }
+
+    /// Generate an explanation for a simple query without nested selections.
+    fn explain_simple_select(
+        &self,
+        select: &Select,
+        collection: &Arc<CollectionVersion>,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
+        // Build document mapping and plan
+        let mapping = plan::build_mapping(select, collection, &self.collections)?;
+
+        // Create an empty plan with no documents for explanation purposes
+        let plan = plan::build_plan(select, vec![], mapping, &self.collections)?;
+
+        // Return the plan explanation based on type
+        match explain_type {
+            ExplainType::Debug => Ok(plan.explain_debug()),
+            _ => Ok(plan.explain()),
+        }
     }
 
     /// Execute a GraphQL query with a specific fetcher and identity.

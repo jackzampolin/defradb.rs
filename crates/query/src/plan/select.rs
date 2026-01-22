@@ -90,6 +90,24 @@ impl PlanNode for SelectNode {
     fn kind(&self) -> &'static str {
         "selectNode"
     }
+
+    fn explain_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        if let Some(ref filter) = self.filter {
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        }
+
+        // Recursively explain child node - merge their wrapped structure
+        let child_explain = self.source.explain();
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        serde_json::Value::Object(obj)
+    }
 }
 
 #[cfg(test)]
@@ -188,7 +206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_select_source_error_propagation() {
+    async fn test_select_source_null_filter_returns_no_match() {
         let collection = make_test_collection();
         let mapping = make_test_mapping();
 
@@ -199,7 +217,7 @@ mod tests {
             None, // age is null
         ])];
 
-        // Add filter on scan that will error
+        // Filter with _gt on null returns false (Go DefraDB behavior), not error
         let filter =
             Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
 
@@ -212,10 +230,9 @@ mod tests {
         select.init().await.unwrap();
         select.start().await.unwrap();
 
+        // With Go DefraDB compatibility, null comparison returns false (no match)
         let result = select.next().await;
-        assert!(
-            result.is_err(),
-            "Source error should propagate through select"
-        );
+        assert!(result.is_ok(), "null comparison should not error");
+        assert!(!result.unwrap(), "null _gt 25 should not match");
     }
 }

@@ -244,7 +244,39 @@ impl PlanNode for OrderByNode {
     }
 
     fn kind(&self) -> &'static str {
-        "orderByNode"
+        "orderNode"
+    }
+
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Go DefraDB format: "orderings" array with { "fields": [...], "direction": "ASC/DESC" }
+        let orderings: Vec<JsonValue> = self
+            .order_by
+            .conditions
+            .iter()
+            .map(|c| {
+                let dir = match c.direction {
+                    OrderDirection::Asc => "ASC",
+                    OrderDirection::Desc => "DESC",
+                };
+                serde_json::json!({
+                    "fields": c.fields,
+                    "direction": dir
+                })
+            })
+            .collect();
+        obj.insert("orderings".to_string(), JsonValue::Array(orderings));
+
+        // Recursively explain child node - merge their wrapped structure
+        let child_explain = self.source.explain();
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        JsonValue::Object(obj)
     }
 }
 
@@ -669,7 +701,7 @@ mod tests {
         let order_by = OrderBy::new();
         let scan = ScanNode::new(collection, mapping.clone()).with_docs(vec![]);
         let orderby = OrderByNode::new(Box::new(scan), order_by, mapping);
-        assert_eq!(orderby.kind(), "orderByNode");
+        assert_eq!(orderby.kind(), "orderNode"); // Go DefraDB compatible name
     }
 
     #[tokio::test]

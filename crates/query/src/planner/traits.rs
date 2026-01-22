@@ -161,6 +161,72 @@ pub trait PlanNode: Send + Sync {
     fn current_group_docs(&self) -> Option<&[Doc]> {
         None
     }
+
+    /// Generate an explanation of this node for EXPLAIN queries.
+    ///
+    /// Returns a JSON object in Go DefraDB format where the node kind is the key:
+    /// `{ "scanNode": { "collectionName": "..." } }`
+    ///
+    /// Child nodes are nested under their kind name, creating a tree structure:
+    /// `{ "selectNode": { "filter": ..., "scanNode": { ... } } }`
+    fn explain(&self) -> JsonValue {
+        let node_kind = self.kind().to_string();
+        let inner = self.explain_inner();
+
+        let mut wrapper = serde_json::Map::new();
+        wrapper.insert(node_kind, inner);
+        JsonValue::Object(wrapper)
+    }
+
+    /// Generate the inner explanation content for this node.
+    ///
+    /// Override this in specific nodes to add node-specific attributes.
+    /// Child nodes are automatically added by the default implementation.
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Recursively explain child nodes - merge their wrapped structure
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            // Child explain is { "childKind": { ... } }, merge it into our object
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        JsonValue::Object(obj)
+    }
+
+    /// Generate a debug explanation showing all nodes including internal ones.
+    ///
+    /// Uses Go DefraDB format with node kind as key.
+    fn explain_debug(&self) -> JsonValue {
+        let node_kind = self.kind().to_string();
+        let inner = self.explain_debug_inner();
+
+        let mut wrapper = serde_json::Map::new();
+        wrapper.insert(node_kind, inner);
+        JsonValue::Object(wrapper)
+    }
+
+    /// Generate the inner debug explanation content for this node.
+    fn explain_debug_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Recursively explain all child nodes
+        if let Some(source) = self.source() {
+            let child_explain = source.explain_debug();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        JsonValue::Object(obj)
+    }
 }
 
 /// Execution statistics for plan nodes

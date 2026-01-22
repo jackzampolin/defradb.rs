@@ -33,9 +33,15 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         // Route to appropriate handler based on operation type
         // Pass identity through for ACP permission checks
         let result = match parsed {
-            ParsedOperation::Query(_) => {
-                self.execute_query_with_identity(&request.query, identity)
-                    .await
+            ParsedOperation::Query { explain, .. } => {
+                if let Some(explain_type) = explain {
+                    // Return query plan instead of executing
+                    self.explain_query_with_identity(&request.query, identity, explain_type)
+                        .await
+                } else {
+                    self.execute_query_with_identity(&request.query, identity)
+                        .await
+                }
             }
             ParsedOperation::Mutation(_) => {
                 self.execute_mutation_with_identity(&request.query, identity)

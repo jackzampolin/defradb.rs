@@ -9,25 +9,26 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 
 /// Filter operators for condition matching
+/// Uses Go DefraDB naming conventions for compatibility
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FilterOp {
     /// Equal (_eq)
     #[serde(rename = "_eq")]
     Eq,
-    /// Not equal (_ne)
-    #[serde(rename = "_ne")]
+    /// Not equal (_neq) - Go DefraDB naming
+    #[serde(rename = "_neq", alias = "_ne")]
     Ne,
     /// Greater than (_gt)
     #[serde(rename = "_gt")]
     Gt,
-    /// Greater than or equal (_gte)
-    #[serde(rename = "_gte")]
+    /// Greater than or equal (_geq) - Go DefraDB naming
+    #[serde(rename = "_geq", alias = "_gte")]
     Gte,
     /// Less than (_lt)
     #[serde(rename = "_lt")]
     Lt,
-    /// Less than or equal (_lte)
-    #[serde(rename = "_lte")]
+    /// Less than or equal (_leq) - Go DefraDB naming
+    #[serde(rename = "_leq", alias = "_lte")]
     Lte,
     /// In array (_in)
     #[serde(rename = "_in")]
@@ -41,6 +42,21 @@ pub enum FilterOp {
     /// Negated pattern match (_nlike)
     #[serde(rename = "_nlike")]
     Nlike,
+    /// Case-insensitive pattern match (_ilike)
+    #[serde(rename = "_ilike")]
+    Ilike,
+    /// Negated case-insensitive pattern match (_nilike)
+    #[serde(rename = "_nilike")]
+    Nilike,
+    /// Array contains value (_contains)
+    #[serde(rename = "_contains")]
+    Contains,
+    /// Array is contained in given array (_contained_in)
+    #[serde(rename = "_contained_in")]
+    ContainedIn,
+    /// Object/map has key (_has_key)
+    #[serde(rename = "_has_key")]
+    HasKey,
     /// Logical AND (_and)
     #[serde(rename = "_and")]
     And,
@@ -53,19 +69,25 @@ pub enum FilterOp {
 }
 
 impl FilterOp {
-    /// Parse a filter operator from string
+    /// Parse a filter operator from string.
+    /// Accepts both Go DefraDB naming (_neq, _geq, _leq) and alternative naming (_ne, _gte, _lte).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "_eq" => Some(Self::Eq),
-            "_ne" => Some(Self::Ne),
+            "_neq" | "_ne" => Some(Self::Ne),
             "_gt" => Some(Self::Gt),
-            "_gte" => Some(Self::Gte),
+            "_geq" | "_gte" => Some(Self::Gte),
             "_lt" => Some(Self::Lt),
-            "_lte" => Some(Self::Lte),
+            "_leq" | "_lte" => Some(Self::Lte),
             "_in" => Some(Self::In),
             "_nin" => Some(Self::Nin),
             "_like" => Some(Self::Like),
             "_nlike" => Some(Self::Nlike),
+            "_ilike" => Some(Self::Ilike),
+            "_nilike" => Some(Self::Nilike),
+            "_contains" => Some(Self::Contains),
+            "_contained_in" => Some(Self::ContainedIn),
+            "_has_key" => Some(Self::HasKey),
             "_and" => Some(Self::And),
             "_or" => Some(Self::Or),
             "_not" => Some(Self::Not),
@@ -73,19 +95,24 @@ impl FilterOp {
         }
     }
 
-    /// Get the string representation
+    /// Get the string representation (uses Go DefraDB naming)
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Eq => "_eq",
-            Self::Ne => "_ne",
+            Self::Ne => "_neq",
             Self::Gt => "_gt",
-            Self::Gte => "_gte",
+            Self::Gte => "_geq",
             Self::Lt => "_lt",
-            Self::Lte => "_lte",
+            Self::Lte => "_leq",
             Self::In => "_in",
             Self::Nin => "_nin",
             Self::Like => "_like",
             Self::Nlike => "_nlike",
+            Self::Ilike => "_ilike",
+            Self::Nilike => "_nilike",
+            Self::Contains => "_contains",
+            Self::ContainedIn => "_contained_in",
+            Self::HasKey => "_has_key",
             Self::And => "_and",
             Self::Or => "_or",
             Self::Not => "_not",
@@ -263,10 +290,11 @@ impl Filter {
         match op {
             FilterOp::Eq => Ok(Self::values_equal(actual, expected)),
             FilterOp::Ne => Ok(!Self::values_equal(actual, expected)),
-            FilterOp::Gt => self.compare(actual, expected).map(|ord| ord.is_gt()),
-            FilterOp::Gte => self.compare(actual, expected).map(|ord| ord.is_ge()),
-            FilterOp::Lt => self.compare(actual, expected).map(|ord| ord.is_lt()),
-            FilterOp::Lte => self.compare(actual, expected).map(|ord| ord.is_le()),
+            // Comparison operators: None (from null or NaN) returns false (Go DefraDB behavior)
+            FilterOp::Gt => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_gt())),
+            FilterOp::Gte => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_ge())),
+            FilterOp::Lt => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_lt())),
+            FilterOp::Lte => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_le())),
             FilterOp::In => {
                 let arr = expected
                     .as_array()
@@ -279,8 +307,51 @@ impl Filter {
                     .ok_or_else(|| QueryError::invalid_filter("_nin requires array"))?;
                 Ok(!arr.iter().any(|v| Self::values_equal(actual, v)))
             }
-            FilterOp::Like => self.like_match(actual, expected, false),
-            FilterOp::Nlike => self.like_match(actual, expected, true),
+            FilterOp::Like => self.like_match(actual, expected, false, false),
+            FilterOp::Nlike => self.like_match(actual, expected, true, false),
+            FilterOp::Ilike => self.like_match(actual, expected, false, true),
+            FilterOp::Nilike => self.like_match(actual, expected, true, true),
+            FilterOp::Contains => {
+                // Array field contains the expected value
+                // Null fields never match (standard database behavior)
+                if actual.is_null() {
+                    return Ok(false);
+                }
+                let arr = actual
+                    .as_array()
+                    .ok_or_else(|| QueryError::invalid_filter("_contains requires array field"))?;
+                Ok(arr.iter().any(|v| Self::values_equal(v, expected)))
+            }
+            FilterOp::ContainedIn => {
+                // All elements of actual array are in expected array (actual is subset of expected)
+                // Null fields never match (standard database behavior)
+                if actual.is_null() {
+                    return Ok(false);
+                }
+                let actual_arr = actual.as_array().ok_or_else(|| {
+                    QueryError::invalid_filter("_contained_in requires array field")
+                })?;
+                let expected_arr = expected.as_array().ok_or_else(|| {
+                    QueryError::invalid_filter("_contained_in requires array value")
+                })?;
+                Ok(actual_arr
+                    .iter()
+                    .all(|v| expected_arr.iter().any(|e| Self::values_equal(v, e))))
+            }
+            FilterOp::HasKey => {
+                // Object/map has the specified key
+                // Null fields never match (standard database behavior)
+                if actual.is_null() {
+                    return Ok(false);
+                }
+                let key = expected
+                    .as_str()
+                    .ok_or_else(|| QueryError::invalid_filter("_has_key requires string key"))?;
+                let obj = actual
+                    .as_object()
+                    .ok_or_else(|| QueryError::invalid_filter("_has_key requires object field"))?;
+                Ok(obj.contains_key(key))
+            }
             FilterOp::And | FilterOp::Or | FilterOp::Not => Err(QueryError::internal(
                 "logical ops should be handled at top level",
             )),
@@ -309,8 +380,15 @@ impl Filter {
         }
     }
 
-    fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<std::cmp::Ordering> {
+    /// Compare two values for ordering.
+    /// Returns None for null comparisons (Go DefraDB behavior: null comparisons return false).
+    /// Supports int/float coercion (Go DefraDB uses numbers.TryUpcast).
+    fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<Option<std::cmp::Ordering>> {
         match (a, b) {
+            // Null comparisons: Go DefraDB returns false for null vs anything in ordering comparisons
+            (JsonValue::Null, _) | (_, JsonValue::Null) => Ok(None),
+
+            // Number comparisons: support int/float coercion (Go's numbers.TryUpcast behavior)
             (JsonValue::Number(a), JsonValue::Number(b)) => {
                 let a_val = a.as_f64().ok_or_else(|| {
                     QueryError::invalid_filter(format!("number {} cannot be compared", a))
@@ -318,11 +396,13 @@ impl Filter {
                 let b_val = b.as_f64().ok_or_else(|| {
                     QueryError::invalid_filter(format!("number {} cannot be compared", b))
                 })?;
-                a_val
-                    .partial_cmp(&b_val)
-                    .ok_or_else(|| QueryError::invalid_filter("cannot compare NaN values"))
+                Ok(a_val.partial_cmp(&b_val)) // Returns None for NaN, which becomes false
             }
-            (JsonValue::String(a), JsonValue::String(b)) => Ok(a.cmp(b)),
+
+            // String comparisons
+            (JsonValue::String(a), JsonValue::String(b)) => Ok(Some(a.cmp(b))),
+
+            // Type mismatch
             _ => Err(QueryError::TypeMismatch {
                 expected: "comparable types".to_string(),
                 actual: format!("{:?} vs {:?}", a, b),
@@ -330,46 +410,91 @@ impl Filter {
         }
     }
 
-    fn like_match(&self, actual: &JsonValue, pattern: &JsonValue, negate: bool) -> Result<bool> {
-        let actual_str = actual
-            .as_str()
-            .ok_or_else(|| QueryError::invalid_filter("_like requires string field"))?;
-        let pattern_str = pattern
-            .as_str()
-            .ok_or_else(|| QueryError::invalid_filter("_like requires string pattern"))?;
+    fn like_match(
+        &self,
+        actual: &JsonValue,
+        pattern: &JsonValue,
+        negate: bool,
+        case_insensitive: bool,
+    ) -> Result<bool> {
+        // Null fields never match (standard database behavior, matches Go DefraDB)
+        if actual.is_null() {
+            return Ok(negate);
+        }
 
-        // Validate pattern - only simple patterns are supported:
+        let op_name = if case_insensitive { "_ilike" } else { "_like" };
+
+        let actual_str = actual.as_str().ok_or_else(|| {
+            QueryError::invalid_filter(format!("{} requires string field", op_name))
+        })?;
+        let pattern_str = pattern.as_str().ok_or_else(|| {
+            QueryError::invalid_filter(format!("{} requires string pattern", op_name))
+        })?;
+
+        // Apply case transformation if case-insensitive
+        let (actual_cmp, pattern_cmp): (std::borrow::Cow<str>, std::borrow::Cow<str>) =
+            if case_insensitive {
+                (
+                    actual_str.to_lowercase().into(),
+                    pattern_str.to_lowercase().into(),
+                )
+            } else {
+                (actual_str.into(), pattern_str.into())
+            };
+
+        // Pattern matching following Go DefraDB behavior:
         // - 'prefix%' (starts with)
         // - '%suffix' (ends with)
         // - '%contains%' (contains)
+        // - 'prefix%suffix' (starts with AND ends with)
         // - 'exact' (exact match)
-        if pattern_str.contains('_') {
-            return Err(QueryError::invalid_filter(
-                "_like with '_' wildcard is not yet supported",
-            ));
-        }
-
-        let percent_count = pattern_str.matches('%').count();
-        if percent_count > 2
-            || (percent_count == 2 && !(pattern_str.starts_with('%') && pattern_str.ends_with('%')))
-        {
-            return Err(QueryError::invalid_filter(
-                "_like only supports: 'prefix%', '%suffix', '%contains%', or exact match",
-            ));
-        }
-
-        // Simple pattern matching
-        let matches = if let Some(inner) = pattern_str
+        // Note: '_' wildcard is treated as literal character (matches Go behavior)
+        let matches = if let Some(inner) = pattern_cmp
             .strip_prefix('%')
             .and_then(|s| s.strip_suffix('%'))
         {
-            actual_str.contains(inner)
-        } else if let Some(suffix) = pattern_str.strip_prefix('%') {
-            actual_str.ends_with(suffix)
-        } else if let Some(prefix) = pattern_str.strip_suffix('%') {
-            actual_str.starts_with(prefix)
+            // %contains%
+            actual_cmp.contains(inner)
+        } else if let Some(suffix) = pattern_cmp.strip_prefix('%') {
+            // %suffix (and suffix has no %)
+            if suffix.contains('%') {
+                // Invalid: multiple % not at edges
+                return Err(QueryError::invalid_filter(format!(
+                    "{} does not support multiple wildcards except '%contains%'",
+                    op_name
+                )));
+            }
+            actual_cmp.ends_with(suffix)
+        } else if let Some(prefix) = pattern_cmp.strip_suffix('%') {
+            // prefix% (and prefix has no %)
+            if prefix.contains('%') {
+                // Invalid: multiple % not at edges
+                return Err(QueryError::invalid_filter(format!(
+                    "{} does not support multiple wildcards except '%contains%'",
+                    op_name
+                )));
+            }
+            actual_cmp.starts_with(prefix)
+        } else if pattern_cmp.contains('%') {
+            // prefix%suffix pattern (single % in the middle)
+            let parts: Vec<&str> = pattern_cmp.splitn(2, '%').collect();
+            if parts.len() == 2 {
+                let prefix = parts[0];
+                let suffix = parts[1];
+                // Suffix should not contain more %
+                if suffix.contains('%') {
+                    return Err(QueryError::invalid_filter(format!(
+                        "{} does not support multiple wildcards except '%contains%'",
+                        op_name
+                    )));
+                }
+                actual_cmp.starts_with(prefix) && actual_cmp.ends_with(suffix)
+            } else {
+                false
+            }
         } else {
-            actual_str == pattern_str
+            // Exact match
+            actual_cmp == pattern_cmp
         };
 
         Ok(if negate { !matches } else { matches })
@@ -536,9 +661,319 @@ mod tests {
     }
 
     #[test]
+    fn test_ilike_filter_case_insensitive_prefix() {
+        // Pattern "ALI%" should match "Alice" (case-insensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "ALI%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_case_insensitive_suffix() {
+        // Pattern "%ICE" should match "Alice" (case-insensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "%ICE"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_case_insensitive_contains() {
+        // Pattern "%LIC%" should match "Alice" (case-insensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "%LIC%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_case_insensitive_exact() {
+        // Pattern "ALICE" should match "Alice" (case-insensitive exact)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "ALICE"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_no_match() {
+        // Pattern "BOB%" should NOT match "Alice"
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "BOB%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_nilike_filter() {
+        // Negated: pattern "BOB%" should NOT match "Alice", so nilike returns true
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_nilike": "BOB%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+
+        // Negated: pattern "ALI%" WOULD match "Alice", so nilike returns false
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_nilike": "ALI%"}),
+        )]));
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_underscore_as_literal() {
+        // Underscore is treated as literal character (matches Go behavior)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "Al_ce"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        // "Al_ce" should NOT match "Alice" because _ is literal, not wildcard
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+
+        // But "Al_ce" should match "Al_ce" exactly
+        let mut fields_with_underscore = make_fields();
+        fields_with_underscore[1] = Some(json!("Al_ce"));
+        assert!(filter.matches(&fields_with_underscore, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_prefix_suffix_pattern() {
+        // Pattern "Ali%ce" should match "Alice" (starts with "ali" AND ends with "ce")
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "ALI%CE"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_like_prefix_suffix_pattern() {
+        // Pattern "Ali%ce" should match "Alice" (case-sensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_like": "Ali%ce"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(filter.matches(&fields, &mapping).unwrap());
+
+        // Wrong case should NOT match
+        let filter_wrong_case = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_like": "ALI%CE"}),
+        )]));
+        assert!(!filter_wrong_case.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_prefix_suffix_no_match() {
+        // Pattern "Bob%son" should NOT match "Alice"
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "Bob%son"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_null_field_returns_false() {
+        // Null field should return false for _ilike (not error), matching Go behavior
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "Ali%"}),
+        )]));
+        let mapping = make_mapping();
+        let mut fields = make_fields();
+        fields[1] = Some(json!(null)); // name is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_nilike_null_field_returns_true() {
+        // Negated: null field with _nilike should return true (null doesn't match pattern)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_nilike": "Ali%"}),
+        )]));
+        let mapping = make_mapping();
+        let mut fields = make_fields();
+        fields[1] = Some(json!(null)); // name is null
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    // Helper to create mapping with array and object fields for testing
+    fn make_extended_mapping() -> DocumentMapping {
+        let mut m = DocumentMapping::new();
+        m.add(0, "_docID");
+        m.add(1, "name");
+        m.add(2, "age");
+        m.add(3, "active");
+        m.add(4, "tags"); // Array field
+        m.add(5, "metadata"); // Object field
+        m
+    }
+
+    fn make_extended_fields() -> Vec<Option<JsonValue>> {
+        vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            Some(json!(30)),
+            Some(json!(true)),
+            Some(json!(["rust", "database", "graphql"])), // tags array
+            Some(json!({"version": "1.0", "author": "Alice"})), // metadata object
+        ]
+    }
+
+    #[test]
+    fn test_contains_filter_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_filter_no_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "python"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_filter_non_array_error() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires array field"));
+    }
+
+    #[test]
+    fn test_contained_in_filter_match() {
+        // All elements of tags are in the given array
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["rust", "database", "graphql", "sql", "nosql"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_filter_no_match() {
+        // Not all elements of tags are in the given array (missing "graphql")
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["rust", "database"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_filter_empty_field_array() {
+        // Empty array is contained in any array
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["anything"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!([])); // Empty tags array
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_filter_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": "version"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_filter_no_match() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": "nonexistent"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_filter_non_object_error() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_has_key": "version"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields();
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires object field"));
+    }
+
+    #[test]
     fn test_filter_op_parse() {
         assert_eq!(FilterOp::parse("_eq"), Some(FilterOp::Eq));
         assert_eq!(FilterOp::parse("_and"), Some(FilterOp::And));
+        assert_eq!(FilterOp::parse("_ilike"), Some(FilterOp::Ilike));
+        assert_eq!(FilterOp::parse("_nilike"), Some(FilterOp::Nilike));
+        assert_eq!(FilterOp::parse("_contains"), Some(FilterOp::Contains));
+        assert_eq!(
+            FilterOp::parse("_contained_in"),
+            Some(FilterOp::ContainedIn)
+        );
+        assert_eq!(FilterOp::parse("_has_key"), Some(FilterOp::HasKey));
         assert_eq!(FilterOp::parse("invalid"), None);
     }
 
@@ -560,8 +995,8 @@ mod tests {
     }
 
     #[test]
-    fn test_null_field_gt_comparison_error() {
-        // Comparing null with _gt should fail with type mismatch
+    fn test_null_field_gt_comparison_returns_false() {
+        // Go DefraDB behavior: null _gt 25 returns false (not error)
         let filter =
             Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
         let mapping = make_mapping();
@@ -572,7 +1007,8 @@ mod tests {
             Some(json!(true)),
         ];
         let result = filter.matches(&fields, &mapping);
-        assert!(result.is_err());
+        assert!(result.is_ok(), "null _gt comparison should not error");
+        assert!(!result.unwrap(), "null _gt 25 should return false");
     }
 
     #[test]
@@ -636,19 +1072,21 @@ mod tests {
     }
 
     #[test]
-    fn test_like_unsupported_underscore() {
+    fn test_like_underscore_as_literal() {
+        // Underscore is treated as literal character (matches Go behavior)
         let filter = Filter::from_conditions(HashMap::from([(
             "name".to_string(),
             json!({"_like": "Al_ce"}),
         )]));
         let mapping = make_mapping();
         let fields = make_fields();
-        let result = filter.matches(&fields, &mapping);
-        assert!(result.is_err());
+        // "Al_ce" should NOT match "Alice" because _ is literal
+        assert!(!filter.matches(&fields, &mapping).unwrap());
     }
 
     #[test]
     fn test_like_unsupported_complex_pattern() {
+        // Multiple % not at edges should error (except %contains%)
         let filter = Filter::from_conditions(HashMap::from([(
             "name".to_string(),
             json!({"_like": "%li%ce"}),
@@ -657,5 +1095,151 @@ mod tests {
         let fields = make_fields();
         let result = filter.matches(&fields, &mapping);
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Null field handling tests for array/object operators
+    // =========================================================================
+
+    #[test]
+    fn test_contains_null_field_returns_false() {
+        // When field is null, _contains should return false (not error)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!(null)); // tags is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_null_field_returns_false() {
+        // When field is null, _contained_in should return false (not error)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["rust", "go"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!(null)); // tags is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_null_field_returns_false() {
+        // When field is null, _has_key should return false (not error)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": "version"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[5] = Some(json!(null)); // metadata is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_with_null_in_array() {
+        // Array contains null, searching for null should find it
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": null}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!(["rust", null, "graphql"])); // Array with null
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_null_not_in_array() {
+        // Array doesn't contain null, searching for null should not find it
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": null}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields(); // No null in tags
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    // =========================================================================
+    // Empty array edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_contains_empty_array() {
+        // Empty array should never contain anything
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!([])); // Empty array
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_empty_expected_array() {
+        // Non-empty field array vs empty expected array
+        // [a,b,c] is NOT contained in [] (no elements of expected contain the actuals)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": []}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields(); // tags = ["rust", "database", "graphql"]
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_empty_string_key() {
+        // Empty string keys are valid in JSON objects
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": ""}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[5] = Some(json!({"": "empty key value", "version": "1.0"}));
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    // =========================================================================
+    // Pattern matching edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_like_pattern_only_percent() {
+        // Pattern "%" should match any non-empty string (suffix after empty prefix)
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": "%"}))]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_like_empty_pattern() {
+        // Empty pattern should only match empty string
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": ""}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_like_empty_pattern_matches_empty_string() {
+        // Empty pattern should match empty string
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": ""}))]));
+        let mapping = make_mapping();
+        let mut fields = make_fields();
+        fields[1] = Some(json!("")); // empty name
+        assert!(filter.matches(&fields, &mapping).unwrap());
     }
 }
