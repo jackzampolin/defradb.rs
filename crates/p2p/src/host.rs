@@ -142,6 +142,16 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Remove specific collections from a replicator.
+    ///
+    /// If the replicator has no collections left after removal, they are deleted.
+    /// This matches Go DefraDB's partial removal behavior.
+    RemoveReplicatorCollections {
+        peer_id: PeerId,
+        collections: Vec<String>,
+        response: oneshot::Sender<Result<bool>>, // true if replicator was fully deleted
+    },
+
     /// Get all registered replicators.
     GetAllReplicators {
         response: oneshot::Sender<Vec<ReplicatorInfo>>,
@@ -518,6 +528,30 @@ impl P2PHostHandle {
         self.command_tx
             .send(HostCommand::DeleteReplicator {
                 peer_id,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Remove specific collections from a replicator.
+    ///
+    /// This matches Go DefraDB's partial removal behavior:
+    /// - Removes only the specified collections from the replicator
+    /// - If the replicator has no collections left, they are fully deleted
+    ///
+    /// Returns `true` if the replicator was fully deleted (no collections remain).
+    pub async fn remove_replicator_collections(
+        &self,
+        peer_id: PeerId,
+        collections: Vec<String>,
+    ) -> Result<bool> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::RemoveReplicatorCollections {
+                peer_id,
+                collections,
                 response: response_tx,
             })
             .await
@@ -1135,6 +1169,37 @@ impl<S: Store> P2PHost<S> {
                 self.replicators.remove_peer(&peer_id);
                 if response.send(Ok(())).is_err() {
                     debug!(peer_id = %peer_id, "DeleteReplicator command response dropped - caller cancelled");
+                }
+            }
+
+            HostCommand::RemoveReplicatorCollections {
+                peer_id,
+                collections,
+                response,
+            } => {
+                debug!(
+                    peer_id = %peer_id,
+                    collections = ?collections,
+                    "Removing collections from replicator"
+                );
+
+                // Remove specific collections from the replicator
+                for collection_id in &collections {
+                    self.replicators.remove_replicator(collection_id, &peer_id);
+                }
+
+                // Check if the replicator still has any collections
+                let fully_deleted = !self.replicators.is_any_replicator(&peer_id);
+
+                if fully_deleted {
+                    debug!(peer_id = %peer_id, "Replicator fully deleted (no collections remain)");
+                }
+
+                if response.send(Ok(fully_deleted)).is_err() {
+                    debug!(
+                        peer_id = %peer_id,
+                        "RemoveReplicatorCollections command response dropped - caller cancelled"
+                    );
                 }
             }
 

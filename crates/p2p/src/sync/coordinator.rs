@@ -990,6 +990,49 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         Ok(())
     }
 
+    /// Remove specific collections from a replicator.
+    ///
+    /// This matches Go DefraDB's partial removal behavior:
+    /// - If `collections` is empty: deletes the entire replicator (all collections)
+    /// - If `collections` is non-empty: removes only those collections, keeping the
+    ///   replicator if other collections remain
+    ///
+    /// Returns `true` if the replicator was fully deleted (no collections remain).
+    pub async fn remove_replicator_collections(
+        &self,
+        peer_id: PeerId,
+        collections: Vec<String>,
+    ) -> Result<bool> {
+        // Go behavior: empty collections = delete all
+        if collections.is_empty() {
+            self.host.delete_replicator(peer_id).await?;
+            tracing::info!(peer_id = %peer_id, "Deleted replicator (empty collections = delete all)");
+            return Ok(true);
+        }
+
+        // Partial removal
+        let fully_deleted = self
+            .host
+            .remove_replicator_collections(peer_id, collections.clone())
+            .await?;
+
+        if fully_deleted {
+            tracing::info!(
+                peer_id = %peer_id,
+                collections = ?collections,
+                "Replicator fully deleted (no collections remain after removal)"
+            );
+        } else {
+            tracing::info!(
+                peer_id = %peer_id,
+                collections = ?collections,
+                "Removed collections from replicator (replicator still has other collections)"
+            );
+        }
+
+        Ok(fully_deleted)
+    }
+
     /// Get all registered replicators.
     pub async fn get_all_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
         self.host.get_all_replicators().await

@@ -212,16 +212,37 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
     async fn remove_replicator(
         &self,
-        _collections: Vec<String>,
+        collections: Vec<String>,
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
         let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
 
-        self.handle
-            .delete_replicator(peer_id)
-            .await
-            .map_err(|e| e.to_string())
+        // Go DefraDB behavior for replicator removal:
+        // - If collections is empty: delete the entire replicator (all collections)
+        // - If collections is non-empty: remove only those collections, keep replicator
+        //   if other collections remain
+        if let Some(ref coordinator) = self.sync_coordinator {
+            coordinator
+                .remove_replicator_collections(peer_id, collections)
+                .await
+                .map_err(|e| e.to_string())?;
+        } else {
+            // Without coordinator, use direct handle (only supports full deletion)
+            if !collections.is_empty() {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    "Partial removal requested but sync coordinator not available - \
+                     falling back to full deletion"
+                );
+            }
+            self.handle
+                .delete_replicator(peer_id)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
     }
 
     async fn get_collections(&self) -> Result<Vec<String>, String> {

@@ -230,12 +230,23 @@ impl StartArgs {
     }
 }
 
+/// Tracks spawned P2P background tasks for graceful shutdown.
+struct P2PTasks {
+    /// P2P host event loop task
+    host_task: JoinHandle<()>,
+    /// Replication loop task (processes incoming blocks)
+    replication_task: JoinHandle<()>,
+    /// Host event handler task (processes P2P events through coordinator)
+    event_handler_task: Option<JoinHandle<()>>,
+}
+
 /// DefraDB Node
 /// Node manages the DefraDB server lifecycle.
 #[doc(hidden)]
 pub struct Node {
     config: Config,
     p2p_handle: Option<p2p::P2PHostHandle>,
+    p2p_tasks: Option<P2PTasks>,
     http_server: Option<defra_http::Server>,
     /// Shutdown signal sender (for tests)
     #[doc(hidden)]
@@ -269,7 +280,7 @@ impl Node {
         };
 
         // Initialize storage, database, and set up P2P and HTTP server
-        let (p2p_handle, http_server) = match config.datastore.store {
+        let (p2p_handle, p2p_tasks, http_server) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
@@ -308,6 +319,7 @@ impl Node {
         Ok(Self {
             config,
             p2p_handle,
+            p2p_tasks,
             http_server: Some(http_server),
             shutdown_tx,
             shutdown_rx,
@@ -413,13 +425,16 @@ impl Node {
     ///
     /// This function creates the database, loads collections, sets up the query
     /// runner with proper transaction support, and returns the HTTP server.
+    ///
+    /// Returns a tuple of (P2PHostHandle, P2PTasks, HTTP Server) where the tasks
+    /// are tracked for graceful shutdown.
     async fn init_store_and_server<S>(
         store: Arc<S>,
         config: &Config,
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         acp_store: Arc<dyn acp::AcpStore>,
-    ) -> Result<(Option<p2p::P2PHostHandle>, defra_http::Server)>
+    ) -> Result<(Option<p2p::P2PHostHandle>, Option<P2PTasks>, defra_http::Server)>
     where
         S: storage::corekv::Store + 'static,
     {
@@ -461,18 +476,19 @@ impl Node {
         // Set up P2P if enabled
         // Clone store before potential move for sync coordinator blockstore
         let store_for_sync = store.clone();
-        let (p2p, mut p2p_events) = if config.net.p2p_disabled {
-            (None, None)
+        let (p2p, mut p2p_events, p2p_host_task) = if config.net.p2p_disabled {
+            (None, None, None)
         } else {
             info!("Initializing P2P network");
             let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
             let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            let (handle, events) = Self::start_p2p(config, bitswap_store, peer_keypair).await?;
-            (Some(handle), Some(events))
+            let (handle, events, host_task) =
+                Self::start_p2p(config, bitswap_store, peer_keypair).await?;
+            (Some(handle), Some(events), Some(host_task))
         };
 
         // Create HTTP server with database-backed query runner
-        let http_server = {
+        let (http_server, p2p_tasks) = {
             let api_address: SocketAddr =
                 config
                     .api
@@ -491,7 +507,8 @@ impl Node {
             let fetcher = db::AutoCommitFetcher::new(database.clone());
 
             // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
-            let sync_coordinator = if let Some(ref p2p_handle) = p2p {
+            // Also captures task handles for graceful shutdown
+            let (sync_coordinator, replication_task, event_handler_task) = if let Some(ref p2p_handle) = p2p {
                 let sync_blockstore =
                     Arc::new(blockstore::DefraBlockstore::new(store_for_sync.clone(), false));
 
@@ -530,12 +547,13 @@ impl Node {
                     Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
 
                 // Spawn replication loop to process incoming blocks
+                // Track the task handle for graceful shutdown
                 let coordinator_for_replication = coordinator.clone();
                 let replication_config = p2p::sync::ReplicationConfig {
                     continue_on_error: true,
                     rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
                 };
-                tokio::spawn(async move {
+                let replication_task = tokio::spawn(async move {
                     info!("Starting replication loop for P2P sync");
                     p2p::sync::ReplicationLoop::run(
                         coordinator_for_replication,
@@ -548,9 +566,10 @@ impl Node {
                 });
 
                 // Spawn host event handler to process incoming P2P events through coordinator
-                if let Some(mut events) = p2p_events.take() {
+                // Track the task handle for graceful shutdown
+                let event_handler_task = if let Some(mut events) = p2p_events.take() {
                     let coordinator_for_events = coordinator.clone();
-                    tokio::spawn(async move {
+                    Some(tokio::spawn(async move {
                         while let Some(event) = events.recv().await {
                             // Log events for visibility
                             match &event {
@@ -592,13 +611,15 @@ impl Node {
                                 error!("Failed to handle host event: {}", e);
                             }
                         }
-                    });
-                }
+                    }))
+                } else {
+                    None
+                };
 
                 info!("P2P sync coordinator initialized");
-                Some(coordinator)
+                (Some(coordinator), Some(replication_task), event_handler_task)
             } else {
-                None
+                (None, None, None)
             };
 
             // Create mutator - use BroadcastMutator if P2P is enabled for network propagation
@@ -682,31 +703,48 @@ impl Node {
                 "HTTP server configured on {} with REST endpoints enabled",
                 api_address
             );
-            server
+
+            // Build P2PTasks if P2P is enabled with all required task handles
+            let p2p_tasks = match (p2p_host_task, replication_task) {
+                (Some(host_task), Some(replication_task)) => Some(P2PTasks {
+                    host_task,
+                    replication_task,
+                    event_handler_task,
+                }),
+                _ => None,
+            };
+
+            (server, p2p_tasks)
         };
 
-        Ok((p2p, http_server))
+        Ok((p2p, p2p_tasks, http_server))
     }
+
 
     /// Start P2P networking with the given bitswap store and optional keypair.
     ///
     /// If a keypair is provided, it will be used for the P2P identity.
     /// Otherwise, an ephemeral keypair will be generated.
     ///
-    /// Returns both the handle and the events receiver so that the caller
-    /// can connect events to the sync coordinator.
+    /// Returns the handle, events receiver, and host task handle so that the caller
+    /// can connect events to the sync coordinator and track the host task for shutdown.
     async fn start_p2p<S: p2p::BitswapStore>(
         config: &Config,
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
-    ) -> Result<(p2p::P2PHostHandle, tokio::sync::mpsc::Receiver<p2p::HostEvent>)> {
+    ) -> Result<(
+        p2p::P2PHostHandle,
+        tokio::sync::mpsc::Receiver<p2p::HostEvent>,
+        JoinHandle<()>,
+    )> {
         let (host, handle, events, _replicators) = match keypair {
             Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).await.map_err(Error::P2P)?,
             None => p2p::P2PHost::new(bitswap_store).await.map_err(Error::P2P)?,
         };
 
         // Spawn the host event loop FIRST - it must be running to process commands
-        tokio::spawn(host.run());
+        // Track the task handle for graceful shutdown
+        let host_task = tokio::spawn(host.run());
 
         // Start listening on configured addresses
         for addr_str in &config.net.p2p_addresses {
@@ -730,7 +768,7 @@ impl Node {
             Err(e) => error!("Failed to get local peer ID: {}", e),
         }
 
-        Ok((handle, events))
+        Ok((handle, events, host_task))
     }
 
     /// Run the node until shutdown
@@ -845,11 +883,29 @@ impl Node {
             }
         }
 
-        // Shutdown P2P
+        // Shutdown P2P tasks first, then the handle
         // Note: We log but don't return errors here because:
         // 1. The user's intent (stop the node) is still fulfilled
         // 2. The node is already stopping - failing would just add noise
         // 3. P2P cleanup issues don't affect data integrity
+        if let Some(tasks) = self.p2p_tasks.take() {
+            info!("Stopping P2P background tasks...");
+
+            // Abort all tasks - they will stop when the channel closes
+            tasks.replication_task.abort();
+            tasks.host_task.abort();
+            if let Some(event_task) = tasks.event_handler_task {
+                event_task.abort();
+            }
+
+            // Wait briefly for tasks to complete with timeout
+            let timeout = std::time::Duration::from_secs(2);
+            let _ = tokio::time::timeout(timeout, tasks.replication_task).await;
+            let _ = tokio::time::timeout(timeout, tasks.host_task).await;
+
+            info!("P2P background tasks stopped");
+        }
+
         if let Some(handle) = &self.p2p_handle {
             if let Err(e) = handle.shutdown().await {
                 warn!("P2P shutdown encountered an issue: {}", e);

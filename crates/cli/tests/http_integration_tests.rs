@@ -482,12 +482,12 @@ async fn test_http_graphql_create_mutation() {
     let body: serde_json::Value = response.json().await.unwrap();
 
     // Verify mutation succeeded
-    // Note: Response uses collection name "Users" as key, not "create_Users"
+    // Response uses the mutation field name "create_Users" as key (matching Go DefraDB)
     let data = body.get("data").expect("Response should have data field");
     let created_array = data
-        .get("Users")
+        .get("create_Users")
         .and_then(|u| u.as_array())
-        .expect("Data should have Users array");
+        .expect("Data should have create_Users array");
     assert_eq!(created_array.len(), 1, "Should have created 1 document");
     let created = &created_array[0];
     assert_eq!(
@@ -600,12 +600,12 @@ async fn test_http_graphql_update_mutation() {
     );
 
     // Verify mutation succeeded
-    // Note: Response uses collection name "Users" as key, not "update_Users"
+    // Response uses the mutation field name "update_Users" as key (matching Go DefraDB)
     let data = body.get("data").expect("Response should have data field");
     let updated = data
-        .get("Users")
+        .get("update_Users")
         .and_then(|u| u.as_array())
-        .expect("Users should be an array");
+        .expect("update_Users should be an array");
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0]["age"].as_i64(), Some(29));
     assert_eq!(updated[0]["name"].as_str(), Some("Diana"));
