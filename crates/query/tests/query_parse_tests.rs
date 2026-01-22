@@ -310,6 +310,45 @@ fn test_parse_self_referential_fragment_returns_error() {
 }
 
 #[test]
+fn test_parse_deeply_nested_fragments_succeeds() {
+    use query::mapper::Requestable;
+
+    // Create a chain of 10 fragments (non-circular but deep)
+    let query = r#"
+        fragment F10 on User { name }
+        fragment F9 on User { ...F10 }
+        fragment F8 on User { ...F9 }
+        fragment F7 on User { ...F8 }
+        fragment F6 on User { ...F7 }
+        fragment F5 on User { ...F6 }
+        fragment F4 on User { ...F5 }
+        fragment F3 on User { ...F4 }
+        fragment F2 on User { ...F3 }
+        fragment F1 on User { ...F2 }
+        query { Users { _docID ...F1 } }
+    "#;
+    let result = parse_query(query);
+    assert!(result.is_ok(), "Deep fragment nesting should work");
+
+    let selects = result.unwrap();
+    assert_eq!(selects.len(), 1);
+    // Should have _docID + name (from deeply nested fragment)
+    assert_eq!(selects[0].fields.len(), 2);
+
+    // Verify both fields are present
+    let field_names: Vec<&str> = selects[0]
+        .fields
+        .iter()
+        .filter_map(|f| match f {
+            Requestable::Field(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(field_names.contains(&"_docID"));
+    assert!(field_names.contains(&"name"));
+}
+
+#[test]
 fn test_parse_negative_limit_returns_error() {
     let query = "{ Users(limit: -1) { name } }";
     let result = parse_query(query);

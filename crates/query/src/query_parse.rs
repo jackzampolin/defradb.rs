@@ -1628,4 +1628,89 @@ mod variable_tests {
             _ => panic!("Expected query"),
         }
     }
+
+    // =========================================================================
+    // Variable type mismatch tests
+    // =========================================================================
+
+    #[test]
+    fn test_variable_type_mismatch_bool() {
+        let query = r#"
+            query($deleted: Boolean!) {
+                Users(showDeleted: $deleted) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Provide string instead of bool
+        let variables = HashMap::from([("deleted".to_string(), json!("true"))]);
+        let result = parse_request_with_variables(query, Some(&variables));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a boolean"));
+    }
+
+    #[test]
+    fn test_variable_type_mismatch_string() {
+        let query = r#"
+            query($c: String!) {
+                Users(cid: $c) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Provide integer instead of string
+        let variables = HashMap::from([("c".to_string(), json!(12345))]);
+        let result = parse_request_with_variables(query, Some(&variables));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn test_variable_in_order_direction() {
+        let query = r#"
+            query($dir: String!) {
+                Users(order: {name: $dir}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([("dir".to_string(), json!("DESC"))]);
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                let order = selects[0].order_by.as_ref().unwrap();
+                assert_eq!(
+                    order.conditions[0].direction,
+                    crate::mapper::OrderDirection::Desc
+                );
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_invalid_order_direction() {
+        let query = r#"
+            query($dir: String!) {
+                Users(order: {name: $dir}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([("dir".to_string(), json!("INVALID"))]);
+        let result = parse_request_with_variables(query, Some(&variables));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid order direction"));
+    }
 }

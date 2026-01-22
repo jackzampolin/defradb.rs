@@ -310,6 +310,10 @@ impl Filter {
             FilterOp::Nilike => self.like_match(actual, expected, true, true),
             FilterOp::Contains => {
                 // Array field contains the expected value
+                // Null fields never match (standard database behavior)
+                if actual.is_null() {
+                    return Ok(false);
+                }
                 let arr = actual
                     .as_array()
                     .ok_or_else(|| QueryError::invalid_filter("_contains requires array field"))?;
@@ -317,6 +321,10 @@ impl Filter {
             }
             FilterOp::ContainedIn => {
                 // All elements of actual array are in expected array (actual is subset of expected)
+                // Null fields never match (standard database behavior)
+                if actual.is_null() {
+                    return Ok(false);
+                }
                 let actual_arr = actual.as_array().ok_or_else(|| {
                     QueryError::invalid_filter("_contained_in requires array field")
                 })?;
@@ -329,6 +337,10 @@ impl Filter {
             }
             FilterOp::HasKey => {
                 // Object/map has the specified key
+                // Null fields never match (standard database behavior)
+                if actual.is_null() {
+                    return Ok(false);
+                }
                 let key = expected
                     .as_str()
                     .ok_or_else(|| QueryError::invalid_filter("_has_key requires string key"))?;
@@ -969,5 +981,151 @@ mod tests {
         let fields = make_fields();
         let result = filter.matches(&fields, &mapping);
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Null field handling tests for array/object operators
+    // =========================================================================
+
+    #[test]
+    fn test_contains_null_field_returns_false() {
+        // When field is null, _contains should return false (not error)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!(null)); // tags is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_null_field_returns_false() {
+        // When field is null, _contained_in should return false (not error)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": ["rust", "go"]}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!(null)); // tags is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_null_field_returns_false() {
+        // When field is null, _has_key should return false (not error)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": "version"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[5] = Some(json!(null)); // metadata is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_with_null_in_array() {
+        // Array contains null, searching for null should find it
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": null}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!(["rust", null, "graphql"])); // Array with null
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contains_null_not_in_array() {
+        // Array doesn't contain null, searching for null should not find it
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": null}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields(); // No null in tags
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    // =========================================================================
+    // Empty array edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_contains_empty_array() {
+        // Empty array should never contain anything
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contains": "rust"}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[4] = Some(json!([])); // Empty array
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_contained_in_empty_expected_array() {
+        // Non-empty field array vs empty expected array
+        // [a,b,c] is NOT contained in [] (no elements of expected contain the actuals)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "tags".to_string(),
+            json!({"_contained_in": []}),
+        )]));
+        let mapping = make_extended_mapping();
+        let fields = make_extended_fields(); // tags = ["rust", "database", "graphql"]
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_has_key_empty_string_key() {
+        // Empty string keys are valid in JSON objects
+        let filter = Filter::from_conditions(HashMap::from([(
+            "metadata".to_string(),
+            json!({"_has_key": ""}),
+        )]));
+        let mapping = make_extended_mapping();
+        let mut fields = make_extended_fields();
+        fields[5] = Some(json!({"": "empty key value", "version": "1.0"}));
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    // =========================================================================
+    // Pattern matching edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_like_pattern_only_percent() {
+        // Pattern "%" should match any non-empty string (suffix after empty prefix)
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": "%"}))]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_like_empty_pattern() {
+        // Empty pattern should only match empty string
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": ""}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_like_empty_pattern_matches_empty_string() {
+        // Empty pattern should match empty string
+        let filter =
+            Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": ""}))]));
+        let mapping = make_mapping();
+        let mut fields = make_fields();
+        fields[1] = Some(json!("")); // empty name
+        assert!(filter.matches(&fields, &mapping).unwrap());
     }
 }
