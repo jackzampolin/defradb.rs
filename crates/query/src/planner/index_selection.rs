@@ -81,7 +81,7 @@ impl FieldCondition {
                             continue;
                         }
                     }
-                    FilterOp::Like | FilterOp::Nlike => {
+                    FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
                         if let Some(s) = value.as_str() {
                             ConditionValue::Pattern(s.to_string())
                         } else {

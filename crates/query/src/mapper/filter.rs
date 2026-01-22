@@ -41,6 +41,12 @@ pub enum FilterOp {
     /// Negated pattern match (_nlike)
     #[serde(rename = "_nlike")]
     Nlike,
+    /// Case-insensitive pattern match (_ilike)
+    #[serde(rename = "_ilike")]
+    Ilike,
+    /// Negated case-insensitive pattern match (_nilike)
+    #[serde(rename = "_nilike")]
+    Nilike,
     /// Logical AND (_and)
     #[serde(rename = "_and")]
     And,
@@ -66,6 +72,8 @@ impl FilterOp {
             "_nin" => Some(Self::Nin),
             "_like" => Some(Self::Like),
             "_nlike" => Some(Self::Nlike),
+            "_ilike" => Some(Self::Ilike),
+            "_nilike" => Some(Self::Nilike),
             "_and" => Some(Self::And),
             "_or" => Some(Self::Or),
             "_not" => Some(Self::Not),
@@ -86,6 +94,8 @@ impl FilterOp {
             Self::Nin => "_nin",
             Self::Like => "_like",
             Self::Nlike => "_nlike",
+            Self::Ilike => "_ilike",
+            Self::Nilike => "_nilike",
             Self::And => "_and",
             Self::Or => "_or",
             Self::Not => "_not",
@@ -279,8 +289,10 @@ impl Filter {
                     .ok_or_else(|| QueryError::invalid_filter("_nin requires array"))?;
                 Ok(!arr.iter().any(|v| Self::values_equal(actual, v)))
             }
-            FilterOp::Like => self.like_match(actual, expected, false),
-            FilterOp::Nlike => self.like_match(actual, expected, true),
+            FilterOp::Like => self.like_match(actual, expected, false, false),
+            FilterOp::Nlike => self.like_match(actual, expected, true, false),
+            FilterOp::Ilike => self.like_match(actual, expected, false, true),
+            FilterOp::Nilike => self.like_match(actual, expected, true, true),
             FilterOp::And | FilterOp::Or | FilterOp::Not => Err(QueryError::internal(
                 "logical ops should be handled at top level",
             )),
@@ -330,13 +342,21 @@ impl Filter {
         }
     }
 
-    fn like_match(&self, actual: &JsonValue, pattern: &JsonValue, negate: bool) -> Result<bool> {
-        let actual_str = actual
-            .as_str()
-            .ok_or_else(|| QueryError::invalid_filter("_like requires string field"))?;
-        let pattern_str = pattern
-            .as_str()
-            .ok_or_else(|| QueryError::invalid_filter("_like requires string pattern"))?;
+    fn like_match(
+        &self,
+        actual: &JsonValue,
+        pattern: &JsonValue,
+        negate: bool,
+        case_insensitive: bool,
+    ) -> Result<bool> {
+        let op_name = if case_insensitive { "_ilike" } else { "_like" };
+
+        let actual_str = actual.as_str().ok_or_else(|| {
+            QueryError::invalid_filter(format!("{} requires string field", op_name))
+        })?;
+        let pattern_str = pattern.as_str().ok_or_else(|| {
+            QueryError::invalid_filter(format!("{} requires string pattern", op_name))
+        })?;
 
         // Validate pattern - only simple patterns are supported:
         // - 'prefix%' (starts with)
@@ -344,32 +364,45 @@ impl Filter {
         // - '%contains%' (contains)
         // - 'exact' (exact match)
         if pattern_str.contains('_') {
-            return Err(QueryError::invalid_filter(
-                "_like with '_' wildcard is not yet supported",
-            ));
+            return Err(QueryError::invalid_filter(format!(
+                "{} with '_' wildcard is not yet supported",
+                op_name
+            )));
         }
 
         let percent_count = pattern_str.matches('%').count();
         if percent_count > 2
             || (percent_count == 2 && !(pattern_str.starts_with('%') && pattern_str.ends_with('%')))
         {
-            return Err(QueryError::invalid_filter(
-                "_like only supports: 'prefix%', '%suffix', '%contains%', or exact match",
-            ));
+            return Err(QueryError::invalid_filter(format!(
+                "{} only supports: 'prefix%', '%suffix', '%contains%', or exact match",
+                op_name
+            )));
         }
 
+        // Apply case transformation if case-insensitive
+        let (actual_cmp, pattern_cmp): (std::borrow::Cow<str>, std::borrow::Cow<str>) =
+            if case_insensitive {
+                (
+                    actual_str.to_lowercase().into(),
+                    pattern_str.to_lowercase().into(),
+                )
+            } else {
+                (actual_str.into(), pattern_str.into())
+            };
+
         // Simple pattern matching
-        let matches = if let Some(inner) = pattern_str
+        let matches = if let Some(inner) = pattern_cmp
             .strip_prefix('%')
             .and_then(|s| s.strip_suffix('%'))
         {
-            actual_str.contains(inner)
-        } else if let Some(suffix) = pattern_str.strip_prefix('%') {
-            actual_str.ends_with(suffix)
-        } else if let Some(prefix) = pattern_str.strip_suffix('%') {
-            actual_str.starts_with(prefix)
+            actual_cmp.contains(inner)
+        } else if let Some(suffix) = pattern_cmp.strip_prefix('%') {
+            actual_cmp.ends_with(suffix)
+        } else if let Some(prefix) = pattern_cmp.strip_suffix('%') {
+            actual_cmp.starts_with(prefix)
         } else {
-            actual_str == pattern_str
+            actual_cmp == pattern_cmp
         };
 
         Ok(if negate { !matches } else { matches })
@@ -536,9 +569,102 @@ mod tests {
     }
 
     #[test]
+    fn test_ilike_filter_case_insensitive_prefix() {
+        // Pattern "ALI%" should match "Alice" (case-insensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "ALI%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_case_insensitive_suffix() {
+        // Pattern "%ICE" should match "Alice" (case-insensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "%ICE"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_case_insensitive_contains() {
+        // Pattern "%LIC%" should match "Alice" (case-insensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "%LIC%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_case_insensitive_exact() {
+        // Pattern "ALICE" should match "Alice" (case-insensitive exact)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "ALICE"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_filter_no_match() {
+        // Pattern "BOB%" should NOT match "Alice"
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "BOB%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_nilike_filter() {
+        // Negated: pattern "BOB%" should NOT match "Alice", so nilike returns true
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_nilike": "BOB%"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+
+        // Negated: pattern "ALI%" WOULD match "Alice", so nilike returns false
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_nilike": "ALI%"}),
+        )]));
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_unsupported_underscore() {
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "Al_ce"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields();
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_filter_op_parse() {
         assert_eq!(FilterOp::parse("_eq"), Some(FilterOp::Eq));
         assert_eq!(FilterOp::parse("_and"), Some(FilterOp::And));
+        assert_eq!(FilterOp::parse("_ilike"), Some(FilterOp::Ilike));
+        assert_eq!(FilterOp::parse("_nilike"), Some(FilterOp::Nilike));
         assert_eq!(FilterOp::parse("invalid"), None);
     }
 
