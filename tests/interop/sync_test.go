@@ -14,27 +14,32 @@ import (
 // TestSyncRustToGoWriteRead tests writing a document to a Rust node
 // and reading it from a Go node via P2P replication.
 func TestSyncRustToGoWriteRead(t *testing.T) {
+	t.Parallel() // Safe for parallel execution with ReserveNodePorts
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	// Allocate ports for both nodes
-	httpRust, p2pRust, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Rust node")
+	// Reserve ports for both nodes (held until Release)
+	rustPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Rust node")
+	defer rustPorts.Release()
 
-	httpGo, p2pGo, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Go node")
+	goPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Go node")
+	defer goPorts.Release()
 
 	// Start Rust node
 	rustNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     httpRust,
-		P2PPort:      p2pRust,
+		HTTPPort:     rustPorts.HTTPPort,
+		P2PPort:      rustPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Rust node...")
+	rustPorts.Release() // Release ports before starting node
 	require.NoError(t, rustNode.Start(ctx), "failed to start Rust node")
 	defer rustNode.Stop()
 	dumpLogsOnFailure(t, "rust-node", rustNode)
@@ -44,14 +49,15 @@ func TestSyncRustToGoWriteRead(t *testing.T) {
 	// Start Go node
 	goNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeGo,
-		HTTPPort:     httpGo,
-		P2PPort:      p2pGo,
+		HTTPPort:     goPorts.HTTPPort,
+		P2PPort:      goPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Go node...")
+	goPorts.Release() // Release ports before starting node
 	require.NoError(t, goNode.Start(ctx), "failed to start Go node")
 	defer goNode.Stop()
 	dumpLogsOnFailure(t, "go-node", goNode)
@@ -131,11 +137,12 @@ func TestSyncRustToGoWriteRead(t *testing.T) {
 	docID := createData.CreateUsers[0].DocID
 	t.Logf("Created document with ID: %s", docID)
 
-	// Wait a bit for replication to happen
+	// Wait for replication using polling instead of hardcoded sleep
 	t.Log("Waiting for replication...")
-	time.Sleep(2 * time.Second)
+	err = framework.WaitForDocumentReplicated(ctx, goClient, "Users", docID, 30*time.Second)
+	require.NoError(t, err, "document was not replicated to Go node")
 
-	// Query the document from the Go node
+	// Query the document from the Go node to verify full content
 	t.Log("Querying document from Go node...")
 	queryResp, err := goClient.GraphQL(ctx, framework.QueryUsersQuery(), nil)
 	require.NoError(t, err, "failed to query Go node")
@@ -166,27 +173,32 @@ func TestSyncRustToGoWriteRead(t *testing.T) {
 // TestSyncGoToRustWriteRead tests writing a document to a Go node
 // and reading it from a Rust node via P2P replication.
 func TestSyncGoToRustWriteRead(t *testing.T) {
+	t.Parallel() // Safe for parallel execution with ReserveNodePorts
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	// Allocate ports for both nodes
-	httpRust, p2pRust, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Rust node")
+	// Reserve ports for both nodes (held until Release)
+	rustPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Rust node")
+	defer rustPorts.Release()
 
-	httpGo, p2pGo, err := framework.AllocateNodePorts()
-	require.NoError(t, err, "failed to allocate ports for Go node")
+	goPorts, err := framework.ReserveNodePorts()
+	require.NoError(t, err, "failed to reserve ports for Go node")
+	defer goPorts.Release()
 
 	// Start Rust node
 	rustNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeRust,
-		HTTPPort:     httpRust,
-		P2PPort:      p2pRust,
+		HTTPPort:     rustPorts.HTTPPort,
+		P2PPort:      rustPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Rust node...")
+	rustPorts.Release() // Release ports before starting node
 	require.NoError(t, rustNode.Start(ctx), "failed to start Rust node")
 	defer rustNode.Stop()
 	dumpLogsOnFailure(t, "rust-node", rustNode)
@@ -196,14 +208,15 @@ func TestSyncGoToRustWriteRead(t *testing.T) {
 	// Start Go node
 	goNode := framework.NewNode(framework.NodeConfig{
 		Type:         framework.NodeTypeGo,
-		HTTPPort:     httpGo,
-		P2PPort:      p2pGo,
+		HTTPPort:     goPorts.HTTPPort,
+		P2PPort:      goPorts.P2PPort,
 		Store:        "memory",
 		NoEncryption: true,
 		NoSigning:    true,
 	})
 
 	t.Log("Starting Go node...")
+	goPorts.Release() // Release ports before starting node
 	require.NoError(t, goNode.Start(ctx), "failed to start Go node")
 	defer goNode.Stop()
 	dumpLogsOnFailure(t, "go-node", goNode)
@@ -292,11 +305,12 @@ func TestSyncGoToRustWriteRead(t *testing.T) {
 	docID := createData.CreateUsers[0].DocID
 	t.Logf("Created document with ID: %s", docID)
 
-	// Wait a bit for replication to happen
+	// Wait for replication using polling instead of hardcoded sleep
 	t.Log("Waiting for replication...")
-	time.Sleep(2 * time.Second)
+	err = framework.WaitForDocumentReplicated(ctx, rustClient, "Users", docID, 30*time.Second)
+	require.NoError(t, err, "document was not replicated to Rust node")
 
-	// Query the document from the Rust node
+	// Query the document from the Rust node to verify full content
 	t.Log("Querying document from Rust node...")
 	queryResp, err := rustClient.GraphQL(ctx, framework.QueryUsersQuery(), nil)
 	require.NoError(t, err, "failed to query Rust node")
