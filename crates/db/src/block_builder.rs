@@ -196,7 +196,13 @@ pub fn build_block_from_document(doc: &Document) -> Result<BlockResult, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockstore::MemoryBlockstore;
+    use blockstore::DefraBlockstore;
+    use storage::backends::MemoryStore;
+
+    fn make_test_blockstore() -> Arc<DefraBlockstore<MemoryStore>> {
+        let store = Arc::new(MemoryStore::new());
+        Arc::new(DefraBlockstore::new(store, false))
+    }
 
     #[tokio::test]
     async fn test_build_blocks_creates_proper_structure() {
@@ -205,7 +211,7 @@ mod tests {
         doc.set("name", NormalValue::String("Alice".to_string()));
         doc.set("age", NormalValue::Int(30));
 
-        let blockstore = Arc::new(MemoryBlockstore::new());
+        let blockstore = make_test_blockstore();
         let schema_version_id = "bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq";
 
         let result = build_blocks_from_document(&doc, schema_version_id, &blockstore)
@@ -230,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_blocks_requires_doc_id() {
         let doc = Document::new();
-        let blockstore = Arc::new(MemoryBlockstore::new());
+        let blockstore = make_test_blockstore();
 
         let result = build_blocks_from_document(&doc, "schema-v1", &blockstore).await;
         assert!(result.is_err());
@@ -243,7 +249,7 @@ mod tests {
         doc.generate_and_set_doc_id().unwrap();
         doc.set("name", NormalValue::String("Bob".to_string()));
 
-        let blockstore = Arc::new(MemoryBlockstore::new());
+        let blockstore = make_test_blockstore();
         let schema_version_id = "schema-v1";
 
         let result = build_blocks_from_document(&doc, schema_version_id, &blockstore)
@@ -273,7 +279,7 @@ mod tests {
         doc.set("name", NormalValue::String("Charlie".to_string()));
         doc.set("age", NormalValue::Int(25));
 
-        let blockstore = Arc::new(MemoryBlockstore::new());
+        let blockstore = make_test_blockstore();
 
         let result = build_blocks_from_document(&doc, "schema-v1", &blockstore)
             .await

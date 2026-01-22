@@ -8,6 +8,46 @@ use document::{DocID, Document};
 
 use crate::error::Result;
 
+/// Status of P2P broadcast after a mutation.
+///
+/// This allows callers to know whether changes were successfully broadcast
+/// to the P2P network, enabling appropriate handling of partial success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BroadcastStatus {
+    /// Broadcast succeeded
+    Success,
+    /// Broadcast failed with the given error message
+    Failed(String),
+    /// Broadcast was not attempted (P2P not enabled or not applicable)
+    NotAttempted,
+}
+
+impl BroadcastStatus {
+    /// Returns true if the broadcast succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, BroadcastStatus::Success)
+    }
+
+    /// Returns true if the broadcast failed.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, BroadcastStatus::Failed(_))
+    }
+
+    /// Returns the error message if the broadcast failed.
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            BroadcastStatus::Failed(msg) => Some(msg),
+            _ => None,
+        }
+    }
+}
+
+impl Default for BroadcastStatus {
+    fn default() -> Self {
+        BroadcastStatus::NotAttempted
+    }
+}
+
 /// Result of a create mutation, including the generated DocID and the document.
 #[derive(Debug, Clone)]
 pub struct CreateResult {
@@ -15,12 +55,27 @@ pub struct CreateResult {
     pub doc_id: DocID,
     /// The created document (with ID set)
     pub document: Document,
+    /// Status of P2P broadcast (if applicable)
+    pub broadcast_status: BroadcastStatus,
 }
 
 impl CreateResult {
     /// Create a new result.
     pub fn new(doc_id: DocID, document: Document) -> Self {
-        Self { doc_id, document }
+        Self {
+            doc_id,
+            document,
+            broadcast_status: BroadcastStatus::NotAttempted,
+        }
+    }
+
+    /// Create a result with broadcast status.
+    pub fn with_broadcast(doc_id: DocID, document: Document, broadcast_status: BroadcastStatus) -> Self {
+        Self {
+            doc_id,
+            document,
+            broadcast_status,
+        }
     }
 }
 
@@ -31,6 +86,8 @@ pub struct UpdateResult {
     pub document: Document,
     /// Number of fields that were modified
     pub fields_modified: usize,
+    /// Status of P2P broadcast (if applicable)
+    pub broadcast_status: BroadcastStatus,
 }
 
 impl UpdateResult {
@@ -39,6 +96,16 @@ impl UpdateResult {
         Self {
             document,
             fields_modified,
+            broadcast_status: BroadcastStatus::NotAttempted,
+        }
+    }
+
+    /// Create a result with broadcast status.
+    pub fn with_broadcast(document: Document, fields_modified: usize, broadcast_status: BroadcastStatus) -> Self {
+        Self {
+            document,
+            fields_modified,
+            broadcast_status,
         }
     }
 }
@@ -50,12 +117,27 @@ pub struct DeleteResult {
     pub doc_id: DocID,
     /// Whether the document existed before deletion
     pub existed: bool,
+    /// Status of P2P broadcast (if applicable)
+    pub broadcast_status: BroadcastStatus,
 }
 
 impl DeleteResult {
     /// Create a new result.
     pub fn new(doc_id: DocID, existed: bool) -> Self {
-        Self { doc_id, existed }
+        Self {
+            doc_id,
+            existed,
+            broadcast_status: BroadcastStatus::NotAttempted,
+        }
+    }
+
+    /// Create a result with broadcast status.
+    pub fn with_broadcast(doc_id: DocID, existed: bool, broadcast_status: BroadcastStatus) -> Self {
+        Self {
+            doc_id,
+            existed,
+            broadcast_status,
+        }
     }
 }
 
