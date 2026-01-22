@@ -109,6 +109,30 @@ impl PlanNode for LimitNode {
     fn kind(&self) -> &'static str {
         "limitNode"
     }
+
+    fn explain(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "node".to_string(),
+            serde_json::Value::String(self.kind().to_string()),
+        );
+
+        if let Some(limit) = self.limit {
+            obj.insert("limit".to_string(), serde_json::Value::Number(limit.into()));
+        }
+
+        if self.offset > 0 {
+            obj.insert(
+                "offset".to_string(),
+                serde_json::Value::Number(self.offset.into()),
+            );
+        }
+
+        // Recursively explain child node
+        obj.insert("source".to_string(), self.source.explain());
+
+        serde_json::Value::Object(obj)
+    }
 }
 
 #[cfg(test)]

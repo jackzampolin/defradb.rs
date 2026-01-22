@@ -189,25 +189,87 @@ fn test_parse_subscription_returns_error() {
 }
 
 #[test]
-fn test_parse_fragment_definition_returns_error() {
-    let query = "fragment UserFields on User { name } query { Users { ...UserFields } }";
+fn test_parse_fragment_definition_works() {
+    use query::mapper::Requestable;
+
+    let query = "fragment UserFields on User { name age } query { Users { _docID ...UserFields } }";
     let result = parse_query(query);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("fragments not yet supported"));
+    assert!(result.is_ok(), "Fragment parsing should succeed");
+
+    let selects = result.unwrap();
+    assert_eq!(selects.len(), 1);
+    // Should have _docID + name + age from fragment
+    assert_eq!(selects[0].fields.len(), 3);
+
+    // Verify fields
+    let field_names: Vec<&str> = selects[0]
+        .fields
+        .iter()
+        .filter_map(|f| match f {
+            Requestable::Field(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(field_names.contains(&"_docID"));
+    assert!(field_names.contains(&"name"));
+    assert!(field_names.contains(&"age"));
 }
 
 #[test]
-fn test_parse_inline_fragment_returns_error() {
-    let query = "{ Users { ... on User { name } } }";
+fn test_parse_inline_fragment_works() {
+    use query::mapper::Requestable;
+
+    let query = "{ Users { _docID ... on User { name age } } }";
+    let result = parse_query(query);
+    assert!(result.is_ok(), "Inline fragment parsing should succeed");
+
+    let selects = result.unwrap();
+    assert_eq!(selects.len(), 1);
+    // Should have _docID + name + age from inline fragment
+    assert_eq!(selects[0].fields.len(), 3);
+
+    // Verify fields
+    let field_names: Vec<&str> = selects[0]
+        .fields
+        .iter()
+        .filter_map(|f| match f {
+            Requestable::Field(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(field_names.contains(&"_docID"));
+    assert!(field_names.contains(&"name"));
+    assert!(field_names.contains(&"age"));
+}
+
+#[test]
+fn test_parse_undefined_fragment_returns_error() {
+    let query = "query { Users { ...UndefinedFragment } }";
     let result = parse_query(query);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("inline fragments not yet supported"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("undefined fragment"),
+        "Expected error about undefined fragment"
+    );
+}
+
+#[test]
+fn test_parse_nested_fragment_works() {
+    let query = r#"
+        fragment NameField on User { name }
+        fragment UserInfo on User { ...NameField age }
+        query { Users { _docID ...UserInfo } }
+    "#;
+    let result = parse_query(query);
+    assert!(result.is_ok(), "Nested fragment parsing should succeed");
+
+    let selects = result.unwrap();
+    assert_eq!(selects.len(), 1);
+    // Should have _docID + name (from nested) + age
+    assert_eq!(selects[0].fields.len(), 3);
 }
 
 #[test]
@@ -285,4 +347,58 @@ fn test_parse_filter_non_object_returns_error() {
         .unwrap_err()
         .to_string()
         .contains("filter must be an object"));
+}
+
+// EXPLAIN tests
+
+#[test]
+fn test_parse_explain_directive() {
+    use query::query_parse::{parse_request, ParsedOperation};
+
+    let query = "query @explain { Users { _docID name } }";
+    let result = parse_request(query).unwrap();
+
+    match result {
+        ParsedOperation::Query { selects, explain } => {
+            assert!(explain, "Expected explain=true for @explain directive");
+            assert_eq!(selects.len(), 1);
+        }
+        _ => panic!("Expected query"),
+    }
+}
+
+#[test]
+fn test_parse_query_without_explain() {
+    use query::query_parse::{parse_request, ParsedOperation};
+
+    let query = "query { Users { _docID name } }";
+    let result = parse_request(query).unwrap();
+
+    match result {
+        ParsedOperation::Query { selects, explain } => {
+            assert!(
+                !explain,
+                "Expected explain=false without @explain directive"
+            );
+            assert_eq!(selects.len(), 1);
+        }
+        _ => panic!("Expected query"),
+    }
+}
+
+#[test]
+fn test_parse_bare_query_without_explain() {
+    use query::query_parse::{parse_request, ParsedOperation};
+
+    // Bare selection set (no 'query' keyword)
+    let query = "{ Users { _docID name } }";
+    let result = parse_request(query).unwrap();
+
+    match result {
+        ParsedOperation::Query { selects, explain } => {
+            assert!(!explain, "Expected explain=false for bare selection set");
+            assert_eq!(selects.len(), 1);
+        }
+        _ => panic!("Expected query"),
+    }
 }

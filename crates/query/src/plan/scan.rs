@@ -187,6 +187,28 @@ impl PlanNode for ScanNode {
     fn kind(&self) -> &'static str {
         "scanNode"
     }
+
+    fn explain(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "node".to_string(),
+            serde_json::Value::String(self.kind().to_string()),
+        );
+        obj.insert(
+            "collection".to_string(),
+            serde_json::Value::String(self.collection.name.clone()),
+        );
+
+        if let Some(ref filter) = self.filter {
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        }
+
+        if self.show_deleted {
+            obj.insert("showDeleted".to_string(), serde_json::Value::Bool(true));
+        }
+
+        serde_json::Value::Object(obj)
+    }
 }
 
 #[cfg(test)]

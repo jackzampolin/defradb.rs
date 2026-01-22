@@ -246,6 +246,34 @@ impl PlanNode for OrderByNode {
     fn kind(&self) -> &'static str {
         "orderByNode"
     }
+
+    fn explain(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "node".to_string(),
+            JsonValue::String(self.kind().to_string()),
+        );
+
+        // Format order conditions
+        let order_fields: Vec<JsonValue> = self
+            .order_by
+            .conditions
+            .iter()
+            .map(|c| {
+                let dir = match c.direction {
+                    OrderDirection::Asc => "ASC",
+                    OrderDirection::Desc => "DESC",
+                };
+                JsonValue::String(format!("{} {}", c.fields.join("."), dir))
+            })
+            .collect();
+        obj.insert("orderBy".to_string(), JsonValue::Array(order_fields));
+
+        // Recursively explain child node
+        obj.insert("source".to_string(), self.source.explain());
+
+        JsonValue::Object(obj)
+    }
 }
 
 #[cfg(test)]

@@ -90,6 +90,23 @@ impl PlanNode for SelectNode {
     fn kind(&self) -> &'static str {
         "selectNode"
     }
+
+    fn explain(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "node".to_string(),
+            serde_json::Value::String(self.kind().to_string()),
+        );
+
+        if let Some(ref filter) = self.filter {
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        }
+
+        // Recursively explain child node
+        obj.insert("source".to_string(), self.source.explain());
+
+        serde_json::Value::Object(obj)
+    }
 }
 
 #[cfg(test)]

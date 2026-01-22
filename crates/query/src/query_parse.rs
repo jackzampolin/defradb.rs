@@ -3,7 +3,8 @@
 //! Parses GraphQL query strings into Select and Mutation operations for execution.
 
 use graphql_parser::query::{
-    Definition, Document, Field, OperationDefinition, Selection, SelectionSet, Value,
+    Definition, Directive, Document, Field, FragmentDefinition, OperationDefinition, Selection,
+    SelectionSet, Value,
 };
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap};
@@ -20,9 +21,56 @@ use crate::mapper::{
 #[derive(Debug)]
 pub enum ParsedOperation {
     /// Query operations (SELECT)
-    Query(Vec<Select>),
+    Query {
+        selects: Vec<Select>,
+        /// Whether @explain directive was used
+        explain: bool,
+    },
     /// Mutation operations (CREATE, UPDATE, DELETE)
     Mutation(Vec<Mutation>),
+}
+
+/// Check if a directive list contains @explain
+fn has_explain_directive(directives: &[Directive<'_, String>]) -> bool {
+    directives.iter().any(|d| d.name == "explain")
+}
+
+/// Type alias for fragment definitions map
+type FragmentMap<'a> = HashMap<String, &'a FragmentDefinition<'a, String>>;
+
+/// Parse a selection into Select operations, handling fragments.
+fn parse_selection_to_selects<'a>(
+    selection: &'a Selection<'a, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+    fragments: &FragmentMap<'a>,
+    selects: &mut Vec<Select>,
+) -> Result<()> {
+    match selection {
+        Selection::Field(field) => {
+            let select = parse_field_to_select(field, variables, fragments)?;
+            selects.push(select);
+        }
+        Selection::FragmentSpread(spread) => {
+            // Look up the fragment by name
+            let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
+                QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
+            })?;
+
+            // Process each selection in the fragment's selection set
+            for frag_selection in &frag.selection_set.items {
+                parse_selection_to_selects(frag_selection, variables, fragments, selects)?;
+            }
+        }
+        Selection::InlineFragment(inline) => {
+            // Inline fragments: ... on Type { fields }
+            // For now, we ignore the type condition and just expand the fields
+            // (DefraDB doesn't have interface/union types yet)
+            for inline_selection in &inline.selection_set.items {
+                parse_selection_to_selects(inline_selection, variables, fragments, selects)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse a GraphQL query string into Select operations.
@@ -31,7 +79,7 @@ pub enum ParsedOperation {
 /// For mutations, use `parse_request` instead.
 pub fn parse_query(query: &str) -> Result<Vec<Select>> {
     match parse_request(query)? {
-        ParsedOperation::Query(selects) => Ok(selects),
+        ParsedOperation::Query { selects, .. } => Ok(selects),
         ParsedOperation::Mutation(_) => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_request() for mutations.",
         )),
@@ -44,7 +92,7 @@ pub fn parse_query(query: &str) -> Result<Vec<Select>> {
 pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
     match parse_request(query)? {
         ParsedOperation::Mutation(mutations) => Ok(mutations),
-        ParsedOperation::Query(_) => Err(QueryError::parse("Expected mutation but got query")),
+        ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
     }
 }
 
@@ -78,39 +126,57 @@ pub fn parse_request_with_variables(
     let doc: Document<'_, String> =
         graphql_parser::parse_query(query).map_err(|e| QueryError::parse(e.to_string()))?;
 
+    // First pass: collect all fragment definitions
+    let mut fragments: HashMap<String, &FragmentDefinition<'_, String>> = HashMap::new();
+    for def in &doc.definitions {
+        if let Definition::Fragment(frag) = def {
+            fragments.insert(frag.name.clone(), frag);
+        }
+    }
+
     let mut selects = Vec::new();
     let mut mutations = Vec::new();
     let mut has_query = false;
     let mut has_mutation = false;
+    let mut explain = false;
 
-    for def in doc.definitions {
+    // Second pass: parse operations with fragments available
+    for def in &doc.definitions {
         match def {
             Definition::Operation(op) => {
                 match op {
                     OperationDefinition::Query(q) => {
                         has_query = true;
-                        for selection in q.selection_set.items {
-                            if let Selection::Field(field) = selection {
-                                let select = parse_field_to_select(&field, variables)?;
-                                selects.push(select);
-                            }
+                        // Check for @explain directive
+                        if has_explain_directive(&q.directives) {
+                            explain = true;
+                        }
+                        for selection in &q.selection_set.items {
+                            parse_selection_to_selects(
+                                selection,
+                                variables,
+                                &fragments,
+                                &mut selects,
+                            )?;
                         }
                     }
                     OperationDefinition::SelectionSet(ss) => {
                         // Bare selection set is treated as query
                         has_query = true;
-                        for selection in ss.items {
-                            if let Selection::Field(field) = selection {
-                                let select = parse_field_to_select(&field, variables)?;
-                                selects.push(select);
-                            }
+                        for selection in &ss.items {
+                            parse_selection_to_selects(
+                                selection,
+                                variables,
+                                &fragments,
+                                &mut selects,
+                            )?;
                         }
                     }
                     OperationDefinition::Mutation(m) => {
                         has_mutation = true;
-                        for selection in m.selection_set.items {
+                        for selection in &m.selection_set.items {
                             if let Selection::Field(field) = selection {
-                                let mutation = parse_field_to_mutation(&field, variables)?;
+                                let mutation = parse_field_to_mutation(field, variables)?;
                                 mutations.push(mutation);
                             }
                         }
@@ -121,7 +187,7 @@ pub fn parse_request_with_variables(
                 };
             }
             Definition::Fragment(_) => {
-                return Err(QueryError::parse("fragments not yet supported"))
+                // Already processed in first pass
             }
         }
     }
@@ -136,7 +202,7 @@ pub fn parse_request_with_variables(
     if has_mutation {
         Ok(ParsedOperation::Mutation(mutations))
     } else {
-        Ok(ParsedOperation::Query(selects))
+        Ok(ParsedOperation::Query { selects, explain })
     }
 }
 
@@ -144,6 +210,7 @@ pub fn parse_request_with_variables(
 fn parse_field_to_select(
     field: &Field<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
+    fragments: &FragmentMap<'_>,
 ) -> Result<Select> {
     let collection_name = field.name.clone();
     let alias = field.alias.clone();
@@ -210,7 +277,8 @@ fn parse_field_to_select(
     }
 
     // Parse selection set (child fields)
-    let (fields, mapping) = parse_selection_set(&field.selection_set, &collection_name, variables)?;
+    let (fields, mapping) =
+        parse_selection_set(&field.selection_set, &collection_name, variables, fragments)?;
     select.fields = fields;
     select.document_mapping = mapping;
 
@@ -222,6 +290,7 @@ fn parse_selection_set(
     selection_set: &SelectionSet<'_, String>,
     _collection_name: &str,
     variables: Option<&HashMap<String, JsonValue>>,
+    fragments: &FragmentMap<'_>,
 ) -> Result<(Vec<Requestable>, DocumentMapping)> {
     let mut fields = Vec::new();
     let mut mapping = DocumentMapping::new();
@@ -249,7 +318,7 @@ fn parse_selection_set(
                     fields.push(Requestable::Aggregate(aggregate));
                 } else if !field.selection_set.items.is_empty() {
                     // This is a nested select (relation)
-                    let nested = parse_field_to_select(field, variables)?;
+                    let nested = parse_field_to_select(field, variables, fragments)?;
 
                     // Add nested select to document mapping
                     // Use field name for internal indexing, output_name (alias) for rendering
@@ -274,11 +343,71 @@ fn parse_selection_set(
                     fields.push(Requestable::Field(select_field));
                 }
             }
-            Selection::FragmentSpread(_) => {
-                return Err(QueryError::parse("fragment spreads not yet supported"))
+            Selection::FragmentSpread(spread) => {
+                // Look up the fragment by name
+                let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
+                    QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
+                })?;
+
+                // Recursively parse the fragment's selection set
+                let (frag_fields, _frag_mapping) = parse_selection_set(
+                    &frag.selection_set,
+                    _collection_name,
+                    variables,
+                    fragments,
+                )?;
+
+                // Merge fragment fields and mapping into our current sets
+                for frag_field in frag_fields {
+                    // Update mapping indices for the merged fields
+                    let index = mapping.next_index();
+                    match &frag_field {
+                        Requestable::Field(f) => {
+                            mapping.add(index, &f.name);
+                            mapping.add_render_key(index, f.output_name());
+                        }
+                        Requestable::Aggregate(a) => {
+                            mapping.add(index, a.aggregate_type.as_str());
+                            mapping.add_render_key(index, a.output_name());
+                        }
+                        Requestable::Select(s) => {
+                            mapping.add(index, &s.field.name);
+                            mapping.add_render_key(index, s.field.output_name());
+                        }
+                    }
+                    fields.push(frag_field);
+                }
             }
-            Selection::InlineFragment(_) => {
-                return Err(QueryError::parse("inline fragments not yet supported"))
+            Selection::InlineFragment(inline) => {
+                // Inline fragments: ... on Type { fields }
+                // For now, we ignore the type condition and just expand the fields
+                // (DefraDB doesn't have interface/union types yet)
+                let (inline_fields, _inline_mapping) = parse_selection_set(
+                    &inline.selection_set,
+                    _collection_name,
+                    variables,
+                    fragments,
+                )?;
+
+                // Merge inline fragment fields into our current sets
+                for inline_field in inline_fields {
+                    let index = mapping.next_index();
+                    match &inline_field {
+                        Requestable::Field(f) => {
+                            mapping.add(index, &f.name);
+                            mapping.add_render_key(index, f.output_name());
+                        }
+                        Requestable::Aggregate(a) => {
+                            mapping.add(index, a.aggregate_type.as_str());
+                            mapping.add_render_key(index, a.output_name());
+                        }
+                        Requestable::Select(s) => {
+                            mapping.add(index, &s.field.name);
+                            mapping.add_render_key(index, s.field.output_name());
+                        }
+                    }
+                    fields.push(inline_field);
+                }
             }
         }
     }
@@ -813,7 +942,14 @@ fn parse_field_to_mutation(
     }
 
     // Parse selection set (fields to return after mutation)
-    let (fields, mapping) = parse_selection_set(&field.selection_set, &collection_name, variables)?;
+    // For mutations, we don't support fragments in return fields
+    let empty_fragments: FragmentMap<'_> = HashMap::new();
+    let (fields, mapping) = parse_selection_set(
+        &field.selection_set,
+        &collection_name,
+        variables,
+        &empty_fragments,
+    )?;
     mutation.fields = fields;
     mutation.document_mapping = mapping;
 
@@ -1215,7 +1351,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables)).unwrap();
         match result {
-            ParsedOperation::Query(selects) => {
+            ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects.len(), 1);
                 let filter = selects[0].filter.as_ref().unwrap();
                 let conditions = filter.conditions();
@@ -1240,7 +1376,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables)).unwrap();
         match result {
-            ParsedOperation::Query(selects) => {
+            ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(10));
             }
             _ => panic!("Expected query"),
@@ -1262,7 +1398,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables)).unwrap();
         match result {
-            ParsedOperation::Query(selects) => {
+            ParsedOperation::Query { selects, .. } => {
                 assert_eq!(
                     selects[0].doc_ids,
                     Some(vec!["bae-123".to_string(), "bae-456".to_string()])
@@ -1371,7 +1507,7 @@ mod variable_tests {
         // No variables provided
         let result = parse_request_with_variables(query, None).unwrap();
         match result {
-            ParsedOperation::Query(selects) => {
+            ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects.len(), 1);
                 let filter = selects[0].filter.as_ref().unwrap();
                 let conditions = filter.conditions();
@@ -1422,7 +1558,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables)).unwrap();
         match result {
-            ParsedOperation::Query(selects) => {
+            ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(5));
                 let filter = selects[0].filter.as_ref().unwrap();
                 let conditions = filter.conditions();

@@ -161,6 +161,26 @@ pub trait PlanNode: Send + Sync {
     fn current_group_docs(&self) -> Option<&[Doc]> {
         None
     }
+
+    /// Generate an explanation of this node for EXPLAIN queries.
+    ///
+    /// Returns a JSON object describing the node's role in the query plan.
+    /// The default implementation returns basic node type info.
+    /// Nodes can override this to provide more details (e.g., filter conditions, limits).
+    fn explain(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "node".to_string(),
+            JsonValue::String(self.kind().to_string()),
+        );
+
+        // Recursively explain child nodes
+        if let Some(source) = self.source() {
+            obj.insert("source".to_string(), source.explain());
+        }
+
+        JsonValue::Object(obj)
+    }
 }
 
 /// Execution statistics for plan nodes

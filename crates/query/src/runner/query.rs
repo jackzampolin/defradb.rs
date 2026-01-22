@@ -36,6 +36,80 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             .await
     }
 
+    /// Generate an explanation of the query plan without executing.
+    ///
+    /// Used when queries include the @explain directive.
+    pub async fn explain_query_with_identity(
+        &self,
+        query: &str,
+        _caller_identity: Option<Did>,
+    ) -> Result<JsonValue> {
+        let selects = parse_query(query)?;
+
+        let mut results = Map::new();
+
+        for select in selects {
+            let explanation = self.explain_select(&select)?;
+            let key = select.field.output_name();
+            results.insert(key.to_string(), explanation);
+        }
+
+        Ok(serde_json::json!({ "explain": results }))
+    }
+
+    /// Generate an explanation of a single Select operation.
+    fn explain_select(&self, select: &Select) -> Result<JsonValue> {
+        // Get collection schema
+        let collection = self
+            .collections
+            .get(&select.collection_name)
+            .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
+
+        // Check if this query has nested selections (relations)
+        let has_nested = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
+
+        if has_nested {
+            // Use the Planner for queries with nested selections
+            self.explain_nested_select(select)
+        } else {
+            // Explain simple query plan
+            self.explain_simple_select(select, collection)
+        }
+    }
+
+    /// Generate an explanation for a query with nested selections.
+    fn explain_nested_select(&self, select: &Select) -> Result<JsonValue> {
+        // Build the plan using the Planner
+        let collections: Vec<CollectionVersion> =
+            self.collections.values().map(|c| (**c).clone()).collect();
+
+        let planner = Planner::new(collections);
+        let plan_result = planner.plan_with_index_info(select)?;
+        let plan = plan_result.plan;
+
+        // Return the plan explanation
+        Ok(plan.explain())
+    }
+
+    /// Generate an explanation for a simple query without nested selections.
+    fn explain_simple_select(
+        &self,
+        select: &Select,
+        collection: &Arc<CollectionVersion>,
+    ) -> Result<JsonValue> {
+        // Build document mapping and plan
+        let mapping = plan::build_mapping(select, collection, &self.collections)?;
+
+        // Create an empty plan with no documents for explanation purposes
+        let plan = plan::build_plan(select, vec![], mapping, &self.collections)?;
+
+        // Return the plan explanation
+        Ok(plan.explain())
+    }
+
     /// Execute a GraphQL query with a specific fetcher and identity.
     ///
     /// This is used internally for both regular queries (using the default fetcher)
