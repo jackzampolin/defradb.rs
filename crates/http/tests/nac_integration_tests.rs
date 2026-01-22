@@ -13,8 +13,9 @@ use identity::{new_token, Did, Identity, RawIdentity};
 use tower::ServiceExt;
 
 use defra_http::{
-    create_router_with_state, AppStateBuilder, MockNodeAcpOperations, MockQueryExecutor,
-    MockRestOperations, NodePermission,
+    create_router_with_state, AppStateBuilder, FailingMockNodeAcpOperations,
+    MockAcpOperations, MockBackupOperations, MockIndexOperations, MockNodeAcpOperations,
+    MockP2POperations, MockQueryExecutor, MockRestOperations, NodePermission,
 };
 
 const TEST_HOST: &str = "localhost:9181";
@@ -586,4 +587,1357 @@ async fn test_schema_endpoint_allows_anonymous_when_nac_not_configured() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ============================================================================
+// Document CRUD Endpoint NAC Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_get_document_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/collections/users/doc123")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_get_document_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/collections/users/doc123")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // May be 200 or 404 depending on mock, but NOT 403
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_get_document_allows_user_with_document_read_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentRead);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/collections/users/doc123")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should not be forbidden - may be 200 or 404
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_create_document_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/collections/users")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name": "test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_create_document_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/collections/users")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name": "test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should not be forbidden
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_create_document_requires_document_update_permission() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant only DocumentRead - NOT DocumentUpdate
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentRead);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // User with only DocumentRead should be denied for create
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/collections/users")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name": "test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_create_document_allows_user_with_document_update_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentUpdate);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/collections/users")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name": "test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should not be forbidden
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_update_document_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v0/collections/users/doc123")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name": "updated"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_update_document_allows_user_with_document_update_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentUpdate);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v0/collections/users/doc123")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name": "updated"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should not be forbidden
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_delete_document_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/collections/users/doc123")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_delete_document_allows_user_with_document_delete_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentDelete);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/collections/users/doc123")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should not be forbidden
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ============================================================================
+// Backup Endpoint NAC Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_backup_export_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_backup(Arc::new(MockBackupOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/backup/export")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_backup_export_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_backup(Arc::new(MockBackupOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/backup/export")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_backup_export_allows_user_with_document_read_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentRead);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_backup(Arc::new(MockBackupOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/backup/export")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_backup_import_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_backup(Arc::new(MockBackupOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/backup/import")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"collections": {}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_backup_import_allows_user_with_document_update_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentUpdate);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_backup(Arc::new(MockBackupOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/backup/import")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"collections": {}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ============================================================================
+// NAC Admin Management Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_nac_add_admin_rejects_anonymous() {
+    let (_, owner_did) = create_test_identity();
+    let (_, target_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({ "target": target_did.to_string() });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/nac/admin")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_nac_add_admin_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let (_, target_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({ "target": target_did.to_string() });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/nac/admin")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should not be forbidden (may be 200 or other status)
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_nac_remove_admin_rejects_anonymous() {
+    let (_, owner_did) = create_test_identity();
+    let (_, target_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({ "target": target_did.to_string() });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/nac/admin")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_nac_remove_admin_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let (_, target_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did.clone())
+        .with_admin(target_did.clone());
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({ "target": target_did.to_string() });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/nac/admin")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ============================================================================
+// Index Endpoint NAC Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_index_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_index(Arc::new(MockIndexOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "collection": "users",
+        "fields": ["name"]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/index")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_create_index_allows_user_with_index_create_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::IndexCreate);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_index(Arc::new(MockIndexOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "collection": "users",
+        "fields": ["name"]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/index")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_list_indexes_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_index(Arc::new(MockIndexOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/index")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_list_indexes_allows_user_with_index_list_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::IndexList);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_index(Arc::new(MockIndexOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/index")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_drop_index_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_index(Arc::new(MockIndexOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // drop_index uses query params, not JSON body
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/index?collection=users&name=users_name_idx")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_drop_index_allows_user_with_index_drop_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::IndexDrop);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_index(Arc::new(MockIndexOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // drop_index uses query params, not JSON body
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/index?collection=users&name=users_name_idx")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ============================================================================
+// P2P Endpoint NAC Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_p2p_info_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/p2p/info")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_info_allows_user_with_peer_connect_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::P2pPeerConnect);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/p2p/info")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_list_peers_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/p2p/peers")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_connect_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // connect expects array of multiaddr strings
+    let body = serde_json::json!(["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWTest"]);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/connect")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_replicators_list_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/p2p/replicators")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_replicators_list_allows_user_with_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::P2pReplicatorList);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/p2p/replicators")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_add_replicator_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // ReplicatorRequest uses Go-compatible capitalized keys
+    let body = serde_json::json!({
+        "Collections": ["users"],
+        "Addresses": ["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWTest"]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/replicators")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_remove_replicator_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "collections": ["users"]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/p2p/replicator")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_collections_list_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/p2p/collections")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_add_collections_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "collections": ["users"]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/p2p/collections")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_p2p_remove_collections_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_p2p(Arc::new(MockP2POperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "collections": ["users"]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v0/p2p/collections")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ============================================================================
+// NAC Error Path Tests (Internal Errors)
+// ============================================================================
+
+#[tokio::test]
+async fn test_nac_internal_error_returns_500() {
+    let (user_identity, _) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Use failing mock that returns errors for all permission checks
+    let nac = FailingMockNodeAcpOperations::new("internal database error");
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/collections")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Internal NAC errors should return 500, not 403
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_nac_internal_error_does_not_leak_error_details() {
+    let (user_identity, _) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    let nac = FailingMockNodeAcpOperations::new("secret internal error details");
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_rest(Arc::new(MockRestOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/collections")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Error response should NOT contain the internal error details
+    assert!(
+        !body_str.contains("secret internal error"),
+        "Error response should not leak internal error details"
+    );
+}
+
+// ============================================================================
+// ACP Policy Endpoint NAC Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_acp_add_policy_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "policy": "name: test\nresources: {}"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_acp_list_policies_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_acp_get_policy_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy/policy123")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_acp_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
 }

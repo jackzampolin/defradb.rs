@@ -73,15 +73,14 @@ pub async fn get_document(
 /// - If the collection has a policy and identity is provided, the document
 ///   is registered with ACP and the identity becomes the owner.
 ///
-/// Requires `DocumentRead` permission when NAC is enabled (document creation
-/// involves reading back the created document).
+/// Requires `DocumentUpdate` permission when NAC is enabled.
 pub async fn create_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(collection): Path<String>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, HttpError> {
-    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
     let rest = state
         .rest
