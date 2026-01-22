@@ -12,7 +12,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 
 use crate::auto_commit_mutator::AutoCommitMutator;
-use crate::block_builder::build_block_from_document;
+use crate::block_builder::build_blocks_from_document;
 use crate::database::DB;
 
 /// Document mutator that broadcasts changes to P2P network.
@@ -54,9 +54,15 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         // Execute the create mutation
         let result = self.inner.create(collection_name, doc).await?;
 
-        // Build block from created document
-        let block_result = build_block_from_document(&result.document)
-            .map_err(|e| query::error::QueryError::execution(e))?;
+        // Build proper Block structures for P2P sync
+        // This creates LWW field blocks + Composite block matching Go's format
+        let block_result = build_blocks_from_document(
+            &result.document,
+            &collection_id, // schema_version_id is the same as collection_id
+            self.sync.blockstore(),
+        )
+        .await
+        .map_err(|e| query::error::QueryError::execution(e))?;
 
         // Broadcast to network (fire-and-forget, log errors)
         if let Err(e) = self
@@ -80,6 +86,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                 doc_id = %block_result.doc_id,
                 cid = %block_result.cid,
                 collection = %collection_name,
+                field_blocks = block_result.field_cids.len(),
                 "Broadcast document create to P2P network"
             );
         }
@@ -103,9 +110,14 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         // Execute the update mutation
         let result = self.inner.update(collection_name, doc).await?;
 
-        // Build block from updated document
-        let block_result = build_block_from_document(&result.document)
-            .map_err(|e| query::error::QueryError::execution(e))?;
+        // Build proper Block structures for P2P sync
+        let block_result = build_blocks_from_document(
+            &result.document,
+            &collection_id,
+            self.sync.blockstore(),
+        )
+        .await
+        .map_err(|e| query::error::QueryError::execution(e))?;
 
         // Broadcast to network
         if let Err(e) = self
@@ -129,6 +141,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                 doc_id = %block_result.doc_id,
                 cid = %block_result.cid,
                 collection = %collection_name,
+                field_blocks = block_result.field_cids.len(),
                 "Broadcast document update to P2P network"
             );
         }

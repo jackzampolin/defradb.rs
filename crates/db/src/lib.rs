@@ -71,7 +71,9 @@ pub mod txn_registry;
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
-pub use block_builder::{build_block_from_document, BlockResult};
+pub use block_builder::{build_blocks_from_document, BlockResult};
+#[allow(deprecated)]
+pub use block_builder::build_block_from_document;
 pub use broadcast_mutator::BroadcastMutator;
 pub use collection::Collection;
 pub use collection_acp::{
