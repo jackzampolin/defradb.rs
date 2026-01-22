@@ -1,4 +1,13 @@
 //! GraphQL and transaction HTTP handlers.
+//!
+//! # NAC Permission Model
+//!
+//! GraphQL endpoint permissions are checked based on the operation type:
+//! - Query operations require `DocumentRead` permission
+//! - Mutation operations require `DocumentUpdate` permission
+//!
+//! This matches Go DefraDB's per-operation permission model more closely,
+//! where each operation type has its own permission requirement.
 
 use axum::{
     extract::{Query, State},
@@ -10,11 +19,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use query::executor::{QueryRequest, QueryResponse};
+use query::{parse_request, ParsedOperation};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
+
+/// Determine the required NAC permission based on GraphQL operation type.
+///
+/// - Query operations require `DocumentRead` permission
+/// - Mutation operations require `DocumentUpdate` permission
+/// - Parse failures default to `DocumentUpdate` (fail-secure)
+///
+/// This matches Go DefraDB's per-operation permission model where different
+/// operation types have different permission requirements.
+fn permission_for_query(query: &str) -> NodePermission {
+    match parse_request(query) {
+        Ok(ParsedOperation::Query(_)) => NodePermission::DocumentRead,
+        Ok(ParsedOperation::Mutation(_)) => NodePermission::DocumentUpdate,
+        // Parse failures default to the more restrictive permission
+        Err(_) => NodePermission::DocumentUpdate,
+    }
+}
 
 /// Health check response.
 pub async fn health_check() -> impl IntoResponse {
@@ -41,14 +68,22 @@ pub async fn version() -> Json<VersionResponse> {
 /// Accepts JSON body: { query, operationName?, variables? }
 /// Identity is extracted from the Authorization header and used for ACP checks.
 ///
-/// Requires `DocumentUpdate` permission when NAC is enabled (POST can execute mutations).
+/// # NAC Permission Model
+///
+/// Permission is determined by parsing the query:
+/// - Query operations require `DocumentRead` permission
+/// - Mutation operations require `DocumentUpdate` permission
+///
+/// This matches Go DefraDB's per-operation permission model where each
+/// operation type has its own permission requirement.
 pub async fn graphql(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(mut request): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, HttpError> {
-    // NAC check: POST can execute mutations, so require DocumentUpdate permission
-    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+    // NAC check: Determine required permission based on operation type
+    let required_permission = permission_for_query(&request.query);
+    require_permission(&state, &identity, required_permission).await?;
 
     // Wire identity from Authorization header into the request
     request.identity = identity.into_did();
@@ -139,6 +174,23 @@ pub async fn schema(
 // ============================================================================
 // Transaction Endpoints
 // ============================================================================
+//
+// # NAC Transaction Security Model
+//
+// Transaction endpoints require `DocumentUpdate` permission when NAC is enabled.
+// This is more restrictive than Go DefraDB, which doesn't have explicit handler-level
+// NAC checks for transaction endpoints (permission checks happen during operations
+// within the transaction).
+//
+// This approach was chosen for defense-in-depth:
+// - Prevents unauthorized users from starting/managing transactions
+// - Operations within transactions are still subject to per-operation permission checks
+//
+// # Go DefraDB Comparison
+//
+// Go DefraDB checks NAC permissions at the DB layer during individual operations.
+// Transaction management (begin/commit/rollback) doesn't have explicit handler-level
+// permission checks. This Rust implementation adds upfront checks for extra security.
 
 /// Request body for beginning a transaction.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -309,14 +361,21 @@ pub struct TransactionalQueryRequest {
 /// GraphQL POST request handler with optional transaction support.
 /// Identity is extracted from the Authorization header and used for ACP checks.
 ///
-/// Requires `DocumentUpdate` permission when NAC is enabled (POST can execute mutations).
+/// # NAC Permission Model
+///
+/// Permission is determined by parsing the query:
+/// - Query operations require `DocumentRead` permission
+/// - Mutation operations require `DocumentUpdate` permission
+///
+/// This matches Go DefraDB's per-operation permission model.
 pub async fn graphql_transactional(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(request): Json<TransactionalQueryRequest>,
 ) -> Result<Json<QueryResponse>, HttpError> {
-    // NAC check: POST can execute mutations, so require DocumentUpdate permission
-    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+    // NAC check: Determine required permission based on operation type
+    let required_permission = permission_for_query(&request.query);
+    require_permission(&state, &identity, required_permission).await?;
 
     let query_request = QueryRequest {
         query: request.query,

@@ -6,6 +6,22 @@
 //!
 //! Both algorithms are implemented manually since the jsonwebtoken crate requires
 //! specific key formats (PKCS#8 DER) that differ from our crypto library's raw format.
+//!
+//! # Clock Skew Tolerance
+//!
+//! This implementation uses an explicit clock skew tolerance of 60 seconds
+//! ([`DEFAULT_CLOCK_SKEW_SECONDS`]) for token validation. This tolerance:
+//!
+//! - Allows tokens with `nbf` (not-before) up to 60 seconds in the future
+//! - Allows tokens with `exp` (expiration) up to 60 seconds in the past
+//!
+//! # Go DefraDB Compatibility Note
+//!
+//! Go DefraDB uses the `lestrrat-go/jwx` library for JWT parsing, which has its
+//! own internal time tolerance handling. This Rust implementation uses an explicit
+//! tolerance value for clarity and testability. Both implementations should behave
+//! similarly for typical clock drift scenarios, but exact behavior may differ at
+//! the tolerance boundaries.
 
 mod claims;
 mod decoding;

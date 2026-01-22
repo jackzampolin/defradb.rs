@@ -465,8 +465,8 @@ async fn test_get_document_permission_denied() {
     .await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
-        other => panic!("Expected Forbidden error, got {:?}", other),
+        HttpError::Unauthorized(msg) => assert!(msg.contains("access denied")),
+        other => panic!("Expected Unauthorized error, got {:?}", other),
     }
 }
 
@@ -482,8 +482,8 @@ async fn test_create_document_permission_denied() {
     .await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
-        other => panic!("Expected Forbidden error, got {:?}", other),
+        HttpError::Unauthorized(msg) => assert!(msg.contains("access denied")),
+        other => panic!("Expected Unauthorized error, got {:?}", other),
     }
 }
 
@@ -499,8 +499,8 @@ async fn test_update_document_permission_denied() {
     .await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
-        other => panic!("Expected Forbidden error, got {:?}", other),
+        HttpError::Unauthorized(msg) => assert!(msg.contains("access denied")),
+        other => panic!("Expected Unauthorized error, got {:?}", other),
     }
 }
 
@@ -515,7 +515,7 @@ async fn test_delete_document_permission_denied() {
     .await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        HttpError::Forbidden(msg) => assert!(msg.contains("access denied")),
-        other => panic!("Expected Forbidden error, got {:?}", other),
+        HttpError::Unauthorized(msg) => assert!(msg.contains("access denied")),
+        other => panic!("Expected Unauthorized error, got {:?}", other),
     }
 }

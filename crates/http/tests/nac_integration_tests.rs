@@ -126,7 +126,7 @@ async fn test_nac_enabled_rejects_anonymous() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -188,7 +188,7 @@ async fn test_nac_enabled_rejects_non_owner() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -323,7 +323,7 @@ async fn test_error_message_does_not_leak_permission_name() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     // Read the body to check error message
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -367,7 +367,7 @@ async fn test_error_message_does_not_leak_nac_status() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -413,7 +413,7 @@ async fn test_nac_status_endpoint_requires_permission() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -473,7 +473,7 @@ async fn test_schema_endpoint_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -532,7 +532,7 @@ async fn test_schema_endpoint_rejects_non_owner() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -617,7 +617,7 @@ async fn test_get_document_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -647,7 +647,7 @@ async fn test_get_document_allows_owner() {
         .unwrap();
 
     // May be 200 or 404 depending on mock, but NOT 403
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -679,7 +679,7 @@ async fn test_get_document_allows_user_with_document_read_grant() {
         .unwrap();
 
     // Should not be forbidden - may be 200 or 404
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn test_create_document_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -740,7 +740,7 @@ async fn test_create_document_allows_owner() {
         .unwrap();
 
     // Should not be forbidden
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -775,7 +775,7 @@ async fn test_create_document_requires_document_update_permission() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -809,7 +809,7 @@ async fn test_create_document_allows_user_with_document_update_grant() {
         .unwrap();
 
     // Should not be forbidden
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -838,7 +838,7 @@ async fn test_update_document_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -872,7 +872,7 @@ async fn test_update_document_allows_user_with_document_update_grant() {
         .unwrap();
 
     // Should not be forbidden
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -900,7 +900,7 @@ async fn test_delete_document_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -933,7 +933,7 @@ async fn test_delete_document_allows_user_with_document_delete_grant() {
         .unwrap();
 
     // Should not be forbidden
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ============================================================================
@@ -964,7 +964,7 @@ async fn test_backup_export_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -993,7 +993,7 @@ async fn test_backup_export_allows_owner() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1024,7 +1024,7 @@ async fn test_backup_export_allows_user_with_document_read_grant() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1053,7 +1053,7 @@ async fn test_backup_import_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1086,7 +1086,7 @@ async fn test_backup_import_allows_user_with_document_update_grant() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ============================================================================
@@ -1120,7 +1120,7 @@ async fn test_nac_add_admin_rejects_anonymous() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1153,7 +1153,7 @@ async fn test_nac_add_admin_allows_owner() {
         .unwrap();
 
     // Should not be forbidden (may be 200 or other status)
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1183,7 +1183,7 @@ async fn test_nac_remove_admin_rejects_anonymous() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1216,7 +1216,7 @@ async fn test_nac_remove_admin_allows_owner() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ============================================================================
@@ -1253,7 +1253,7 @@ async fn test_create_index_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1290,7 +1290,7 @@ async fn test_create_index_allows_user_with_index_create_grant() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1317,7 +1317,7 @@ async fn test_list_indexes_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1348,7 +1348,7 @@ async fn test_list_indexes_allows_user_with_index_list_grant() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1377,7 +1377,7 @@ async fn test_drop_index_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1410,7 +1410,7 @@ async fn test_drop_index_allows_user_with_index_drop_grant() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ============================================================================
@@ -1441,7 +1441,7 @@ async fn test_p2p_info_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1472,7 +1472,7 @@ async fn test_p2p_info_allows_user_with_peer_connect_grant() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1499,7 +1499,7 @@ async fn test_p2p_list_peers_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1530,7 +1530,7 @@ async fn test_p2p_connect_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1557,7 +1557,7 @@ async fn test_p2p_replicators_list_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1588,7 +1588,7 @@ async fn test_p2p_replicators_list_allows_user_with_grant() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1622,7 +1622,7 @@ async fn test_p2p_add_replicator_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1654,7 +1654,7 @@ async fn test_p2p_remove_replicator_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1681,7 +1681,7 @@ async fn test_p2p_collections_list_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1713,7 +1713,7 @@ async fn test_p2p_add_collections_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1745,7 +1745,7 @@ async fn test_p2p_remove_collections_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ============================================================================
@@ -1856,7 +1856,7 @@ async fn test_acp_add_policy_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1883,7 +1883,7 @@ async fn test_acp_list_policies_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1910,7 +1910,7 @@ async fn test_acp_get_policy_rejects_anonymous_when_nac_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1939,7 +1939,7 @@ async fn test_acp_allows_owner() {
         .await
         .unwrap();
 
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ============================================================================
@@ -1985,7 +1985,7 @@ async fn test_acp_add_policy_allows_user_with_dac_policy_add_grant() {
     // Should succeed (not forbidden)
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with DacPolicyAdd grant should be able to add policies"
     );
 }
@@ -2022,7 +2022,7 @@ async fn test_acp_list_policies_allows_user_with_dac_status_grant() {
     // Should succeed (not forbidden)
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with DacStatus grant should be able to list policies"
     );
 }
@@ -2059,7 +2059,7 @@ async fn test_acp_get_policy_allows_user_with_dac_status_grant() {
     // Should succeed (not forbidden) - may return 404 if policy doesn't exist, but not 403
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with DacStatus grant should be able to get policies"
     );
 }
@@ -2101,7 +2101,7 @@ async fn test_acp_add_policy_requires_dac_policy_add_not_dac_status() {
     // Should be forbidden - DacStatus doesn't grant DacPolicyAdd
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with only DacStatus should NOT be able to add policies"
     );
 }
@@ -2138,7 +2138,7 @@ async fn test_acp_list_policies_requires_dac_status_not_dac_policy_add() {
     // Should be forbidden - DacPolicyAdd doesn't grant DacStatus
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with only DacPolicyAdd should NOT be able to list policies"
     );
 }
@@ -2175,7 +2175,7 @@ async fn test_acp_get_policy_requires_dac_status_not_dac_policy_add() {
     // Should be forbidden - DacPolicyAdd doesn't grant DacStatus
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with only DacPolicyAdd should NOT be able to get policies"
     );
 }
@@ -2212,7 +2212,7 @@ async fn test_acp_admin_can_perform_all_operations() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "Admin should be able to list policies"
     );
 
@@ -2237,7 +2237,7 @@ async fn test_acp_admin_can_perform_all_operations() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "Admin should be able to add policies"
     );
 }
@@ -2276,7 +2276,7 @@ async fn test_acp_user_with_both_grants_can_do_all_operations() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with both grants should be able to list policies"
     );
 
@@ -2301,7 +2301,7 @@ async fn test_acp_user_with_both_grants_can_do_all_operations() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "User with both grants should be able to add policies"
     );
 }
@@ -2341,7 +2341,7 @@ async fn test_graphql_post_rejects_anonymous_when_nac_enabled() {
 
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "GraphQL POST should reject anonymous requests when NAC is enabled"
     );
 }
@@ -2371,7 +2371,7 @@ async fn test_graphql_get_rejects_anonymous_when_nac_enabled() {
 
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "GraphQL GET should reject anonymous requests when NAC is enabled"
     );
 }
@@ -2408,7 +2408,7 @@ async fn test_graphql_post_allows_owner() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "GraphQL POST should allow owner"
     );
 }
@@ -2443,20 +2443,21 @@ async fn test_graphql_get_allows_user_with_document_read_grant() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "GraphQL GET should allow user with DocumentRead grant"
     );
 }
 
 #[tokio::test]
-async fn test_graphql_post_allows_user_with_document_update_grant() {
+async fn test_graphql_post_query_allows_user_with_document_read_grant() {
     let (_, owner_did) = create_test_identity();
     let (user_identity, user_did) = create_test_identity();
     let user_token = create_test_token(&user_identity);
 
-    // Grant DocumentUpdate - should be able to use GraphQL POST
+    // Grant DocumentRead - should be able to use GraphQL POST for read-only queries
+    // (Go DefraDB compatibility: permission is determined by operation type)
     let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
-        .with_grant(user_did, NodePermission::DocumentUpdate);
+        .with_grant(user_did, NodePermission::DocumentRead);
 
     let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
         .with_nac(Arc::new(nac))
@@ -2483,8 +2484,8 @@ async fn test_graphql_post_allows_user_with_document_update_grant() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
-        "GraphQL POST should allow user with DocumentUpdate grant"
+        StatusCode::UNAUTHORIZED,
+        "GraphQL POST with read-only query should allow user with DocumentRead grant"
     );
 }
 
@@ -2518,18 +2519,19 @@ async fn test_graphql_get_requires_document_read_not_document_update() {
 
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "GraphQL GET should require DocumentRead, not DocumentUpdate"
     );
 }
 
 #[tokio::test]
-async fn test_graphql_post_requires_document_update_not_document_read() {
+async fn test_graphql_post_mutation_requires_document_update_not_document_read() {
     let (_, owner_did) = create_test_identity();
     let (user_identity, user_did) = create_test_identity();
     let user_token = create_test_token(&user_identity);
 
-    // Grant ONLY DocumentRead - should NOT be able to use GraphQL POST (requires DocumentUpdate)
+    // Grant ONLY DocumentRead - should NOT be able to use GraphQL POST for mutations
+    // (Go DefraDB compatibility: mutations require DocumentUpdate)
     let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
         .with_grant(user_did, NodePermission::DocumentRead);
 
@@ -2540,7 +2542,7 @@ async fn test_graphql_post_requires_document_update_not_document_read() {
     let app = create_router_with_state(state);
 
     let body = serde_json::json!({
-        "query": "{ __typename }"
+        "query": "mutation { create_Users(input: [{name: \"Test\"}]) { _docID } }"
     });
     let response = app
         .oneshot(
@@ -2558,8 +2560,8 @@ async fn test_graphql_post_requires_document_update_not_document_read() {
 
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
-        "GraphQL POST should require DocumentUpdate, not DocumentRead"
+        StatusCode::UNAUTHORIZED,
+        "GraphQL POST with mutation should require DocumentUpdate, not DocumentRead"
     );
 }
 
@@ -2598,7 +2600,7 @@ async fn test_tx_begin_rejects_anonymous_when_nac_enabled() {
 
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "tx_begin should reject anonymous requests when NAC is enabled"
     );
 }
@@ -2633,7 +2635,7 @@ async fn test_tx_commit_rejects_anonymous_when_nac_enabled() {
 
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "tx_commit should reject anonymous requests when NAC is enabled"
     );
 }
@@ -2668,7 +2670,7 @@ async fn test_tx_rollback_rejects_anonymous_when_nac_enabled() {
 
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "tx_rollback should reject anonymous requests when NAC is enabled"
     );
 }
@@ -2705,7 +2707,7 @@ async fn test_tx_begin_allows_owner() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "tx_begin should allow owner"
     );
 }
@@ -2745,7 +2747,7 @@ async fn test_tx_begin_allows_user_with_document_update_grant() {
 
     assert_ne!(
         response.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "tx_begin should allow user with DocumentUpdate grant"
     );
 }

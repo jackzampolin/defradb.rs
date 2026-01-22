@@ -18,6 +18,14 @@ pub enum HttpError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// 401 Unauthorized - Used for NAC permission denials.
+    /// Matches Go DefraDB's CollectionMiddleware which returns 401 for
+    /// `ErrNotAuthorizedToPerformOperation`.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    /// 403 Forbidden - Used for invalid/expired tokens.
+    /// Matches Go DefraDB's AuthMiddleware which returns 403 for token errors.
     #[error("forbidden: {0}")]
     Forbidden(String),
 
@@ -42,6 +50,7 @@ impl IntoResponse for HttpError {
         let (status, message) = match &self {
             HttpError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             HttpError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            HttpError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             HttpError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             HttpError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             HttpError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
@@ -65,7 +74,8 @@ impl From<RestError> for HttpError {
                 HttpError::BadRequest(format!("Invalid document ID: {}", id))
             }
             RestError::InvalidInput(msg) => HttpError::BadRequest(msg),
-            RestError::PermissionDenied(msg) => HttpError::Forbidden(msg),
+            // Use Unauthorized (401) for permission denied to match Go DefraDB behavior
+            RestError::PermissionDenied(msg) => HttpError::Unauthorized(msg),
             RestError::Internal(msg) => HttpError::Internal(msg),
         }
     }
