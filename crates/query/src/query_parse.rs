@@ -51,7 +51,30 @@ pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
 /// Parse a GraphQL request (query or mutation) into operations.
 ///
 /// This is the main entry point for parsing GraphQL requests.
+/// For queries with variables, use `parse_request_with_variables` instead.
 pub fn parse_request(query: &str) -> Result<ParsedOperation> {
+    parse_request_with_variables(query, None)
+}
+
+/// Parse a GraphQL request with variable substitution.
+///
+/// Variables in the query (e.g., `$userId`) will be substituted with values
+/// from the provided variables map during parsing.
+///
+/// # Example
+/// ```ignore
+/// let variables = HashMap::from([
+///     ("userId".to_string(), json!("bae-123")),
+/// ]);
+/// let result = parse_request_with_variables(
+///     "query($userId: ID!) { User(docID: $userId) { name } }",
+///     Some(&variables)
+/// )?;
+/// ```
+pub fn parse_request_with_variables(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<ParsedOperation> {
     let doc: Document<'_, String> =
         graphql_parser::parse_query(query).map_err(|e| QueryError::parse(e.to_string()))?;
 
@@ -68,7 +91,7 @@ pub fn parse_request(query: &str) -> Result<ParsedOperation> {
                         has_query = true;
                         for selection in q.selection_set.items {
                             if let Selection::Field(field) = selection {
-                                let select = parse_field_to_select(&field)?;
+                                let select = parse_field_to_select(&field, variables)?;
                                 selects.push(select);
                             }
                         }
@@ -78,7 +101,7 @@ pub fn parse_request(query: &str) -> Result<ParsedOperation> {
                         has_query = true;
                         for selection in ss.items {
                             if let Selection::Field(field) = selection {
-                                let select = parse_field_to_select(&field)?;
+                                let select = parse_field_to_select(&field, variables)?;
                                 selects.push(select);
                             }
                         }
@@ -87,7 +110,7 @@ pub fn parse_request(query: &str) -> Result<ParsedOperation> {
                         has_mutation = true;
                         for selection in m.selection_set.items {
                             if let Selection::Field(field) = selection {
-                                let mutation = parse_field_to_mutation(&field)?;
+                                let mutation = parse_field_to_mutation(&field, variables)?;
                                 mutations.push(mutation);
                             }
                         }
@@ -118,7 +141,10 @@ pub fn parse_request(query: &str) -> Result<ParsedOperation> {
 }
 
 /// Parse a single GraphQL field into a Select operation.
-fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
+fn parse_field_to_select(
+    field: &Field<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Select> {
     let collection_name = field.name.clone();
     let alias = field.alias.clone();
 
@@ -131,11 +157,11 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
     for (arg_name, arg_value) in &field.arguments {
         match arg_name.as_str() {
             "filter" => {
-                let filter = parse_filter_value(arg_value)?;
+                let filter = parse_filter_value(arg_value, variables)?;
                 select.filter = Some(filter);
             }
             "limit" => {
-                let limit_val = parse_int_value(arg_value)?;
+                let limit_val = parse_int_value(arg_value, variables)?;
                 if limit_val < 0 {
                     return Err(QueryError::parse("limit must be non-negative"));
                 }
@@ -145,7 +171,7 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
                 ));
             }
             "offset" => {
-                let offset_val = parse_int_value(arg_value)?;
+                let offset_val = parse_int_value(arg_value, variables)?;
                 if offset_val < 0 {
                     return Err(QueryError::parse("offset must be non-negative"));
                 }
@@ -155,25 +181,25 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
                 ));
             }
             "order" => {
-                let order_by = parse_order_value(arg_value)?;
+                let order_by = parse_order_value(arg_value, variables)?;
                 select.order_by = Some(order_by);
             }
             "groupBy" => {
-                let group_by = parse_group_by_value(arg_value)?;
+                let group_by = parse_group_by_value(arg_value, variables)?;
                 select.group_by = Some(group_by);
             }
             "docIDs" | "docID" => {
-                let doc_ids = parse_doc_ids_value(arg_value)?;
+                let doc_ids = parse_doc_ids_value(arg_value, variables)?;
                 select.doc_ids = Some(doc_ids);
             }
-            "cid" => match arg_value {
-                Value::String(s) => select.cid = Some(s.clone()),
-                _ => return Err(QueryError::parse("cid argument must be a string")),
-            },
-            "showDeleted" => match arg_value {
-                Value::Boolean(b) => select.show_deleted = *b,
-                _ => return Err(QueryError::parse("showDeleted argument must be a boolean")),
-            },
+            "cid" => {
+                let cid_val = resolve_string_value(arg_value, variables, "cid")?;
+                select.cid = Some(cid_val);
+            }
+            "showDeleted" => {
+                let show_deleted = resolve_bool_value(arg_value, variables, "showDeleted")?;
+                select.show_deleted = show_deleted;
+            }
             _ => {
                 return Err(QueryError::parse(format!(
                     "unknown argument '{}' on collection '{}'. Valid arguments are: filter, limit, offset, order, groupBy, docIDs, docID, cid, showDeleted",
@@ -184,7 +210,7 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
     }
 
     // Parse selection set (child fields)
-    let (fields, mapping) = parse_selection_set(&field.selection_set, &collection_name)?;
+    let (fields, mapping) = parse_selection_set(&field.selection_set, &collection_name, variables)?;
     select.fields = fields;
     select.document_mapping = mapping;
 
@@ -195,6 +221,7 @@ fn parse_field_to_select(field: &Field<'_, String>) -> Result<Select> {
 fn parse_selection_set(
     selection_set: &SelectionSet<'_, String>,
     _collection_name: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<(Vec<Requestable>, DocumentMapping)> {
     let mut fields = Vec::new();
     let mut mapping = DocumentMapping::new();
@@ -207,7 +234,7 @@ fn parse_selection_set(
 
                 // Check if this is an aggregate field (_count, _sum, _avg, _min, _max)
                 if let Some(agg_type) = AggregateType::parse(&field_name) {
-                    let mut aggregate = parse_aggregate_field(field, agg_type)?;
+                    let mut aggregate = parse_aggregate_field(field, agg_type, variables)?;
 
                     // Set alias if provided
                     if let Some(ref a) = alias {
@@ -222,7 +249,7 @@ fn parse_selection_set(
                     fields.push(Requestable::Aggregate(aggregate));
                 } else if !field.selection_set.items.is_empty() {
                     // This is a nested select (relation)
-                    let nested = parse_field_to_select(field)?;
+                    let nested = parse_field_to_select(field, variables)?;
 
                     // Add nested select to document mapping
                     // Use field name for internal indexing, output_name (alias) for rendering
@@ -260,10 +287,13 @@ fn parse_selection_set(
 }
 
 /// Parse a filter argument value into a Filter.
-fn parse_filter_value(value: &Value<'_, String>) -> Result<Filter> {
+fn parse_filter_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Filter> {
     match value {
         Value::Object(obj) => {
-            let conditions = parse_filter_object(obj)?;
+            let conditions = parse_filter_object(obj, variables)?;
             Ok(Filter::from_conditions(conditions))
         }
         _ => Err(QueryError::parse("filter must be an object")),
@@ -273,19 +303,23 @@ fn parse_filter_value(value: &Value<'_, String>) -> Result<Filter> {
 /// Parse a filter object into conditions map.
 fn parse_filter_object(
     obj: &BTreeMap<String, Value<'_, String>>,
+    variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<HashMap<String, JsonValue>> {
     let mut conditions = HashMap::new();
 
     for (key, val) in obj {
-        let json_val = graphql_value_to_json(val)?;
+        let json_val = graphql_value_to_json(val, variables)?;
         conditions.insert(key.clone(), json_val);
     }
 
     Ok(conditions)
 }
 
-/// Convert GraphQL Value to JSON Value.
-fn graphql_value_to_json(value: &Value<'_, String>) -> Result<JsonValue> {
+/// Convert GraphQL Value to JSON Value, resolving variables if present.
+fn graphql_value_to_json(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<JsonValue> {
     match value {
         Value::Null => Ok(JsonValue::Null),
         Value::Int(n) => n
@@ -299,32 +333,65 @@ fn graphql_value_to_json(value: &Value<'_, String>) -> Result<JsonValue> {
         Value::Boolean(b) => Ok(JsonValue::Bool(*b)),
         Value::Enum(e) => Ok(JsonValue::String(e.clone())),
         Value::List(items) => {
-            let arr: Result<Vec<JsonValue>> = items.iter().map(graphql_value_to_json).collect();
+            let arr: Result<Vec<JsonValue>> = items
+                .iter()
+                .map(|v| graphql_value_to_json(v, variables))
+                .collect();
             Ok(JsonValue::Array(arr?))
         }
         Value::Object(obj) => {
             let mut map = serde_json::Map::new();
             for (k, v) in obj {
-                map.insert(k.clone(), graphql_value_to_json(v)?);
+                map.insert(k.clone(), graphql_value_to_json(v, variables)?);
             }
             Ok(JsonValue::Object(map))
         }
-        Value::Variable(_) => Err(QueryError::parse("variables not yet supported")),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            vars.get(name)
+                .cloned()
+                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))
+        }
     }
 }
 
-/// Parse an integer value from GraphQL Value.
-fn parse_int_value(value: &Value<'_, String>) -> Result<i64> {
+/// Parse an integer value from GraphQL Value, resolving variables if present.
+fn parse_int_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<i64> {
     match value {
         Value::Int(n) => n
             .as_i64()
             .ok_or_else(|| QueryError::parse("integer out of range")),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars
+                .get(name)
+                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+            json_val
+                .as_i64()
+                .ok_or_else(|| QueryError::parse(format!("variable '{}' must be an integer", name)))
+        }
         _ => Err(QueryError::parse("expected integer value")),
     }
 }
 
 /// Parse order argument into OrderBy.
-fn parse_order_value(value: &Value<'_, String>) -> Result<OrderBy> {
+fn parse_order_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<OrderBy> {
     let mut order_by = OrderBy::new();
 
     match value {
@@ -332,6 +399,29 @@ fn parse_order_value(value: &Value<'_, String>) -> Result<OrderBy> {
             for (field_name, direction_val) in obj {
                 let direction = match direction_val {
                     Value::Enum(s) | Value::String(s) => {
+                        OrderDirection::parse(s).ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "invalid order direction '{}', expected ASC or DESC",
+                                s
+                            ))
+                        })?
+                    }
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!("undefined variable '${}'", name))
+                        })?;
+                        let s = json_val.as_str().ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' must be a string (ASC or DESC)",
+                                name
+                            ))
+                        })?;
                         OrderDirection::parse(s).ok_or_else(|| {
                             QueryError::parse(format!(
                                 "invalid order direction '{}', expected ASC or DESC",
@@ -351,14 +441,54 @@ fn parse_order_value(value: &Value<'_, String>) -> Result<OrderBy> {
 }
 
 /// Parse groupBy argument into GroupBy.
-fn parse_group_by_value(value: &Value<'_, String>) -> Result<GroupBy> {
+fn parse_group_by_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<GroupBy> {
     match value {
         Value::List(items) => {
             let fields: Result<Vec<String>> = items
                 .iter()
                 .map(|v| match v {
                     Value::String(s) | Value::Enum(s) => Ok(s.clone()),
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!("undefined variable '${}'", name))
+                        })?;
+                        json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                            QueryError::parse(format!("variable '{}' must be a string", name))
+                        })
+                    }
                     _ => Err(QueryError::parse("groupBy items must be strings")),
+                })
+                .collect();
+            Ok(GroupBy::new(fields?))
+        }
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars
+                .get(name)
+                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+            let arr = json_val.as_array().ok_or_else(|| {
+                QueryError::parse(format!("variable '{}' must be an array of strings", name))
+            })?;
+            let fields: Result<Vec<String>> = arr
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| QueryError::parse("groupBy items must be strings"))
                 })
                 .collect();
             Ok(GroupBy::new(fields?))
@@ -370,7 +500,11 @@ fn parse_group_by_value(value: &Value<'_, String>) -> Result<GroupBy> {
 /// Parse an aggregate field into an Aggregate.
 ///
 /// Handles aggregate functions like `_count`, `_sum(field: "age")`, etc.
-fn parse_aggregate_field(field: &Field<'_, String>, agg_type: AggregateType) -> Result<Aggregate> {
+fn parse_aggregate_field(
+    field: &Field<'_, String>,
+    agg_type: AggregateType,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Aggregate> {
     let mut target_field: Option<String> = None;
 
     // Parse arguments (e.g., `field: "age"` for _sum)
@@ -380,6 +514,23 @@ fn parse_aggregate_field(field: &Field<'_, String>, agg_type: AggregateType) -> 
                 target_field = Some(match arg_value {
                     Value::String(s) => s.clone(),
                     Value::Enum(s) => s.clone(),
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!("undefined variable '${}'", name))
+                        })?;
+                        json_val
+                            .as_str()
+                            .ok_or_else(|| {
+                                QueryError::parse(format!("variable '{}' must be a string", name))
+                            })?
+                            .to_string()
+                    }
                     _ => return Err(QueryError::parse("field argument must be a string")),
                 });
             }
@@ -429,20 +580,124 @@ fn parse_aggregate_field(field: &Field<'_, String>, agg_type: AggregateType) -> 
 }
 
 /// Parse docIDs argument into vector of strings.
-fn parse_doc_ids_value(value: &Value<'_, String>) -> Result<Vec<String>> {
+fn parse_doc_ids_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<String>> {
     match value {
         Value::List(items) => {
             let ids: Result<Vec<String>> = items
                 .iter()
                 .map(|v| match v {
                     Value::String(s) => Ok(s.clone()),
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!("undefined variable '${}'", name))
+                        })?;
+                        json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                            QueryError::parse(format!("variable '{}' must be a string", name))
+                        })
+                    }
                     _ => Err(QueryError::parse("docIDs items must be strings")),
                 })
                 .collect();
             ids
         }
         Value::String(s) => Ok(vec![s.clone()]),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars
+                .get(name)
+                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+            // Variable can be a string (single ID) or array of strings
+            if let Some(s) = json_val.as_str() {
+                Ok(vec![s.to_string()])
+            } else if let Some(arr) = json_val.as_array() {
+                arr.iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| QueryError::parse("docIDs items must be strings"))
+                    })
+                    .collect()
+            } else {
+                Err(QueryError::parse(format!(
+                    "variable '{}' must be a string or array of strings",
+                    name
+                )))
+            }
+        }
         _ => Err(QueryError::parse("docIDs must be a string or list")),
+    }
+}
+
+/// Resolve a string value, handling variables.
+fn resolve_string_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+    arg_name: &str,
+) -> Result<String> {
+    match value {
+        Value::String(s) => Ok(s.clone()),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars
+                .get(name)
+                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+            json_val
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| QueryError::parse(format!("variable '{}' must be a string", name)))
+        }
+        _ => Err(QueryError::parse(format!(
+            "{} argument must be a string",
+            arg_name
+        ))),
+    }
+}
+
+/// Resolve a boolean value, handling variables.
+fn resolve_bool_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+    arg_name: &str,
+) -> Result<bool> {
+    match value {
+        Value::Boolean(b) => Ok(*b),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars
+                .get(name)
+                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+            json_val
+                .as_bool()
+                .ok_or_else(|| QueryError::parse(format!("variable '{}' must be a boolean", name)))
+        }
+        _ => Err(QueryError::parse(format!(
+            "{} argument must be a boolean",
+            arg_name
+        ))),
     }
 }
 
@@ -454,7 +709,10 @@ fn parse_doc_ids_value(value: &Value<'_, String>) -> Result<Vec<String>> {
 ///
 /// Mutation field names follow the format: `operation_collection`
 /// Examples: `create_Users`, `update_Posts`, `delete_Comments`
-fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
+fn parse_field_to_mutation(
+    field: &Field<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Mutation> {
     let field_name = &field.name;
 
     // Parse mutation name to get operation type and collection
@@ -474,13 +732,13 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
         match (mutation_type, arg_name.as_str()) {
             // CREATE: input is array of documents
             (MutationType::Create, "input") => {
-                let input = parse_create_input(arg_value)?;
+                let input = parse_create_input(arg_value, variables)?;
                 mutation.create_input = input;
             }
 
             // UPDATE/UPSERT: input is patch object
             (MutationType::Update | MutationType::Upsert, "input") => {
-                let input = parse_update_input(arg_value)?;
+                let input = parse_update_input(arg_value, variables)?;
                 mutation.update_input = input;
             }
 
@@ -489,13 +747,13 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
                 MutationType::Update | MutationType::Delete | MutationType::Upsert,
                 "docIDs" | "_docIDs",
             ) => {
-                let doc_ids = parse_doc_ids_value(arg_value)?;
+                let doc_ids = parse_doc_ids_value(arg_value, variables)?;
                 mutation.doc_ids = Some(doc_ids);
             }
 
             // UPDATE/DELETE/UPSERT: filter to find documents
             (MutationType::Update | MutationType::Delete | MutationType::Upsert, "filter") => {
-                let filter = parse_filter_value(arg_value)?;
+                let filter = parse_filter_value(arg_value, variables)?;
                 mutation.filter = Some(filter);
             }
 
@@ -555,7 +813,7 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
     }
 
     // Parse selection set (fields to return after mutation)
-    let (fields, mapping) = parse_selection_set(&field.selection_set, &collection_name)?;
+    let (fields, mapping) = parse_selection_set(&field.selection_set, &collection_name, variables)?;
     mutation.fields = fields;
     mutation.document_mapping = mapping;
 
@@ -563,14 +821,17 @@ fn parse_field_to_mutation(field: &Field<'_, String>) -> Result<Mutation> {
 }
 
 /// Parse CREATE mutation input (array of documents).
-fn parse_create_input(value: &Value<'_, String>) -> Result<Vec<HashMap<String, JsonValue>>> {
+fn parse_create_input(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<HashMap<String, JsonValue>>> {
     match value {
         Value::List(items) => {
             let mut docs = Vec::new();
             for item in items {
                 match item {
                     Value::Object(obj) => {
-                        let doc = parse_document_input(obj)?;
+                        let doc = parse_document_input(obj, variables)?;
                         docs.push(doc);
                     }
                     _ => return Err(QueryError::parse("CREATE input items must be objects")),
@@ -580,7 +841,7 @@ fn parse_create_input(value: &Value<'_, String>) -> Result<Vec<HashMap<String, J
         }
         Value::Object(obj) => {
             // Single document (wrap in array)
-            let doc = parse_document_input(obj)?;
+            let doc = parse_document_input(obj, variables)?;
             Ok(vec![doc])
         }
         _ => Err(QueryError::parse(
@@ -590,9 +851,12 @@ fn parse_create_input(value: &Value<'_, String>) -> Result<Vec<HashMap<String, J
 }
 
 /// Parse UPDATE mutation input (patch object).
-fn parse_update_input(value: &Value<'_, String>) -> Result<HashMap<String, JsonValue>> {
+fn parse_update_input(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<HashMap<String, JsonValue>> {
     match value {
-        Value::Object(obj) => parse_document_input(obj),
+        Value::Object(obj) => parse_document_input(obj, variables),
         _ => Err(QueryError::parse("UPDATE input must be an object")),
     }
 }
@@ -600,10 +864,11 @@ fn parse_update_input(value: &Value<'_, String>) -> Result<HashMap<String, JsonV
 /// Parse a document input object into field-value map.
 fn parse_document_input(
     obj: &BTreeMap<String, Value<'_, String>>,
+    variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<HashMap<String, JsonValue>> {
     let mut fields = HashMap::new();
     for (key, value) in obj {
-        let json_value = graphql_value_to_json(value)?;
+        let json_value = graphql_value_to_json(value, variables)?;
         fields.insert(key.clone(), json_value);
     }
     Ok(fields)
@@ -927,5 +1192,247 @@ mod mutation_tests {
         let result = parse_mutations(query);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("requires 'input'"));
+    }
+}
+
+#[cfg(test)]
+mod variable_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_variable_in_filter() {
+        let query = r#"
+            query($name: String!) {
+                Users(filter: {name: {_eq: $name}}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([("name".to_string(), json!("Alice"))]);
+
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Query(selects) => {
+                assert_eq!(selects.len(), 1);
+                let filter = selects[0].filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                let name_cond = conditions.get("name").unwrap();
+                assert_eq!(name_cond.get("_eq"), Some(&json!("Alice")));
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_in_limit() {
+        let query = r#"
+            query($lim: Int!) {
+                Users(limit: $lim) {
+                    _docID
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([("lim".to_string(), json!(10))]);
+
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Query(selects) => {
+                assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(10));
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_in_doc_ids() {
+        let query = r#"
+            query($ids: [String!]!) {
+                Users(docIDs: $ids) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([("ids".to_string(), json!(["bae-123", "bae-456"]))]);
+
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Query(selects) => {
+                assert_eq!(
+                    selects[0].doc_ids,
+                    Some(vec!["bae-123".to_string(), "bae-456".to_string()])
+                );
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_in_mutation_input() {
+        let query = r#"
+            mutation($userName: String!, $userAge: Int!) {
+                create_Users(input: [{name: $userName, age: $userAge}]) {
+                    _docID
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([
+            ("userName".to_string(), json!("Bob")),
+            ("userAge".to_string(), json!(25)),
+        ]);
+
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Mutation(mutations) => {
+                assert_eq!(mutations.len(), 1);
+                let input = &mutations[0].create_input[0];
+                assert_eq!(input.get("name"), Some(&json!("Bob")));
+                assert_eq!(input.get("age"), Some(&json!(25)));
+            }
+            _ => panic!("Expected mutation"),
+        }
+    }
+
+    #[test]
+    fn test_variable_in_mutation_doc_ids() {
+        let query = r#"
+            mutation($id: String!) {
+                delete_Users(docIDs: [$id]) {
+                    _docID
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([("id".to_string(), json!("bae-999"))]);
+
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Mutation(mutations) => {
+                assert_eq!(mutations[0].doc_ids, Some(vec!["bae-999".to_string()]));
+            }
+            _ => panic!("Expected mutation"),
+        }
+    }
+
+    #[test]
+    fn test_undefined_variable_error() {
+        let query = r#"
+            query {
+                Users(filter: {name: {_eq: $undefined}}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let variables = HashMap::new();
+        let result = parse_request_with_variables(query, Some(&variables));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("undefined variable"));
+    }
+
+    #[test]
+    fn test_no_variables_provided_error() {
+        let query = r#"
+            query {
+                Users(filter: {name: {_eq: $name}}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_request_with_variables(query, None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no variables provided"));
+    }
+
+    #[test]
+    fn test_query_without_variables_still_works() {
+        let query = r#"
+            {
+                Users(filter: {name: {_eq: "Alice"}}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        // No variables provided
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Query(selects) => {
+                assert_eq!(selects.len(), 1);
+                let filter = selects[0].filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                let name_cond = conditions.get("name").unwrap();
+                assert_eq!(name_cond.get("_eq"), Some(&json!("Alice")));
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_type_mismatch_int() {
+        let query = r#"
+            query($lim: Int!) {
+                Users(limit: $lim) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Provide string instead of int
+        let variables = HashMap::from([("lim".to_string(), json!("not an int"))]);
+        let result = parse_request_with_variables(query, Some(&variables));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an integer"));
+    }
+
+    #[test]
+    fn test_multiple_variables() {
+        let query = r#"
+            query($name: String!, $minAge: Int!, $lim: Int!) {
+                Users(filter: {name: {_eq: $name}, age: {_gte: $minAge}}, limit: $lim) {
+                    _docID
+                    name
+                    age
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([
+            ("name".to_string(), json!("Alice")),
+            ("minAge".to_string(), json!(18)),
+            ("lim".to_string(), json!(5)),
+        ]);
+
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Query(selects) => {
+                assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(5));
+                let filter = selects[0].filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                assert_eq!(
+                    conditions.get("name").unwrap().get("_eq"),
+                    Some(&json!("Alice"))
+                );
+                assert_eq!(conditions.get("age").unwrap().get("_gte"), Some(&json!(18)));
+            }
+            _ => panic!("Expected query"),
+        }
     }
 }
