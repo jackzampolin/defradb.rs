@@ -128,7 +128,10 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                     error = %collection_error,
                     "Partial broadcast: document topic succeeded, collection topic failed"
                 );
-                BroadcastStatus::Failed(format!("Partial: collection topic failed: {}", collection_error))
+                BroadcastStatus::Failed(format!(
+                    "Partial: collection topic failed: {}",
+                    collection_error
+                ))
             }
             Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
                 tracing::warn!(
@@ -137,7 +140,10 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                     error = %document_error,
                     "Partial broadcast: collection topic succeeded, document topic failed"
                 );
-                BroadcastStatus::Failed(format!("Partial: document topic failed: {}", document_error))
+                BroadcastStatus::Failed(format!(
+                    "Partial: document topic failed: {}",
+                    document_error
+                ))
             }
             Err(e) => {
                 tracing::warn!(
@@ -230,7 +236,10 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                     error = %collection_error,
                     "Partial broadcast: document topic succeeded, collection topic failed"
                 );
-                BroadcastStatus::Failed(format!("Partial: collection topic failed: {}", collection_error))
+                BroadcastStatus::Failed(format!(
+                    "Partial: collection topic failed: {}",
+                    collection_error
+                ))
             }
             Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
                 tracing::warn!(
@@ -239,7 +248,10 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                     error = %document_error,
                     "Partial broadcast: collection topic succeeded, document topic failed"
                 );
-                BroadcastStatus::Failed(format!("Partial: document topic failed: {}", document_error))
+                BroadcastStatus::Failed(format!(
+                    "Partial: document topic failed: {}",
+                    document_error
+                ))
             }
             Err(e) => {
                 tracing::warn!(

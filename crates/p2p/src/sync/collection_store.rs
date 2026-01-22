@@ -6,7 +6,7 @@
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
-use storage::corekv::{Iterator, IterOptions, Key, Reader, Store};
+use storage::corekv::{IterOptions, Iterator, Key, Reader, Store};
 
 /// Marker byte for collection subscription (matches Go's marker = byte(0xff))
 const COLLECTION_MARKER: u8 = 0xff;

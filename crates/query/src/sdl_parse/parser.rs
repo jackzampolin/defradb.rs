@@ -2484,13 +2484,15 @@ mod tests {
         let users = &collections[0];
 
         // Print debug info for diagnosing CID mismatches
-        println!("Field order: {:?}", users.fields.iter().map(|f| &f.name).collect::<Vec<_>>());
+        println!(
+            "Field order: {:?}",
+            users.fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
         println!("Collection CID: {}", users.collection_id);
         println!("Expected (Go): {}", GO_EXPECTED_CID);
 
         assert_eq!(
-            users.collection_id,
-            GO_EXPECTED_CID,
+            users.collection_id, GO_EXPECTED_CID,
             "Collection CID should match Go DefraDB"
         );
     }

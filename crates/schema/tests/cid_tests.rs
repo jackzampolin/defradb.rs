@@ -157,7 +157,10 @@ fn debug_users_schema_cids() {
     // Field 1: _docID (priority 1)
     let doc_id = FieldDescription::new("1", "_docID", FieldKind::doc_id());
     let doc_id_cid = generate_field_cid_with_priority(&doc_id, 1).unwrap();
-    println!("_docID (p=1): {} crdt={}", doc_id_cid, doc_id.crdt_type as u8);
+    println!(
+        "_docID (p=1): {} crdt={}",
+        doc_id_cid, doc_id.crdt_type as u8
+    );
 
     // Field 2: name (priority 2)
     let name = FieldDescription::new("2", "name", FieldKind::string());
@@ -176,7 +179,10 @@ fn debug_users_schema_cids() {
 
     // Also test without field CIDs
     let collection_cid_no_fields = generate_collection_cid("Users", &[]).unwrap();
-    println!("Collection 'Users' (no fields): {}", collection_cid_no_fields);
+    println!(
+        "Collection 'Users' (no fields): {}",
+        collection_cid_no_fields
+    );
 
     println!();
 }
@@ -185,45 +191,52 @@ fn debug_detailed_field_encoding() {
     use schema::{generate_field_cid_with_priority, CType, FieldDescription, FieldKind};
 
     println!("\n=== Detailed Field Debug ===");
-    
+
     // _docID with CType::None (like Go)
-    let doc_id = FieldDescription::new("1", "_docID", FieldKind::doc_id())
-        .with_crdt_type(CType::None);
+    let doc_id =
+        FieldDescription::new("1", "_docID", FieldKind::doc_id()).with_crdt_type(CType::None);
     let doc_id_cid = generate_field_cid_with_priority(&doc_id, 1).unwrap();
-    println!("_docID: crdt={}, scalarKind={:?}, cid={}", 
-             doc_id.crdt_type as u8, 
-             match &doc_id.kind { 
-                 schema::FieldKind::Scalar(k) => *k as u8,
-                 _ => 255
-             },
-             doc_id_cid);
+    println!(
+        "_docID: crdt={}, scalarKind={:?}, cid={}",
+        doc_id.crdt_type as u8,
+        match &doc_id.kind {
+            schema::FieldKind::Scalar(k) => *k as u8,
+            _ => 255,
+        },
+        doc_id_cid
+    );
 
     // age with CType::LwwRegister (default)
     let age = FieldDescription::new("2", "age", FieldKind::int());
     let age_cid = generate_field_cid_with_priority(&age, 2).unwrap();
-    println!("age: crdt={}, scalarKind={:?}, cid={}", 
-             age.crdt_type as u8, 
-             match &age.kind { 
-                 schema::FieldKind::Scalar(k) => *k as u8,
-                 _ => 255
-             },
-             age_cid);
+    println!(
+        "age: crdt={}, scalarKind={:?}, cid={}",
+        age.crdt_type as u8,
+        match &age.kind {
+            schema::FieldKind::Scalar(k) => *k as u8,
+            _ => 255,
+        },
+        age_cid
+    );
 
     // name with CType::LwwRegister (default)
     let name = FieldDescription::new("3", "name", FieldKind::string());
     let name_cid = generate_field_cid_with_priority(&name, 3).unwrap();
-    println!("name: crdt={}, scalarKind={:?}, cid={}", 
-             name.crdt_type as u8, 
-             match &name.kind { 
-                 schema::FieldKind::Scalar(k) => *k as u8,
-                 _ => 255
-             },
-             name_cid);
+    println!(
+        "name: crdt={}, scalarKind={:?}, cid={}",
+        name.crdt_type as u8,
+        match &name.kind {
+            schema::FieldKind::Scalar(k) => *k as u8,
+            _ => 255,
+        },
+        name_cid
+    );
 
     // Collection with sorted fields
-    let collection_cid = schema::generate_collection_cid("Users", &[doc_id_cid, age_cid, name_cid]).unwrap();
+    let collection_cid =
+        schema::generate_collection_cid("Users", &[doc_id_cid, age_cid, name_cid]).unwrap();
     println!("\nCollection 'Users': {}", collection_cid);
-    
+
     // Compare with Go expected
     println!("\nGo expected: bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq");
 }

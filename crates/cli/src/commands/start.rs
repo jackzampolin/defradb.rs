@@ -434,7 +434,11 @@ impl Node {
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         acp_store: Arc<dyn acp::AcpStore>,
-    ) -> Result<(Option<p2p::P2PHostHandle>, Option<P2PTasks>, defra_http::Server)>
+    ) -> Result<(
+        Option<p2p::P2PHostHandle>,
+        Option<P2PTasks>,
+        defra_http::Server,
+    )>
     where
         S: storage::corekv::Store + 'static,
     {
@@ -508,124 +512,137 @@ impl Node {
 
             // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
             // Also captures task handles for graceful shutdown
-            let (sync_coordinator, replication_task, event_handler_task) = if let Some(ref p2p_handle) = p2p {
-                let sync_blockstore =
-                    Arc::new(blockstore::DefraBlockstore::new(store_for_sync.clone(), false));
+            let (sync_coordinator, replication_task, event_handler_task) =
+                if let Some(ref p2p_handle) = p2p {
+                    let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
+                        store_for_sync.clone(),
+                        false,
+                    ));
 
-                // Clone blockstore for merge handler (before moving into coordinator)
-                let merge_blockstore = sync_blockstore.clone();
+                    // Clone blockstore for merge handler (before moving into coordinator)
+                    let merge_blockstore = sync_blockstore.clone();
 
-                // Create persistent collection store for P2P subscriptions
-                let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
-                    Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
+                    // Create persistent collection store for P2P subscriptions
+                    let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
+                        Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
 
-                let (coordinator, sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
-                    p2p_handle.clone(),
-                    sync_blockstore,
-                    p2p::sync::SyncConfig::default(),
-                    collection_store,
-                )
-                .await
-                .map_err(Error::P2P)?;
+                    let (coordinator, sync_events) =
+                        p2p::sync::SyncCoordinator::with_collection_store(
+                            p2p_handle.clone(),
+                            sync_blockstore,
+                            p2p::sync::SyncConfig::default(),
+                            collection_store,
+                        )
+                        .await
+                        .map_err(Error::P2P)?;
 
-                let coordinator = Arc::new(coordinator);
+                    let coordinator = Arc::new(coordinator);
 
-                // Load persisted P2P collection subscriptions
-                match coordinator.load_p2p_collections().await {
-                    Ok(count) => {
-                        if count > 0 {
-                            info!("Loaded {} persisted P2P collection subscription(s)", count);
+                    // Load persisted P2P collection subscriptions
+                    match coordinator.load_p2p_collections().await {
+                        Ok(count) => {
+                            if count > 0 {
+                                info!("Loaded {} persisted P2P collection subscription(s)", count);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to load persisted P2P collections: {}", e);
                         }
                     }
-                    Err(e) => {
-                        warn!("Failed to load persisted P2P collections: {}", e);
-                    }
-                }
 
-                // Create merge handler for CRDT merging
-                let merge_handler =
-                    Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
+                    // Create merge handler for CRDT merging
+                    let merge_handler =
+                        Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
 
-                // Spawn replication loop to process incoming blocks
-                // Track the task handle for graceful shutdown
-                let coordinator_for_replication = coordinator.clone();
-                let replication_config = p2p::sync::ReplicationConfig {
-                    continue_on_error: true,
-                    rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
-                };
-                let replication_task = tokio::spawn(async move {
-                    info!("Starting replication loop for P2P sync");
-                    p2p::sync::ReplicationLoop::run(
-                        coordinator_for_replication,
-                        sync_events,
-                        merge_handler,
-                        replication_config,
+                    // Spawn replication loop to process incoming blocks
+                    // Track the task handle for graceful shutdown
+                    let coordinator_for_replication = coordinator.clone();
+                    let replication_config = p2p::sync::ReplicationConfig {
+                        continue_on_error: true,
+                        rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
+                    };
+                    let replication_task = tokio::spawn(async move {
+                        info!("Starting replication loop for P2P sync");
+                        p2p::sync::ReplicationLoop::run(
+                            coordinator_for_replication,
+                            sync_events,
+                            merge_handler,
+                            replication_config,
+                        )
+                        .await;
+                        info!("Replication loop stopped");
+                    });
+
+                    // Spawn host event handler to process incoming P2P events through coordinator
+                    // Track the task handle for graceful shutdown
+                    let event_handler_task = if let Some(mut events) = p2p_events.take() {
+                        let coordinator_for_events = coordinator.clone();
+                        Some(tokio::spawn(async move {
+                            while let Some(event) = events.recv().await {
+                                // Log events for visibility
+                                match &event {
+                                    p2p::HostEvent::PeerConnected(peer) => {
+                                        info!("Peer connected: {}", peer);
+                                    }
+                                    p2p::HostEvent::PeerDisconnected(peer) => {
+                                        info!("Peer disconnected: {}", peer);
+                                    }
+                                    p2p::HostEvent::PeerDiscovered(peer) => {
+                                        info!("Peer discovered: {}", peer);
+                                    }
+                                    p2p::HostEvent::Listening(addr) => {
+                                        info!("Now listening on: {}", addr);
+                                    }
+                                    p2p::HostEvent::GossipMessage {
+                                        propagation_source,
+                                        topic,
+                                        ..
+                                    } => {
+                                        info!(
+                                            "Received gossip message on {} from {}",
+                                            topic, propagation_source
+                                        );
+                                    }
+                                    p2p::HostEvent::TwoStreamRequest { peer_id, request } => {
+                                        info!(
+                                            peer_id = %peer_id,
+                                            message_id = %request.metadata.message_id,
+                                            doc_id = %request.doc_id,
+                                            "Processing TwoStreamRequest through coordinator"
+                                        );
+                                    }
+                                    _ => {}
+                                }
+
+                                // Process event through coordinator for response handling
+                                if let Err(e) =
+                                    coordinator_for_events.handle_host_event(event).await
+                                {
+                                    error!("Failed to handle host event: {}", e);
+                                }
+                            }
+                        }))
+                    } else {
+                        None
+                    };
+
+                    info!("P2P sync coordinator initialized");
+                    (
+                        Some(coordinator),
+                        Some(replication_task),
+                        event_handler_task,
                     )
-                    .await;
-                    info!("Replication loop stopped");
-                });
-
-                // Spawn host event handler to process incoming P2P events through coordinator
-                // Track the task handle for graceful shutdown
-                let event_handler_task = if let Some(mut events) = p2p_events.take() {
-                    let coordinator_for_events = coordinator.clone();
-                    Some(tokio::spawn(async move {
-                        while let Some(event) = events.recv().await {
-                            // Log events for visibility
-                            match &event {
-                                p2p::HostEvent::PeerConnected(peer) => {
-                                    info!("Peer connected: {}", peer);
-                                }
-                                p2p::HostEvent::PeerDisconnected(peer) => {
-                                    info!("Peer disconnected: {}", peer);
-                                }
-                                p2p::HostEvent::PeerDiscovered(peer) => {
-                                    info!("Peer discovered: {}", peer);
-                                }
-                                p2p::HostEvent::Listening(addr) => {
-                                    info!("Now listening on: {}", addr);
-                                }
-                                p2p::HostEvent::GossipMessage {
-                                    propagation_source,
-                                    topic,
-                                    ..
-                                } => {
-                                    info!(
-                                        "Received gossip message on {} from {}",
-                                        topic, propagation_source
-                                    );
-                                }
-                                p2p::HostEvent::TwoStreamRequest { peer_id, request } => {
-                                    info!(
-                                        peer_id = %peer_id,
-                                        message_id = %request.metadata.message_id,
-                                        doc_id = %request.doc_id,
-                                        "Processing TwoStreamRequest through coordinator"
-                                    );
-                                }
-                                _ => {}
-                            }
-
-                            // Process event through coordinator for response handling
-                            if let Err(e) = coordinator_for_events.handle_host_event(event).await {
-                                error!("Failed to handle host event: {}", e);
-                            }
-                        }
-                    }))
                 } else {
-                    None
+                    (None, None, None)
                 };
-
-                info!("P2P sync coordinator initialized");
-                (Some(coordinator), Some(replication_task), event_handler_task)
-            } else {
-                (None, None, None)
-            };
 
             // Create mutator - use BroadcastMutator if P2P is enabled for network propagation
             let mutator: Arc<dyn query::mutator::DocMutator> =
                 if let Some(ref coordinator) = sync_coordinator {
-                    Arc::new(db::BroadcastMutator::new(database.clone(), coordinator.clone()))
+                    Arc::new(db::BroadcastMutator::new(
+                        database.clone(),
+                        coordinator.clone(),
+                    ))
                 } else {
                     Arc::new(db::AutoCommitMutator::new(database.clone()))
                 };
@@ -720,7 +737,6 @@ impl Node {
         Ok((p2p, p2p_tasks, http_server))
     }
 
-
     /// Start P2P networking with the given bitswap store and optional keypair.
     ///
     /// If a keypair is provided, it will be used for the P2P identity.
@@ -738,7 +754,9 @@ impl Node {
         JoinHandle<()>,
     )> {
         let (host, handle, events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).await.map_err(Error::P2P)?,
+            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store)
+                .await
+                .map_err(Error::P2P)?,
             None => p2p::P2PHost::new(bitswap_store).await.map_err(Error::P2P)?,
         };
 

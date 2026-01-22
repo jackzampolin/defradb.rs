@@ -164,7 +164,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         field_name = %payload.field_name,
                         "LWW delta rejected by CRDT (lower priority or tie-break)"
                     );
-                    Ok(MergeOutcome::skipped("rejected by CRDT conflict resolution"))
+                    Ok(MergeOutcome::skipped(
+                        "rejected by CRDT conflict resolution",
+                    ))
                 } else {
                     // Skipped (already applied)
                     if let Err(e) = txn.force_discard() {
@@ -474,9 +476,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 doc.set_id(doc_id.clone());
 
                                 // Store the document (upsert)
-                                if let Err(e) = collection
-                                    .save_with_datastore(&datastore, &doc)
-                                    .await
+                                if let Err(e) =
+                                    collection.save_with_datastore(&datastore, &doc).await
                                 {
                                     process_error = Some(MergeError::Database(e));
                                 } else {
@@ -490,10 +491,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 }
                             }
                             Err(e) => {
-                                process_error = Some(MergeError::MergeFailed(format!(
-                                    "Invalid doc_id: {}",
-                                    e
-                                )));
+                                process_error =
+                                    Some(MergeError::MergeFailed(format!("Invalid doc_id: {}", e)));
                             }
                         }
                     }
@@ -585,8 +584,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
         );
 
         // Decode the block from DAG-CBOR
-        let block = Block::from_dag_cbor(block_data)
-            .map_err(|e| MergeError::BlockDecode(e.to_string()))?;
+        let block =
+            Block::from_dag_cbor(block_data).map_err(|e| MergeError::BlockDecode(e.to_string()))?;
 
         tracing::debug!(
             cid = %cid,

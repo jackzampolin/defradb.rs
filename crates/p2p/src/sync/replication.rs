@@ -30,10 +30,10 @@
 
 use std::sync::Arc;
 
+use crate::QueryId;
 use blockstore::Blockstore;
 use cid::Cid;
 use libp2p::PeerId;
-use crate::QueryId;
 use tokio::sync::mpsc;
 
 use super::coordinator::SyncCoordinator;

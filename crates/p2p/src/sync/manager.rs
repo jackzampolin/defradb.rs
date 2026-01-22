@@ -22,10 +22,10 @@
 //! The actual CRDT merge is performed by the database layer.
 //! This matches Go's architecture where p2p calls db.Merge().
 
+use crate::QueryId;
 use cid::Cid;
 use libipld::{Block, DefaultParams};
 use libp2p::PeerId;
-use crate::QueryId;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -698,7 +698,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Returns `true` if the block was stored (not a duplicate).
     pub async fn store_bitswap_block(&self, cid: &Cid, data: &[u8]) -> Result<bool> {
         // Check if we already have the block
-        if self.blockstore.has(cid).await.map_err(|e| Error::BlockstoreError(e.to_string()))? {
+        if self
+            .blockstore
+            .has(cid)
+            .await
+            .map_err(|e| Error::BlockstoreError(e.to_string()))?
+        {
             tracing::debug!(
                 cid = %cid,
                 "Bitswap block already in blockstore (duplicate)"
@@ -798,10 +803,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 "Pending DAG still has missing links after Bitswap fetch"
             );
             // Update the pending info with new missing CIDs
-            self.pending_dags.write().insert(*root_cid, PendingDag {
-                missing: missing.into_iter().collect(),
-                ..info
-            });
+            self.pending_dags.write().insert(
+                *root_cid,
+                PendingDag {
+                    missing: missing.into_iter().collect(),
+                    ..info
+                },
+            );
             return Ok(false);
         }
 
@@ -814,12 +822,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         );
 
         // Emit event that DAG is ready for merge
-        let _ = self.event_tx.send(SyncEvent::DagReady {
-            root_cid: *root_cid,
-            doc_id: info.doc_id.clone(),
-            collection_id: info.collection_id.clone(),
-            schema_version_id: info.creator.clone(), // Use creator as stand-in for schema_version_id
-        }).await;
+        let _ = self
+            .event_tx
+            .send(SyncEvent::DagReady {
+                root_cid: *root_cid,
+                doc_id: info.doc_id.clone(),
+                collection_id: info.collection_id.clone(),
+                schema_version_id: info.creator.clone(), // Use creator as stand-in for schema_version_id
+            })
+            .await;
 
         Ok(true)
     }

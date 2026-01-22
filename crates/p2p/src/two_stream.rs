@@ -117,9 +117,9 @@ impl TwoStreamHandler {
     /// Reads the response and routes it to the pending request channel.
     pub async fn handle_response_stream(&self, peer_id: PeerId, mut stream: Stream) -> Result<()> {
         // Read the response from the stream
-        let response: PushLogReply = read_message(&mut stream).await.map_err(|e| {
-            Error::CborDeserialization(format!("failed to read response: {}", e))
-        })?;
+        let response: PushLogReply = read_message(&mut stream)
+            .await
+            .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
 
         let message_id = response.message_id.clone();
 
@@ -233,9 +233,9 @@ impl TwoStreamHandler {
             .await
             .map_err(|e| Error::Transport(format!("failed to open response stream: {}", e)))?;
 
-        write_message(&mut stream, &response).await.map_err(|e| {
-            Error::CborSerialization(format!("failed to write response: {}", e))
-        })?;
+        write_message(&mut stream, &response)
+            .await
+            .map_err(|e| Error::CborSerialization(format!("failed to write response: {}", e)))?;
 
         tracing::info!(
             peer_id = %peer_id,

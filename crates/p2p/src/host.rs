@@ -984,13 +984,19 @@ impl<S: Store> P2PHost<S> {
             }
 
             HostCommand::Shutdown => {
-                info!("Shutdown requested, waiting for {} spawned tasks to complete", self.spawned_tasks.len());
+                info!(
+                    "Shutdown requested, waiting for {} spawned tasks to complete",
+                    self.spawned_tasks.len()
+                );
                 // Wait for all spawned tasks to complete with a timeout
                 let timeout_duration = std::time::Duration::from_secs(5);
                 let shutdown_start = std::time::Instant::now();
                 while !self.spawned_tasks.is_empty() {
                     if shutdown_start.elapsed() > timeout_duration {
-                        warn!("Shutdown timeout exceeded, aborting {} remaining tasks", self.spawned_tasks.len());
+                        warn!(
+                            "Shutdown timeout exceeded, aborting {} remaining tasks",
+                            self.spawned_tasks.len()
+                        );
                         self.spawned_tasks.abort_all();
                         break;
                     }
@@ -998,14 +1004,16 @@ impl<S: Store> P2PHost<S> {
                     match tokio::time::timeout(
                         std::time::Duration::from_millis(100),
                         self.spawned_tasks.join_next(),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(Some(Ok(()))) => {
                             debug!("Spawned task completed during shutdown");
                         }
                         Ok(Some(Err(e))) => {
                             warn!("Spawned task failed during shutdown: {}", e);
                         }
-                        Ok(None) => break, // No more tasks
+                        Ok(None) => break,  // No more tasks
                         Err(_) => continue, // Timeout, check again
                     }
                 }
@@ -1020,8 +1028,10 @@ impl<S: Store> P2PHost<S> {
                 response,
             } => {
                 // Generate a query ID for tracking
-                static QUERY_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let query_id = QueryId(QUERY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                static QUERY_COUNTER: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let query_id =
+                    QueryId(QUERY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
 
                 info!(
                     cid = %cid,
@@ -1084,11 +1094,14 @@ impl<S: Store> P2PHost<S> {
                                 );
 
                                 // Send block to coordinator for storage
-                                if let Err(e) = event_tx.send(HostEvent::BitswapBlockReceived {
-                                    query_id,
-                                    cid: block_cid,
-                                    data: block_data,
-                                }).await {
+                                if let Err(e) = event_tx
+                                    .send(HostEvent::BitswapBlockReceived {
+                                        query_id,
+                                        cid: block_cid,
+                                        data: block_data,
+                                    })
+                                    .await
+                                {
                                     warn!(
                                         query_id = query_id.0,
                                         cid = %block_cid,
@@ -1108,25 +1121,38 @@ impl<S: Store> P2PHost<S> {
                             );
 
                             // Notify completion
-                            let _ = event_tx.send(HostEvent::BitswapComplete {
-                                query_id,
-                                success,
-                                error: if success { None } else { Some(format!("Only fetched {} of {} blocks", fetched, missing_cids.len())) },
-                            }).await;
+                            let _ = event_tx
+                                .send(HostEvent::BitswapComplete {
+                                    query_id,
+                                    success,
+                                    error: if success {
+                                        None
+                                    } else {
+                                        Some(format!(
+                                            "Only fetched {} of {} blocks",
+                                            fetched,
+                                            missing_cids.len()
+                                        ))
+                                    },
+                                })
+                                .await;
                         }
                         Err(e) => {
                             warn!(query_id = query_id.0, error = %e, "Bitswap fetch failed");
-                            let _ = event_tx.send(HostEvent::BitswapComplete {
-                                query_id,
-                                success: false,
-                                error: Some(e.to_string()),
-                            }).await;
+                            let _ = event_tx
+                                .send(HostEvent::BitswapComplete {
+                                    query_id,
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                })
+                                .await;
                         }
                     }
                 });
 
                 // Store the abort handle for cancellation support
-                self.bitswap_queries.insert(query_id, task_handle.abort_handle());
+                self.bitswap_queries
+                    .insert(query_id, task_handle.abort_handle());
 
                 if response.send(Ok(query_id)).is_err() {
                     debug!(cid = %cid, "BitswapSync command response dropped - caller cancelled");
@@ -1433,8 +1459,7 @@ impl<S: Store> P2PHost<S> {
 
                 // Inform Bitswap about the peer's supported protocols
                 // This is critical for Bitswap to know this peer can serve blocks
-                let protocols: Vec<String> =
-                    info.protocols.iter().map(|p| p.to_string()).collect();
+                let protocols: Vec<String> = info.protocols.iter().map(|p| p.to_string()).collect();
                 debug!(
                     peer_id = %peer_id,
                     protocols = ?protocols,
@@ -1618,7 +1643,11 @@ impl<S: Store> P2PHost<S> {
                 debug!(cid = %key, "Bitswap requests to provide block");
                 // Could integrate with Kademlia DHT to provide this key
             }
-            BitswapEvent::FindProviders { key, response, limit } => {
+            BitswapEvent::FindProviders {
+                key,
+                response,
+                limit,
+            } => {
                 debug!(cid = %key, limit = limit, "Bitswap requests to find providers");
                 // Could query Kademlia DHT to find providers
                 // For now, send empty set (peer discovery via mDNS/manual dial)
@@ -1684,7 +1713,10 @@ impl<S: Store> P2PHost<S> {
             .behaviour_mut()
             .send_pushlog_response(channel.0, response)
         {
-            error!("Failed to send PushLog response: message_id={}", resp.message_id);
+            error!(
+                "Failed to send PushLog response: message_id={}",
+                resp.message_id
+            );
         }
     }
 }

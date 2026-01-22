@@ -24,7 +24,9 @@ pub trait CollectionLookup: Send + Sync {
 ///
 /// Optionally uses a SyncCoordinator for replicator operations,
 /// which enables auto-subscribe to collection topics.
-pub struct P2PAdapter<B: Blockstore + 'static = blockstore::DefraBlockstore<storage::backends::MemoryStore>> {
+pub struct P2PAdapter<
+    B: Blockstore + 'static = blockstore::DefraBlockstore<storage::backends::MemoryStore>,
+> {
     handle: P2PHostHandle,
     /// Optional sync coordinator for replicator operations with auto-subscribe
     sync_coordinator: Option<Arc<SyncCoordinator<B>>>,
@@ -43,7 +45,10 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     }
 
     /// Create a new adapter with a sync coordinator for enhanced replicator support.
-    pub fn with_sync_coordinator(handle: P2PHostHandle, coordinator: Arc<SyncCoordinator<B>>) -> Self {
+    pub fn with_sync_coordinator(
+        handle: P2PHostHandle,
+        coordinator: Arc<SyncCoordinator<B>>,
+    ) -> Self {
         Self {
             handle,
             sync_coordinator: Some(coordinator),
@@ -90,7 +95,11 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         coordinator: Arc<SyncCoordinator<B>>,
         lookup: Arc<dyn CollectionLookup>,
     ) -> Arc<dyn P2POperations> {
-        Arc::new(Self::with_sync_coordinator_and_lookup(handle, coordinator, lookup))
+        Arc::new(Self::with_sync_coordinator_and_lookup(
+            handle,
+            coordinator,
+            lookup,
+        ))
     }
 }
 

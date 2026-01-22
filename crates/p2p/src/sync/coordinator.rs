@@ -530,7 +530,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                             error = %e,
                             "Failed to parse CID from two-stream request - sending error response"
                         );
-                        let mut reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                        let mut reply =
+                            PushLogReply::error(&request.metadata.message_id, &error_msg);
                         // Sign the error response
                         if let Err(sign_err) = sign_message(self.host.keypair(), &mut reply) {
                             tracing::error!(error = %sign_err, "Failed to sign invalid CID response");
@@ -589,7 +590,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 // Propagate the processing error if there was one
                 process_result?;
             }
-            HostEvent::BitswapBlockReceived { query_id, cid, data } => {
+            HostEvent::BitswapBlockReceived {
+                query_id,
+                cid,
+                data,
+            } => {
                 tracing::info!(
                     query_id = query_id.0,
                     cid = %cid,
@@ -624,7 +629,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     }
                 }
             }
-            HostEvent::BitswapComplete { query_id, success, error } => {
+            HostEvent::BitswapComplete {
+                query_id,
+                success,
+                error,
+            } => {
                 tracing::info!(
                     query_id = query_id.0,
                     success = success,
@@ -690,7 +699,12 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// we receive messages for a collection we haven't recorded).
     pub async fn subscribe_collection(&self, collection_id: &str) -> Result<bool> {
         // Check if already subscribed in cache (fast path)
-        if self.subscribed_collections.read().await.contains(collection_id) {
+        if self
+            .subscribed_collections
+            .read()
+            .await
+            .contains(collection_id)
+        {
             return Ok(false);
         }
 
@@ -717,7 +731,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             Err(e) => {
                 // GossipSub subscription failed - remove from storage to stay consistent
-                if let Err(remove_err) = self.collection_store.remove_collection(collection_id).await {
+                if let Err(remove_err) =
+                    self.collection_store.remove_collection(collection_id).await
+                {
                     tracing::error!(
                         collection_id = %collection_id,
                         subscribe_error = %e,
@@ -739,7 +755,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ///
     /// Removes the collection subscription from both memory and persistent storage.
     pub async fn unsubscribe_collection(&self, collection_id: &str) -> Result<bool> {
-        let result = self.broadcaster.unsubscribe_collection(collection_id).await?;
+        let result = self
+            .broadcaster
+            .unsubscribe_collection(collection_id)
+            .await?;
         if result {
             // Remove from persistent storage first
             self.collection_store

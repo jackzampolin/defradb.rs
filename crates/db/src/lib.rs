@@ -46,7 +46,6 @@ pub mod acp_merge_handler;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod block_builder;
-pub mod merge_handler;
 pub mod broadcast_mutator;
 pub mod collection;
 pub mod collection_acp;
@@ -60,6 +59,7 @@ pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
 pub mod index_manager;
+pub mod merge_handler;
 pub mod nac;
 pub mod peer_identity;
 pub mod schema_loader;
@@ -71,9 +71,9 @@ pub mod txn_registry;
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
-pub use block_builder::{build_blocks_from_document, BlockResult};
 #[allow(deprecated)]
 pub use block_builder::build_block_from_document;
+pub use block_builder::{build_blocks_from_document, BlockResult};
 pub use broadcast_mutator::BroadcastMutator;
 pub use collection::Collection;
 pub use collection_acp::{

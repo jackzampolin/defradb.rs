@@ -721,7 +721,9 @@ impl<S: Store> DB<S> {
                 collection_id = %collection_id,
                 "Collection cache lock poisoned during find_collection_by_id"
             );
-            Error::LockPoisoned("collection cache lock poisoned during find_collection_by_id".into())
+            Error::LockPoisoned(
+                "collection cache lock poisoned during find_collection_by_id".into(),
+            )
         })?;
         Ok(cache
             .values()

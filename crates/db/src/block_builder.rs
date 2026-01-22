@@ -154,10 +154,7 @@ fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
 /// Go DefraDB cannot parse this format. Use `build_blocks_from_document` instead.
 ///
 /// This function is kept for backward compatibility with non-P2P code paths.
-#[deprecated(
-    since = "0.1.0",
-    note = "Use build_blocks_from_document for P2P sync"
-)]
+#[deprecated(since = "0.1.0", note = "Use build_blocks_from_document for P2P sync")]
 pub fn build_block_from_document(doc: &Document) -> Result<BlockResult, String> {
     use multihash::MultihashGeneric;
     use sha2::{Digest, Sha256};
