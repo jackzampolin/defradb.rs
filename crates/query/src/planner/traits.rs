@@ -181,6 +181,25 @@ pub trait PlanNode: Send + Sync {
 
         JsonValue::Object(obj)
     }
+
+    /// Generate a debug explanation showing all nodes including internal ones.
+    ///
+    /// This is more verbose than explain() and includes all plan nodes,
+    /// not just the "explainable" ones.
+    fn explain_debug(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "node".to_string(),
+            JsonValue::String(self.kind().to_string()),
+        );
+
+        // Recursively explain all child nodes
+        if let Some(source) = self.source() {
+            obj.insert("source".to_string(), source.explain_debug());
+        }
+
+        JsonValue::Object(obj)
+    }
 }
 
 /// Execution statistics for plan nodes

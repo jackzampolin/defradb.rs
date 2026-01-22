@@ -405,6 +405,11 @@ impl Filter {
         negate: bool,
         case_insensitive: bool,
     ) -> Result<bool> {
+        // Null fields never match (standard database behavior, matches Go DefraDB)
+        if actual.is_null() {
+            return Ok(if negate { true } else { false });
+        }
+
         let op_name = if case_insensitive { "_ilike" } else { "_like" };
 
         let actual_str = actual.as_str().ok_or_else(|| {
@@ -413,28 +418,6 @@ impl Filter {
         let pattern_str = pattern.as_str().ok_or_else(|| {
             QueryError::invalid_filter(format!("{} requires string pattern", op_name))
         })?;
-
-        // Validate pattern - only simple patterns are supported:
-        // - 'prefix%' (starts with)
-        // - '%suffix' (ends with)
-        // - '%contains%' (contains)
-        // - 'exact' (exact match)
-        if pattern_str.contains('_') {
-            return Err(QueryError::invalid_filter(format!(
-                "{} with '_' wildcard is not yet supported",
-                op_name
-            )));
-        }
-
-        let percent_count = pattern_str.matches('%').count();
-        if percent_count > 2
-            || (percent_count == 2 && !(pattern_str.starts_with('%') && pattern_str.ends_with('%')))
-        {
-            return Err(QueryError::invalid_filter(format!(
-                "{} only supports: 'prefix%', '%suffix', '%contains%', or exact match",
-                op_name
-            )));
-        }
 
         // Apply case transformation if case-insensitive
         let (actual_cmp, pattern_cmp): (std::borrow::Cow<str>, std::borrow::Cow<str>) =
@@ -447,17 +430,58 @@ impl Filter {
                 (actual_str.into(), pattern_str.into())
             };
 
-        // Simple pattern matching
+        // Pattern matching following Go DefraDB behavior:
+        // - 'prefix%' (starts with)
+        // - '%suffix' (ends with)
+        // - '%contains%' (contains)
+        // - 'prefix%suffix' (starts with AND ends with)
+        // - 'exact' (exact match)
+        // Note: '_' wildcard is treated as literal character (matches Go behavior)
         let matches = if let Some(inner) = pattern_cmp
             .strip_prefix('%')
             .and_then(|s| s.strip_suffix('%'))
         {
+            // %contains%
             actual_cmp.contains(inner)
         } else if let Some(suffix) = pattern_cmp.strip_prefix('%') {
+            // %suffix (and suffix has no %)
+            if suffix.contains('%') {
+                // Invalid: multiple % not at edges
+                return Err(QueryError::invalid_filter(format!(
+                    "{} does not support multiple wildcards except '%contains%'",
+                    op_name
+                )));
+            }
             actual_cmp.ends_with(suffix)
         } else if let Some(prefix) = pattern_cmp.strip_suffix('%') {
+            // prefix% (and prefix has no %)
+            if prefix.contains('%') {
+                // Invalid: multiple % not at edges
+                return Err(QueryError::invalid_filter(format!(
+                    "{} does not support multiple wildcards except '%contains%'",
+                    op_name
+                )));
+            }
             actual_cmp.starts_with(prefix)
+        } else if pattern_cmp.contains('%') {
+            // prefix%suffix pattern (single % in the middle)
+            let parts: Vec<&str> = pattern_cmp.splitn(2, '%').collect();
+            if parts.len() == 2 {
+                let prefix = parts[0];
+                let suffix = parts[1];
+                // Suffix should not contain more %
+                if suffix.contains('%') {
+                    return Err(QueryError::invalid_filter(format!(
+                        "{} does not support multiple wildcards except '%contains%'",
+                        op_name
+                    )));
+                }
+                actual_cmp.starts_with(prefix) && actual_cmp.ends_with(suffix)
+            } else {
+                false
+            }
         } else {
+            // Exact match
             actual_cmp == pattern_cmp
         };
 
@@ -704,15 +728,90 @@ mod tests {
     }
 
     #[test]
-    fn test_ilike_unsupported_underscore() {
+    fn test_ilike_underscore_as_literal() {
+        // Underscore is treated as literal character (matches Go behavior)
         let filter = Filter::from_conditions(HashMap::from([(
             "name".to_string(),
             json!({"_ilike": "Al_ce"}),
         )]));
         let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        // "Al_ce" should NOT match "Alice" because _ is literal, not wildcard
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+
+        // But "Al_ce" should match "Al_ce" exactly
+        let mut fields_with_underscore = make_fields();
+        fields_with_underscore[1] = Some(json!("Al_ce"));
+        assert!(filter.matches(&fields_with_underscore, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_prefix_suffix_pattern() {
+        // Pattern "Ali%ce" should match "Alice" (starts with "ali" AND ends with "ce")
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "ALI%CE"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_like_prefix_suffix_pattern() {
+        // Pattern "Ali%ce" should match "Alice" (case-sensitive)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_like": "Ali%ce"}),
+        )]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // name = "Alice"
+        assert!(filter.matches(&fields, &mapping).unwrap());
+
+        // Wrong case should NOT match
+        let filter_wrong_case = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_like": "ALI%CE"}),
+        )]));
+        assert!(!filter_wrong_case.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_prefix_suffix_no_match() {
+        // Pattern "Bob%son" should NOT match "Alice"
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "Bob%son"}),
+        )]));
+        let mapping = make_mapping();
         let fields = make_fields();
-        let result = filter.matches(&fields, &mapping);
-        assert!(result.is_err());
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_ilike_null_field_returns_false() {
+        // Null field should return false for _ilike (not error), matching Go behavior
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_ilike": "Ali%"}),
+        )]));
+        let mapping = make_mapping();
+        let mut fields = make_fields();
+        fields[1] = Some(json!(null)); // name is null
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_nilike_null_field_returns_true() {
+        // Negated: null field with _nilike should return true (null doesn't match pattern)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_nilike": "Ali%"}),
+        )]));
+        let mapping = make_mapping();
+        let mut fields = make_fields();
+        fields[1] = Some(json!(null)); // name is null
+        assert!(filter.matches(&fields, &mapping).unwrap());
     }
 
     // Helper to create mapping with array and object fields for testing
@@ -960,19 +1059,21 @@ mod tests {
     }
 
     #[test]
-    fn test_like_unsupported_underscore() {
+    fn test_like_underscore_as_literal() {
+        // Underscore is treated as literal character (matches Go behavior)
         let filter = Filter::from_conditions(HashMap::from([(
             "name".to_string(),
             json!({"_like": "Al_ce"}),
         )]));
         let mapping = make_mapping();
         let fields = make_fields();
-        let result = filter.matches(&fields, &mapping);
-        assert!(result.is_err());
+        // "Al_ce" should NOT match "Alice" because _ is literal
+        assert!(!filter.matches(&fields, &mapping).unwrap());
     }
 
     #[test]
     fn test_like_unsupported_complex_pattern() {
+        // Multiple % not at edges should error (except %contains%)
         let filter = Filter::from_conditions(HashMap::from([(
             "name".to_string(),
             json!({"_like": "%li%ce"}),

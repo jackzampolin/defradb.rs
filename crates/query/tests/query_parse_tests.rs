@@ -429,14 +429,66 @@ fn test_parse_filter_non_object_returns_error() {
 
 #[test]
 fn test_parse_explain_directive() {
-    use query::query_parse::{parse_request, ParsedOperation};
+    use query::query_parse::{parse_request, ExplainType, ParsedOperation};
 
     let query = "query @explain { Users { _docID name } }";
     let result = parse_request(query).unwrap();
 
     match result {
         ParsedOperation::Query { selects, explain } => {
-            assert!(explain, "Expected explain=true for @explain directive");
+            assert!(
+                explain.is_some(),
+                "Expected explain=Some for @explain directive"
+            );
+            assert_eq!(explain, Some(ExplainType::Simple));
+            assert_eq!(selects.len(), 1);
+        }
+        _ => panic!("Expected query"),
+    }
+}
+
+#[test]
+fn test_parse_explain_directive_with_type_simple() {
+    use query::query_parse::{parse_request, ExplainType, ParsedOperation};
+
+    let query = "query @explain(type: simple) { Users { _docID name } }";
+    let result = parse_request(query).unwrap();
+
+    match result {
+        ParsedOperation::Query { selects, explain } => {
+            assert_eq!(explain, Some(ExplainType::Simple));
+            assert_eq!(selects.len(), 1);
+        }
+        _ => panic!("Expected query"),
+    }
+}
+
+#[test]
+fn test_parse_explain_directive_with_type_execute() {
+    use query::query_parse::{parse_request, ExplainType, ParsedOperation};
+
+    let query = "query @explain(type: execute) { Users { _docID name } }";
+    let result = parse_request(query).unwrap();
+
+    match result {
+        ParsedOperation::Query { selects, explain } => {
+            assert_eq!(explain, Some(ExplainType::Execute));
+            assert_eq!(selects.len(), 1);
+        }
+        _ => panic!("Expected query"),
+    }
+}
+
+#[test]
+fn test_parse_explain_directive_with_type_debug() {
+    use query::query_parse::{parse_request, ExplainType, ParsedOperation};
+
+    let query = "query @explain(type: debug) { Users { _docID name } }";
+    let result = parse_request(query).unwrap();
+
+    match result {
+        ParsedOperation::Query { selects, explain } => {
+            assert_eq!(explain, Some(ExplainType::Debug));
             assert_eq!(selects.len(), 1);
         }
         _ => panic!("Expected query"),
@@ -453,8 +505,8 @@ fn test_parse_query_without_explain() {
     match result {
         ParsedOperation::Query { selects, explain } => {
             assert!(
-                !explain,
-                "Expected explain=false without @explain directive"
+                explain.is_none(),
+                "Expected explain=None without @explain directive"
             );
             assert_eq!(selects.len(), 1);
         }
@@ -472,7 +524,10 @@ fn test_parse_bare_query_without_explain() {
 
     match result {
         ParsedOperation::Query { selects, explain } => {
-            assert!(!explain, "Expected explain=false for bare selection set");
+            assert!(
+                explain.is_none(),
+                "Expected explain=None for bare selection set"
+            );
             assert_eq!(selects.len(), 1);
         }
         _ => panic!("Expected query"),

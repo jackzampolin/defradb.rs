@@ -4,7 +4,7 @@
 
 use graphql_parser::query::{
     Definition, Directive, Document, Field, FragmentDefinition, OperationDefinition, Selection,
-    SelectionSet, Value,
+    SelectionSet, Value, VariableDefinition,
 };
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -17,22 +17,67 @@ use crate::mapper::{
     Select,
 };
 
+/// Type of explain output requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExplainType {
+    /// Simple explanation showing query plan structure without execution.
+    #[default]
+    Simple,
+    /// Execute the query and return both the plan structure and execution metrics.
+    Execute,
+    /// Debug mode showing all plan nodes including internal ones.
+    Debug,
+}
+
+impl ExplainType {
+    /// Parse explain type from string.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "simple" => Some(Self::Simple),
+            "execute" => Some(Self::Execute),
+            "debug" => Some(Self::Debug),
+            _ => None,
+        }
+    }
+}
+
 /// Result of parsing a GraphQL request.
 #[derive(Debug)]
 pub enum ParsedOperation {
     /// Query operations (SELECT)
     Query {
         selects: Vec<Select>,
-        /// Whether @explain directive was used
-        explain: bool,
+        /// Whether @explain directive was used and which type
+        explain: Option<ExplainType>,
     },
     /// Mutation operations (CREATE, UPDATE, DELETE)
     Mutation(Vec<Mutation>),
 }
 
-/// Check if a directive list contains @explain
-fn has_explain_directive(directives: &[Directive<'_, String>]) -> bool {
-    directives.iter().any(|d| d.name == "explain")
+/// Check if a directive list contains @explain and parse its type.
+/// Returns Some(ExplainType) if @explain is present, None otherwise.
+fn parse_explain_directive(directives: &[Directive<'_, String>]) -> Option<ExplainType> {
+    for directive in directives {
+        if directive.name == "explain" {
+            // Check for type argument: @explain(type: simple|execute|debug)
+            for (name, value) in &directive.arguments {
+                if name == "type" {
+                    if let Value::Enum(type_str) = value {
+                        if let Some(explain_type) = ExplainType::from_str(type_str) {
+                            return Some(explain_type);
+                        }
+                    } else if let Value::String(type_str) = value {
+                        if let Some(explain_type) = ExplainType::from_str(type_str) {
+                            return Some(explain_type);
+                        }
+                    }
+                }
+            }
+            // No type argument or unknown type - default to Simple
+            return Some(ExplainType::Simple);
+        }
+    }
+    None
 }
 
 /// Type alias for fragment definitions map
@@ -165,7 +210,7 @@ pub fn parse_request_with_variables(
     let mut mutations = Vec::new();
     let mut has_query = false;
     let mut has_mutation = false;
-    let mut explain = false;
+    let mut explain: Option<ExplainType> = None;
 
     // Second pass: parse operations with fragments available
     for def in &doc.definitions {
@@ -174,15 +219,27 @@ pub fn parse_request_with_variables(
                 match op {
                     OperationDefinition::Query(q) => {
                         has_query = true;
-                        // Check for @explain directive
-                        if has_explain_directive(&q.directives) {
-                            explain = true;
+                        // Check for @explain directive and parse type
+                        if let Some(explain_type) = parse_explain_directive(&q.directives) {
+                            explain = Some(explain_type);
                         }
+
+                        // Extract default values from variable definitions and merge with provided variables
+                        let defaults = extract_variable_defaults(&q.variable_definitions)?;
+                        let effective_variables = merge_variables(variables, &defaults);
+                        // If variables was provided (even empty) or we have defaults, use the merged map
+                        // Otherwise preserve None to get appropriate "no variables provided" error
+                        let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
+                            Some(&effective_variables)
+                        } else {
+                            None
+                        };
+
                         let mut visiting = HashSet::new();
                         for selection in &q.selection_set.items {
                             parse_selection_to_selects(
                                 selection,
-                                variables,
+                                effective_vars_ref,
                                 &fragments,
                                 &mut selects,
                                 &mut visiting,
@@ -205,9 +262,21 @@ pub fn parse_request_with_variables(
                     }
                     OperationDefinition::Mutation(m) => {
                         has_mutation = true;
+
+                        // Extract default values from variable definitions and merge with provided variables
+                        let defaults = extract_variable_defaults(&m.variable_definitions)?;
+                        let effective_variables = merge_variables(variables, &defaults);
+                        // If variables was provided (even empty) or we have defaults, use the merged map
+                        // Otherwise preserve None to get appropriate "no variables provided" error
+                        let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
+                            Some(&effective_variables)
+                        } else {
+                            None
+                        };
+
                         for selection in &m.selection_set.items {
                             if let Selection::Field(field) = selection {
-                                let mutation = parse_field_to_mutation(field, variables)?;
+                                let mutation = parse_field_to_mutation(field, effective_vars_ref)?;
                                 mutations.push(mutation);
                             }
                         }
@@ -498,6 +567,79 @@ fn parse_filter_object(
     Ok(conditions)
 }
 
+/// Merge provided variables with default values.
+///
+/// Provided variables take precedence over defaults.
+fn merge_variables(
+    provided: Option<&HashMap<String, JsonValue>>,
+    defaults: &HashMap<String, JsonValue>,
+) -> HashMap<String, JsonValue> {
+    let mut merged = defaults.clone();
+    if let Some(vars) = provided {
+        for (k, v) in vars {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    merged
+}
+
+/// Extract default values from variable definitions.
+///
+/// Returns a HashMap of variable name -> default value for all variables
+/// that have a default value defined.
+fn extract_variable_defaults(
+    var_defs: &[VariableDefinition<'_, String>],
+) -> Result<HashMap<String, JsonValue>> {
+    let mut defaults = HashMap::new();
+    for var_def in var_defs {
+        if let Some(default_value) = &var_def.default_value {
+            // Convert the default value without variable resolution (defaults can't reference other variables)
+            let json_val = graphql_value_to_json_no_vars(default_value)?;
+            defaults.insert(var_def.name.clone(), json_val);
+        }
+    }
+    Ok(defaults)
+}
+
+/// Convert GraphQL Value to JSON Value without variable resolution.
+///
+/// Used for converting default values where variable references are not allowed.
+fn graphql_value_to_json_no_vars(value: &Value<'_, String>) -> Result<JsonValue> {
+    match value {
+        Value::Null => Ok(JsonValue::Null),
+        Value::Int(n) => n
+            .as_i64()
+            .map(|i| JsonValue::Number(i.into()))
+            .ok_or_else(|| QueryError::parse("integer out of range")),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(JsonValue::Number)
+            .ok_or_else(|| QueryError::parse("invalid float value")),
+        Value::String(s) => Ok(JsonValue::String(s.clone())),
+        Value::Boolean(b) => Ok(JsonValue::Bool(*b)),
+        Value::Enum(e) => Ok(JsonValue::String(e.clone())),
+        Value::List(items) => {
+            let arr: Result<Vec<JsonValue>> = items
+                .iter()
+                .map(graphql_value_to_json_no_vars)
+                .collect();
+            Ok(JsonValue::Array(arr?))
+        }
+        Value::Object(obj) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in obj {
+                map.insert(k.clone(), graphql_value_to_json_no_vars(v)?);
+            }
+            Ok(JsonValue::Object(map))
+        }
+        Value::Variable(name) => {
+            Err(QueryError::parse(format!(
+                "variable '{}' cannot be used in default value",
+                name
+            )))
+        }
+    }
+}
+
 /// Convert GraphQL Value to JSON Value, resolving variables if present.
 fn graphql_value_to_json(
     value: &Value<'_, String>,
@@ -538,7 +680,7 @@ fn graphql_value_to_json(
             })?;
             vars.get(name)
                 .cloned()
-                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))
         }
     }
 }
@@ -561,10 +703,10 @@ fn parse_int_value(
             })?;
             let json_val = vars
                 .get(name)
-                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
             json_val
                 .as_i64()
-                .ok_or_else(|| QueryError::parse(format!("variable '{}' must be an integer", name)))
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type Int", name)))
         }
         _ => Err(QueryError::parse("expected integer value")),
     }
@@ -597,11 +739,11 @@ fn parse_order_value(
                             ))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
-                            QueryError::parse(format!("undefined variable '${}'", name))
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         let s = json_val.as_str().ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' must be a string (ASC or DESC)",
+                                "Variable \"${}\" must be of type Ordering (ASC or DESC)",
                                 name
                             ))
                         })?;
@@ -642,10 +784,10 @@ fn parse_group_by_value(
                             ))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
-                            QueryError::parse(format!("undefined variable '${}'", name))
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                            QueryError::parse(format!("variable '{}' must be a string", name))
+                            QueryError::parse(format!("Variable \"${}\" must be of type String", name))
                         })
                     }
                     _ => Err(QueryError::parse("groupBy items must be strings")),
@@ -662,9 +804,9 @@ fn parse_group_by_value(
             })?;
             let json_val = vars
                 .get(name)
-                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
             let arr = json_val.as_array().ok_or_else(|| {
-                QueryError::parse(format!("variable '{}' must be an array of strings", name))
+                QueryError::parse(format!("Variable \"${}\" must be of type [String]", name))
             })?;
             let fields: Result<Vec<String>> = arr
                 .iter()
@@ -705,12 +847,12 @@ fn parse_aggregate_field(
                             ))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
-                            QueryError::parse(format!("undefined variable '${}'", name))
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         json_val
                             .as_str()
                             .ok_or_else(|| {
-                                QueryError::parse(format!("variable '{}' must be a string", name))
+                                QueryError::parse(format!("Variable \"${}\" must be of type String", name))
                             })?
                             .to_string()
                     }
@@ -781,10 +923,10 @@ fn parse_doc_ids_value(
                             ))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
-                            QueryError::parse(format!("undefined variable '${}'", name))
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                            QueryError::parse(format!("variable '{}' must be a string", name))
+                            QueryError::parse(format!("Variable \"${}\" must be of type String", name))
                         })
                     }
                     _ => Err(QueryError::parse("docIDs items must be strings")),
@@ -802,7 +944,7 @@ fn parse_doc_ids_value(
             })?;
             let json_val = vars
                 .get(name)
-                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
             // Variable can be a string (single ID) or array of strings
             if let Some(s) = json_val.as_str() {
                 Ok(vec![s.to_string()])
@@ -816,7 +958,7 @@ fn parse_doc_ids_value(
                     .collect()
             } else {
                 Err(QueryError::parse(format!(
-                    "variable '{}' must be a string or array of strings",
+                    "Variable \"${}\" must be of type String or [String]",
                     name
                 )))
             }
@@ -842,11 +984,11 @@ fn resolve_string_value(
             })?;
             let json_val = vars
                 .get(name)
-                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
             json_val
                 .as_str()
                 .map(|s| s.to_string())
-                .ok_or_else(|| QueryError::parse(format!("variable '{}' must be a string", name)))
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type String", name)))
         }
         _ => Err(QueryError::parse(format!(
             "{} argument must be a string",
@@ -872,10 +1014,10 @@ fn resolve_bool_value(
             })?;
             let json_val = vars
                 .get(name)
-                .ok_or_else(|| QueryError::parse(format!("undefined variable '${}'", name)))?;
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
             json_val
                 .as_bool()
-                .ok_or_else(|| QueryError::parse(format!("variable '{}' must be a boolean", name)))
+                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type Boolean", name)))
         }
         _ => Err(QueryError::parse(format!(
             "{} argument must be a boolean",
@@ -1529,7 +1671,7 @@ mod variable_tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("undefined variable"));
+            .contains("was not provided"));
     }
 
     #[test]
@@ -1592,7 +1734,7 @@ mod variable_tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("must be an integer"));
+            .contains("must be of type Int"));
     }
 
     #[test]
@@ -1650,7 +1792,7 @@ mod variable_tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("must be a boolean"));
+            .contains("must be of type Boolean"));
     }
 
     #[test]
@@ -1667,7 +1809,10 @@ mod variable_tests {
         let variables = HashMap::from([("c".to_string(), json!(12345))]);
         let result = parse_request_with_variables(query, Some(&variables));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a string"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be of type String"));
     }
 
     #[test]
@@ -1712,5 +1857,222 @@ mod variable_tests {
             .unwrap_err()
             .to_string()
             .contains("invalid order direction"));
+    }
+
+    // =========================================================================
+    // Variable default value tests
+    // =========================================================================
+
+    #[test]
+    fn test_variable_default_value_used_when_not_provided() {
+        let query = r#"
+            query($name: String = "DefaultName") {
+                Users(filter: {name: {_eq: $name}}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        // Don't provide the variable - should use default
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                let filter = selects[0].filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                assert_eq!(
+                    conditions.get("name").unwrap().get("_eq"),
+                    Some(&json!("DefaultName"))
+                );
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_provided_value_overrides_default() {
+        let query = r#"
+            query($name: String = "DefaultName") {
+                Users(filter: {name: {_eq: $name}}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        // Provide a value - should override default
+        let variables = HashMap::from([("name".to_string(), json!("ProvidedName"))]);
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                let filter = selects[0].filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                assert_eq!(
+                    conditions.get("name").unwrap().get("_eq"),
+                    Some(&json!("ProvidedName"))
+                );
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_default_int_value() {
+        let query = r#"
+            query($lim: Int = 50) {
+                Users(limit: $lim) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Don't provide the variable - should use default 50
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(50));
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_default_boolean_value() {
+        let query = r#"
+            query($deleted: Boolean = true) {
+                Users(showDeleted: $deleted) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Don't provide the variable - should use default true
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                assert!(selects[0].show_deleted);
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_variables_with_some_defaults() {
+        let query = r#"
+            query($name: String!, $minAge: Int = 18, $lim: Int = 10) {
+                Users(filter: {name: {_eq: $name}, age: {_gte: $minAge}}, limit: $lim) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        // Only provide $name, use defaults for $minAge and $lim
+        let variables = HashMap::from([("name".to_string(), json!("Alice"))]);
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(10));
+                let filter = selects[0].filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                assert_eq!(
+                    conditions.get("name").unwrap().get("_eq"),
+                    Some(&json!("Alice"))
+                );
+                assert_eq!(conditions.get("age").unwrap().get("_gte"), Some(&json!(18)));
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_mutation_variable_default_value() {
+        let query = r#"
+            mutation($name: String = "DefaultUser") {
+                create_Users(input: [{name: $name}]) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Don't provide the variable - should use default
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Mutation(mutations) => {
+                let input = &mutations[0].create_input;
+                assert_eq!(input[0].get("name"), Some(&json!("DefaultUser")));
+            }
+            _ => panic!("Expected mutation"),
+        }
+    }
+
+    #[test]
+    fn test_variable_default_array_value() {
+        let query = r#"
+            query($ids: [String!] = ["id1", "id2"]) {
+                Users(docIDs: $ids) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Don't provide the variable - should use default array
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                let doc_ids = selects[0].doc_ids.as_ref().unwrap();
+                assert_eq!(doc_ids.len(), 2);
+                assert_eq!(doc_ids[0], "id1");
+                assert_eq!(doc_ids[1], "id2");
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_default_null_value() {
+        let query = r#"
+            query($name: String = null) {
+                Users(filter: {name: {_eq: $name}}) {
+                    _docID
+                }
+            }
+        "#;
+
+        // Don't provide the variable - should use default null
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Query { selects, .. } => {
+                let filter = selects[0].filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                assert_eq!(
+                    conditions.get("name").unwrap().get("_eq"),
+                    Some(&JsonValue::Null)
+                );
+            }
+            _ => panic!("Expected query"),
+        }
+    }
+
+    #[test]
+    fn test_variable_default_cannot_reference_other_variable() {
+        // Note: GraphQL spec doesn't allow variable references in default values
+        // graphql-parser rejects this at parse time with a parse error
+        let query = r#"
+            query($a: String = $b, $b: String = "test") {
+                Users(filter: {name: {_eq: $a}}) {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_request_with_variables(query, None);
+        // graphql-parser rejects this at the parse level since variable references
+        // aren't allowed in default value position per the GraphQL spec
+        assert!(
+            result.is_err(),
+            "Expected error for variable reference in default value, but got: {:?}",
+            result
+        );
     }
 }

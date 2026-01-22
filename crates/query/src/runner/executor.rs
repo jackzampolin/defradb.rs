@@ -34,9 +34,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
         // Pass identity through for ACP permission checks
         let result = match parsed {
             ParsedOperation::Query { explain, .. } => {
-                if explain {
+                if let Some(explain_type) = explain {
                     // Return query plan instead of executing
-                    self.explain_query_with_identity(&request.query, identity)
+                    self.explain_query_with_identity(&request.query, identity, explain_type)
                         .await
                 } else {
                     self.execute_query_with_identity(&request.query, identity)
