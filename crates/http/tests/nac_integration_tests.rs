@@ -1941,3 +1941,811 @@ async fn test_acp_allows_owner() {
 
     assert_ne!(response.status(), StatusCode::FORBIDDEN);
 }
+
+// ============================================================================
+// ACP Policy Cross-Permission Tests
+// ============================================================================
+// These tests verify that granting one permission does NOT grant another,
+// ensuring proper permission isolation.
+
+#[tokio::test]
+async fn test_acp_add_policy_allows_user_with_dac_policy_add_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DacPolicyAdd - user should be able to add policies
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DacPolicyAdd);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "policy": "name: test\nresources: {}"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should succeed (not forbidden)
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with DacPolicyAdd grant should be able to add policies"
+    );
+}
+
+#[tokio::test]
+async fn test_acp_list_policies_allows_user_with_dac_status_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DacStatus - user should be able to list policies
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DacStatus);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should succeed (not forbidden)
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with DacStatus grant should be able to list policies"
+    );
+}
+
+#[tokio::test]
+async fn test_acp_get_policy_allows_user_with_dac_status_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DacStatus - user should be able to get policies
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DacStatus);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy/policy123")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should succeed (not forbidden) - may return 404 if policy doesn't exist, but not 403
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with DacStatus grant should be able to get policies"
+    );
+}
+
+#[tokio::test]
+async fn test_acp_add_policy_requires_dac_policy_add_not_dac_status() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DacStatus - user should NOT be able to add policies
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DacStatus);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "policy": "name: test\nresources: {}"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should be forbidden - DacStatus doesn't grant DacPolicyAdd
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with only DacStatus should NOT be able to add policies"
+    );
+}
+
+#[tokio::test]
+async fn test_acp_list_policies_requires_dac_status_not_dac_policy_add() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DacPolicyAdd - user should NOT be able to list policies
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DacPolicyAdd);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should be forbidden - DacPolicyAdd doesn't grant DacStatus
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with only DacPolicyAdd should NOT be able to list policies"
+    );
+}
+
+#[tokio::test]
+async fn test_acp_get_policy_requires_dac_status_not_dac_policy_add() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DacPolicyAdd - user should NOT be able to get policies
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DacPolicyAdd);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy/policy123")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should be forbidden - DacPolicyAdd doesn't grant DacStatus
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with only DacPolicyAdd should NOT be able to get policies"
+    );
+}
+
+#[tokio::test]
+async fn test_acp_admin_can_perform_all_operations() {
+    let (_, owner_did) = create_test_identity();
+    let (admin_identity, admin_did) = create_test_identity();
+    let admin_token = create_test_token(&admin_identity);
+
+    // Admin should be able to perform all ACP operations without explicit grants
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did).with_admin(admin_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // Test list policies
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", admin_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "Admin should be able to list policies"
+    );
+
+    // Test add policy
+    let body = serde_json::json!({
+        "policy": "name: test\nresources: {}"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", admin_token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "Admin should be able to add policies"
+    );
+}
+
+#[tokio::test]
+async fn test_acp_user_with_both_grants_can_do_all_operations() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // User with BOTH DacPolicyAdd AND DacStatus should be able to do all ACP operations
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did.clone(), NodePermission::DacPolicyAdd)
+        .with_grant(user_did, NodePermission::DacStatus);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_acp(Arc::new(MockAcpOperations::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    // Test list policies (requires DacStatus)
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with both grants should be able to list policies"
+    );
+
+    // Test add policy (requires DacPolicyAdd)
+    let body = serde_json::json!({
+        "policy": "name: test\nresources: {}"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/acp/policy")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "User with both grants should be able to add policies"
+    );
+}
+
+// ============================================================================
+// GraphQL Endpoint NAC Tests
+// ============================================================================
+// These tests verify that GraphQL endpoints respect NAC permissions.
+
+#[tokio::test]
+async fn test_graphql_post_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "query": "{ __typename }"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/graphql")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "GraphQL POST should reject anonymous requests when NAC is enabled"
+    );
+}
+
+#[tokio::test]
+async fn test_graphql_get_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/graphql?query=%7B%20__typename%20%7D")
+                .header(HOST, TEST_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "GraphQL GET should reject anonymous requests when NAC is enabled"
+    );
+}
+
+#[tokio::test]
+async fn test_graphql_post_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "query": "{ __typename }"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/graphql")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "GraphQL POST should allow owner"
+    );
+}
+
+#[tokio::test]
+async fn test_graphql_get_allows_user_with_document_read_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant DocumentRead - should be able to use GraphQL GET
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentRead);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/graphql?query=%7B%20__typename%20%7D")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "GraphQL GET should allow user with DocumentRead grant"
+    );
+}
+
+#[tokio::test]
+async fn test_graphql_post_allows_user_with_document_update_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant DocumentUpdate - should be able to use GraphQL POST
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentUpdate);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "query": "{ __typename }"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/graphql")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "GraphQL POST should allow user with DocumentUpdate grant"
+    );
+}
+
+#[tokio::test]
+async fn test_graphql_get_requires_document_read_not_document_update() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DocumentUpdate - should NOT be able to use GraphQL GET (requires DocumentRead)
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentUpdate);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v0/graphql?query=%7B%20__typename%20%7D")
+                .header(HOST, TEST_HOST)
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "GraphQL GET should require DocumentRead, not DocumentUpdate"
+    );
+}
+
+#[tokio::test]
+async fn test_graphql_post_requires_document_update_not_document_read() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant ONLY DocumentRead - should NOT be able to use GraphQL POST (requires DocumentUpdate)
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentRead);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "query": "{ __typename }"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/graphql")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "GraphQL POST should require DocumentUpdate, not DocumentRead"
+    );
+}
+
+// ============================================================================
+// Transaction Endpoint NAC Tests
+// ============================================================================
+// These tests verify that transaction endpoints respect NAC permissions.
+
+#[tokio::test]
+async fn test_tx_begin_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "readonly": false
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/tx/begin")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "tx_begin should reject anonymous requests when NAC is enabled"
+    );
+}
+
+#[tokio::test]
+async fn test_tx_commit_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "txn_id": "fake-txn-id"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/tx/commit")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "tx_commit should reject anonymous requests when NAC is enabled"
+    );
+}
+
+#[tokio::test]
+async fn test_tx_rollback_rejects_anonymous_when_nac_enabled() {
+    let (_, owner_did) = create_test_identity();
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "txn_id": "fake-txn-id"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/tx/rollback")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "tx_rollback should reject anonymous requests when NAC is enabled"
+    );
+}
+
+#[tokio::test]
+async fn test_tx_begin_allows_owner() {
+    let (owner_identity, owner_did) = create_test_identity();
+    let token = create_test_token(&owner_identity);
+
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "readonly": false
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/tx/begin")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "tx_begin should allow owner"
+    );
+}
+
+#[tokio::test]
+async fn test_tx_begin_allows_user_with_document_update_grant() {
+    let (_, owner_did) = create_test_identity();
+    let (user_identity, user_did) = create_test_identity();
+    let user_token = create_test_token(&user_identity);
+
+    // Grant DocumentUpdate - should be able to begin transactions
+    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did)
+        .with_grant(user_did, NodePermission::DocumentUpdate);
+
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        .with_nac(Arc::new(nac))
+        .build();
+
+    let app = create_router_with_state(state);
+
+    let body = serde_json::json!({
+        "readonly": false
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v0/tx/begin")
+                .header(HOST, TEST_HOST)
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", user_token))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "tx_begin should allow user with DocumentUpdate grant"
+    );
+}

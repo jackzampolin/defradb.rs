@@ -40,18 +40,23 @@ pub async fn version() -> Json<VersionResponse> {
 ///
 /// Accepts JSON body: { query, operationName?, variables? }
 /// Identity is extracted from the Authorization header and used for ACP checks.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled (POST can execute mutations).
 pub async fn graphql(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(mut request): Json<QueryRequest>,
-) -> Json<QueryResponse> {
+) -> Result<Json<QueryResponse>, HttpError> {
+    // NAC check: POST can execute mutations, so require DocumentUpdate permission
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
     // Wire identity from Authorization header into the request
     request.identity = identity.into_did();
     let response = state.executor.execute(request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
     }
-    Json(response)
+    Ok(Json(response))
 }
 
 /// GraphQL GET request query parameters.
@@ -67,20 +72,25 @@ pub struct GraphqlQueryParams {
 ///
 /// Accepts query parameters: ?query=...&operationName=...&variables=...
 /// Identity is extracted from the Authorization header and used for ACP checks.
+///
+/// Requires `DocumentRead` permission when NAC is enabled (GET is read-only).
 pub async fn graphql_get(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Query(params): Query<GraphqlQueryParams>,
-) -> Json<QueryResponse> {
+) -> Result<Json<QueryResponse>, HttpError> {
+    // NAC check: GET is read-only queries, so require DocumentRead permission
+    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+
     let variables: Option<JsonValue> = match params.variables {
         Some(v) => match serde_json::from_str(&v) {
             Ok(parsed) => Some(parsed),
             Err(e) => {
                 tracing::warn!(error = %e, "Invalid JSON in variables query parameter");
-                return Json(QueryResponse::error(format!(
+                return Ok(Json(QueryResponse::error(format!(
                     "invalid JSON in 'variables' parameter: {}",
                     e
-                )));
+                ))));
             }
         },
         None => None,
@@ -97,7 +107,7 @@ pub async fn graphql_get(
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL GET query returned errors");
     }
-    Json(response)
+    Ok(Json(response))
 }
 
 /// Schema endpoint handler.
@@ -156,11 +166,17 @@ pub struct TxSuccessResponse {
 }
 
 /// Begin a new transaction.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
 pub async fn tx_begin(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<TxBeginRequest>,
-) -> impl IntoResponse {
-    match state.executor.begin_txn(request.readonly).await {
+) -> Result<impl IntoResponse, HttpError> {
+    // NAC check: transactions can modify data, require DocumentUpdate permission
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
+    Ok(match state.executor.begin_txn(request.readonly).await {
         Ok(handle) => {
             tracing::info!(txn_id = %handle, readonly = request.readonly, "Transaction started");
             (
@@ -181,28 +197,34 @@ pub async fn tx_begin(
             )
                 .into_response()
         }
-    }
+    })
 }
 
 /// Commit a transaction.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
 pub async fn tx_commit(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<TxRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, HttpError> {
+    // NAC check: committing transactions requires DocumentUpdate permission
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
     let handle = match request.txn_id.parse() {
         Ok(h) => h,
         Err(_) => {
-            return (
+            return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(crate::error::ErrorResponse {
                     error: format!("Invalid transaction ID: {}", request.txn_id),
                 }),
             )
-                .into_response();
+                .into_response());
         }
     };
 
-    match state.executor.commit_txn(&handle).await {
+    Ok(match state.executor.commit_txn(&handle).await {
         Ok(()) => {
             tracing::info!(txn_id = %handle, "Transaction committed");
             (
@@ -223,28 +245,34 @@ pub async fn tx_commit(
             )
                 .into_response()
         }
-    }
+    })
 }
 
 /// Rollback a transaction.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
 pub async fn tx_rollback(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(request): Json<TxRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, HttpError> {
+    // NAC check: rolling back transactions requires DocumentUpdate permission
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
     let handle = match request.txn_id.parse() {
         Ok(h) => h,
         Err(_) => {
-            return (
+            return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(crate::error::ErrorResponse {
                     error: format!("Invalid transaction ID: {}", request.txn_id),
                 }),
             )
-                .into_response();
+                .into_response());
         }
     };
 
-    match state.executor.rollback_txn(&handle).await {
+    Ok(match state.executor.rollback_txn(&handle).await {
         Ok(()) => {
             tracing::info!(txn_id = %handle, "Transaction rolled back");
             (
@@ -265,7 +293,7 @@ pub async fn tx_rollback(
             )
                 .into_response()
         }
-    }
+    })
 }
 
 /// Extended GraphQL request with optional transaction ID.
@@ -280,11 +308,16 @@ pub struct TransactionalQueryRequest {
 
 /// GraphQL POST request handler with optional transaction support.
 /// Identity is extracted from the Authorization header and used for ACP checks.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled (POST can execute mutations).
 pub async fn graphql_transactional(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(request): Json<TransactionalQueryRequest>,
-) -> Json<QueryResponse> {
+) -> Result<Json<QueryResponse>, HttpError> {
+    // NAC check: POST can execute mutations, so require DocumentUpdate permission
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
     let query_request = QueryRequest {
         query: request.query,
         operation_name: request.operation_name,
@@ -297,10 +330,10 @@ pub async fn graphql_transactional(
             let handle = match txn_id_str.parse() {
                 Ok(h) => h,
                 Err(_) => {
-                    return Json(QueryResponse::error(format!(
+                    return Ok(Json(QueryResponse::error(format!(
                         "Invalid transaction ID: {}",
                         txn_id_str
-                    )));
+                    ))));
                 }
             };
             state.executor.execute_in_txn(query_request, &handle).await
@@ -311,5 +344,5 @@ pub async fn graphql_transactional(
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL query returned errors");
     }
-    Json(response)
+    Ok(Json(response))
 }

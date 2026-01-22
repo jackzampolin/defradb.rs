@@ -22,6 +22,10 @@ use crate::error::Error;
 use crate::key_type::IdentityKeyType;
 use crate::{FullIdentity, Result};
 
+/// Default clock skew tolerance in seconds.
+/// This allows for minor time differences between token issuer and verifier.
+pub const DEFAULT_CLOCK_SKEW_SECONDS: u64 = 60;
+
 pub use claims::IdentityClaims;
 use decoding::{decode_ed25519, decode_secp256k1, parse_algorithm};
 use encoding::{encode_ed25519, encode_secp256k1, EDDSA_ALG, ES256K_ALG};
@@ -79,6 +83,9 @@ pub fn new_token<I: FullIdentity>(
 
 /// Verifies a bearer token against an expected audience.
 ///
+/// Uses `DEFAULT_CLOCK_SKEW_SECONDS` (60 seconds) for time tolerance.
+/// For custom tolerance, use `verify_auth_token_with_skew`.
+///
 /// # Parameters
 /// * `identity` - The token identity to verify
 /// * `expected_audience` - The expected audience value
@@ -88,23 +95,53 @@ pub fn new_token<I: FullIdentity>(
 ///
 /// # Errors
 /// Returns an error if:
-/// * The token is not yet valid (nbf is in the future)
-/// * The token has expired
+/// * The token is not yet valid (nbf is in the future, accounting for clock skew)
+/// * The token has expired (accounting for clock skew)
 /// * The audience doesn't match
 pub fn verify_auth_token(identity: &TokenIdentity, expected_audience: &str) -> Result<()> {
+    verify_auth_token_with_skew(identity, expected_audience, DEFAULT_CLOCK_SKEW_SECONDS)
+}
+
+/// Verifies a bearer token against an expected audience with custom clock skew tolerance.
+///
+/// Clock skew tolerance accounts for minor time differences between the token issuer
+/// and verifier systems. In distributed systems, clocks may not be perfectly synchronized.
+///
+/// # Parameters
+/// * `identity` - The token identity to verify
+/// * `expected_audience` - The expected audience value
+/// * `clock_skew_seconds` - Tolerance in seconds for time differences (0 for strict checking)
+///
+/// # Returns
+/// Ok(()) if verification succeeds.
+///
+/// # Errors
+/// Returns an error if:
+/// * The token is not yet valid (nbf is in the future beyond tolerance)
+/// * The token has expired (beyond tolerance)
+/// * The audience doesn't match
+pub fn verify_auth_token_with_skew(
+    identity: &TokenIdentity,
+    expected_audience: &str,
+    clock_skew_seconds: u64,
+) -> Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Error::TokenDecoding(format!("system time error: {}", e)))?
         .as_secs();
 
-    if identity.claims.nbf > now {
+    // Allow clock skew tolerance for nbf (not-before) check
+    // Token is invalid if nbf is more than clock_skew_seconds in the future
+    if identity.claims.nbf > now.saturating_add(clock_skew_seconds) {
         return Err(Error::TokenNotYetValid {
             nbf: identity.claims.nbf,
             now,
         });
     }
 
-    if identity.claims.exp < now {
+    // Allow clock skew tolerance for exp (expiration) check
+    // Token is expired if exp is more than clock_skew_seconds in the past
+    if identity.claims.exp.saturating_add(clock_skew_seconds) < now {
         return Err(Error::TokenExpired {
             exp: identity.claims.exp,
             now,

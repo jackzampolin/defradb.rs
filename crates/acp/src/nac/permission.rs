@@ -9,6 +9,27 @@ use serde::{Deserialize, Serialize};
 ///
 /// These permissions control access to node-level operations when NAC is enabled.
 /// By default (NAC disabled), all operations are allowed without authentication.
+///
+/// # Implementation Status
+///
+/// **Currently implemented (20 permissions):**
+/// - Collection: `CollectionGet`, `CollectionPatch`
+/// - Document: `DocumentRead`, `DocumentUpdate`, `DocumentDelete`
+/// - Index: `IndexList`, `IndexCreate`, `IndexDrop`
+/// - P2P: `P2pPeerConnect`, `P2pReplicatorCreate`, `P2pReplicatorDelete`, `P2pReplicatorList`,
+///        `P2pCollectionCreate`, `P2pCollectionDelete`, `P2pCollectionList`
+/// - ACP: `DacPolicyAdd`, `DacStatus`
+/// - NAC: `NacStatus`, `NacRelationAdd`, `NacRelationDelete`
+///
+/// **Not yet implemented (13 permissions):**
+/// - DAC management: `DacBypass`, `DacEnable`, `DacDisable`, `DacPurge`,
+///                   `DacRelationAdd`, `DacRelationDelete`
+/// - NAC management: `NacReEnable`, `NacDisable`, `NacPurge`
+/// - P2P document replication: `P2pDocumentCreate`, `P2pDocumentDelete`, `P2pDocumentList`
+/// - Other: `SignatureVerify`
+///
+/// These permissions are defined for Go DefraDB compatibility but do not yet have
+/// corresponding HTTP endpoints in the Rust implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum NodePermission {
@@ -16,120 +37,134 @@ pub enum NodePermission {
     // DAC (Document Access Control) Operations
     // =========================================================================
     /// Bypass DAC checks entirely (super-admin only)
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacBypass,
 
     /// Enable DAC on the node
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacEnable,
 
     /// Disable DAC on the node
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacDisable,
 
     /// Purge all DAC data (dev mode only)
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacPurge,
 
-    /// View DAC status
+    /// View DAC status (used by GET /api/v0/acp/policy and GET /api/v0/acp/policy/:id)
     DacStatus,
 
     /// Add DAC relation on a document
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacRelationAdd,
 
     /// Delete DAC relation on a document
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacRelationDelete,
 
-    /// Add a new DAC policy
+    /// Add a new DAC policy (used by POST /api/v0/acp/policy)
     DacPolicyAdd,
 
     // =========================================================================
     // NAC (Node Access Control) Operations
     // =========================================================================
     /// Re-enable NAC after temporary disable
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     NacReEnable,
 
     /// Temporarily disable NAC
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     NacDisable,
 
     /// Purge all NAC data (dev mode only)
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     NacPurge,
 
-    /// View NAC status
+    /// View NAC status (used by GET /api/v0/nac/status)
     NacStatus,
 
-    /// Add NAC relation (grant permission to another identity)
+    /// Add NAC relation - grant permission to another identity (used by POST /api/v0/nac/admin)
     NacRelationAdd,
 
-    /// Delete NAC relation (revoke permission from another identity)
+    /// Delete NAC relation - revoke permission from another identity (used by DELETE /api/v0/nac/admin)
     NacRelationDelete,
 
     // =========================================================================
     // Collection Operations
     // =========================================================================
-    /// Patch/update collection schema
+    /// Patch/update collection schema (used by POST /api/v0/schema)
     CollectionPatch,
 
-    /// Get collection information
+    /// Get collection information (used by GET /api/v0/collections, GET /api/v0/schema)
     CollectionGet,
 
     // =========================================================================
     // Document Operations
     // =========================================================================
-    /// Read documents
+    /// Read documents (used by GET /api/v0/collections/:name/:doc_id, GET /api/v0/graphql, GET /api/v0/backup/export)
     DocumentRead,
 
-    /// Update documents
+    /// Update documents (used by POST/PATCH document endpoints, POST /api/v0/graphql, transaction endpoints)
+    /// Note: This permission covers both create and update operations.
     DocumentUpdate,
 
-    /// Delete documents
+    /// Delete documents (used by DELETE /api/v0/collections/:name/:doc_id)
     DocumentDelete,
 
     // =========================================================================
     // Index Operations
     // =========================================================================
-    /// List indexes
+    /// List indexes (used by GET /api/v0/collections/:name/indexes)
     IndexList,
 
-    /// Create an index
+    /// Create an index (used by POST /api/v0/collections/:name/indexes)
     IndexCreate,
 
-    /// Drop an index
+    /// Drop an index (used by DELETE /api/v0/collections/:name/indexes/:index)
     IndexDrop,
 
     // =========================================================================
     // P2P Operations
     // =========================================================================
-    /// Connect to a peer
+    /// Connect to a peer (used by P2P info, list, and connect endpoints)
     P2pPeerConnect,
 
-    /// Create a replicator
+    /// Create a replicator (used by POST /api/v0/p2p/replicators)
     P2pReplicatorCreate,
 
-    /// Delete a replicator
+    /// Delete a replicator (used by DELETE /api/v0/p2p/replicators)
     P2pReplicatorDelete,
 
-    /// List replicators
+    /// List replicators (used by GET /api/v0/p2p/replicators)
     P2pReplicatorList,
 
-    /// Add collection to P2P
+    /// Add collection to P2P (used by POST /api/v0/p2p/collections)
     P2pCollectionCreate,
 
-    /// Remove collection from P2P
+    /// Remove collection from P2P (used by DELETE /api/v0/p2p/collections)
     P2pCollectionDelete,
 
-    /// List P2P collections
+    /// List P2P collections (used by GET /api/v0/p2p/collections)
     P2pCollectionList,
 
     /// Add document to P2P replication
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     P2pDocumentCreate,
 
     /// Remove document from P2P replication
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     P2pDocumentDelete,
 
     /// List P2P replicated documents
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     P2pDocumentList,
 
     // =========================================================================
     // Other Operations
     // =========================================================================
     /// Verify signatures
+    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     SignatureVerify,
 }
 

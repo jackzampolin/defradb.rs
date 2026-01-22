@@ -93,7 +93,11 @@ pub async fn add_admin(
     let added = nac
         .add_admin(&requestor, &target)
         .await
-        .map_err(|e| HttpError::Forbidden(format!("failed to add admin: {}", e)))?;
+        .map_err(|e| {
+            // Log the actual error for debugging, but return generic message to prevent information leakage
+            tracing::warn!(error = %e, "NAC add_admin operation failed");
+            HttpError::Forbidden("not authorized to add admin".into())
+        })?;
 
     let message = if added {
         format!("admin added: {}", target)
@@ -137,7 +141,11 @@ pub async fn remove_admin(
     let removed = nac
         .remove_admin(&requestor, &target)
         .await
-        .map_err(|e| HttpError::Forbidden(format!("failed to remove admin: {}", e)))?;
+        .map_err(|e| {
+            // Log the actual error for debugging, but return generic message to prevent information leakage
+            tracing::warn!(error = %e, "NAC remove_admin operation failed");
+            HttpError::Forbidden("not authorized to remove admin".into())
+        })?;
 
     let message = if removed {
         format!("admin removed: {}", target)
