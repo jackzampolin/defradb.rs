@@ -9,25 +9,26 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 
 /// Filter operators for condition matching
+/// Uses Go DefraDB naming conventions for compatibility
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FilterOp {
     /// Equal (_eq)
     #[serde(rename = "_eq")]
     Eq,
-    /// Not equal (_ne)
-    #[serde(rename = "_ne")]
+    /// Not equal (_neq) - Go DefraDB naming
+    #[serde(rename = "_neq", alias = "_ne")]
     Ne,
     /// Greater than (_gt)
     #[serde(rename = "_gt")]
     Gt,
-    /// Greater than or equal (_gte)
-    #[serde(rename = "_gte")]
+    /// Greater than or equal (_geq) - Go DefraDB naming
+    #[serde(rename = "_geq", alias = "_gte")]
     Gte,
     /// Less than (_lt)
     #[serde(rename = "_lt")]
     Lt,
-    /// Less than or equal (_lte)
-    #[serde(rename = "_lte")]
+    /// Less than or equal (_leq) - Go DefraDB naming
+    #[serde(rename = "_leq", alias = "_lte")]
     Lte,
     /// In array (_in)
     #[serde(rename = "_in")]
@@ -68,15 +69,16 @@ pub enum FilterOp {
 }
 
 impl FilterOp {
-    /// Parse a filter operator from string
+    /// Parse a filter operator from string.
+    /// Accepts both Go DefraDB naming (_neq, _geq, _leq) and alternative naming (_ne, _gte, _lte).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "_eq" => Some(Self::Eq),
-            "_ne" => Some(Self::Ne),
+            "_neq" | "_ne" => Some(Self::Ne),
             "_gt" => Some(Self::Gt),
-            "_gte" => Some(Self::Gte),
+            "_geq" | "_gte" => Some(Self::Gte),
             "_lt" => Some(Self::Lt),
-            "_lte" => Some(Self::Lte),
+            "_leq" | "_lte" => Some(Self::Lte),
             "_in" => Some(Self::In),
             "_nin" => Some(Self::Nin),
             "_like" => Some(Self::Like),
@@ -93,15 +95,15 @@ impl FilterOp {
         }
     }
 
-    /// Get the string representation
+    /// Get the string representation (uses Go DefraDB naming)
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Eq => "_eq",
-            Self::Ne => "_ne",
+            Self::Ne => "_neq",
             Self::Gt => "_gt",
-            Self::Gte => "_gte",
+            Self::Gte => "_geq",
             Self::Lt => "_lt",
-            Self::Lte => "_lte",
+            Self::Lte => "_leq",
             Self::In => "_in",
             Self::Nin => "_nin",
             Self::Like => "_like",

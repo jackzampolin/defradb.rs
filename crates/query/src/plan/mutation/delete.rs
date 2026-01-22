@@ -148,16 +148,13 @@ impl PlanNode for DeleteNode {
         // On first call, perform all deletions
         if !self.did_delete {
             // Get document IDs to delete
+            // Note: Filter-based deletion is handled by the mutation runner which resolves
+            // filters to doc_ids before passing to DeleteNode. See resolve_filter_to_doc_ids().
             let doc_ids_to_delete = if let Some(ref ids) = self.doc_ids {
                 ids.clone()
-            } else if self.filter.is_some() {
-                // Filter-based deletes would require fetching all docs and filtering
-                return Err(QueryError::execution(
-                    "Filter-based deletes not yet implemented - use doc_ids",
-                ));
             } else {
                 return Err(QueryError::execution(
-                    "DeleteNode requires either doc_ids or filter",
+                    "DeleteNode requires doc_ids (filter resolution should be done by runner)",
                 ));
             };
 

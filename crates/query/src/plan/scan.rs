@@ -188,15 +188,17 @@ impl PlanNode for ScanNode {
         "scanNode"
     }
 
-    fn explain(&self) -> serde_json::Value {
+    fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
+
+        // Go DefraDB uses "collectionName" and "collectionID"
         obj.insert(
-            "node".to_string(),
-            serde_json::Value::String(self.kind().to_string()),
+            "collectionName".to_string(),
+            serde_json::Value::String(self.collection.name.clone()),
         );
         obj.insert(
-            "collection".to_string(),
-            serde_json::Value::String(self.collection.name.clone()),
+            "collectionID".to_string(),
+            serde_json::Value::String(self.collection.collection_id.clone()),
         );
 
         if let Some(ref filter) = self.filter {

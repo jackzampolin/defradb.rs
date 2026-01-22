@@ -71,6 +71,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Execute the query and return explain output with execution metrics.
+    /// Format matches Go DefraDB's executeAndExplainRequest output.
     async fn execute_explain(
         &self,
         query: &str,
@@ -78,53 +79,61 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         let selects = parse_query(query)?;
 
-        let mut results = Map::new();
+        let mut explain_result = Map::new();
         let mut total_executions: u64 = 0;
         let mut total_docs: usize = 0;
         let mut execution_success = true;
         let mut execution_errors: Vec<String> = Vec::new();
 
         for select in selects {
-            let key = select.field.output_name().to_string();
-
             // Execute the select and collect metrics
             match self
                 .execute_select_with_metrics(&select, caller_identity.clone())
                 .await
             {
                 Ok((explanation, doc_count, exec_count)) => {
-                    results.insert(key, explanation);
+                    // Merge the plan tree into explain result (Go format)
+                    if let Some(obj) = explanation.as_object() {
+                        for (key, value) in obj {
+                            explain_result.insert(key.clone(), value.clone());
+                        }
+                    }
                     total_docs += doc_count;
                     total_executions += exec_count;
                 }
                 Err(e) => {
                     execution_success = false;
-                    execution_errors.push(format!("{}: {}", key, e));
+                    execution_errors.push(e.to_string());
                 }
             }
         }
 
-        let mut explain_result = serde_json::json!({
-            "executionSuccess": execution_success,
-            "planExecutions": total_executions,
-            "sizeOfResult": total_docs,
-        });
+        // Add execution metrics (Go format)
+        explain_result.insert(
+            "executionSuccess".to_string(),
+            serde_json::json!(execution_success),
+        );
+        explain_result.insert(
+            "planExecutions".to_string(),
+            serde_json::json!(total_executions),
+        );
+        explain_result.insert(
+            "sizeOfResult".to_string(),
+            serde_json::json!(total_docs),
+        );
 
         if !execution_errors.is_empty() {
-            explain_result["executionErrors"] = serde_json::json!(execution_errors);
+            explain_result.insert(
+                "executionErrors".to_string(),
+                serde_json::json!(execution_errors),
+            );
         }
 
-        // Merge results into explain output
-        if let Some(obj) = explain_result.as_object_mut() {
-            for (key, value) in results {
-                obj.insert(key, value);
-            }
-        }
-
-        Ok(serde_json::json!({ "explain": explain_result }))
+        Ok(serde_json::json!({ "explain": JsonValue::Object(explain_result) }))
     }
 
     /// Execute a select and return the explain output with metrics.
+    /// Format matches Go DefraDB's collectExecuteExplainInfo output.
     async fn execute_select_with_metrics(
         &self,
         select: &Select,
@@ -181,17 +190,29 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         plan.close().await?;
 
-        // Get the execution explain from the plan
-        let mut explanation = plan.explain();
+        // Get the execution explain from the plan (Go format: { "nodeKind": { ... } })
+        let explanation = plan.explain();
 
-        // Add execution metrics to the explanation
-        if let Some(obj) = explanation.as_object_mut() {
-            obj.insert("iterations".to_string(), serde_json::json!(iterations));
-            obj.insert("docFetches".to_string(), serde_json::json!(doc_count));
-            obj.insert("resultCount".to_string(), serde_json::json!(result_count));
-        }
+        // Go adds iterations to each node during execute explain
+        // For now, we add it to the outermost node
+        let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
 
         Ok((explanation, result_count, iterations))
+    }
+
+    /// Add execution metrics to the explain output (Go format).
+    fn add_iterations_to_explain(mut explanation: JsonValue, iterations: u64, doc_fetches: usize) -> JsonValue {
+        // The explanation is { "nodeKind": { ... } }
+        // We need to add iterations to the inner object
+        if let Some(obj) = explanation.as_object_mut() {
+            if let Some((_, inner)) = obj.iter_mut().next() {
+                if let Some(inner_obj) = inner.as_object_mut() {
+                    inner_obj.insert("iterations".to_string(), serde_json::json!(iterations));
+                    inner_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+                }
+            }
+        }
+        explanation
     }
 
     /// Generate an explanation of a single Select operation.
