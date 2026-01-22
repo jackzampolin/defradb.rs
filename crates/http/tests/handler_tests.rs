@@ -197,7 +197,8 @@ async fn test_p2p_add_collections() {
                 .method("POST")
                 .uri("/api/v0/p2p/collections")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"collections": ["Users", "Posts"]}"#))
+                // Go-compatible format: raw array
+                .body(Body::from(r#"["Users", "Posts"]"#))
                 .unwrap(),
         )
         .await
@@ -237,13 +238,14 @@ async fn test_acp_add_policy() {
     let state = AppStateBuilder::new(executor).with_acp(acp).build();
     let router = create_router_with_state(state);
 
+    // ACP add policy now accepts raw text body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v0/acp/policy")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"policy": "name: test\nresources: []"}"#))
+                .header("content-type", "text/plain")
+                .body(Body::from("name: test\nresources: []"))
                 .unwrap(),
         )
         .await
@@ -543,11 +545,14 @@ async fn test_backup_without_backup_enabled() {
     let state = AppStateBuilder::new(executor).build();
     let router = create_router_with_state(state);
 
+    // Backup export now uses POST with JSON body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/api/v0/backup/export")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
@@ -564,11 +569,14 @@ async fn test_backup_export() {
     let state = AppStateBuilder::new(executor).with_backup(backup).build();
     let router = create_router_with_state(state);
 
+    // Backup export now uses POST with JSON body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/api/v0/backup/export")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
@@ -590,11 +598,14 @@ async fn test_backup_export_pretty() {
     let state = AppStateBuilder::new(executor).with_backup(backup).build();
     let router = create_router_with_state(state);
 
+    // Backup export now uses POST with JSON body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
-                .uri("/api/v0/backup/export?pretty=true")
-                .body(Body::empty())
+                .method("POST")
+                .uri("/api/v0/backup/export")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"pretty": true}"#))
                 .unwrap(),
         )
         .await
@@ -631,14 +642,8 @@ async fn test_backup_import() {
         .await
         .unwrap();
 
+    // Import now returns empty body (StatusCode::OK) to match Go DefraDB
     assert_eq!(response.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(result.get("success").unwrap(), true);
-    assert_eq!(result.get("documents_imported").unwrap(), 1);
 }
 
 #[tokio::test]
@@ -789,8 +794,8 @@ async fn test_acp_add_policy_internal_error() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v0/acp/policy")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"policy": "name: test\nresources: []"}"#))
+                .header("content-type", "text/plain")
+                .body(Body::from("name: test\nresources: []"))
                 .unwrap(),
         )
         .await
@@ -870,11 +875,14 @@ async fn test_backup_export_internal_error() {
     let state = AppStateBuilder::new(executor).with_backup(backup).build();
     let router = create_router_with_state(state);
 
+    // Backup export now uses POST with JSON body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/api/v0/backup/export")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
@@ -1021,7 +1029,8 @@ async fn test_p2p_add_collections_invalid_collection_name() {
                 .method("POST")
                 .uri("/api/v0/p2p/collections")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"collections": ["Users", "Invalid-Name"]}"#))
+                // Go-compatible format: raw array
+                .body(Body::from(r#"["Users", "Invalid-Name"]"#))
                 .unwrap(),
         )
         .await
@@ -1085,13 +1094,14 @@ async fn test_acp_add_policy_empty_string() {
     let state = AppStateBuilder::new(executor).with_acp(acp).build();
     let router = create_router_with_state(state);
 
+    // ACP add policy now accepts raw text body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v0/acp/policy")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"policy": ""}"#))
+                .header("content-type", "text/plain")
+                .body(Body::from(""))
                 .unwrap(),
         )
         .await
@@ -1107,13 +1117,14 @@ async fn test_acp_add_policy_whitespace_only() {
     let state = AppStateBuilder::new(executor).with_acp(acp).build();
     let router = create_router_with_state(state);
 
+    // ACP add policy now accepts raw text body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v0/acp/policy")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"policy": "   \n\t  "}"#))
+                .header("content-type", "text/plain")
+                .body(Body::from("   \n\t  "))
                 .unwrap(),
         )
         .await
@@ -1179,11 +1190,14 @@ async fn test_backup_export_invalid_collection_name() {
     let state = AppStateBuilder::new(executor).with_backup(backup).build();
     let router = create_router_with_state(state);
 
+    // Backup export now uses POST with JSON body to match Go DefraDB
     let response = router
         .oneshot(
             Request::builder()
-                .uri("/api/v0/backup/export?collections=123Invalid")
-                .body(Body::empty())
+                .method("POST")
+                .uri("/api/v0/backup/export")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"collections": ["123Invalid"]}"#))
                 .unwrap(),
         )
         .await

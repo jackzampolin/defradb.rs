@@ -536,7 +536,7 @@ impl RestOperations for FailingMockRestOperations {
 
 use crate::router::{
     AcpOperations, BackupOperations, ImportResult, IndexFieldInfo, IndexInfo, IndexOperations,
-    P2POperations, PolicyInfo, ReplicatorInfo,
+    P2POperations, P2pDocumentInfo, P2pDocumentRequest, PolicyInfo, ReplicatorInfo,
 };
 
 /// Mock P2P operations for testing P2P handlers.
@@ -674,6 +674,32 @@ impl P2POperations for MockP2POperations {
     ) -> std::result::Result<(), String> {
         let mut existing = self.collections.write().unwrap();
         existing.retain(|c| !collections.contains(c));
+        Ok(())
+    }
+
+    async fn get_documents(&self) -> std::result::Result<Vec<P2pDocumentInfo>, String> {
+        Ok(vec![])
+    }
+
+    async fn add_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn remove_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn sync_collections(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn sync_documents(&self) -> std::result::Result<(), String> {
         Ok(())
     }
 }
@@ -1036,6 +1062,32 @@ impl P2POperations for FailingMockP2POperations {
     ) -> std::result::Result<(), String> {
         Err(self.error.clone())
     }
+
+    async fn get_documents(&self) -> std::result::Result<Vec<P2pDocumentInfo>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn add_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn remove_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn sync_collections(&self) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn sync_documents(&self) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
 }
 
 /// Mock ACP operations that always fails with a configurable error.
@@ -1321,5 +1373,62 @@ impl NodeAcpOperations for MockNodeAcpOperations {
         let initial_len = admins.len();
         admins.retain(|a| a != target);
         Ok(admins.len() < initial_len)
+    }
+}
+
+/// Mock NAC operations that always fails with a configurable error.
+///
+/// Use this to test error handling paths in handlers when NAC
+/// permission checks fail with internal errors (not just permission denied).
+#[derive(Debug, Clone)]
+pub struct FailingMockNodeAcpOperations {
+    error: String,
+}
+
+impl FailingMockNodeAcpOperations {
+    /// Create a new failing mock with the given error message.
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl NodeAcpOperations for FailingMockNodeAcpOperations {
+    async fn check_permission(
+        &self,
+        _identity: &Did,
+        _permission: NodePermission,
+    ) -> std::result::Result<bool, String> {
+        Err(self.error.clone())
+    }
+
+    async fn get_status(&self) -> NacStatus {
+        NacStatus::Enabled
+    }
+
+    async fn owner(&self) -> Option<Did> {
+        None
+    }
+
+    async fn is_admin(&self, _identity: &Did) -> std::result::Result<bool, String> {
+        Err(self.error.clone())
+    }
+
+    async fn add_admin(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+    ) -> std::result::Result<bool, String> {
+        Err(self.error.clone())
+    }
+
+    async fn remove_admin(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+    ) -> std::result::Result<bool, String> {
+        Err(self.error.clone())
     }
 }

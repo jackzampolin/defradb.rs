@@ -60,6 +60,21 @@ pub trait P2POperations: Send + Sync {
 
     /// Remove collections from P2P.
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String>;
+
+    /// Get P2P documents (for document-level replication).
+    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String>;
+
+    /// Add documents to P2P replication.
+    async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+
+    /// Remove documents from P2P replication.
+    async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+
+    /// Sync collections with peers (trigger immediate sync).
+    async fn sync_collections(&self) -> Result<(), String>;
+
+    /// Sync documents with peers (trigger immediate sync).
+    async fn sync_documents(&self) -> Result<(), String>;
 }
 
 /// Replicator information for HTTP responses.
@@ -68,6 +83,28 @@ pub struct ReplicatorInfo {
     pub id: Option<String>,
     pub collections: Vec<String>,
     pub address: Option<String>,
+}
+
+/// P2P document information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2pDocumentInfo {
+    /// Collection name the document belongs to.
+    #[serde(rename = "Collection")]
+    pub collection: String,
+    /// Document ID.
+    #[serde(rename = "DocID")]
+    pub doc_id: String,
+}
+
+/// Request to add/remove P2P documents (Go-compatible format).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2pDocumentRequest {
+    /// Collection name the document belongs to.
+    #[serde(rename = "Collection")]
+    pub collection: String,
+    /// Document ID.
+    #[serde(rename = "DocID")]
+    pub doc_id: String,
 }
 
 /// Trait for ACP (Access Control Policy) operations.
@@ -463,11 +500,17 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // Health check at root level (matches Go DefraDB)
     let root_routes = Router::new().route("/health-check", get(handlers::health_check));
 
-    // Transaction routes
+    // Transaction routes (Go-compatible)
+    // Go DefraDB:
+    //   POST /tx - begin transaction (query param: ?read_only=true)
+    //   POST /tx/concurrent - begin concurrent transaction
+    //   POST /tx/{id} - commit transaction
+    //   DELETE /tx/{id} - discard transaction
     let tx_routes = Router::new()
-        .route("/begin", post(handlers::tx_begin))
-        .route("/commit", post(handlers::tx_commit))
-        .route("/rollback", post(handlers::tx_rollback));
+        .route("/", post(handlers::tx_begin))
+        .route("/concurrent", post(handlers::tx_begin_concurrent))
+        .route("/:id", post(handlers::tx_commit))
+        .route("/:id", delete(handlers::tx_discard));
 
     // Collection routes (REST API)
     let collection_routes = Router::new()
@@ -476,7 +519,14 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/:name", post(handlers::create_document))
         .route("/:name/:docID", get(handlers::get_document))
         .route("/:name/:docID", patch(handlers::update_document))
-        .route("/:name/:docID", delete(handlers::delete_document));
+        .route("/:name/:docID", delete(handlers::delete_document))
+        // Go-compatible index routes (collection in path)
+        .route("/:name/indexes", get(handlers::index::go_list_indexes))
+        .route("/:name/indexes", post(handlers::index::go_create_index))
+        .route(
+            "/:name/indexes/:index",
+            delete(handlers::index::go_drop_index),
+        );
 
     // P2P routes
     let p2p_routes = Router::new()
@@ -492,7 +542,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/replicator", delete(handlers::p2p::remove_replicator))
         .route("/collections", get(handlers::p2p::list_collections))
         .route("/collections", post(handlers::p2p::add_collections))
-        .route("/collections", delete(handlers::p2p::remove_collections));
+        .route("/collections", delete(handlers::p2p::remove_collections))
+        .route("/collections/sync", post(handlers::p2p::sync_collections)) // Go-compatible
+        .route("/documents", get(handlers::p2p::list_documents)) // Go-compatible
+        .route("/documents", post(handlers::p2p::add_documents))
+        .route("/documents", delete(handlers::p2p::remove_documents))
+        .route("/documents/sync", post(handlers::p2p::sync_documents)); // Go-compatible
 
     // ACP routes
     let acp_routes = Router::new()
@@ -506,9 +561,9 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/", get(handlers::index::list_indexes))
         .route("/", delete(handlers::index::drop_index));
 
-    // Backup routes
+    // Backup routes (POST for both to match Go DefraDB)
     let backup_routes = Router::new()
-        .route("/export", get(handlers::backup::export))
+        .route("/export", post(handlers::backup::export))
         .route("/import", post(handlers::backup::import));
 
     // NAC (Node Access Control) routes
@@ -516,6 +571,19 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/status", get(handlers::nac::get_status))
         .route("/admin", post(handlers::nac::add_admin))
         .route("/admin", delete(handlers::nac::remove_admin));
+
+    // Go-compatible ACP node routes (aliased from /acp/node/*)
+    // Go DefraDB uses:
+    //   GET /acp/node/status
+    //   POST /acp/node/relationship
+    //   DELETE /acp/node/relationship
+    let acp_node_routes = Router::new()
+        .route("/status", get(handlers::nac::get_status))
+        .route("/relationship", post(handlers::nac::go_add_relationship))
+        .route(
+            "/relationship",
+            delete(handlers::nac::go_remove_relationship),
+        );
 
     // API v0 routes
     let api_routes = Router::new()
@@ -531,14 +599,19 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/collections", collection_routes)
         // P2P endpoints
         .nest("/p2p", p2p_routes)
-        // ACP endpoints
+        // ACP endpoints (document-level access control)
         .nest("/acp", acp_routes)
+        // Go-compatible ACP node routes (NAC via /acp/node/*)
+        .nest("/acp/node", acp_node_routes)
         // Index endpoints
         .nest("/index", index_routes)
         // Backup endpoints
         .nest("/backup", backup_routes)
-        // NAC endpoints
+        // NAC endpoints (Rust-native routes)
         .nest("/nac", nac_routes)
+        // Utility endpoints (Go-compatible)
+        .route("/purge", post(handlers::utility::purge))
+        .route("/node/identity", get(handlers::utility::get_node_identity))
         .with_state(state);
 
     root_routes.nest("/api/v0", api_routes)

@@ -2,6 +2,12 @@
 //!
 //! This module provides utility functions for HTTP handlers to enforce
 //! NAC permission checks before performing operations.
+//!
+//! # Error Handling
+//!
+//! This module returns `401 Unauthorized` for NAC permission denials to match
+//! Go DefraDB's behavior. Go's `CollectionMiddleware` returns 401 when it
+//! detects `ErrNotAuthorizedToPerformOperation`.
 
 use identity::Did;
 
@@ -12,10 +18,15 @@ use crate::router::{AppState, NodePermission};
 /// Check if an identity has a specific NAC permission.
 ///
 /// Returns `Ok(())` if the permission is granted, or an appropriate error:
-/// - `HttpError::Forbidden` if the identity lacks the required permission
-/// - `HttpError::Forbidden` if authentication is required but not provided
+/// - `HttpError::Unauthorized` (401) if the identity lacks the required permission
+/// - `HttpError::Unauthorized` (401) if authentication is required but not provided
 ///
 /// If NAC is not configured on the server, all permissions are allowed.
+///
+/// # Go DefraDB Compatibility
+///
+/// Returns 401 Unauthorized to match Go DefraDB's CollectionMiddleware which
+/// returns `http.StatusUnauthorized` for `ErrNotAuthorizedToPerformOperation`.
 pub async fn require_permission(
     state: &AppState,
     identity: &ExtractIdentity,
@@ -26,67 +37,22 @@ pub async fn require_permission(
         return Ok(());
     };
 
-    // Get the identity DID, requiring authentication for NAC-protected operations
+    // Get the identity DID, requiring authentication for NAC-protected operations.
+    // In Go, if no identity is provided, the NAC check proceeds and fails with
+    // "not authorized to perform operation", so we use Unauthorized here too.
     let did = identity
         .did()
-        .ok_or_else(|| HttpError::Forbidden("forbidden".into()))?;
+        .ok_or_else(|| HttpError::Unauthorized("authentication required".into()))?;
 
     // Check the permission
-    let allowed = nac
-        .check_permission(did, permission)
-        .await
-        .map_err(|_| HttpError::Internal("permission check failed".into()))?;
+    let allowed = nac.check_permission(did, permission).await.map_err(|e| {
+        tracing::error!(error = %e, ?permission, "NAC permission check failed");
+        HttpError::Internal("permission check failed".into())
+    })?;
 
     if !allowed {
-        return Err(HttpError::Forbidden(
-            "not authorized to perform operation".into(),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Check if an identity has a specific NAC permission, allowing anonymous access.
-///
-/// Similar to `require_permission` but allows anonymous access when NAC
-/// is not enabled or for read-only operations.
-///
-/// Returns `Ok(())` if the permission is granted, or an appropriate error:
-/// - `HttpError::Forbidden` if the identity lacks the required permission
-///
-/// If NAC is not configured on the server, all permissions are allowed.
-/// If the identity is anonymous but NAC is enabled, permission is checked
-/// with a synthetic anonymous DID.
-pub async fn check_permission_optional_auth(
-    state: &AppState,
-    identity: &ExtractIdentity,
-    permission: NodePermission,
-) -> Result<(), HttpError> {
-    // If NAC is not configured, allow all operations
-    let Some(nac) = &state.nac else {
-        return Ok(());
-    };
-
-    // If anonymous, check if NAC is actually enabled
-    let Some(did) = identity.did() else {
-        // For anonymous users, check if NAC status allows the operation
-        // (NotConfigured or DisabledTemporarily allows all)
-        let status = nac.get_status().await;
-        if status.to_string() != "enabled" {
-            return Ok(());
-        }
-        // NAC is enabled but user is anonymous - deny
-        return Err(HttpError::Forbidden("forbidden".into()));
-    };
-
-    // Check the permission
-    let allowed = nac
-        .check_permission(did, permission)
-        .await
-        .map_err(|_| HttpError::Internal("permission check failed".into()))?;
-
-    if !allowed {
-        return Err(HttpError::Forbidden(
+        // Return 401 to match Go DefraDB's CollectionMiddleware behavior
+        return Err(HttpError::Unauthorized(
             "not authorized to perform operation".into(),
         ));
     }
@@ -100,5 +66,5 @@ pub async fn check_permission_optional_auth(
 pub fn require_identity(identity: &ExtractIdentity) -> Result<&Did, HttpError> {
     identity
         .did()
-        .ok_or_else(|| HttpError::Forbidden("authentication required".into()))
+        .ok_or_else(|| HttpError::Unauthorized("authentication required".into()))
 }

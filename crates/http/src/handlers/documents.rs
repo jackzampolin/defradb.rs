@@ -4,24 +4,21 @@
 //! to the REST operations layer for ACP (Access Control Policy) enforcement.
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
+//!
+//! Note: Create, update, and delete operations return empty bodies to match
+//! Go DefraDB behavior. Go returns only HTTP 200 status with no body.
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     Json,
 };
-use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
-
-/// Response for delete operations.
-#[derive(Debug, Clone, Serialize)]
-pub struct DeleteResponse {
-    pub deleted: bool,
-}
 
 /// Get a single document by ID.
 ///
@@ -48,9 +45,10 @@ pub async fn get_document(
         .await
     {
         Ok(Some(doc)) => Ok(Json(doc)),
-        Ok(None) => Err(HttpError::NotFound(format!(
-            "Document '{}' not found in collection '{}'",
-            doc_id, collection
+        // Go DefraDB returns 400 Bad Request for document not found (combines with permission error)
+        Ok(None) => Err(HttpError::BadRequest(format!(
+            "document not found or not authorized: {}",
+            doc_id
         ))),
         Err(e) => {
             tracing::warn!(
@@ -73,15 +71,16 @@ pub async fn get_document(
 /// - If the collection has a policy and identity is provided, the document
 ///   is registered with ACP and the identity becomes the owner.
 ///
-/// Requires `DocumentRead` permission when NAC is enabled (document creation
-/// involves reading back the created document).
+/// Requires `DocumentUpdate` permission when NAC is enabled.
+///
+/// Returns HTTP 200 with empty body to match Go DefraDB behavior.
 pub async fn create_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(collection): Path<String>,
     Json(body): Json<JsonValue>,
-) -> Result<Json<JsonValue>, HttpError> {
-    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+) -> Result<StatusCode, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
     let rest = state
         .rest
@@ -108,15 +107,8 @@ pub async fn create_document(
                 count = docs.len(),
                 "Documents created"
             );
-            // Return single doc if single input, array if array input
-            let response = if docs.len() == 1 {
-                docs.into_iter()
-                    .next()
-                    .expect("docs.len() == 1 but iterator was empty")
-            } else {
-                JsonValue::Array(docs)
-            };
-            Ok(Json(response))
+            // Return empty body to match Go DefraDB behavior
+            Ok(StatusCode::OK)
         }
         Err(e) => {
             tracing::warn!(collection = %collection, error = %e, "Failed to create document");
@@ -133,12 +125,14 @@ pub async fn create_document(
 /// update permission on protected documents.
 ///
 /// Requires `DocumentUpdate` permission when NAC is enabled.
+///
+/// Returns HTTP 200 with empty body to match Go DefraDB behavior.
 pub async fn update_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
     Json(patch): Json<JsonValue>,
-) -> Result<Json<JsonValue>, HttpError> {
+) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
     let rest = state
@@ -150,13 +144,14 @@ pub async fn update_document(
         .update_document(&collection, &doc_id, patch, identity.did())
         .await
     {
-        Ok(doc) => {
+        Ok(_doc) => {
             tracing::info!(
                 collection = %collection,
                 doc_id = %doc_id,
                 "Document updated"
             );
-            Ok(Json(doc))
+            // Return empty body to match Go DefraDB behavior
+            Ok(StatusCode::OK)
         }
         Err(e) => {
             tracing::warn!(
@@ -178,11 +173,13 @@ pub async fn update_document(
 /// delete permission on protected documents.
 ///
 /// Requires `DocumentDelete` permission when NAC is enabled.
+///
+/// Returns HTTP 200 with empty body to match Go DefraDB behavior.
 pub async fn delete_document(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path((collection, doc_id)): Path<(String, String)>,
-) -> Result<Json<DeleteResponse>, HttpError> {
+) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentDelete).await?;
 
     let rest = state
@@ -202,7 +199,8 @@ pub async fn delete_document(
                     "Document deleted"
                 );
             }
-            Ok(Json(DeleteResponse { deleted }))
+            // Return empty body to match Go DefraDB behavior
+            Ok(StatusCode::OK)
         }
         Err(e) => {
             tracing::warn!(
