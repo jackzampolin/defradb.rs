@@ -26,7 +26,10 @@ pub fn generate_field_cid(field: &FieldDescription) -> crate::Result<Cid> {
 ///
 /// Go assigns incrementing priorities to each field block (1 for first, 2 for second, etc).
 /// The priority affects the CID, so it must match Go's assignment order.
-pub fn generate_field_cid_with_priority(field: &FieldDescription, priority: u64) -> crate::Result<Cid> {
+pub fn generate_field_cid_with_priority(
+    field: &FieldDescription,
+    priority: u64,
+) -> crate::Result<Cid> {
     let delta = field_to_delta_with_priority(field, priority)?;
     let block = Block::new(CrdtDelta::FieldDefinition(delta), vec![], vec![]);
     generate_block_cid(&block)
@@ -90,11 +93,6 @@ fn generate_block_cid(block: &Block) -> crate::Result<Cid> {
     // Create CIDv1 with DAG-CBOR codec
     let cid = Cid::new_v1(DAG_CBOR_CODEC, mh);
     Ok(cid)
-}
-
-/// Convert a FieldDescription to a FieldDefinitionDeltaPayload with priority=1
-fn field_to_delta(field: &FieldDescription) -> crate::Result<FieldDefinitionDeltaPayload> {
-    field_to_delta_with_priority(field, 1)
 }
 
 /// Convert a FieldDescription to a FieldDefinitionDeltaPayload with a specific priority

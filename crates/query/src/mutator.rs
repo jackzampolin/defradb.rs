@@ -12,13 +12,14 @@ use crate::error::Result;
 ///
 /// This allows callers to know whether changes were successfully broadcast
 /// to the P2P network, enabling appropriate handling of partial success.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastStatus {
     /// Broadcast succeeded
     Success,
     /// Broadcast failed with the given error message
     Failed(String),
     /// Broadcast was not attempted (P2P not enabled or not applicable)
+    #[default]
     NotAttempted,
 }
 
@@ -39,12 +40,6 @@ impl BroadcastStatus {
             BroadcastStatus::Failed(msg) => Some(msg),
             _ => None,
         }
-    }
-}
-
-impl Default for BroadcastStatus {
-    fn default() -> Self {
-        BroadcastStatus::NotAttempted
     }
 }
 
@@ -70,7 +65,11 @@ impl CreateResult {
     }
 
     /// Create a result with broadcast status.
-    pub fn with_broadcast(doc_id: DocID, document: Document, broadcast_status: BroadcastStatus) -> Self {
+    pub fn with_broadcast(
+        doc_id: DocID,
+        document: Document,
+        broadcast_status: BroadcastStatus,
+    ) -> Self {
         Self {
             doc_id,
             document,
@@ -101,7 +100,11 @@ impl UpdateResult {
     }
 
     /// Create a result with broadcast status.
-    pub fn with_broadcast(document: Document, fields_modified: usize, broadcast_status: BroadcastStatus) -> Self {
+    pub fn with_broadcast(
+        document: Document,
+        fields_modified: usize,
+        broadcast_status: BroadcastStatus,
+    ) -> Self {
         Self {
             document,
             fields_modified,
