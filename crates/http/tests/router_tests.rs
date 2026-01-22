@@ -183,7 +183,8 @@ async fn test_document_not_found() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Go DefraDB returns 400 Bad Request for document not found (combines with permission error)
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -233,7 +234,10 @@ async fn test_create_document_response_body() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert!(body.is_empty(), "Response body should be empty to match Go DefraDB");
+    assert!(
+        body.is_empty(),
+        "Response body should be empty to match Go DefraDB"
+    );
 }
 
 #[tokio::test]

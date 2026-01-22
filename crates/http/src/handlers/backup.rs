@@ -45,6 +45,19 @@ pub struct ExportRequest {
     /// Format for export (only "json" is supported).
     #[serde(default)]
     pub format: Option<String>,
+    /// Filepath (Go-compatible, but not supported - see note below).
+    /// Go DefraDB writes to this file path. This implementation returns
+    /// data in the response body instead.
+    #[serde(default)]
+    pub filepath: Option<String>,
+}
+
+/// Request body for Go-compatible import.
+/// Go DefraDB expects: `{"filepath": "/path/to/backup.json"}`
+#[derive(Debug, Clone, Deserialize)]
+pub struct GoImportRequest {
+    /// File path to import from (Go format).
+    pub filepath: Option<String>,
 }
 
 /// Export the database.
@@ -61,7 +74,7 @@ pub struct ExportRequest {
 /// ```
 ///
 /// Note: Go DefraDB also accepts a "filepath" field and writes to disk.
-/// This implementation returns the data in the response body instead.
+/// This implementation ignores filepath and returns the data in the response body instead.
 ///
 /// Requires `DocumentRead` permission when NAC is enabled.
 pub async fn export(
@@ -72,6 +85,14 @@ pub async fn export(
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
     let backup = state.require_backup()?;
+
+    // Log warning if filepath was provided (Go-compatibility note)
+    if let Some(ref filepath) = request.filepath {
+        tracing::warn!(
+            filepath = %filepath,
+            "filepath parameter ignored - export data returned in response body instead of file"
+        );
+    }
 
     // Validate format if specified (only "json" is supported)
     if let Some(ref format) = request.format {
@@ -122,9 +143,15 @@ pub async fn export(
 ///
 /// POST /api/v0/backup/import
 ///
-/// Go DefraDB accepts a JSON body with a "filepath" field pointing to a file on disk.
-/// This implementation accepts the backup data directly in the request body for
-/// HTTP-native usage.
+/// This endpoint supports two formats:
+///
+/// 1. **Go DefraDB format**: JSON body with "filepath" field
+///    `{"filepath": "/path/to/backup.json"}`
+///    Note: File-based import is NOT supported in this HTTP implementation.
+///    Use the direct data format instead.
+///
+/// 2. **Direct data format**: Raw backup JSON in request body
+///    `{"CollectionName": [{"_docID": "...", ...}]}`
 ///
 /// Requires `DocumentUpdate` permission when NAC is enabled.
 ///
@@ -147,15 +174,28 @@ pub async fn import(
     }
 
     // Convert bytes to UTF-8 string
-    let body = String::from_utf8(body.to_vec())
+    let body_str = String::from_utf8(body.to_vec())
         .map_err(|_| HttpError::BadRequest("import data must be valid UTF-8".into()))?;
 
-    if body.trim().is_empty() {
+    if body_str.trim().is_empty() {
         return Err(HttpError::BadRequest("import data cannot be empty".into()));
     }
 
+    // Try to parse as Go format first (filepath-based)
+    if let Ok(go_request) = serde_json::from_str::<GoImportRequest>(&body_str) {
+        if let Some(filepath) = go_request.filepath {
+            // Go DefraDB expects file-based import, which we don't support
+            return Err(HttpError::BadRequest(format!(
+                "file-based import is not supported in HTTP mode. \
+                 Go DefraDB requested filepath '{}'. \
+                 Please send the backup data directly in the request body instead.",
+                filepath
+            )));
+        }
+    }
+
     // Validate that the body is valid JSON with expected structure
-    let parsed: serde_json::Value = serde_json::from_str(&body)
+    let parsed: serde_json::Value = serde_json::from_str(&body_str)
         .map_err(|e| HttpError::BadRequest(format!("invalid JSON: {}", e)))?;
 
     // Backup data should be an object or array, not a primitive
@@ -165,9 +205,17 @@ pub async fn import(
         ));
     }
 
-    // Reject empty objects or arrays
+    // Reject empty objects or arrays (but allow Go filepath format detection first)
     let is_empty = match &parsed {
-        serde_json::Value::Object(obj) => obj.is_empty(),
+        serde_json::Value::Object(obj) => {
+            // Check if this looks like Go filepath format (has only filepath key)
+            if obj.len() == 1 && obj.contains_key("filepath") {
+                // Already handled above
+                false
+            } else {
+                obj.is_empty()
+            }
+        }
         serde_json::Value::Array(arr) => arr.is_empty(),
         _ => false,
     };
@@ -177,7 +225,10 @@ pub async fn import(
         ));
     }
 
-    let _result = backup.import(&body).await.map_err(HttpError::BadRequest)?;
+    let _result = backup
+        .import(&body_str)
+        .await
+        .map_err(HttpError::BadRequest)?;
 
     // Return empty body to match Go DefraDB behavior
     Ok(StatusCode::OK)

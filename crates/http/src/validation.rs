@@ -68,7 +68,9 @@ pub fn validate_multiaddr(address: &str) -> Result<(), HttpError> {
 /// This performs basic validation; full validation happens in the document layer.
 pub fn validate_doc_id(doc_id: &str) -> Result<(), HttpError> {
     if doc_id.trim().is_empty() {
-        return Err(HttpError::BadRequest("document ID cannot be empty".to_string()));
+        return Err(HttpError::BadRequest(
+            "document ID cannot be empty".to_string(),
+        ));
     }
 
     // DefraDB doc IDs start with "bae-"

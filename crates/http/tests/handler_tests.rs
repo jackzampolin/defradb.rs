@@ -197,7 +197,8 @@ async fn test_p2p_add_collections() {
                 .method("POST")
                 .uri("/api/v0/p2p/collections")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"collections": ["Users", "Posts"]}"#))
+                // Go-compatible format: raw array
+                .body(Body::from(r#"["Users", "Posts"]"#))
                 .unwrap(),
         )
         .await
@@ -1028,7 +1029,8 @@ async fn test_p2p_add_collections_invalid_collection_name() {
                 .method("POST")
                 .uri("/api/v0/p2p/collections")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"collections": ["Users", "Invalid-Name"]}"#))
+                // Go-compatible format: raw array
+                .body(Body::from(r#"["Users", "Invalid-Name"]"#))
                 .unwrap(),
         )
         .await

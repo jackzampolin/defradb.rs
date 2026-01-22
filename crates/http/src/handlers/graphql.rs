@@ -10,11 +10,14 @@
 //! where each operation type has its own permission requirement.
 
 use axum::{
-    extract::{Query, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
+
+/// Go DefraDB transaction header name.
+const TX_HEADER_NAME: &str = "x-defradb-tx";
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -192,57 +195,59 @@ pub async fn schema(
 // Transaction management (begin/commit/rollback) doesn't have explicit handler-level
 // permission checks. This Rust implementation adds upfront checks for extra security.
 
-/// Request body for beginning a transaction.
+/// Query parameters for beginning a transaction (Go-compatible).
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct TxBeginRequest {
+pub struct TxBeginQuery {
+    /// Whether to create a read-only transaction.
     #[serde(default)]
-    pub readonly: bool,
+    pub read_only: bool,
 }
 
-/// Response from beginning a transaction.
+/// Response from beginning a transaction (Go-compatible).
+/// Uses numeric `id` field to match Go DefraDB's `CreateTxResponse`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TxBeginResponse {
-    pub txn_id: String,
+    /// Transaction ID as numeric value (Go uses uint64).
+    pub id: u64,
 }
 
-/// Request body for commit/rollback operations.
+/// Path parameter for transaction operations.
 #[derive(Debug, Clone, Deserialize)]
-pub struct TxRequest {
-    pub txn_id: String,
+pub struct TxPathParam {
+    pub id: String,
 }
 
-/// Response for successful transaction operations.
-#[derive(Debug, Clone, Serialize)]
-pub struct TxSuccessResponse {
-    pub status: String,
-}
-
-/// Begin a new transaction.
+/// Begin a new transaction (Go-compatible).
+///
+/// POST /api/v0/tx?read_only=true
+///
+/// Go DefraDB uses query parameter `read_only` (not request body).
+/// Returns `{"id": uint64}` to match Go's `CreateTxResponse`.
 ///
 /// Requires `DocumentUpdate` permission when NAC is enabled.
 pub async fn tx_begin(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(request): Json<TxBeginRequest>,
+    Query(query): Query<TxBeginQuery>,
 ) -> Result<impl IntoResponse, HttpError> {
     // NAC check: transactions can modify data, require DocumentUpdate permission
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-    Ok(match state.executor.begin_txn(request.readonly).await {
+    Ok(match state.executor.begin_txn(query.read_only).await {
         Ok(handle) => {
-            tracing::info!(txn_id = %handle, readonly = request.readonly, "Transaction started");
-            (
-                StatusCode::OK,
-                Json(TxBeginResponse {
-                    txn_id: handle.to_string(),
-                }),
-            )
-                .into_response()
+            // Parse handle to u64 to match Go's numeric ID format
+            let id: u64 = handle.to_string().parse().unwrap_or(0);
+            tracing::info!(
+                txn_id = id,
+                readonly = query.read_only,
+                "Transaction started"
+            );
+            (StatusCode::OK, Json(TxBeginResponse { id })).into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to begin transaction");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::BAD_REQUEST,
                 Json(crate::error::ErrorResponse {
                     error: format!("Failed to begin transaction: {}", e),
                 }),
@@ -252,47 +257,40 @@ pub async fn tx_begin(
     })
 }
 
-/// Commit a transaction.
+/// Begin a new concurrent transaction (Go-compatible).
+///
+/// POST /api/v0/tx/concurrent?read_only=true
+///
+/// Concurrent transactions allow multiple transactions to run in parallel.
 ///
 /// Requires `DocumentUpdate` permission when NAC is enabled.
-pub async fn tx_commit(
+pub async fn tx_begin_concurrent(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(request): Json<TxRequest>,
+    Query(query): Query<TxBeginQuery>,
 ) -> Result<impl IntoResponse, HttpError> {
-    // NAC check: committing transactions requires DocumentUpdate permission
+    // NAC check: transactions can modify data, require DocumentUpdate permission
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-    let handle = match request.txn_id.parse() {
-        Ok(h) => h,
-        Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: format!("Invalid transaction ID: {}", request.txn_id),
-                }),
-            )
-                .into_response());
-        }
-    };
-
-    Ok(match state.executor.commit_txn(&handle).await {
-        Ok(()) => {
-            tracing::info!(txn_id = %handle, "Transaction committed");
-            (
-                StatusCode::OK,
-                Json(TxSuccessResponse {
-                    status: "committed".to_string(),
-                }),
-            )
-                .into_response()
+    // For now, concurrent transactions use the same implementation as regular transactions.
+    // The distinction is primarily semantic in Go DefraDB.
+    Ok(match state.executor.begin_txn(query.read_only).await {
+        Ok(handle) => {
+            let id: u64 = handle.to_string().parse().unwrap_or(0);
+            tracing::info!(
+                txn_id = id,
+                readonly = query.read_only,
+                concurrent = true,
+                "Concurrent transaction started"
+            );
+            (StatusCode::OK, Json(TxBeginResponse { id })).into_response()
         }
         Err(e) => {
-            tracing::error!(txn_id = %handle, error = %e, "Failed to commit transaction");
+            tracing::error!(error = %e, "Failed to begin concurrent transaction");
             (
                 StatusCode::BAD_REQUEST,
                 Json(crate::error::ErrorResponse {
-                    error: format!("Failed to commit transaction: {}", e),
+                    error: format!("Failed to begin transaction: {}", e),
                 }),
             )
                 .into_response()
@@ -300,52 +298,95 @@ pub async fn tx_commit(
     })
 }
 
-/// Rollback a transaction.
+/// Commit a transaction (Go-compatible).
+///
+/// POST /api/v0/tx/{id}
+///
+/// Go DefraDB uses path parameter for transaction ID and returns empty body on success.
 ///
 /// Requires `DocumentUpdate` permission when NAC is enabled.
-pub async fn tx_rollback(
+pub async fn tx_commit(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(request): Json<TxRequest>,
+    Path(params): Path<TxPathParam>,
 ) -> Result<impl IntoResponse, HttpError> {
-    // NAC check: rolling back transactions requires DocumentUpdate permission
+    // NAC check: committing transactions requires DocumentUpdate permission
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-    let handle = match request.txn_id.parse() {
-        Ok(h) => h,
-        Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(crate::error::ErrorResponse {
-                    error: format!("Invalid transaction ID: {}", request.txn_id),
-                }),
-            )
-                .into_response());
-        }
-    };
+    // Parse transaction ID as u64 (Go format)
+    let _txn_id: u64 = params
+        .id
+        .parse()
+        .map_err(|_| HttpError::BadRequest("invalid transaction id".to_string()))?;
 
-    Ok(match state.executor.rollback_txn(&handle).await {
+    let handle = params
+        .id
+        .parse()
+        .map_err(|_| HttpError::BadRequest("invalid transaction id".to_string()))?;
+
+    match state.executor.commit_txn(&handle).await {
         Ok(()) => {
-            tracing::info!(txn_id = %handle, "Transaction rolled back");
-            (
-                StatusCode::OK,
-                Json(TxSuccessResponse {
-                    status: "rolled_back".to_string(),
-                }),
-            )
-                .into_response()
+            tracing::info!(txn_id = %handle, "Transaction committed");
+            // Go returns 200 OK with empty body
+            Ok(StatusCode::OK.into_response())
         }
         Err(e) => {
-            tracing::error!(txn_id = %handle, error = %e, "Failed to rollback transaction");
-            (
+            tracing::error!(txn_id = %handle, error = %e, "Failed to commit transaction");
+            Ok((
                 StatusCode::BAD_REQUEST,
                 Json(crate::error::ErrorResponse {
-                    error: format!("Failed to rollback transaction: {}", e),
+                    error: "invalid transaction id".to_string(),
                 }),
             )
-                .into_response()
+                .into_response())
         }
-    })
+    }
+}
+
+/// Discard/rollback a transaction (Go-compatible).
+///
+/// DELETE /api/v0/tx/{id}
+///
+/// Go DefraDB uses DELETE method with path parameter for transaction ID.
+/// Returns empty body on success.
+///
+/// Requires `DocumentUpdate` permission when NAC is enabled.
+pub async fn tx_discard(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(params): Path<TxPathParam>,
+) -> Result<impl IntoResponse, HttpError> {
+    // NAC check: discarding transactions requires DocumentUpdate permission
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
+    // Parse transaction ID as u64 (Go format)
+    let _txn_id: u64 = params
+        .id
+        .parse()
+        .map_err(|_| HttpError::BadRequest("invalid transaction id".to_string()))?;
+
+    let handle = params
+        .id
+        .parse()
+        .map_err(|_| HttpError::BadRequest("invalid transaction id".to_string()))?;
+
+    match state.executor.rollback_txn(&handle).await {
+        Ok(()) => {
+            tracing::info!(txn_id = %handle, "Transaction discarded");
+            // Go returns 200 OK with empty body
+            Ok(StatusCode::OK.into_response())
+        }
+        Err(e) => {
+            tracing::error!(txn_id = %handle, error = %e, "Failed to discard transaction");
+            Ok((
+                StatusCode::BAD_REQUEST,
+                Json(crate::error::ErrorResponse {
+                    error: "invalid transaction id".to_string(),
+                }),
+            )
+                .into_response())
+        }
+    }
 }
 
 /// Extended GraphQL request with optional transaction ID.
@@ -361,6 +402,14 @@ pub struct TransactionalQueryRequest {
 /// GraphQL POST request handler with optional transaction support.
 /// Identity is extracted from the Authorization header and used for ACP checks.
 ///
+/// # Transaction ID
+///
+/// Transaction ID can be provided in two ways (Go-compatible):
+/// 1. `x-defradb-tx` header (preferred by Go DefraDB clients)
+/// 2. `txn_id` field in request body
+///
+/// Header takes precedence if both are provided.
+///
 /// # NAC Permission Model
 ///
 /// Permission is determined by parsing the query:
@@ -371,6 +420,7 @@ pub struct TransactionalQueryRequest {
 pub async fn graphql_transactional(
     State(state): State<AppState>,
     identity: ExtractIdentity,
+    headers: HeaderMap,
     Json(request): Json<TransactionalQueryRequest>,
 ) -> Result<Json<QueryResponse>, HttpError> {
     // NAC check: Determine required permission based on operation type
@@ -384,7 +434,14 @@ pub async fn graphql_transactional(
         identity: identity.into_did(),
     };
 
-    let response = match request.txn_id {
+    // Check for transaction ID in header first (Go-compatible), then body
+    let txn_id = headers
+        .get(TX_HEADER_NAME)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or(request.txn_id);
+
+    let response = match txn_id {
         Some(txn_id_str) => {
             let handle = match txn_id_str.parse() {
                 Ok(h) => h,

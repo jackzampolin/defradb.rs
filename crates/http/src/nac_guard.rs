@@ -45,13 +45,10 @@ pub async fn require_permission(
         .ok_or_else(|| HttpError::Unauthorized("authentication required".into()))?;
 
     // Check the permission
-    let allowed = nac
-        .check_permission(did, permission)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, ?permission, "NAC permission check failed");
-            HttpError::Internal("permission check failed".into())
-        })?;
+    let allowed = nac.check_permission(did, permission).await.map_err(|e| {
+        tracing::error!(error = %e, ?permission, "NAC permission check failed");
+        HttpError::Internal("permission check failed".into())
+    })?;
 
     if !allowed {
         // Return 401 to match Go DefraDB's CollectionMiddleware behavior

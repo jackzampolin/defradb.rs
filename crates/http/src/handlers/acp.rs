@@ -49,10 +49,7 @@ pub async fn add_policy(
         return Err(HttpError::BadRequest("policy cannot be empty".into()));
     }
 
-    let policy_id = acp
-        .add_policy(&body)
-        .await
-        .map_err(HttpError::BadRequest)?;
+    let policy_id = acp.add_policy(&body).await.map_err(HttpError::BadRequest)?;
 
     Ok(Json(AddPolicyResponse { policy_id }))
 }

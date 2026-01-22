@@ -500,11 +500,17 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // Health check at root level (matches Go DefraDB)
     let root_routes = Router::new().route("/health-check", get(handlers::health_check));
 
-    // Transaction routes
+    // Transaction routes (Go-compatible)
+    // Go DefraDB:
+    //   POST /tx - begin transaction (query param: ?read_only=true)
+    //   POST /tx/concurrent - begin concurrent transaction
+    //   POST /tx/{id} - commit transaction
+    //   DELETE /tx/{id} - discard transaction
     let tx_routes = Router::new()
-        .route("/begin", post(handlers::tx_begin))
-        .route("/commit", post(handlers::tx_commit))
-        .route("/rollback", post(handlers::tx_rollback));
+        .route("/", post(handlers::tx_begin))
+        .route("/concurrent", post(handlers::tx_begin_concurrent))
+        .route("/:id", post(handlers::tx_commit))
+        .route("/:id", delete(handlers::tx_discard));
 
     // Collection routes (REST API)
     let collection_routes = Router::new()
@@ -566,6 +572,19 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/admin", post(handlers::nac::add_admin))
         .route("/admin", delete(handlers::nac::remove_admin));
 
+    // Go-compatible ACP node routes (aliased from /acp/node/*)
+    // Go DefraDB uses:
+    //   GET /acp/node/status
+    //   POST /acp/node/relationship
+    //   DELETE /acp/node/relationship
+    let acp_node_routes = Router::new()
+        .route("/status", get(handlers::nac::get_status))
+        .route("/relationship", post(handlers::nac::go_add_relationship))
+        .route(
+            "/relationship",
+            delete(handlers::nac::go_remove_relationship),
+        );
+
     // API v0 routes
     let api_routes = Router::new()
         // GraphQL endpoints
@@ -580,14 +599,19 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/collections", collection_routes)
         // P2P endpoints
         .nest("/p2p", p2p_routes)
-        // ACP endpoints
+        // ACP endpoints (document-level access control)
         .nest("/acp", acp_routes)
+        // Go-compatible ACP node routes (NAC via /acp/node/*)
+        .nest("/acp/node", acp_node_routes)
         // Index endpoints
         .nest("/index", index_routes)
         // Backup endpoints
         .nest("/backup", backup_routes)
-        // NAC endpoints
+        // NAC endpoints (Rust-native routes)
         .nest("/nac", nac_routes)
+        // Utility endpoints (Go-compatible)
+        .route("/purge", post(handlers::utility::purge))
+        .route("/node/identity", get(handlers::utility::get_node_identity))
         .with_state(state);
 
     root_routes.nest("/api/v0", api_routes)

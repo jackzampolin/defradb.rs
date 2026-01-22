@@ -8,16 +8,13 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
-use axum::{
-    extract::{Query, State},
-    Json,
-};
+use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
-use crate::router::{AppState, NodePermission, P2pDocumentInfo, P2pDocumentRequest};
+use crate::router::{AppState, NodePermission, P2pDocumentRequest};
 use crate::validation::{validate_collection_name, validate_doc_id, validate_multiaddr};
 
 /// Response for P2P node info (Go-compatible format).
@@ -39,14 +36,19 @@ pub struct ConnectPeerRequest {
     pub address: String,
 }
 
-/// Response for replicator info.
+/// Response for replicator info (Go-compatible format with PascalCase).
+/// Matches Go's `client.Replicator` struct.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReplicatorInfoResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Replicator ID (Go uses PascalCase).
+    #[serde(rename = "ID", skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    pub collections: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
+    /// List of peer addresses (Go uses Addresses plural).
+    #[serde(rename = "Addresses")]
+    pub addresses: Vec<String>,
+    /// Collection IDs being replicated (Go uses CollectionIDs).
+    #[serde(rename = "CollectionIDs")]
+    pub collection_ids: Vec<String>,
 }
 
 /// Request to add a replicator (Go-compatible format).
@@ -60,25 +62,15 @@ pub struct ReplicatorRequest {
     pub addresses: Vec<String>,
 }
 
-/// Query parameters for replicator removal.
+/// Request body for replicator removal (Go-compatible).
+/// Go DefraDB uses body JSON with ID and Collections fields.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ReplicatorDeleteQuery {
-    #[serde(default)]
-    pub collections: Vec<String>,
-    #[serde(default)]
-    pub address: Option<String>,
-}
-
-/// Request to add P2P collections.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CollectionsRequest {
-    pub collections: Vec<String>,
-}
-
-/// Query parameters for collection removal.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CollectionsDeleteQuery {
-    #[serde(default)]
+pub struct ReplicatorDeleteRequest {
+    /// Replicator ID (optional in Go).
+    #[serde(rename = "ID", default)]
+    pub id: Option<String>,
+    /// Collections to remove from replicator.
+    #[serde(rename = "Collections", default)]
     pub collections: Vec<String>,
 }
 
@@ -186,9 +178,12 @@ pub async fn connect(
     Ok(())
 }
 
-/// List replicators.
+/// List replicators (Go-compatible format).
 ///
-/// GET /api/v0/p2p/replicator
+/// GET /api/v0/p2p/replicators
+///
+/// Returns array of replicators with Go-compatible PascalCase field names:
+/// `[{"ID": "...", "Addresses": [...], "CollectionIDs": [...]}]`
 ///
 /// Requires `P2pReplicatorList` permission when NAC is enabled.
 pub async fn list_replicators(
@@ -205,8 +200,10 @@ pub async fn list_replicators(
         .into_iter()
         .map(|r| ReplicatorInfoResponse {
             id: r.id,
-            collections: r.collections,
-            address: r.address,
+            // Convert single address to array (Go uses Addresses plural)
+            addresses: r.address.into_iter().collect(),
+            // Use collections as collection IDs
+            collection_ids: r.collections,
         })
         .collect();
 
@@ -255,41 +252,43 @@ pub async fn add_replicator(
     Ok(Json(()))
 }
 
-/// Remove a replicator.
+/// Remove a replicator (Go-compatible).
 ///
-/// DELETE /api/v0/p2p/replicator
+/// DELETE /api/v0/p2p/replicators
+///
+/// Go DefraDB uses body JSON with ID and Collections fields:
+/// `{"ID": "replicator-id", "Collections": ["col1", "col2"]}`
 ///
 /// Requires `P2pReplicatorDelete` permission when NAC is enabled.
 pub async fn remove_replicator(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<ReplicatorDeleteQuery>,
-) -> Result<Json<()>, HttpError> {
+    Json(request): Json<ReplicatorDeleteRequest>,
+) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pReplicatorDelete).await?;
 
     let p2p = state.require_p2p()?;
 
-    if query.collections.is_empty() {
+    if request.collections.is_empty() {
         return Err(HttpError::BadRequest(
             "at least one collection is required".into(),
         ));
     }
 
     // Validate collection names
-    for col in &query.collections {
+    for col in &request.collections {
         validate_collection_name(col)?;
     }
 
-    // Validate address if provided
-    if let Some(ref addr) = query.address {
-        validate_multiaddr(addr)?;
-    }
+    // Use ID as address if provided (Go uses ID field for peer identification)
+    let addr = request.id.as_deref();
 
-    p2p.remove_replicator(query.collections, query.address.as_deref())
+    p2p.remove_replicator(request.collections, addr)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(()))
+    // Go returns 200 OK with empty body
+    Ok(())
 }
 
 /// List P2P collections.
@@ -310,165 +309,186 @@ pub async fn list_collections(
     Ok(Json(collections))
 }
 
-/// Add collections to P2P.
+/// Add collections to P2P (Go-compatible).
 ///
 /// POST /api/v0/p2p/collections
+///
+/// Go DefraDB accepts raw array: `["collection1", "collection2"]`
 ///
 /// Requires `P2pCollectionCreate` permission when NAC is enabled.
 pub async fn add_collections(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(request): Json<CollectionsRequest>,
-) -> Result<Json<()>, HttpError> {
+    Json(collections): Json<Vec<String>>,
+) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pCollectionCreate).await?;
 
     let p2p = state.require_p2p()?;
 
-    if request.collections.is_empty() {
+    if collections.is_empty() {
         return Err(HttpError::BadRequest(
             "at least one collection is required".into(),
         ));
     }
 
     // Validate collection names
-    for col in &request.collections {
+    for col in &collections {
         validate_collection_name(col)?;
     }
 
-    p2p.add_collections(request.collections)
+    p2p.add_collections(collections)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(()))
+    // Go returns 200 OK with empty body
+    Ok(())
 }
 
-/// Remove collections from P2P.
+/// Remove collections from P2P (Go-compatible).
 ///
 /// DELETE /api/v0/p2p/collections
+///
+/// Go DefraDB accepts body JSON: `["collection1", "collection2"]`
 ///
 /// Requires `P2pCollectionDelete` permission when NAC is enabled.
 pub async fn remove_collections(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<CollectionsDeleteQuery>,
-) -> Result<Json<()>, HttpError> {
+    Json(collections): Json<Vec<String>>,
+) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pCollectionDelete).await?;
 
     let p2p = state.require_p2p()?;
 
-    if query.collections.is_empty() {
+    if collections.is_empty() {
         return Err(HttpError::BadRequest(
             "at least one collection is required".into(),
         ));
     }
 
     // Validate collection names
-    for col in &query.collections {
+    for col in &collections {
         validate_collection_name(col)?;
     }
 
-    p2p.remove_collections(query.collections)
+    p2p.remove_collections(collections)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(()))
+    // Go returns 200 OK with empty body
+    Ok(())
 }
 
-/// List P2P documents (for document-level replication).
+/// List P2P documents (Go-compatible).
 ///
 /// GET /api/v0/p2p/documents
+///
+/// Go DefraDB returns flat array of document IDs: `["doc-id-1", "doc-id-2"]`
 ///
 /// Requires `P2pDocumentList` permission when NAC is enabled.
 pub async fn list_documents(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-) -> Result<Json<Vec<P2pDocumentInfo>>, HttpError> {
+) -> Result<Json<Vec<String>>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pDocumentList).await?;
 
     let p2p = state.require_p2p()?;
 
     let docs = p2p.get_documents().await.map_err(HttpError::Internal)?;
 
-    Ok(Json(docs))
+    // Convert to flat array of document IDs (Go-compatible format)
+    let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
+
+    Ok(Json(doc_ids))
 }
 
-/// Add documents to P2P replication.
+/// Add documents to P2P replication (Go-compatible).
 ///
 /// POST /api/v0/p2p/documents
 ///
-/// Body: [{"Collection": "Users", "DocID": "bae-123"}, ...]
+/// Go DefraDB accepts flat array of document IDs: `["doc-id-1", "doc-id-2"]`
 ///
 /// Requires `P2pDocumentCreate` permission when NAC is enabled.
 pub async fn add_documents(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(docs): Json<Vec<P2pDocumentRequest>>,
-) -> Result<Json<()>, HttpError> {
+    Json(doc_ids): Json<Vec<String>>,
+) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pDocumentCreate).await?;
 
     let p2p = state.require_p2p()?;
 
-    if docs.is_empty() {
+    if doc_ids.is_empty() {
         return Err(HttpError::BadRequest(
             "at least one document is required".into(),
         ));
     }
 
-    // Validate collection names and doc IDs
-    for doc in &docs {
-        validate_collection_name(&doc.collection)?;
-        validate_doc_id(&doc.doc_id)?;
+    // Validate doc IDs
+    for doc_id in &doc_ids {
+        validate_doc_id(doc_id)?;
     }
+
+    // Convert flat doc IDs to P2pDocumentRequest format
+    // Note: Go DefraDB infers collection from doc ID prefix
+    let docs: Vec<P2pDocumentRequest> = doc_ids
+        .into_iter()
+        .map(|doc_id| P2pDocumentRequest {
+            collection: String::new(), // Collection inferred from doc ID
+            doc_id,
+        })
+        .collect();
 
     p2p.add_documents(docs)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(()))
+    // Go returns 200 OK with empty body
+    Ok(())
 }
 
-/// Request to remove P2P documents.
-#[derive(Debug, Clone, Deserialize)]
-pub struct DocumentsDeleteQuery {
-    #[serde(default)]
-    pub collection: Option<String>,
-    #[serde(default)]
-    pub doc_id: Option<String>,
-}
-
-/// Remove documents from P2P replication.
+/// Remove documents from P2P replication (Go-compatible).
 ///
 /// DELETE /api/v0/p2p/documents
 ///
-/// Query params: ?collection=Users&doc_id=bae-123
+/// Go DefraDB accepts body JSON with flat array of document IDs: `["doc-id-1", "doc-id-2"]`
 ///
 /// Requires `P2pDocumentDelete` permission when NAC is enabled.
 pub async fn remove_documents(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<DocumentsDeleteQuery>,
-) -> Result<Json<()>, HttpError> {
+    Json(doc_ids): Json<Vec<String>>,
+) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pDocumentDelete).await?;
 
     let p2p = state.require_p2p()?;
 
-    // Both collection and doc_id are required for removal
-    let collection = query.collection.ok_or_else(|| {
-        HttpError::BadRequest("collection parameter is required".into())
-    })?;
-    let doc_id = query.doc_id.ok_or_else(|| {
-        HttpError::BadRequest("doc_id parameter is required".into())
-    })?;
+    if doc_ids.is_empty() {
+        return Err(HttpError::BadRequest(
+            "at least one document is required".into(),
+        ));
+    }
 
-    validate_collection_name(&collection)?;
-    validate_doc_id(&doc_id)?;
+    // Validate doc IDs
+    for doc_id in &doc_ids {
+        validate_doc_id(doc_id)?;
+    }
 
-    let docs = vec![P2pDocumentRequest { collection, doc_id }];
+    // Convert flat doc IDs to P2pDocumentRequest format
+    let docs: Vec<P2pDocumentRequest> = doc_ids
+        .into_iter()
+        .map(|doc_id| P2pDocumentRequest {
+            collection: String::new(),
+            doc_id,
+        })
+        .collect();
+
     p2p.remove_documents(docs)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(()))
+    // Go returns 200 OK with empty body
+    Ok(())
 }
 
 /// Sync collections with peers (trigger immediate sync).
@@ -484,9 +504,7 @@ pub async fn sync_collections(
 
     let p2p = state.require_p2p()?;
 
-    p2p.sync_collections()
-        .await
-        .map_err(HttpError::Internal)?;
+    p2p.sync_collections().await.map_err(HttpError::Internal)?;
 
     Ok(Json(()))
 }
@@ -504,9 +522,7 @@ pub async fn sync_documents(
 
     let p2p = state.require_p2p()?;
 
-    p2p.sync_documents()
-        .await
-        .map_err(HttpError::Internal)?;
+    p2p.sync_documents().await.map_err(HttpError::Internal)?;
 
     Ok(Json(()))
 }
@@ -541,10 +557,20 @@ mod tests {
     }
 
     #[test]
-    fn test_collections_request_deserialize() {
-        let json = r#"{"collections": ["Users", "Posts"]}"#;
-        let request: CollectionsRequest = serde_json::from_str(json).unwrap();
+    fn test_replicator_delete_request_deserialize() {
+        // Go-compatible format with PascalCase field names
+        let json = r#"{"ID": "replicator-123", "Collections": ["Users", "Posts"]}"#;
+        let request: ReplicatorDeleteRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.id, Some("replicator-123".to_string()));
         assert_eq!(request.collections.len(), 2);
+    }
+
+    #[test]
+    fn test_collections_array_deserialize() {
+        // Go-compatible format: raw array
+        let json = r#"["Users", "Posts"]"#;
+        let collections: Vec<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(collections.len(), 2);
     }
 
     #[test]
@@ -557,5 +583,20 @@ mod tests {
         assert!(json.contains("/ip4/127.0.0.1/tcp/9000"));
         // Verify it's an array, not an object
         assert!(json.starts_with('['));
+    }
+
+    #[test]
+    fn test_replicator_info_response_serialize() {
+        // Go-compatible format with PascalCase field names
+        let response = ReplicatorInfoResponse {
+            id: Some("replicator-123".to_string()),
+            addresses: vec!["/ip4/127.0.0.1/tcp/9000".to_string()],
+            collection_ids: vec!["Users".to_string(), "Posts".to_string()],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        // Verify PascalCase field names
+        assert!(json.contains("\"ID\""));
+        assert!(json.contains("\"Addresses\""));
+        assert!(json.contains("\"CollectionIDs\""));
     }
 }

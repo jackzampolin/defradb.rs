@@ -62,9 +62,10 @@ async fn test_get_document_not_found() {
     )
     .await;
     assert!(result.is_err());
+    // Go DefraDB returns 400 Bad Request for document not found (combines with permission error)
     match result.unwrap_err() {
-        HttpError::NotFound(msg) => assert!(msg.contains("bae-nonexistent")),
-        _ => panic!("Expected NotFound error"),
+        HttpError::BadRequest(msg) => assert!(msg.contains("bae-nonexistent")),
+        _ => panic!("Expected BadRequest error (Go-compatible behavior for document not found)"),
     }
 }
 
@@ -185,9 +186,10 @@ async fn test_update_document_not_found() {
     )
     .await;
     assert!(result.is_err());
+    // Go DefraDB returns 400 Bad Request for document not found (combines with permission error)
     match result.unwrap_err() {
-        HttpError::NotFound(msg) => assert!(msg.contains("bae-nonexistent")),
-        _ => panic!("Expected NotFound error"),
+        HttpError::BadRequest(msg) => assert!(msg.contains("bae-nonexistent")),
+        _ => panic!("Expected BadRequest error (Go-compatible behavior for document not found)"),
     }
 }
 

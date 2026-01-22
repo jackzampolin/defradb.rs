@@ -18,12 +18,13 @@ pub mod index;
 pub mod nac;
 pub mod p2p;
 pub mod schema;
+pub mod utility;
 
 // Re-export GraphQL handlers for backwards compatibility
 pub use graphql::{
-    graphql, graphql_get, graphql_transactional, health_check, schema, tx_begin, tx_commit,
-    tx_rollback, version, GraphqlQueryParams, TransactionalQueryRequest, TxBeginRequest,
-    TxBeginResponse, TxRequest, TxSuccessResponse, VersionResponse,
+    graphql, graphql_get, graphql_transactional, health_check, schema, tx_begin,
+    tx_begin_concurrent, tx_commit, tx_discard, version, GraphqlQueryParams,
+    TransactionalQueryRequest, TxBeginQuery, TxBeginResponse, TxPathParam, VersionResponse,
 };
 
 // Re-export REST handlers

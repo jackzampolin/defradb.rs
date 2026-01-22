@@ -13,9 +13,9 @@ use identity::{new_token, Did, Identity, RawIdentity};
 use tower::ServiceExt;
 
 use defra_http::{
-    create_router_with_state, AppStateBuilder, FailingMockNodeAcpOperations,
-    MockAcpOperations, MockBackupOperations, MockIndexOperations, MockNodeAcpOperations,
-    MockP2POperations, MockQueryExecutor, MockRestOperations, NodePermission,
+    create_router_with_state, AppStateBuilder, FailingMockNodeAcpOperations, MockAcpOperations,
+    MockBackupOperations, MockIndexOperations, MockNodeAcpOperations, MockP2POperations,
+    MockQueryExecutor, MockRestOperations, NodePermission,
 };
 
 const TEST_HOST: &str = "localhost:9181";
@@ -1196,8 +1196,8 @@ async fn test_nac_remove_admin_allows_owner() {
     let (_, target_did) = create_test_identity();
     let token = create_test_token(&owner_identity);
 
-    let nac = MockNodeAcpOperations::enabled_with_owner(owner_did.clone())
-        .with_admin(target_did.clone());
+    let nac =
+        MockNodeAcpOperations::enabled_with_owner(owner_did.clone()).with_admin(target_did.clone());
 
     let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
         .with_nac(Arc::new(nac))
@@ -1701,9 +1701,8 @@ async fn test_p2p_add_collections_rejects_anonymous_when_nac_enabled() {
 
     let app = create_router_with_state(state);
 
-    let body = serde_json::json!({
-        "collections": ["users"]
-    });
+    // Go-compatible format: raw array
+    let body = serde_json::json!(["users"]);
     let response = app
         .oneshot(
             Request::builder()
@@ -1733,9 +1732,8 @@ async fn test_p2p_remove_collections_rejects_anonymous_when_nac_enabled() {
 
     let app = create_router_with_state(state);
 
-    let body = serde_json::json!({
-        "collections": ["users"]
-    });
+    // Go-compatible format: raw array
+    let body = serde_json::json!(["users"]);
     let response = app
         .oneshot(
             Request::builder()

@@ -1416,7 +1416,11 @@ impl NodeAcpOperations for FailingMockNodeAcpOperations {
         Err(self.error.clone())
     }
 
-    async fn add_admin(&self, _requestor: &Did, _target: &Did) -> std::result::Result<bool, String> {
+    async fn add_admin(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+    ) -> std::result::Result<bool, String> {
         Err(self.error.clone())
     }
 

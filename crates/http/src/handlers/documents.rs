@@ -45,9 +45,10 @@ pub async fn get_document(
         .await
     {
         Ok(Some(doc)) => Ok(Json(doc)),
-        Ok(None) => Err(HttpError::NotFound(format!(
-            "Document '{}' not found in collection '{}'",
-            doc_id, collection
+        // Go DefraDB returns 400 Bad Request for document not found (combines with permission error)
+        Ok(None) => Err(HttpError::BadRequest(format!(
+            "document not found or not authorized: {}",
+            doc_id
         ))),
         Err(e) => {
             tracing::warn!(

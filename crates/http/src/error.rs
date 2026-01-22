@@ -67,8 +67,10 @@ impl From<RestError> for HttpError {
             RestError::CollectionNotFound(name) => {
                 HttpError::NotFound(format!("Collection '{}' not found", name))
             }
+            // Go DefraDB returns 400 Bad Request for document not found
+            // (combines with "not authorized" for ambiguity in permission errors)
             RestError::DocumentNotFound(id) => {
-                HttpError::NotFound(format!("Document '{}' not found", id))
+                HttpError::BadRequest(format!("document not found or not authorized: {}", id))
             }
             RestError::InvalidDocId(id) => {
                 HttpError::BadRequest(format!("Invalid document ID: {}", id))
