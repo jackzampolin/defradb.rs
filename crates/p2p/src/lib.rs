@@ -105,7 +105,12 @@ pub use sync::{
 
 // Re-export bitswap types
 pub use bitswap::{AccessMode, BitswapStoreAdapter, ReplicatorRegistry};
-pub use libp2p_bitswap_next::{BitswapStore, QueryId};
+pub use iroh_bitswap::Store as BitswapStore;
+
+/// Query ID for tracking Bitswap operations.
+/// This is a simple wrapper that allows correlating sync requests with completions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryId(pub u64);
 
 // Re-export replicator types
 pub use replicator::ReplicatorInfo;

@@ -46,6 +46,7 @@ pub mod acp_merge_handler;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod block_builder;
+pub mod merge_handler;
 pub mod broadcast_mutator;
 pub mod collection;
 pub mod collection_acp;
@@ -87,6 +88,7 @@ pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
+pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };

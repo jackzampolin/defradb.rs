@@ -64,28 +64,36 @@ pub fn sign_message<M>(keypair: &Keypair, msg: &mut M) -> Result<()>
 where
     M: Message + Serialize,
 {
-    let metadata = msg.metadata_mut();
-
     // Generate message ID if not already set
-    if metadata.message_id.is_empty() {
-        metadata.message_id = Uuid::new_v4().to_string();
+    if msg.message_id().is_empty() {
+        msg.set_message_id(Uuid::new_v4().to_string());
     }
 
     // Set protocol version
-    metadata.version = MESSAGE_VERSION.to_string();
+    msg.set_version(MESSAGE_VERSION.to_string());
 
     // Set sender ID from keypair
     let peer_id = keypair.public().to_peer_id();
-    metadata.sender_id = peer_id.to_string();
+    msg.set_sender_id(peer_id.to_string());
 
     // Set public key (protobuf encoded, matching Go's libp2p)
-    metadata.pubkey = keypair.public().encode_protobuf();
+    msg.set_pubkey(keypair.public().encode_protobuf());
 
     // Clear signature before serializing for signing
-    metadata.signature = None;
+    msg.set_signature(None);
 
     // CBOR serialize the message
     let bytes = serde_cbor::to_vec(&msg).map_err(|e| Error::CborSerialization(e.to_string()))?;
+
+    // Debug logging
+    tracing::info!(
+        bytes_len = bytes.len(),
+        message_id = %msg.message_id(),
+        sender_id = %msg.sender_id(),
+        pubkey_len = msg.pubkey().len(),
+        version = %msg.version(),
+        "Signing message for Go interop"
+    );
 
     // Sign the serialized bytes
     let signature = keypair
@@ -93,7 +101,7 @@ where
         .map_err(|e| Error::SigningFailed(e.to_string()))?;
 
     // Set the signature
-    msg.metadata_mut().signature = Some(signature);
+    msg.set_signature(Some(signature));
 
     Ok(())
 }
@@ -121,21 +129,19 @@ pub fn verify_message<M>(msg: &M) -> Result<()>
 where
     M: Message + Serialize + Clone,
 {
-    let metadata = msg.metadata();
-
     // Check that signature exists
-    let signature = metadata.signature.as_ref().ok_or(Error::MissingSignature)?;
+    let signature = msg.signature().ok_or(Error::MissingSignature)?;
 
     // Decode public key from message
-    let pubkey = PublicKey::try_decode_protobuf(&metadata.pubkey)
+    let pubkey = PublicKey::try_decode_protobuf(msg.pubkey())
         .map_err(|e| Error::PublicKeyDecode(e.to_string()))?;
 
     // Derive peer ID from public key
     let id_from_key = pubkey.to_peer_id();
 
     // Parse sender ID as peer ID
-    let sender_peer_id: PeerId = metadata
-        .sender_id
+    let sender_peer_id: PeerId = msg
+        .sender_id()
         .parse()
         .map_err(|e: libp2p::identity::ParseError| Error::InvalidPeerId(e.to_string()))?;
 
@@ -146,7 +152,7 @@ where
 
     // Clone message and clear signature for verification
     let mut msg_for_verify = msg.clone();
-    msg_for_verify.metadata_mut().signature = None;
+    msg_for_verify.set_signature(None);
 
     // CBOR serialize
     let bytes =

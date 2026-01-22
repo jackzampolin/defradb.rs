@@ -20,7 +20,8 @@ acp = { path = "../acp" }
 
 # P2P
 libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio", "gossipsub", "kad"] }
-libp2p-bitswap-next = { workspace = true }
+iroh-bitswap = { workspace = true }
+iroh-metrics = { workspace = true }
 libp2p-stream = { workspace = true }
 multiaddr = { workspace = true }
 
@@ -43,7 +44,11 @@ libipld = { workspace = true }
 
 # Errors
 thiserror = { workspace = true }
+anyhow = { workspace = true }
 tracing = { workspace = true }
+
+# Bytes
+bytes = { workspace = true }
 
 # Synchronization (non-poisoning locks)
 parking_lot = { workspace = true }

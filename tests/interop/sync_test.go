@@ -249,12 +249,26 @@ func TestSyncGoToRustWriteRead(t *testing.T) {
 	require.NoError(t, err, "failed to add P2P collections to Rust node")
 	t.Log("P2P collections added to Rust node")
 
+	// Set up bi-directional replicator registration:
+	// 1. Go sets Rust as a replicator so Go pushes updates TO Rust
+	// 2. Go also needs to allow Rust to fetch blocks via Bitswap (hasAccess check)
+	//    This happens implicitly when we set replicator - Go allows replicators to fetch blocks
+
 	// Set up replication from Go to Rust
 	// The Go node will push data to the Rust node via request-response protocol
-	t.Log("Setting up replication...")
+	t.Log("Setting up replication (Go -> Rust)...")
 	err = goClient.SetReplicator(ctx, []string{rustNode.P2PMultiaddr()}, []string{goSchemas[0].Name})
 	require.NoError(t, err, "failed to set replicator on Go node")
 	t.Log("Replicator set on Go node")
+
+	// Also set up replication from Rust to Go - this is needed because:
+	// Go's Bitswap has an access control filter (hasAccess) that only serves blocks
+	// to peers that are registered replicators. Without this, when Rust tries to
+	// fetch linked blocks via Bitswap, Go will deny the request.
+	t.Log("Setting up replication (Rust -> Go) for Bitswap access...")
+	err = rustClient.SetReplicator(ctx, []string{goNode.P2PMultiaddr()}, []string{rustSchemas[0].Name})
+	require.NoError(t, err, "failed to set replicator on Rust node")
+	t.Log("Replicator set on Rust node (enables Bitswap access)")
 
 	// Create a document on the Go node
 	t.Log("Creating document on Go node...")

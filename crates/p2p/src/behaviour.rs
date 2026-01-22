@@ -15,7 +15,7 @@
 //! - Peer identification (identify)
 //! - Local peer discovery (mDNS)
 //! - Kademlia DHT for peer discovery
-//! - Bitswap for block exchange (Go compatibility)
+//! - Bitswap for block exchange (Go compatibility via iroh-bitswap)
 //! - Request-response for PushLog synchronization
 //! - GossipSub for pubsub messaging
 //!
@@ -32,13 +32,13 @@
 //! For GossipSub, we use libp2p's native message signing via
 //! `MessageAuthenticity::Signed` which matches Go's approach.
 //!
-//! For Bitswap, we use libp2p-bitswap-next which implements the standard
-//! IPFS block exchange protocol, enabling interoperability with Go DefraDB.
+//! For Bitswap, we use iroh-bitswap which implements the standard
+//! IPFS block exchange protocol (1.0.0, 1.1.0, 1.2.0), enabling
+//! interoperability with Go DefraDB.
 
 use std::time::Duration;
 
-use futures::future::BoxFuture;
-use libipld::DefaultParams;
+use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig, Store};
 use libp2p::{
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
     identify,
@@ -48,7 +48,6 @@ use libp2p::{
     swarm::NetworkBehaviour,
     Multiaddr, PeerId, StreamProtocol,
 };
-use libp2p_bitswap_next::{Bitswap, BitswapConfig, BitswapEvent, BitswapStore, QueryId};
 use libp2p_stream as stream;
 
 use libp2p::identity::Keypair;
@@ -62,7 +61,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Composite network behaviour for DefraDB nodes.
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "DefraEvent")]
-pub struct DefraBehaviour {
+pub struct DefraBehaviour<S: Store> {
     /// Peer identification protocol.
     pub identify: identify::Behaviour,
 
@@ -74,8 +73,8 @@ pub struct DefraBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
 
     /// Bitswap block exchange protocol (Go compatibility).
-    /// Uses libp2p-bitswap-next for IPFS block exchange.
-    pub bitswap: Bitswap<DefaultParams>,
+    /// Uses iroh-bitswap for IPFS block exchange.
+    pub bitswap: Bitswap<S>,
 
     /// Request-response protocol for PushLog messages.
     pub pushlog: request_response::Behaviour<PushLogCodec>,
@@ -154,7 +153,7 @@ impl From<()> for DefraEvent {
     }
 }
 
-impl DefraBehaviour {
+impl<S: Store> DefraBehaviour<S> {
     /// Create a new DefraDB network behaviour with message signing enabled.
     ///
     /// # Arguments
@@ -171,8 +170,8 @@ impl DefraBehaviour {
     /// # Note
     ///
     /// This must be called within a tokio runtime context as Bitswap spawns
-    /// a background task for database operations.
-    pub fn new<S: BitswapStore<Params = DefaultParams>>(
+    /// background tasks for operations.
+    pub async fn new(
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
         keypair: Keypair,
@@ -235,11 +234,9 @@ impl DefraBehaviour {
         kademlia.set_mode(Some(Mode::Server));
 
         // Configure Bitswap for block exchange (Go compatibility)
-        // The executor spawns a background task for database operations
-        let executor: Box<dyn FnOnce(BoxFuture<'static, ()>)> = Box::new(|fut| {
-            tokio::spawn(fut);
-        });
-        let bitswap = Bitswap::new(BitswapConfig::default(), bitswap_store, executor);
+        // iroh-bitswap implements the standard IPFS bitswap protocols
+        let bitswap_config = BitswapConfig::default();
+        let bitswap = Bitswap::new(local_peer_id, bitswap_store, bitswap_config).await;
 
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
@@ -270,7 +267,7 @@ impl DefraBehaviour {
     ///
     /// A new `DefraBehaviour` instance or an error if initialization fails.
     #[cfg(test)]
-    pub fn new_without_signing<S: BitswapStore<Params = DefaultParams>>(
+    pub async fn new_without_signing(
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
         bitswap_store: S,
@@ -320,10 +317,8 @@ impl DefraBehaviour {
         kademlia.set_mode(Some(Mode::Server));
 
         // Configure Bitswap for block exchange
-        let executor: Box<dyn FnOnce(BoxFuture<'static, ()>)> = Box::new(|fut| {
-            tokio::spawn(fut);
-        });
-        let bitswap = Bitswap::new(BitswapConfig::default(), bitswap_store, executor);
+        let bitswap_config = BitswapConfig::default();
+        let bitswap = Bitswap::new(local_peer_id, bitswap_store, bitswap_config).await;
 
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
@@ -397,46 +392,17 @@ impl DefraBehaviour {
     }
 
     // === Bitswap operations ===
+    // Note: iroh-bitswap uses a client/server model. The Bitswap behaviour
+    // handles protocol negotiation, but block fetching is done through the client.
 
-    /// Add a peer address for Bitswap block exchange.
-    pub fn add_bitswap_address(&mut self, peer_id: &PeerId, addr: Multiaddr) {
-        self.bitswap.add_address(peer_id, addr);
+    /// Get a reference to the Bitswap client for block fetching.
+    pub fn bitswap_client(&self) -> &iroh_bitswap::Client<S> {
+        self.bitswap.client()
     }
 
-    /// Remove a peer address from Bitswap.
-    pub fn remove_bitswap_address(&mut self, peer_id: &PeerId, addr: &Multiaddr) {
-        self.bitswap.remove_address(peer_id, addr);
-    }
-
-    /// Start a Bitswap get query to fetch a block by CID.
-    ///
-    /// Returns a query ID that can be used to track progress and completion.
-    pub fn bitswap_get(
-        &mut self,
-        cid: libipld::Cid,
-        peers: impl Iterator<Item = PeerId>,
-    ) -> QueryId {
-        self.bitswap.get(cid, peers)
-    }
-
-    /// Start a Bitswap sync query to fetch a block and all its linked blocks.
-    ///
-    /// This is used to sync a DAG starting from a root CID.
-    /// The `missing` iterator should contain the initial set of missing CIDs.
-    pub fn bitswap_sync(
-        &mut self,
-        cid: libipld::Cid,
-        peers: Vec<PeerId>,
-        missing: impl Iterator<Item = libipld::Cid>,
-    ) -> QueryId {
-        self.bitswap.sync(cid, peers, missing)
-    }
-
-    /// Cancel an in-progress Bitswap query.
-    ///
-    /// Returns `true` if a query was cancelled.
-    pub fn bitswap_cancel(&mut self, id: QueryId) -> bool {
-        self.bitswap.cancel(id)
+    /// Called when identify reports peer protocols - informs bitswap about supported protocols.
+    pub fn on_identify(&self, peer: &PeerId, protocols: &[String]) {
+        self.bitswap.on_identify(peer, protocols);
     }
 }
 
@@ -453,7 +419,7 @@ mod tests {
         let public_key = keypair.public();
         let store = MockBitswapStore::new();
 
-        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair, store);
+        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair, store).await;
         assert!(behaviour.is_ok());
     }
 
@@ -464,7 +430,7 @@ mod tests {
         let public_key = keypair.public();
         let store = MockBitswapStore::new();
 
-        let behaviour = DefraBehaviour::new_without_signing(peer_id, public_key, store);
+        let behaviour = DefraBehaviour::new_without_signing(peer_id, public_key, store).await;
         assert!(behaviour.is_ok());
     }
 }

@@ -495,11 +495,14 @@ impl Node {
                 let sync_blockstore =
                     Arc::new(blockstore::DefraBlockstore::new(store_for_sync.clone(), false));
 
+                // Clone blockstore for merge handler (before moving into coordinator)
+                let merge_blockstore = sync_blockstore.clone();
+
                 // Create persistent collection store for P2P subscriptions
                 let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
                     Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
 
-                let (coordinator, mut sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
+                let (coordinator, sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
                     p2p_handle.clone(),
                     sync_blockstore,
                     p2p::sync::SyncConfig::default(),
@@ -522,26 +525,26 @@ impl Node {
                     }
                 }
 
-                // Spawn sync event handler for incoming blocks
+                // Create merge handler for CRDT merging
+                let merge_handler =
+                    Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
+
+                // Spawn replication loop to process incoming blocks
+                let coordinator_for_replication = coordinator.clone();
+                let replication_config = p2p::sync::ReplicationConfig {
+                    continue_on_error: true,
+                    rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
+                };
                 tokio::spawn(async move {
-                    while let Some(event) = sync_events.recv().await {
-                        match event {
-                            p2p::sync::SyncEvent::BlockReceived {
-                                cid,
-                                doc_id,
-                                collection_id,
-                                ..
-                            } => {
-                                info!(
-                                    cid = %cid,
-                                    doc_id = %doc_id,
-                                    collection_id = %collection_id,
-                                    "Received block from P2P (merge not yet implemented)"
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
+                    info!("Starting replication loop for P2P sync");
+                    p2p::sync::ReplicationLoop::run(
+                        coordinator_for_replication,
+                        sync_events,
+                        merge_handler,
+                        replication_config,
+                    )
+                    .await;
+                    info!("Replication loop stopped");
                 });
 
                 // Spawn host event handler to process incoming P2P events through coordinator
@@ -692,14 +695,14 @@ impl Node {
     ///
     /// Returns both the handle and the events receiver so that the caller
     /// can connect events to the sync coordinator.
-    async fn start_p2p<S: p2p::BitswapStore<Params = libipld::DefaultParams>>(
+    async fn start_p2p<S: p2p::BitswapStore>(
         config: &Config,
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
     ) -> Result<(p2p::P2PHostHandle, tokio::sync::mpsc::Receiver<p2p::HostEvent>)> {
         let (host, handle, events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).map_err(Error::P2P)?,
-            None => p2p::P2PHost::new(bitswap_store).map_err(Error::P2P)?,
+            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store).await.map_err(Error::P2P)?,
+            None => p2p::P2PHost::new(bitswap_store).await.map_err(Error::P2P)?,
         };
 
         // Spawn the host event loop FIRST - it must be running to process commands

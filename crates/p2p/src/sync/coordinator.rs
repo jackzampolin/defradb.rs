@@ -95,8 +95,9 @@ use libp2p::PeerId;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
-use crate::message::{PushLogBroadcast, PushLogReply};
+use crate::message::{Message, PushLogBroadcast, PushLogReply};
 use crate::replicator::ReplicatorInfo;
+use crate::signing::sign_message;
 
 use super::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
 
@@ -493,13 +494,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                         doc_id = %request.doc_id,
                         "Rejecting two-stream request from unauthorized peer"
                     );
-                    let reply = PushLogReply::error(
+                    let mut reply = PushLogReply::error(
                         &request.metadata.message_id,
                         &format!(
                             "access denied: not authorized for collection {}",
                             request.collection_id
                         ),
                     );
+                    // Sign the error response
+                    if let Err(sign_err) = sign_message(self.host.keypair(), &mut reply) {
+                        tracing::error!(error = %sign_err, "Failed to sign access denied response");
+                    }
                     if let Err(send_err) = self.host.send_two_stream_response(peer_id, reply).await
                     {
                         tracing::warn!(
@@ -525,7 +530,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                             error = %e,
                             "Failed to parse CID from two-stream request - sending error response"
                         );
-                        let reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                        let mut reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
+                        // Sign the error response
+                        if let Err(sign_err) = sign_message(self.host.keypair(), &mut reply) {
+                            tracing::error!(error = %sign_err, "Failed to sign invalid CID response");
+                        }
                         if let Err(send_err) =
                             self.host.send_two_stream_response(peer_id, reply).await
                         {
@@ -547,10 +556,20 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 let process_result = self.manager.process_pushlog(&broadcast).await;
 
                 // Send response via two-stream protocol (on a NEW stream)
-                let reply = match &process_result {
+                let mut reply = match &process_result {
                     Ok(()) => PushLogReply::success(&request.metadata.message_id),
                     Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
                 };
+
+                // Sign the response (required for Go compatibility)
+                if let Err(e) = sign_message(self.host.keypair(), &mut reply) {
+                    tracing::error!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to sign two-stream response"
+                    );
+                    return Err(e);
+                }
 
                 if let Err(e) = self.host.send_two_stream_response(peer_id, reply).await {
                     tracing::warn!(
@@ -569,6 +588,87 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
                 // Propagate the processing error if there was one
                 process_result?;
+            }
+            HostEvent::BitswapBlockReceived { query_id, cid, data } => {
+                tracing::info!(
+                    query_id = query_id.0,
+                    cid = %cid,
+                    data_len = data.len(),
+                    "Storing Bitswap block in blockstore"
+                );
+
+                // Store the block in the blockstore
+                match self.manager.store_bitswap_block(&cid, &data).await {
+                    Ok(true) => {
+                        tracing::debug!(
+                            query_id = query_id.0,
+                            cid = %cid,
+                            "Bitswap block stored successfully"
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            query_id = query_id.0,
+                            cid = %cid,
+                            "Bitswap block was already in blockstore"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            query_id = query_id.0,
+                            cid = %cid,
+                            error = %e,
+                            "Failed to store Bitswap block"
+                        );
+                        return Err(e);
+                    }
+                }
+            }
+            HostEvent::BitswapComplete { query_id, success, error } => {
+                tracing::info!(
+                    query_id = query_id.0,
+                    success = success,
+                    error = ?error,
+                    "Bitswap fetch completed"
+                );
+
+                if success {
+                    // Try to retry pending DAGs that were waiting for these blocks
+                    let pending_dags: Vec<Cid> = self.manager.pending_dag_cids();
+
+                    for root_cid in pending_dags {
+                        match self.manager.retry_pending_dag(&root_cid).await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    query_id = query_id.0,
+                                    root_cid = %root_cid,
+                                    "Pending DAG completed after Bitswap fetch"
+                                );
+                            }
+                            Ok(false) => {
+                                tracing::debug!(
+                                    query_id = query_id.0,
+                                    root_cid = %root_cid,
+                                    "Pending DAG still has missing links"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    query_id = query_id.0,
+                                    root_cid = %root_cid,
+                                    error = %e,
+                                    "Failed to retry pending DAG"
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(ref err) = error {
+                    tracing::warn!(
+                        query_id = query_id.0,
+                        error = %err,
+                        "Bitswap fetch failed"
+                    );
+                }
             }
             other => {
                 // Other events (peer discovery, listening, etc.) don't need sync handling

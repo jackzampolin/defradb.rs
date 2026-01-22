@@ -25,7 +25,7 @@
 use cid::Cid;
 use libipld::{Block, DefaultParams};
 use libp2p::PeerId;
-use libp2p_bitswap_next::QueryId;
+use crate::QueryId;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -98,6 +98,21 @@ pub enum SyncEvent {
         collection_id: String,
         /// Creator of the root block
         creator: String,
+    },
+
+    /// DAG is ready for merge after Bitswap fetch completed.
+    ///
+    /// All missing blocks have been fetched. The database layer should now
+    /// process the complete DAG for CRDT merge.
+    DAGReady {
+        /// Root CID of the completed DAG
+        root_cid: Cid,
+        /// Document ID
+        doc_id: String,
+        /// Collection ID
+        collection_id: String,
+        /// Schema version ID
+        schema_version_id: String,
     },
 }
 
@@ -458,9 +473,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// indicating possible data corruption.
     async fn find_missing_links(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
         // Try to parse the block to extract references
-        // We use a dummy CID since we only care about extracting links
+        // Create a CID with DAG-CBOR codec to ensure proper IPLD parsing
+        use libipld::multihash::{Code, MultihashDigest};
+        let hash = Code::Sha2_256.digest(block_data);
+        let dummy_cid = Cid::new_v1(0x71, hash); // 0x71 = DAG-CBOR codec
+
         let mut refs = Vec::new();
-        let block = Block::<DefaultParams>::new_unchecked(Cid::default(), block_data.to_vec());
+        let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
         if let Err(e) = block.references(&mut refs) {
             // Check if this is an unsupported codec error vs a parse error
             let error_msg = e.to_string();
@@ -636,6 +655,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_dags.read().len()
     }
 
+    /// Get CIDs of all pending DAGs.
+    pub fn pending_dag_cids(&self) -> Vec<Cid> {
+        self.pending_dags.read().keys().copied().collect()
+    }
+
     /// Check if a block exists and is merged.
     pub async fn is_merged(&self, cid: &Cid) -> Result<bool> {
         self.blockstore
@@ -663,5 +687,140 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get the blockstore reference.
     pub fn blockstore(&self) -> &Arc<B> {
         &self.blockstore
+    }
+
+    /// Store a block received via Bitswap and check if pending DAGs can now proceed.
+    ///
+    /// This is called when blocks are fetched via Bitswap during DAG synchronization.
+    /// The block is stored in the blockstore, and we check if any pending DAGs are
+    /// now complete and can be processed.
+    ///
+    /// Returns `true` if the block was stored (not a duplicate).
+    pub async fn store_bitswap_block(&self, cid: &Cid, data: &[u8]) -> Result<bool> {
+        // Check if we already have the block
+        if self.blockstore.has(cid).await.map_err(|e| Error::BlockstoreError(e.to_string()))? {
+            tracing::debug!(
+                cid = %cid,
+                "Bitswap block already in blockstore (duplicate)"
+            );
+            return Ok(false);
+        }
+
+        // Store the block
+        if let Err(e) = self.blockstore.put(cid, data).await {
+            tracing::error!(
+                cid = %cid,
+                error = %e,
+                "Failed to store Bitswap block"
+            );
+            return Err(Error::BlockstoreError(e.to_string()));
+        }
+
+        tracing::info!(
+            cid = %cid,
+            data_len = data.len(),
+            "Stored Bitswap block in blockstore"
+        );
+
+        // Check if any pending DAGs can now proceed
+        // This is done by checking which pending DAGs were waiting for this CID
+        let pending = self.pending_dags.read().clone();
+        for (root_cid, pending_info) in pending {
+            if pending_info.missing.contains(cid) {
+                tracing::debug!(
+                    root_cid = %root_cid,
+                    received_cid = %cid,
+                    "Pending DAG received a missing block - will check completeness"
+                );
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Process a pending DAG after Bitswap blocks have been received.
+    ///
+    /// This is called when BitswapComplete is received, indicating all requested
+    /// blocks have arrived. We re-check the DAG for any remaining missing links
+    /// and process it if complete.
+    pub async fn retry_pending_dag(&self, root_cid: &Cid) -> Result<bool> {
+        // Get the pending DAG info
+        let pending_info = {
+            let pending = self.pending_dags.read();
+            pending.get(root_cid).cloned()
+        };
+
+        let Some(info) = pending_info else {
+            tracing::warn!(
+                root_cid = %root_cid,
+                "No pending DAG found for retry"
+            );
+            return Ok(false);
+        };
+
+        // Load the root block from blockstore
+        let block_data = match self.blockstore.get(root_cid).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                tracing::error!(
+                    root_cid = %root_cid,
+                    "Root block not found in blockstore during retry"
+                );
+                return Err(Error::BlockstoreError("Root block not found".to_string()));
+            }
+            Err(e) => {
+                tracing::error!(
+                    root_cid = %root_cid,
+                    error = %e,
+                    "Failed to load root block from blockstore"
+                );
+                return Err(Error::BlockstoreError(e.to_string()));
+            }
+        };
+
+        // Re-check missing links
+        let missing = match self.find_missing_links(&block_data).await {
+            Ok(missing) => missing,
+            Err(e) => {
+                tracing::error!(
+                    root_cid = %root_cid,
+                    error = %e,
+                    "Failed to re-check missing links for pending DAG"
+                );
+                return Err(e);
+            }
+        };
+
+        if !missing.is_empty() {
+            tracing::debug!(
+                root_cid = %root_cid,
+                missing_count = missing.len(),
+                "Pending DAG still has missing links after Bitswap fetch"
+            );
+            // Update the pending info with new missing CIDs
+            self.pending_dags.write().insert(*root_cid, PendingDag {
+                missing: missing.into_iter().collect(),
+                ..info
+            });
+            return Ok(false);
+        }
+
+        // DAG is complete - remove from pending and process
+        self.pending_dags.write().remove(root_cid);
+        tracing::info!(
+            root_cid = %root_cid,
+            doc_id = %info.doc_id,
+            "Pending DAG is complete after Bitswap fetch"
+        );
+
+        // Emit event that DAG is ready for merge
+        let _ = self.event_tx.send(SyncEvent::DAGReady {
+            root_cid: *root_cid,
+            doc_id: info.doc_id.clone(),
+            collection_id: info.collection_id.clone(),
+            schema_version_id: info.creator.clone(), // Use creator as stand-in for schema_version_id
+        }).await;
+
+        Ok(true)
     }
 }

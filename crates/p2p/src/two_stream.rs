@@ -121,7 +121,7 @@ impl TwoStreamHandler {
             Error::CborDeserialization(format!("failed to read response: {}", e))
         })?;
 
-        let message_id = response.metadata.message_id.clone();
+        let message_id = response.message_id.clone();
 
         tracing::debug!(
             peer_id = %peer_id,
@@ -217,12 +217,12 @@ impl TwoStreamHandler {
     ///
     /// This opens a new stream on the response protocol and sends the reply.
     pub async fn send_response(&mut self, peer_id: PeerId, response: PushLogReply) -> Result<()> {
-        let message_id = response.metadata.message_id.clone();
+        let message_id = response.message_id.clone();
 
         tracing::info!(
             peer_id = %peer_id,
             message_id = %message_id,
-            pubkey_len = response.metadata.pubkey.len(),
+            pubkey_len = response.pubkey.len(),
             "Opening response stream for two-stream protocol"
         );
 

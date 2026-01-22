@@ -46,6 +46,7 @@ pub use traits::Blockstore;
 
 use async_trait::async_trait;
 use cid::Cid;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
@@ -61,6 +62,14 @@ pub struct DefraBlockstore<S: Store> {
     store: InternalBlockstore<S>,
     /// Whether to verify hash on read
     rehash: AtomicBool,
+}
+
+impl<S: Store> fmt::Debug for DefraBlockstore<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DefraBlockstore")
+            .field("rehash", &self.rehash.load(Ordering::Relaxed))
+            .finish()
+    }
 }
 
 impl<S: Store + 'static> DefraBlockstore<S> {
