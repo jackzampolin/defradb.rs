@@ -956,9 +956,11 @@ async fn test_backup_export_rejects_anonymous_when_nac_enabled() {
     let response = app
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/api/v0/backup/export")
                 .header(HOST, TEST_HOST)
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
@@ -984,10 +986,12 @@ async fn test_backup_export_allows_owner() {
     let response = app
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/api/v0/backup/export")
                 .header(HOST, TEST_HOST)
                 .header(AUTHORIZATION, format!("Bearer {}", token))
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await

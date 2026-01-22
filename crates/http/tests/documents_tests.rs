@@ -1,8 +1,13 @@
 //! Document handler tests.
+//!
+//! Note: Create, update, and delete handlers now return empty bodies (StatusCode::OK)
+//! to match Go DefraDB behavior. These tests verify that operations succeed by
+//! checking the status code rather than response content.
 
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde_json::json;
 
@@ -102,9 +107,8 @@ async fn test_create_single_document() {
     )
     .await;
     assert!(result.is_ok());
-    let Json(doc) = result.unwrap();
-    assert!(doc.get("_docID").is_some());
-    assert_eq!(doc.get("name").unwrap(), "Charlie");
+    // Returns empty body (StatusCode::OK) to match Go DefraDB behavior
+    assert_eq!(result.unwrap(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -121,9 +125,8 @@ async fn test_create_multiple_documents() {
     )
     .await;
     assert!(result.is_ok());
-    let Json(docs) = result.unwrap();
-    let docs = docs.as_array().unwrap();
-    assert_eq!(docs.len(), 2);
+    // Returns empty body (StatusCode::OK) to match Go DefraDB behavior
+    assert_eq!(result.unwrap(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -167,10 +170,8 @@ async fn test_update_document() {
     )
     .await;
     assert!(result.is_ok());
-    let doc = result.unwrap();
-    assert_eq!(doc.get("_docID").unwrap(), "bae-123");
-    assert_eq!(doc.get("name").unwrap(), "Alice");
-    assert_eq!(doc.get("age").unwrap(), 31);
+    // Returns empty body (StatusCode::OK) to match Go DefraDB behavior
+    assert_eq!(result.unwrap(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -230,8 +231,8 @@ async fn test_delete_document() {
     )
     .await;
     assert!(result.is_ok());
-    let response = result.unwrap();
-    assert!(response.deleted);
+    // Returns empty body (StatusCode::OK) to match Go DefraDB behavior
+    assert_eq!(result.unwrap(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -243,9 +244,9 @@ async fn test_delete_document_not_found() {
         Path(("Users".to_string(), "bae-nonexistent".to_string())),
     )
     .await;
+    // Delete of non-existent document still returns OK (Go behavior)
     assert!(result.is_ok());
-    let response = result.unwrap();
-    assert!(!response.deleted);
+    assert_eq!(result.unwrap(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -330,9 +331,8 @@ async fn test_create_empty_document_array() {
     )
     .await;
     assert!(result.is_ok());
-    let Json(docs) = result.unwrap();
-    assert!(docs.is_array());
-    assert!(docs.as_array().unwrap().is_empty());
+    // Returns empty body (StatusCode::OK) to match Go DefraDB behavior
+    assert_eq!(result.unwrap(), StatusCode::OK);
 }
 
 // =========================================================================

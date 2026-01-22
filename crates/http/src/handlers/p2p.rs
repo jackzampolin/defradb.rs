@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
-use crate::router::{AppState, NodePermission};
-use crate::validation::{validate_collection_name, validate_multiaddr};
+use crate::router::{AppState, NodePermission, P2pDocumentInfo, P2pDocumentRequest};
+use crate::validation::{validate_collection_name, validate_doc_id, validate_multiaddr};
 
 /// Response for P2P node info (Go-compatible format).
 /// Returns array of full multiaddrs with peer ID embedded.
@@ -370,6 +370,143 @@ pub async fn remove_collections(
     p2p.remove_collections(query.collections)
         .await
         .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(()))
+}
+
+/// List P2P documents (for document-level replication).
+///
+/// GET /api/v0/p2p/documents
+///
+/// Requires `P2pDocumentList` permission when NAC is enabled.
+pub async fn list_documents(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<P2pDocumentInfo>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pDocumentList).await?;
+
+    let p2p = state.require_p2p()?;
+
+    let docs = p2p.get_documents().await.map_err(HttpError::Internal)?;
+
+    Ok(Json(docs))
+}
+
+/// Add documents to P2P replication.
+///
+/// POST /api/v0/p2p/documents
+///
+/// Body: [{"Collection": "Users", "DocID": "bae-123"}, ...]
+///
+/// Requires `P2pDocumentCreate` permission when NAC is enabled.
+pub async fn add_documents(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(docs): Json<Vec<P2pDocumentRequest>>,
+) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pDocumentCreate).await?;
+
+    let p2p = state.require_p2p()?;
+
+    if docs.is_empty() {
+        return Err(HttpError::BadRequest(
+            "at least one document is required".into(),
+        ));
+    }
+
+    // Validate collection names and doc IDs
+    for doc in &docs {
+        validate_collection_name(&doc.collection)?;
+        validate_doc_id(&doc.doc_id)?;
+    }
+
+    p2p.add_documents(docs)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(()))
+}
+
+/// Request to remove P2P documents.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DocumentsDeleteQuery {
+    #[serde(default)]
+    pub collection: Option<String>,
+    #[serde(default)]
+    pub doc_id: Option<String>,
+}
+
+/// Remove documents from P2P replication.
+///
+/// DELETE /api/v0/p2p/documents
+///
+/// Query params: ?collection=Users&doc_id=bae-123
+///
+/// Requires `P2pDocumentDelete` permission when NAC is enabled.
+pub async fn remove_documents(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Query(query): Query<DocumentsDeleteQuery>,
+) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pDocumentDelete).await?;
+
+    let p2p = state.require_p2p()?;
+
+    // Both collection and doc_id are required for removal
+    let collection = query.collection.ok_or_else(|| {
+        HttpError::BadRequest("collection parameter is required".into())
+    })?;
+    let doc_id = query.doc_id.ok_or_else(|| {
+        HttpError::BadRequest("doc_id parameter is required".into())
+    })?;
+
+    validate_collection_name(&collection)?;
+    validate_doc_id(&doc_id)?;
+
+    let docs = vec![P2pDocumentRequest { collection, doc_id }];
+    p2p.remove_documents(docs)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(()))
+}
+
+/// Sync collections with peers (trigger immediate sync).
+///
+/// POST /api/v0/p2p/collections/sync
+///
+/// Requires `P2pCollectionList` permission when NAC is enabled (per Go behavior).
+pub async fn sync_collections(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pCollectionList).await?;
+
+    let p2p = state.require_p2p()?;
+
+    p2p.sync_collections()
+        .await
+        .map_err(HttpError::Internal)?;
+
+    Ok(Json(()))
+}
+
+/// Sync documents with peers (trigger immediate sync).
+///
+/// POST /api/v0/p2p/documents/sync
+///
+/// Requires `P2pDocumentCreate` permission when NAC is enabled (per Go behavior).
+pub async fn sync_documents(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pDocumentCreate).await?;
+
+    let p2p = state.require_p2p()?;
+
+    p2p.sync_documents()
+        .await
+        .map_err(HttpError::Internal)?;
 
     Ok(Json(()))
 }

@@ -7,11 +7,15 @@
 //! All endpoints enforce NAC permissions when NAC is enabled.
 //! Export requires `DocumentRead` permission.
 //! Import requires `DocumentUpdate` permission.
+//!
+//! Note: Export uses POST method with JSON body to match Go DefraDB behavior.
+//! Go DefraDB writes to a file path specified in the request; this implementation
+//! returns the data in the response body for HTTP-native usage.
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Query, State},
-    http::header,
+    extract::State,
+    http::{header, StatusCode},
     response::Response,
     Json,
 };
@@ -26,36 +30,61 @@ use crate::validation::validate_collection_name;
 /// Maximum size for backup import data (100 MB).
 const MAX_IMPORT_SIZE: usize = 100 * 1024 * 1024;
 
-/// Maximum number of collections that can be specified in export query.
+/// Maximum number of collections that can be specified in export request.
 const MAX_EXPORT_COLLECTIONS: usize = 100;
 
-/// Query parameters for export.
+/// Request body for export (Go-compatible format).
 #[derive(Debug, Clone, Deserialize)]
-pub struct ExportQuery {
+pub struct ExportRequest {
     /// Collections to export (if empty, exports all).
     #[serde(default)]
     pub collections: Vec<String>,
     /// Whether to pretty-print the JSON output.
     #[serde(default)]
     pub pretty: bool,
+    /// Format for export (only "json" is supported).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// Export the database.
 ///
-/// GET /api/v0/backup/export
+/// POST /api/v0/backup/export
+///
+/// Accepts JSON body with export configuration (Go-compatible format):
+/// ```json
+/// {
+///   "collections": ["Users", "Posts"],
+///   "pretty": true,
+///   "format": "json"
+/// }
+/// ```
+///
+/// Note: Go DefraDB also accepts a "filepath" field and writes to disk.
+/// This implementation returns the data in the response body instead.
 ///
 /// Requires `DocumentRead` permission when NAC is enabled.
 pub async fn export(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<ExportQuery>,
+    Json(request): Json<ExportRequest>,
 ) -> Result<Response, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
     let backup = state.require_backup()?;
 
+    // Validate format if specified (only "json" is supported)
+    if let Some(ref format) = request.format {
+        if !format.eq_ignore_ascii_case("json") {
+            return Err(HttpError::BadRequest(format!(
+                "unsupported export format '{}': only 'json' is supported",
+                format
+            )));
+        }
+    }
+
     // Validate collection count limit
-    if query.collections.len() > MAX_EXPORT_COLLECTIONS {
+    if request.collections.len() > MAX_EXPORT_COLLECTIONS {
         return Err(HttpError::BadRequest(format!(
             "too many collections specified (max: {})",
             MAX_EXPORT_COLLECTIONS
@@ -63,23 +92,25 @@ pub async fn export(
     }
 
     // Validate collection names if provided
-    for col in &query.collections {
+    for col in &request.collections {
         validate_collection_name(col)?;
     }
 
-    let collections = if query.collections.is_empty() {
+    let collections = if request.collections.is_empty() {
         None
     } else {
-        Some(query.collections)
+        Some(request.collections)
     };
 
     let data = backup
-        .export(collections, query.pretty)
+        .export(collections, request.pretty)
         .await
         .map_err(HttpError::Internal)?;
 
     // Return as JSON with appropriate content type
+    // Go returns empty body (writes to file), but we return data in response
     let response = Response::builder()
+        .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(data))
         .map_err(|e| HttpError::Internal(e.to_string()))?;
@@ -91,12 +122,18 @@ pub async fn export(
 ///
 /// POST /api/v0/backup/import
 ///
+/// Go DefraDB accepts a JSON body with a "filepath" field pointing to a file on disk.
+/// This implementation accepts the backup data directly in the request body for
+/// HTTP-native usage.
+///
 /// Requires `DocumentUpdate` permission when NAC is enabled.
+///
+/// Returns HTTP 200 with empty body to match Go DefraDB behavior.
 pub async fn import(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     body: Bytes,
-) -> Result<Json<ImportResponse>, HttpError> {
+) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
     let backup = state.require_backup()?;
@@ -140,9 +177,10 @@ pub async fn import(
         ));
     }
 
-    let result = backup.import(&body).await.map_err(HttpError::BadRequest)?;
+    let _result = backup.import(&body).await.map_err(HttpError::BadRequest)?;
 
-    Ok(Json(ImportResponse::from(result)))
+    // Return empty body to match Go DefraDB behavior
+    Ok(StatusCode::OK)
 }
 
 /// Response for import operation.
@@ -179,18 +217,26 @@ mod tests {
     use crate::router::ImportResult;
 
     #[test]
-    fn test_export_query_empty() {
-        let query: ExportQuery = serde_json::from_str("{}").unwrap();
-        assert!(query.collections.is_empty());
-        assert!(!query.pretty);
+    fn test_export_request_empty() {
+        let request: ExportRequest = serde_json::from_str("{}").unwrap();
+        assert!(request.collections.is_empty());
+        assert!(!request.pretty);
+        assert!(request.format.is_none());
     }
 
     #[test]
-    fn test_export_query_with_collections() {
+    fn test_export_request_with_collections() {
         let json = r#"{"collections": ["Users", "Posts"], "pretty": true}"#;
-        let query: ExportQuery = serde_json::from_str(json).unwrap();
-        assert_eq!(query.collections.len(), 2);
-        assert!(query.pretty);
+        let request: ExportRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.collections.len(), 2);
+        assert!(request.pretty);
+    }
+
+    #[test]
+    fn test_export_request_with_format() {
+        let json = r#"{"collections": ["Users"], "format": "json"}"#;
+        let request: ExportRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.format, Some("json".to_string()));
     }
 
     #[test]

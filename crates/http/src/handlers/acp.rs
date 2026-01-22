@@ -6,23 +6,20 @@
 //! - Get policy by ID
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
+//!
+//! Note: The add_policy endpoint accepts text/plain body to match Go DefraDB behavior.
+//! Go DefraDB reads the raw policy text from the request body, not JSON.
 
 use axum::{
     extract::{Path, State},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission, PolicyInfo};
-
-/// Request to add a new ACP policy.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AddPolicyRequest {
-    pub policy: String,
-}
 
 /// Response for adding a policy.
 #[derive(Debug, Clone, Serialize)]
@@ -35,22 +32,25 @@ pub struct AddPolicyResponse {
 ///
 /// POST /api/v0/acp/policy
 ///
+/// Accepts raw policy text in the request body (text/plain), matching Go DefraDB.
+/// The policy should be valid YAML or JSON following the ACP policy specification.
+///
 /// Requires `DacPolicyAdd` permission when NAC is enabled.
 pub async fn add_policy(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(request): Json<AddPolicyRequest>,
+    body: String,
 ) -> Result<Json<AddPolicyResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::DacPolicyAdd).await?;
 
     let acp = state.require_acp()?;
 
-    if request.policy.trim().is_empty() {
+    if body.trim().is_empty() {
         return Err(HttpError::BadRequest("policy cannot be empty".into()));
     }
 
     let policy_id = acp
-        .add_policy(&request.policy)
+        .add_policy(&body)
         .await
         .map_err(HttpError::BadRequest)?;
 
@@ -101,13 +101,6 @@ pub async fn get_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_add_policy_request_deserialize() {
-        let json = r#"{"policy": "name: test\nresources:\n  users:\n    permissions:\n      read:\n        expr: owner"}"#;
-        let request: AddPolicyRequest = serde_json::from_str(json).unwrap();
-        assert!(request.policy.contains("test"));
-    }
 
     #[test]
     fn test_add_policy_response_serialize() {

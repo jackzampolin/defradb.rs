@@ -536,7 +536,7 @@ impl RestOperations for FailingMockRestOperations {
 
 use crate::router::{
     AcpOperations, BackupOperations, ImportResult, IndexFieldInfo, IndexInfo, IndexOperations,
-    P2POperations, PolicyInfo, ReplicatorInfo,
+    P2POperations, P2pDocumentInfo, P2pDocumentRequest, PolicyInfo, ReplicatorInfo,
 };
 
 /// Mock P2P operations for testing P2P handlers.
@@ -674,6 +674,32 @@ impl P2POperations for MockP2POperations {
     ) -> std::result::Result<(), String> {
         let mut existing = self.collections.write().unwrap();
         existing.retain(|c| !collections.contains(c));
+        Ok(())
+    }
+
+    async fn get_documents(&self) -> std::result::Result<Vec<P2pDocumentInfo>, String> {
+        Ok(vec![])
+    }
+
+    async fn add_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn remove_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn sync_collections(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn sync_documents(&self) -> std::result::Result<(), String> {
         Ok(())
     }
 }
@@ -1034,6 +1060,32 @@ impl P2POperations for FailingMockP2POperations {
         &self,
         _collections: Vec<String>,
     ) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn get_documents(&self) -> std::result::Result<Vec<P2pDocumentInfo>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn add_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn remove_documents(
+        &self,
+        _docs: Vec<P2pDocumentRequest>,
+    ) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn sync_collections(&self) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn sync_documents(&self) -> std::result::Result<(), String> {
         Err(self.error.clone())
     }
 }

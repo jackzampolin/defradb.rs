@@ -62,6 +62,44 @@ pub fn validate_multiaddr(address: &str) -> Result<(), HttpError> {
     Ok(())
 }
 
+/// Validate a document ID format.
+///
+/// DefraDB document IDs have the format "bae-" followed by a UUID-like string.
+/// This performs basic validation; full validation happens in the document layer.
+pub fn validate_doc_id(doc_id: &str) -> Result<(), HttpError> {
+    if doc_id.trim().is_empty() {
+        return Err(HttpError::BadRequest("document ID cannot be empty".to_string()));
+    }
+
+    // DefraDB doc IDs start with "bae-"
+    if !doc_id.starts_with("bae-") {
+        return Err(HttpError::BadRequest(format!(
+            "invalid document ID '{}': must start with 'bae-'",
+            doc_id
+        )));
+    }
+
+    // Basic format check: bae- followed by alphanumeric and dashes
+    let suffix = &doc_id[4..];
+    if suffix.is_empty() {
+        return Err(HttpError::BadRequest(format!(
+            "invalid document ID '{}': missing ID after 'bae-' prefix",
+            doc_id
+        )));
+    }
+
+    // Validate the suffix contains only valid characters (hex digits and dashes)
+    let valid = suffix.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    if !valid {
+        return Err(HttpError::BadRequest(format!(
+            "invalid document ID '{}': ID suffix must contain only hex digits and dashes",
+            doc_id
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +198,22 @@ mod tests {
         assert!(validate_collection_name("").is_err());
         assert!(validate_collection_name("123Collection").is_err());
         assert!(validate_collection_name("User-Name").is_err());
+    }
+
+    #[test]
+    fn test_validate_doc_id_valid() {
+        assert!(validate_doc_id("bae-3fc941b7-505c-5ce2-91a0-b180930ec8a9").is_ok());
+        assert!(validate_doc_id("bae-abcd1234").is_ok());
+        assert!(validate_doc_id("bae-0123456789abcdef").is_ok());
+    }
+
+    #[test]
+    fn test_validate_doc_id_invalid() {
+        assert!(validate_doc_id("").is_err());
+        assert!(validate_doc_id("   ").is_err());
+        assert!(validate_doc_id("invalid-id").is_err());
+        assert!(validate_doc_id("bae-").is_err());
+        assert!(validate_doc_id("bae-GHIJK").is_err()); // G-Z are not hex
+        assert!(validate_doc_id("BAE-abc").is_err()); // Must be lowercase bae-
     }
 }

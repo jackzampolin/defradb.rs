@@ -60,6 +60,21 @@ pub trait P2POperations: Send + Sync {
 
     /// Remove collections from P2P.
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String>;
+
+    /// Get P2P documents (for document-level replication).
+    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String>;
+
+    /// Add documents to P2P replication.
+    async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+
+    /// Remove documents from P2P replication.
+    async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+
+    /// Sync collections with peers (trigger immediate sync).
+    async fn sync_collections(&self) -> Result<(), String>;
+
+    /// Sync documents with peers (trigger immediate sync).
+    async fn sync_documents(&self) -> Result<(), String>;
 }
 
 /// Replicator information for HTTP responses.
@@ -68,6 +83,28 @@ pub struct ReplicatorInfo {
     pub id: Option<String>,
     pub collections: Vec<String>,
     pub address: Option<String>,
+}
+
+/// P2P document information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2pDocumentInfo {
+    /// Collection name the document belongs to.
+    #[serde(rename = "Collection")]
+    pub collection: String,
+    /// Document ID.
+    #[serde(rename = "DocID")]
+    pub doc_id: String,
+}
+
+/// Request to add/remove P2P documents (Go-compatible format).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2pDocumentRequest {
+    /// Collection name the document belongs to.
+    #[serde(rename = "Collection")]
+    pub collection: String,
+    /// Document ID.
+    #[serde(rename = "DocID")]
+    pub doc_id: String,
 }
 
 /// Trait for ACP (Access Control Policy) operations.
@@ -476,7 +513,14 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/:name", post(handlers::create_document))
         .route("/:name/:docID", get(handlers::get_document))
         .route("/:name/:docID", patch(handlers::update_document))
-        .route("/:name/:docID", delete(handlers::delete_document));
+        .route("/:name/:docID", delete(handlers::delete_document))
+        // Go-compatible index routes (collection in path)
+        .route("/:name/indexes", get(handlers::index::go_list_indexes))
+        .route("/:name/indexes", post(handlers::index::go_create_index))
+        .route(
+            "/:name/indexes/:index",
+            delete(handlers::index::go_drop_index),
+        );
 
     // P2P routes
     let p2p_routes = Router::new()
@@ -492,7 +536,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/replicator", delete(handlers::p2p::remove_replicator))
         .route("/collections", get(handlers::p2p::list_collections))
         .route("/collections", post(handlers::p2p::add_collections))
-        .route("/collections", delete(handlers::p2p::remove_collections));
+        .route("/collections", delete(handlers::p2p::remove_collections))
+        .route("/collections/sync", post(handlers::p2p::sync_collections)) // Go-compatible
+        .route("/documents", get(handlers::p2p::list_documents)) // Go-compatible
+        .route("/documents", post(handlers::p2p::add_documents))
+        .route("/documents", delete(handlers::p2p::remove_documents))
+        .route("/documents/sync", post(handlers::p2p::sync_documents)); // Go-compatible
 
     // ACP routes
     let acp_routes = Router::new()
@@ -506,9 +555,9 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/", get(handlers::index::list_indexes))
         .route("/", delete(handlers::index::drop_index));
 
-    // Backup routes
+    // Backup routes (POST for both to match Go DefraDB)
     let backup_routes = Router::new()
-        .route("/export", get(handlers::backup::export))
+        .route("/export", post(handlers::backup::export))
         .route("/import", post(handlers::backup::import));
 
     // NAC (Node Access Control) routes

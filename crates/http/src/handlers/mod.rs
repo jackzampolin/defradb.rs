@@ -30,6 +30,4 @@ pub use graphql::{
 pub use collections::{
     get_collection_doc_ids, list_collections, CollectionsResponse, DocIdsResponse,
 };
-pub use documents::{
-    create_document, delete_document, get_document, update_document, DeleteResponse,
-};
+pub use documents::{create_document, delete_document, get_document, update_document};

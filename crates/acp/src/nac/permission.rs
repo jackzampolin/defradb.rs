@@ -17,13 +17,13 @@ use serde::{Deserialize, Serialize};
 /// - Document: `DocumentRead`, `DocumentUpdate`, `DocumentDelete`
 /// - Index: `IndexList`, `IndexCreate`, `IndexDrop`
 /// - P2P: `P2pPeerConnect`, `P2pReplicatorCreate`, `P2pReplicatorDelete`, `P2pReplicatorList`,
-///        `P2pCollectionCreate`, `P2pCollectionDelete`, `P2pCollectionList`
+///   `P2pCollectionCreate`, `P2pCollectionDelete`, `P2pCollectionList`
 /// - ACP: `DacPolicyAdd`, `DacStatus`
 /// - NAC: `NacStatus`, `NacRelationAdd`, `NacRelationDelete`
 ///
 /// **Not yet implemented (13 permissions):**
 /// - DAC management: `DacBypass`, `DacEnable`, `DacDisable`, `DacPurge`,
-///                   `DacRelationAdd`, `DacRelationDelete`
+///   `DacRelationAdd`, `DacRelationDelete`
 /// - NAC management: `NacReEnable`, `NacDisable`, `NacPurge`
 /// - P2P document replication: `P2pDocumentCreate`, `P2pDocumentDelete`, `P2pDocumentList`
 /// - Other: `SignatureVerify`
