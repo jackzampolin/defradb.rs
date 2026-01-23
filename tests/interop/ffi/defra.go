@@ -346,3 +346,123 @@ func (t *Transaction) Query(query string) (*QueryResult, error) {
 func (t *Transaction) Mutate(mutation string) (*QueryResult, error) {
 	return t.Query(mutation)
 }
+
+// IndexField describes a field within an index.
+type IndexField struct {
+	Name       string `json:"Name"`
+	Descending bool   `json:"Descending,omitempty"`
+}
+
+// IndexDescription describes a secondary index on a collection.
+type IndexDescription struct {
+	Name   string       `json:"Name"`
+	ID     uint32       `json:"ID,omitempty"`
+	Fields []IndexField `json:"Fields"`
+	Unique bool         `json:"Unique,omitempty"`
+}
+
+// CreateIndex creates a new index on a collection.
+// Returns the created index description with assigned ID.
+func (n *Node) CreateIndex(collectionName string, indexName string, fields []IndexField, unique bool) (*IndexDescription, error) {
+	cCollName := C.CString(collectionName)
+	defer C.free(unsafe.Pointer(cCollName))
+
+	indexInput := IndexDescription{
+		Name:   indexName,
+		Fields: fields,
+		Unique: unique,
+	}
+	indexJSON, err := json.Marshal(indexInput)
+	if err != nil {
+		return nil, fmt.Errorf("ffi: failed to marshal index: %w", err)
+	}
+
+	cIndexJSON := C.CString(string(indexJSON))
+	defer C.free(unsafe.Pointer(cIndexJSON))
+
+	result := C.create_index(n.ptr, cCollName, cIndexJSON)
+
+	if result.status != 0 {
+		errMsg := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return nil, fmt.Errorf("ffi: create_index failed: %s", errMsg)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var index IndexDescription
+	if err := json.Unmarshal([]byte(value), &index); err != nil {
+		return nil, fmt.Errorf("ffi: failed to parse index: %w", err)
+	}
+
+	return &index, nil
+}
+
+// DropIndex drops an index from a collection.
+func (n *Node) DropIndex(collectionName string, indexName string) error {
+	cCollName := C.CString(collectionName)
+	defer C.free(unsafe.Pointer(cCollName))
+
+	cIndexName := C.CString(indexName)
+	defer C.free(unsafe.Pointer(cIndexName))
+
+	result := C.drop_index(n.ptr, cCollName, cIndexName)
+
+	if result.status != 0 {
+		errMsg := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: drop_index failed: %s", errMsg)
+	}
+
+	if result.value != nil {
+		C.defra_free_string(result.value)
+	}
+
+	return nil
+}
+
+// GetIndexes returns all indexes for a collection.
+func (n *Node) GetIndexes(collectionName string) ([]IndexDescription, error) {
+	cCollName := C.CString(collectionName)
+	defer C.free(unsafe.Pointer(cCollName))
+
+	result := C.get_indexes(n.ptr, cCollName)
+
+	if result.status != 0 {
+		errMsg := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return nil, fmt.Errorf("ffi: get_indexes failed: %s", errMsg)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var indexes []IndexDescription
+	if err := json.Unmarshal([]byte(value), &indexes); err != nil {
+		return nil, fmt.Errorf("ffi: failed to parse indexes: %w", err)
+	}
+
+	return indexes, nil
+}
+
+// GetAllIndexes returns all indexes across all collections.
+func (n *Node) GetAllIndexes() (map[string][]IndexDescription, error) {
+	result := C.get_all_indexes(n.ptr)
+
+	if result.status != 0 {
+		errMsg := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return nil, fmt.Errorf("ffi: get_all_indexes failed: %s", errMsg)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var indexes map[string][]IndexDescription
+	if err := json.Unmarshal([]byte(value), &indexes); err != nil {
+		return nil, fmt.Errorf("ffi: failed to parse indexes: %w", err)
+	}
+
+	return indexes, nil
+}

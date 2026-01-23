@@ -254,10 +254,9 @@ mod tests {
         assert!(!txn_id.is_empty());
 
         // Execute in transaction
-        let mutation = CString::new(
-            r#"mutation { create_TxnTest(input: {value: 42}) { _docID value } }"#,
-        )
-        .unwrap();
+        let mutation =
+            CString::new(r#"mutation { create_TxnTest(input: {value: 42}) { _docID value } }"#)
+                .unwrap();
         let txn_id_cstr = CString::new(txn_id.as_ref()).unwrap();
         let result = unsafe {
             exec_request_in_txn(
@@ -298,10 +297,9 @@ mod tests {
         let txn_id_cstr = CString::new(txn_id.as_ref()).unwrap();
 
         // Execute in transaction
-        let mutation = CString::new(
-            r#"mutation { create_RollbackTest(input: {value: 99}) { _docID } }"#,
-        )
-        .unwrap();
+        let mutation =
+            CString::new(r#"mutation { create_RollbackTest(input: {value: 99}) { _docID } }"#)
+                .unwrap();
         let result = unsafe {
             exec_request_in_txn(
                 node,
