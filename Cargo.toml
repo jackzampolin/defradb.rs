@@ -18,6 +18,7 @@ members = [
     "crates/identity",
     "crates/acp",
     "crates/events",
+    "crates/ffi",
 ]
 
 [workspace.package]

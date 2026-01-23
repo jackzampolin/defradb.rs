@@ -1,0 +1,190 @@
+/*
+ * DefraDB Rust FFI - Auto-generated header
+ *
+ * This header provides C bindings for the DefraDB Rust implementation.
+ * Use with CGO to integrate with Go code.
+ *
+ * Usage:
+ *   1. Build library: cargo build --release -p ffi
+ *   2. Link with: -L target/release -lffi
+ */
+
+
+#ifndef DEFRA_H
+#define DEFRA_H
+
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+/*
+ FFI result for node creation, containing a node handle.
+
+ Matches Go's NewNodeResult struct.
+ */
+typedef struct NewNodeResult {
+  /*
+   Status code: 0=success, 1=error
+   */
+  int status;
+  /*
+   Error message (null on success). Caller must free with `defra_free_string`.
+   */
+  char *error;
+  /*
+   Handle to the node (0 on error).
+   */
+  uintptr_t node_ptr;
+} NewNodeResult;
+
+/*
+ Options for node initialization.
+
+ Matches Go's NodeInitOptions struct.
+ */
+typedef struct NodeInitOptions {
+  /*
+   Path to store directory (null for in-memory).
+   */
+  const char *db_path;
+  /*
+   Use in-memory storage (1=true, 0=false).
+   */
+  int in_memory;
+} NodeInitOptions;
+
+/*
+ FFI result type matching Go's Result struct.
+
+ Status codes:
+ - 0: Success
+ - 1: Error (message in error field)
+ - 2: Subscription (ID in value field, not yet implemented)
+ */
+typedef struct FfiResult {
+  /*
+   Status code: 0=success, 1=error, 2=subscription
+   */
+  int status;
+  /*
+   Error message (null on success). Caller must free with `defra_free_string`.
+   */
+  char *error;
+  /*
+   JSON value (null on error). Caller must free with `defra_free_string`.
+   */
+  char *value;
+} FfiResult;
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+/*
+ Initialize the FFI library.
+
+ This must be called once before any other FFI functions.
+ Safe to call multiple times.
+ */
+void defra_init(void);
+
+/*
+ Get the library version.
+
+ Returns a null-terminated string that must be freed with `defra_free_string`.
+ */
+char *defra_version(void);
+
+/*
+ Create a new DefraDB node.
+
+ This creates an in-memory database instance with a query runner.
+ The returned handle must be passed to `node_close` when done.
+
+ # Safety
+
+ The returned `node_ptr` must be freed by calling `node_close`.
+ */
+struct NewNodeResult new_node(struct NodeInitOptions options);
+
+/*
+ Close a DefraDB node and release resources.
+
+ # Safety
+
+ The `node_ptr` must be a valid handle returned by `new_node`.
+ After this call, the handle is no longer valid.
+ */
+struct FfiResult node_close(uintptr_t node_ptr);
+
+/*
+ Execute a GraphQL query or mutation.
+
+ Returns a JSON object with the query result in GraphQL format:
+ ```json
+ {
+     "data": { ... },
+     "errors": [ ... ]
+ }
+ ```
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `request_query` - GraphQL query string (required)
+ * `operation_name` - Optional operation name for multi-operation documents (null if not used)
+ * `variables` - Optional JSON string of variables (null if not used)
+
+ # Safety
+
+ All string pointers must be either null or valid null-terminated UTF-8 strings.
+ */
+struct FfiResult exec_request(uintptr_t node_ptr,
+                              const char *request_query,
+                              const char *operation_name,
+                              const char *variables);
+
+/*
+ Add a schema to the database.
+
+ The schema should be a GraphQL SDL string defining types.
+
+ Returns a JSON array of CollectionVersion objects on success.
+
+ # Example SDL
+
+ ```graphql
+ type User {
+     name: String
+     age: Int
+ }
+ ```
+
+ # Safety
+
+ `schema_sdl` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult add_schema(uintptr_t node_ptr, const char *schema_sdl);
+
+/*
+ Get all collections from the database.
+
+ Returns a JSON array of collection descriptions.
+ */
+struct FfiResult get_collections(uintptr_t node_ptr);
+
+/*
+ Free a string allocated by FFI functions.
+
+ # Safety
+
+ The pointer must have been allocated by an FFI function in this crate.
+ */
+void defra_free_string(char *ptr);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
+
+#endif  /* DEFRA_H */
