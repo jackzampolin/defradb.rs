@@ -527,46 +527,179 @@ impl<'a> SdlParser<'a> {
         }
     }
 
+    /// Build a map of which relation fields have the @primary directive.
+    /// Key: (source_type, target_type) -> bool (has_primary)
+    ///
+    /// This is used to determine which side of a 1:1 relation is the "primary" side.
+    /// In Go, if one side has @primary and the other doesn't, the side WITHOUT @primary
+    /// is considered secondary and gets empty FieldID (not included in CID calculation).
+    fn collect_primary_directives(
+        &self,
+        type_names: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<(String, String), bool> {
+        let mut result = std::collections::HashMap::new();
+
+        for (type_name, type_def) in &self.type_defs {
+            for field in &type_def.fields {
+                let target = &field.field_type.base_type;
+
+                // Only consider relations to other types in the schema
+                if type_names.contains(target) {
+                    // Key: (source_type, target_type) -> has_primary directive
+                    result.insert(
+                        (type_name.clone(), target.clone()),
+                        field.directives.is_primary,
+                    );
+                }
+            }
+        }
+
+        result
+    }
+
     fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
         // Build collection names set for relation detection
         let type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
 
-        // Detect circular relation sets - types that reference each other form a "collection set"
-        // Within a set, Go uses SelfKind with relative indices instead of CollectionKind
-        let collection_set = self.detect_collection_set(&type_names);
+        // Collect @primary directive information for determining actual primaryness
+        let primary_directives = self.collect_primary_directives(&type_names);
+
+        // Detect circular relation sets - types that form TRUE cycles
+        // A cycle only occurs if BOTH sides of a mutual reference are PRIMARY
+        // (i.e., neither has @primary making the other secondary)
+        let collection_set = self.detect_collection_set(&type_names, &primary_directives);
 
         // Process types in alphabetical order (Go behavior)
         let mut sorted_type_names: Vec<_> = self.type_defs.keys().cloned().collect();
         sorted_type_names.sort();
 
-        // TWO-PASS APPROACH (matches Go behavior):
-        // Pass 1: Calculate CollectionIDs for ALL types first
-        // CollectionIDs are based on scalar fields and FK fields only (not relation object fields)
-        // This allows us to know all CollectionIDs before resolving relation field Kinds
-        let mut all_collection_ids: std::collections::HashMap<String, String> =
+        // TOPOLOGICAL ORDER APPROACH (matches Go behavior):
+        // Process types in topological order based on CID dependencies.
+        //
+        // A type A depends on type B if A has a PRIMARY relation field to B
+        // (meaning B's CollectionID must be known to calculate A's CID).
+        //
+        // Types are sorted by:
+        // 1. Dependency order (types with fewer dependencies first)
+        // 2. Alphabetical order as tiebreaker
+        //
+        // This ensures that when we process a type, all types it depends on
+        // have already been processed and their CollectionIDs are known.
+
+        // Build dependency graph: which types does each type's CID depend on?
+        let mut dependencies: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
 
         for type_name in &sorted_type_names {
             let type_def = self.type_defs.get(type_name).unwrap();
+            let mut deps = std::collections::HashSet::new();
+
+            for field in &type_def.fields {
+                let target = &field.field_type.base_type;
+                if !type_names.contains(target) || target == type_name {
+                    continue; // Not a relation to another type in schema, or self-ref
+                }
+
+                // Check if this field is PRIMARY (included in CID calculation)
+                let is_array = field.field_type.is_list;
+                if is_array {
+                    continue; // Arrays are secondary, not in CID
+                }
+
+                let has_primary = field.directives.is_primary;
+                let counterpart_has_primary = primary_directives
+                    .get(&(target.clone(), type_name.clone()))
+                    .copied()
+                    .unwrap_or(false);
+
+                let is_field_primary = has_primary || !counterpart_has_primary;
+                if is_field_primary {
+                    // This field is PRIMARY, so this type's CID depends on target's CID
+                    deps.insert(target.clone());
+                }
+            }
+
+            dependencies.insert(type_name.clone(), deps);
+        }
+
+        // Topological sort using Kahn's algorithm
+        let mut in_degree: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for type_name in &sorted_type_names {
+            in_degree.insert(type_name.clone(), 0);
+        }
+        for deps in dependencies.values() {
+            for dep in deps {
+                *in_degree.get_mut(dep).unwrap() += 1;
+            }
+        }
+
+        // Queue starts with types that have no dependencies
+        let mut queue: Vec<&String> = sorted_type_names
+            .iter()
+            .filter(|name| dependencies.get(*name).map(|d| d.is_empty()).unwrap_or(true))
+            .collect();
+        // Sort queue alphabetically for determinism
+        queue.sort();
+
+        let mut processing_order = Vec::new();
+        while !queue.is_empty() {
+            // Sort queue alphabetically for deterministic ordering
+            queue.sort();
+            let current = queue.remove(0);
+            processing_order.push(current.clone());
+
+            // For each type that depends on current, decrease its in-degree
+            for (type_name, deps) in &dependencies {
+                if deps.contains(current) {
+                    let degree = in_degree.get_mut(type_name).unwrap();
+                    *degree -= 1;
+                    if *degree == 0 && !processing_order.contains(type_name) {
+                        queue.push(type_name);
+                    }
+                }
+            }
+        }
+
+        // If there's a cycle, fall back to alphabetical order for remaining types
+        for type_name in &sorted_type_names {
+            if !processing_order.contains(type_name) {
+                processing_order.push(type_name.clone());
+            }
+        }
+
+        // TWO-PASS APPROACH:
+        // Pass 1: Calculate CollectionIDs in topological order
+        // This ensures CID dependencies are resolved correctly
+        let mut all_collection_ids: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        for type_name in &processing_order {
+            let type_def = self.type_defs.get(type_name).unwrap();
             let collection = self.build_collection(
                 type_def,
                 &type_names,
                 &collection_set,
-                &std::collections::HashMap::new(), // Empty - relation fields use NamedKind
+                &all_collection_ids, // Pass already-calculated CollectionIDs
+                &primary_directives,
             )?;
+            // Store this type's CollectionID for later types to reference
             all_collection_ids.insert(type_name.clone(), collection.collection_id.clone());
         }
 
-        // Pass 2: Now rebuild collections with ALL CollectionIDs known
-        // Relation fields will now use CollectionKind with the correct CollectionID
+        // Pass 2: Rebuild all collections with ALL CollectionIDs known
+        // This ensures all relation fields have proper CollectionKind (not NamedKind)
+        // for query resolution, even for secondary fields pointing to later types
         let mut collections = Vec::new();
+
         for type_name in &sorted_type_names {
             let type_def = self.type_defs.get(type_name).unwrap();
             let collection = self.build_collection(
                 type_def,
                 &type_names,
                 &collection_set,
-                &all_collection_ids,
+                &all_collection_ids, // Now has ALL CollectionIDs
+                &primary_directives,
             )?;
             collections.push(collection);
         }
@@ -578,19 +711,52 @@ impl<'a> SdlParser<'a> {
     /// Returns a map from type name to its sorted index within its connected cycle group.
     /// Types with circular relations use SelfKind with relative indices for CID generation.
     ///
-    /// IMPORTANT: Only PRIMARY relation fields (single-object relations, not arrays) contribute
-    /// to circular reference detection. Secondary fields (arrays) are skipped during CID
-    /// generation, so they don't create circular dependencies.
+    /// IMPORTANT: A cycle only exists if BOTH sides of a mutual reference are PRIMARY.
+    /// If one side has @primary and the other doesn't, the side WITHOUT @primary is SECONDARY
+    /// and gets empty FieldID (not included in CID calculation), breaking the cycle.
     ///
     /// IMPORTANT: Only types that are ACTUALLY part of a cycle are included.
-    /// Different cycle groups (e.g., Person<->Profile vs Employee self-ref) are treated
-    /// as separate collection sets with their own index numbering starting from 0.
+    /// Different cycle groups (e.g., Employee self-ref) are treated as separate collection sets.
     fn detect_collection_set(
         &self,
         type_names: &std::collections::HashSet<String>,
+        primary_directives: &std::collections::HashMap<(String, String), bool>,
     ) -> std::collections::HashMap<String, i32> {
+        // Helper to check if a relation field from source->target is actually primary
+        // (will be included in CID calculation)
+        let is_field_primary = |source: &str, target: &str, is_array: bool| -> bool {
+            if is_array {
+                // Arrays are always secondary
+                return false;
+            }
+
+            // Check if this field has @primary directive
+            let has_primary = primary_directives
+                .get(&(source.to_string(), target.to_string()))
+                .copied()
+                .unwrap_or(false);
+
+            if has_primary {
+                return true;
+            }
+
+            // Check if the counterpart (target->source) has @primary
+            // If it does, this side is SECONDARY
+            let counterpart_has_primary = primary_directives
+                .get(&(target.to_string(), source.to_string()))
+                .copied()
+                .unwrap_or(false);
+
+            if counterpart_has_primary {
+                // Counterpart has @primary, so this side is secondary
+                return false;
+            }
+
+            // Neither side has @primary - single-object relation defaults to primary
+            true
+        };
+
         // Build relation graph: which types reference which other types via PRIMARY relations only
-        // A field is primary if it's a single-object relation (not an array)
         let mut references: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
 
@@ -600,9 +766,10 @@ impl<'a> SdlParser<'a> {
                 let target = &field.field_type.base_type;
                 // Only consider relations to other types that are:
                 // 1. In the current schema (type_names)
-                // 2. Single-object relations (not arrays) - these are PRIMARY
-                // Array relations are secondary and don't contribute to CID
-                if type_names.contains(target) && !field.field_type.is_list {
+                // 2. Actually PRIMARY (will be included in CID)
+                if type_names.contains(target)
+                    && is_field_primary(type_name, target, field.field_type.is_list)
+                {
                     refs.insert(target.clone());
                 }
             }
@@ -611,21 +778,23 @@ impl<'a> SdlParser<'a> {
 
         // Build bidirectional cycle edges: only keep edges that form cycles
         // A->B is a cycle edge if A->B and B->A (mutual reference) or A->A (self-ref)
+        // where BOTH sides are PRIMARY
         let mut cycle_edges: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
 
         for (type_a, refs_a) in &references {
             let mut edges = std::collections::HashSet::new();
 
-            // Self-reference
+            // Self-reference (single-object only - already filtered above)
             if refs_a.contains(type_a) {
                 edges.insert(type_a.clone());
             }
 
-            // Mutual references
+            // Mutual references where BOTH directions are primary
             for type_b in refs_a {
                 if type_a != type_b {
                     if let Some(refs_b) = references.get(type_b) {
+                        // Both A->B and B->A are in PRIMARY references
                         if refs_b.contains(type_a) {
                             edges.insert(type_b.clone());
                         }
@@ -718,6 +887,7 @@ impl<'a> SdlParser<'a> {
         type_names: &std::collections::HashSet<String>,
         collection_set: &std::collections::HashMap<String, i32>,
         known_collection_ids: &std::collections::HashMap<String, String>,
+        primary_directives: &std::collections::HashMap<(String, String), bool>,
     ) -> Result<CollectionVersion> {
         // collection_id will be generated after fields are created (like Go)
         let mut fields = Vec::new();
@@ -746,13 +916,50 @@ impl<'a> SdlParser<'a> {
 
             // Determine if this relation creates an implicit _id field (FK):
             // - Single-object relations (not arrays) get an implicit {field}_id field
-            // - BOTH the relation object field AND the _id field are marked as primary in Go
-            // - This allows them to be saved to the blockstore
+            // - But only on the PRIMARY side (the side with @primary OR the default primary)
             let creates_fk_field = kind.is_relation() && !kind.is_array();
 
             // Check if this is a self-reference relation (field type == current type)
             let is_self_ref_relation = kind.is_relation()
                 && parsed_field.field_type.base_type == type_def.name;
+
+            // Determine the actual primary status for this relation field
+            // In Go, a field is PRIMARY if:
+            // 1. It has explicit @primary directive, OR
+            // 2. It's a single-object relation AND the counterpart does NOT have @primary
+            // A field is SECONDARY if:
+            // 1. It's an array relation, OR
+            // 2. The counterpart (target->source) has @primary
+            let is_primary = if kind.is_relation() {
+                let target_type = &parsed_field.field_type.base_type;
+                let source_type = &type_def.name;
+
+                // Check if this field has @primary directive
+                let has_primary_directive = parsed_field.directives.is_primary;
+
+                // Check if counterpart has @primary directive
+                let counterpart_has_primary = primary_directives
+                    .get(&(target_type.clone(), source_type.clone()))
+                    .copied()
+                    .unwrap_or(false);
+
+                if kind.is_array() {
+                    // Arrays are always secondary
+                    false
+                } else if has_primary_directive {
+                    // Explicit @primary makes this primary
+                    true
+                } else if counterpart_has_primary {
+                    // Counterpart has @primary, so this is secondary
+                    false
+                } else {
+                    // Neither has @primary - single-object defaults to primary
+                    true
+                }
+            } else {
+                // Non-relation fields: use explicit @primary directive
+                parsed_field.directives.is_primary
+            };
 
             // Determine CRDT type: directive overrides > relation defaults > LwwRegister
             // Go uses NONE_CRDT (Typ=0) for ALL relation object fields, not just single-object
@@ -766,8 +973,10 @@ impl<'a> SdlParser<'a> {
             };
 
             // Generate field ID using actual kind and CRDT type
-            // Go uses empty FieldID for self-reference relation object fields
-            let field_id = if is_self_ref_relation {
+            // Go uses empty FieldID for:
+            // - Self-reference relation object fields (always)
+            // - SECONDARY relation fields (counterpart has @primary)
+            let field_id = if is_self_ref_relation || (kind.is_relation() && !is_primary) {
                 String::new()
             } else {
                 generate_field_id(&parsed_field.name, &kind, crdt_type)
@@ -776,15 +985,7 @@ impl<'a> SdlParser<'a> {
             let mut field = FieldDescription::new(&field_id, &parsed_field.name, kind.clone())
                 .with_crdt_type(crdt_type);
 
-            // For single-object relations, the relation field itself IS primary in Go
-            // This is different from array relations which are secondary
-            let is_primary = if creates_fk_field {
-                true // Single-object relation is primary
-            } else if kind.is_relation() {
-                false // Array relation is secondary (not saved)
-            } else {
-                parsed_field.directives.is_primary // Non-relation: use explicit @primary
-            };
+            // Set is_primary based on our earlier computation
             if is_primary {
                 field = field.as_primary();
             }
@@ -812,20 +1013,30 @@ impl<'a> SdlParser<'a> {
                 field = field.with_relation_name(relation_name.clone());
 
                 // For single-object relations (not arrays), Go automatically creates an
-                // implicit {field}_id field to store the foreign key. This FK field:
-                // - IS primary (saved to blockstore, contributes to CID)
-                // - HAS relation_name set (same as the relation object field)
-                // - Has LWW_REGISTER CRDT type
+                // implicit {field}_id field to store the foreign key.
+                // The FK field has the SAME is_primary status as the main relation field:
+                // - If main field is PRIMARY, FK field is also PRIMARY (non-empty FieldID)
+                // - If main field is SECONDARY, FK field is also SECONDARY (empty FieldID)
                 if creates_fk_field {
                     let id_field_name = format!("{}_id", parsed_field.name);
                     let id_field_kind = FieldKind::doc_id();
                     let id_field_crdt = CType::LwwRegister;
-                    let id_field_id = generate_field_id(&id_field_name, &id_field_kind, id_field_crdt);
-                    // FK field has same relation_name as the relation object field and is primary
-                    let id_field = FieldDescription::new(&id_field_id, &id_field_name, id_field_kind)
-                        .with_crdt_type(id_field_crdt)
-                        .with_relation_name(relation_name)
-                        .as_primary();
+
+                    // FK field has empty FieldID if secondary, otherwise generated
+                    let id_field_id = if is_primary {
+                        generate_field_id(&id_field_name, &id_field_kind, id_field_crdt)
+                    } else {
+                        String::new()
+                    };
+
+                    // FK field has same is_primary status as relation object field
+                    let mut id_field =
+                        FieldDescription::new(&id_field_id, &id_field_name, id_field_kind)
+                            .with_crdt_type(id_field_crdt)
+                            .with_relation_name(relation_name);
+                    if is_primary {
+                        id_field = id_field.as_primary();
+                    }
                     fields.push(id_field);
                     field_id_counter += 1;
                 }

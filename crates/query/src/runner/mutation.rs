@@ -208,6 +208,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 let inputs = self.build_create_inputs(mutation)?;
                 Box::new(
                     CreateNode::new(&mutation.collection_name, mutator, mapping.clone())
+                        .with_collection(collection.clone())
                         .with_inputs(inputs),
                 )
             }

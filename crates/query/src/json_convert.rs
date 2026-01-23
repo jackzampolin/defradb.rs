@@ -2,6 +2,7 @@
 //!
 //! This module handles converting document field values to JSON format.
 
+use chrono::SecondsFormat;
 use document::NormalValue;
 use serde_json::Value as JsonValue;
 use std::fmt::Write;
@@ -18,7 +19,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
         NormalValue::Float32(f) => float32_to_json(*f),
         NormalValue::String(s) => Ok(JsonValue::String(s.clone())),
         NormalValue::Bytes(b) => bytes_to_json(b),
-        NormalValue::Time(t) => Ok(JsonValue::String(t.to_rfc3339())),
+        NormalValue::Time(t) => Ok(JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true))),
         NormalValue::Json(j) => Ok(j.clone()),
         NormalValue::IntArray(arr) => Ok(JsonValue::Array(
             arr.iter().map(|i| JsonValue::Number((*i).into())).collect(),
@@ -43,7 +44,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
         NormalValue::NillableFloat32(opt) => nillable_float32_to_json(*opt),
         NormalValue::NillableTime(opt) => Ok(opt
             .as_ref()
-            .map(|t| JsonValue::String(t.to_rfc3339()))
+            .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
             .unwrap_or(JsonValue::Null)),
         NormalValue::Document(doc) => Ok(JsonValue::String(format!("<document:{:?}>", doc.id()))),
         NormalValue::DocumentArray(docs) => Ok(JsonValue::Array(
@@ -59,7 +60,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
         NormalValue::BytesArray(arr) => bytes_array_to_json(arr),
         NormalValue::TimeArray(arr) => Ok(JsonValue::Array(
             arr.iter()
-                .map(|t| JsonValue::String(t.to_rfc3339()))
+                .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
                 .collect(),
         )),
         NormalValue::JsonArray(arr) => Ok(JsonValue::Array(arr.clone())),
@@ -85,7 +86,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
             .map(|arr| {
                 JsonValue::Array(
                     arr.iter()
-                        .map(|t| JsonValue::String(t.to_rfc3339()))
+                        .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
                         .collect(),
                 )
             })
@@ -133,7 +134,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
             arr.iter()
                 .map(|opt| {
                     opt.as_ref()
-                        .map(|t| JsonValue::String(t.to_rfc3339()))
+                        .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
                         .unwrap_or(JsonValue::Null)
                 })
                 .collect(),

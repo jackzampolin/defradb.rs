@@ -47,6 +47,9 @@ impl PlanResult {
 pub struct Planner {
     /// Available collection schemas by name
     collections: HashMap<String, Arc<CollectionVersion>>,
+    /// Available collection schemas by CollectionID (CID)
+    /// This is needed because FieldKind::Relation stores the CollectionID, not the name
+    collections_by_id: HashMap<String, Arc<CollectionVersion>>,
     /// Optional fetcher for ScanNodes to load data on-demand
     fetcher: Option<Arc<dyn DocFetcher>>,
 }
@@ -54,12 +57,18 @@ pub struct Planner {
 impl Planner {
     /// Create a new planner with the given collection schemas.
     pub fn new(collections: Vec<CollectionVersion>) -> Self {
-        let collections = collections
+        let collections: HashMap<String, Arc<CollectionVersion>> = collections
             .into_iter()
             .map(|c| (c.name.clone(), Arc::new(c)))
             .collect();
+        // Build a second map by CollectionID for relation field resolution
+        let collections_by_id: HashMap<String, Arc<CollectionVersion>> = collections
+            .values()
+            .map(|c| (c.collection_id.clone(), c.clone()))
+            .collect();
         Self {
             collections,
+            collections_by_id,
             fetcher: None,
         }
     }
@@ -71,6 +80,19 @@ impl Planner {
     pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
         self.fetcher = Some(fetcher);
         self
+    }
+
+    /// Get a collection by name or CollectionID.
+    ///
+    /// Relation fields store the CollectionID (CID) in their Kind, but we need
+    /// the collection to resolve the relation. This method tries both lookups:
+    /// 1. First by name (for Named kind fields and root queries)
+    /// 2. Then by CollectionID (for Relation kind fields)
+    fn get_collection(&self, name_or_id: &str) -> Option<Arc<CollectionVersion>> {
+        self.collections
+            .get(name_or_id)
+            .or_else(|| self.collections_by_id.get(name_or_id))
+            .cloned()
     }
 
     /// Build an execution plan from a Select operation.
@@ -239,7 +261,11 @@ impl Planner {
                 }
 
                 // Get the target collection
-                let target_collection_name = relation_field
+                // The relation_collection_id() returns either:
+                // - CollectionID (CID) for FieldKind::Relation
+                // - RelativeID for FieldKind::SelfRef (empty string for same-type self-refs)
+                // - Collection name for FieldKind::Named
+                let target_collection_id = relation_field
                     .kind
                     .relation_collection_id()
                     .ok_or_else(|| {
@@ -249,11 +275,14 @@ impl Planner {
                         ))
                     })?;
 
-                let target_collection = self
-                    .collections
-                    .get(target_collection_name)
-                    .ok_or_else(|| QueryError::collection_not_found(target_collection_name))?
-                    .clone();
+                // For self-referential relations (empty relative_id), use the parent collection
+                let target_collection = if target_collection_id.is_empty() {
+                    // Self-reference: target is the same collection as parent
+                    Arc::new(parent_collection.clone())
+                } else {
+                    self.get_collection(target_collection_id)
+                        .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
+                };
 
                 // Build child mapping for rendering (only selected fields)
                 let child_render_mapping = self.build_mapping(nested_select, &target_collection)?;

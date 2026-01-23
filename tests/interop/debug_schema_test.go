@@ -169,26 +169,46 @@ type Employee {
 	goSchemas, err := addSchemaWithFields(goNode.HTTPURL(), sdl)
 	require.NoError(t, err)
 
-	// Find Enrollment in both
-	var rustSR, goSR *SchemaDefinition
+	// Find Person, Profile, Employee, and Enrollment in both
+	var rustPerson, goPerson, rustProfile, goProfile, rustEmployee, goEmployee, rustEnrollment, goEnrollment, rustStudent, goStudent *SchemaDefinition
 	for i := range rustSchemas {
-		if rustSchemas[i].Name == "Enrollment" {
-			rustSR = &rustSchemas[i]
+		switch rustSchemas[i].Name {
+		case "Person":
+			rustPerson = &rustSchemas[i]
+		case "Profile":
+			rustProfile = &rustSchemas[i]
+		case "Employee":
+			rustEmployee = &rustSchemas[i]
+		case "Enrollment":
+			rustEnrollment = &rustSchemas[i]
+		case "Student":
+			rustStudent = &rustSchemas[i]
 		}
 	}
 	for i := range goSchemas {
-		if goSchemas[i].Name == "Enrollment" {
-			goSR = &goSchemas[i]
+		switch goSchemas[i].Name {
+		case "Person":
+			goPerson = &goSchemas[i]
+		case "Profile":
+			goProfile = &goSchemas[i]
+		case "Employee":
+			goEmployee = &goSchemas[i]
+		case "Enrollment":
+			goEnrollment = &goSchemas[i]
+		case "Student":
+			goStudent = &goSchemas[i]
 		}
 	}
 
-	require.NotNil(t, rustSR, "Rust Enrollment not found")
-	require.NotNil(t, goSR, "Go Enrollment not found")
+	require.NotNil(t, rustPerson, "Rust Person not found")
+	require.NotNil(t, goPerson, "Go Person not found")
+	require.NotNil(t, rustProfile, "Rust Profile not found")
+	require.NotNil(t, goProfile, "Go Profile not found")
 
-	t.Logf("=== RUST Enrollment ===")
-	t.Logf("CollectionID: %s", rustSR.CollectionID)
+	t.Logf("=== RUST Person ===")
+	t.Logf("CollectionID: %s", rustPerson.CollectionID)
 	t.Logf("Fields:")
-	for _, f := range rustSR.Fields {
+	for _, f := range rustPerson.Fields {
 		relName := "<nil>"
 		if f.RelationName != nil {
 			relName = *f.RelationName
@@ -198,10 +218,10 @@ type Employee {
 	}
 
 	t.Logf("")
-	t.Logf("=== GO Enrollment ===")
-	t.Logf("CollectionID: %s", goSR.CollectionID)
+	t.Logf("=== GO Person ===")
+	t.Logf("CollectionID: %s", goPerson.CollectionID)
 	t.Logf("Fields:")
-	for _, f := range goSR.Fields {
+	for _, f := range goPerson.Fields {
 		relName := "<nil>"
 		if f.RelationName != nil {
 			relName = *f.RelationName
@@ -210,6 +230,111 @@ type Employee {
 		t.Logf("  %s: FieldID=%s, RelationName=%s, IsPrimary=%v, Typ=%d, Kind=%s", f.Name, f.FieldID, relName, f.IsPrimary, f.Typ, string(kindJSON))
 	}
 
+	t.Logf("")
+	t.Logf("=== RUST Profile ===")
+	t.Logf("CollectionID: %s", rustProfile.CollectionID)
+	t.Logf("Fields:")
+	for _, f := range rustProfile.Fields {
+		relName := "<nil>"
+		if f.RelationName != nil {
+			relName = *f.RelationName
+		}
+		kindJSON, _ := json.Marshal(f.Kind)
+		t.Logf("  %s: FieldID=%s, RelationName=%s, IsPrimary=%v, Typ=%d, Kind=%s", f.Name, f.FieldID, relName, f.IsPrimary, f.Typ, string(kindJSON))
+	}
+
+	t.Logf("")
+	t.Logf("=== GO Profile ===")
+	t.Logf("CollectionID: %s", goProfile.CollectionID)
+	t.Logf("Fields:")
+	for _, f := range goProfile.Fields {
+		relName := "<nil>"
+		if f.RelationName != nil {
+			relName = *f.RelationName
+		}
+		kindJSON, _ := json.Marshal(f.Kind)
+		t.Logf("  %s: FieldID=%s, RelationName=%s, IsPrimary=%v, Typ=%d, Kind=%s", f.Name, f.FieldID, relName, f.IsPrimary, f.Typ, string(kindJSON))
+	}
+
+	t.Logf("")
+	t.Logf("=== RUST Employee ===")
+	if rustEmployee != nil {
+		t.Logf("CollectionID: %s", rustEmployee.CollectionID)
+		t.Logf("Fields:")
+		for _, f := range rustEmployee.Fields {
+			relName := "<nil>"
+			if f.RelationName != nil {
+				relName = *f.RelationName
+			}
+			kindJSON, _ := json.Marshal(f.Kind)
+			t.Logf("  %s: FieldID=%s, RelationName=%s, IsPrimary=%v, Typ=%d, Kind=%s", f.Name, f.FieldID, relName, f.IsPrimary, f.Typ, string(kindJSON))
+		}
+	}
+
+	t.Logf("")
+	t.Logf("=== GO Employee ===")
+	if goEmployee != nil {
+		t.Logf("CollectionID: %s", goEmployee.CollectionID)
+		t.Logf("Fields:")
+		for _, f := range goEmployee.Fields {
+			relName := "<nil>"
+			if f.RelationName != nil {
+				relName = *f.RelationName
+			}
+			kindJSON, _ := json.Marshal(f.Kind)
+			t.Logf("  %s: FieldID=%s, RelationName=%s, IsPrimary=%v, Typ=%d, Kind=%s", f.Name, f.FieldID, relName, f.IsPrimary, f.Typ, string(kindJSON))
+		}
+	}
+
+	t.Logf("")
+	t.Logf("=== RUST Enrollment ===")
+	if rustEnrollment != nil {
+		t.Logf("CollectionID: %s", rustEnrollment.CollectionID)
+		t.Logf("Fields:")
+		for _, f := range rustEnrollment.Fields {
+			relName := "<nil>"
+			if f.RelationName != nil {
+				relName = *f.RelationName
+			}
+			kindJSON, _ := json.Marshal(f.Kind)
+			t.Logf("  %s: FieldID=%s, RelationName=%s, IsPrimary=%v, Typ=%d, Kind=%s", f.Name, f.FieldID, relName, f.IsPrimary, f.Typ, string(kindJSON))
+		}
+	}
+
+	t.Logf("")
+	t.Logf("=== GO Enrollment ===")
+	if goEnrollment != nil {
+		t.Logf("CollectionID: %s", goEnrollment.CollectionID)
+		t.Logf("Fields:")
+		for _, f := range goEnrollment.Fields {
+			relName := "<nil>"
+			if f.RelationName != nil {
+				relName = *f.RelationName
+			}
+			kindJSON, _ := json.Marshal(f.Kind)
+			t.Logf("  %s: FieldID=%s, RelationName=%s, IsPrimary=%v, Typ=%d, Kind=%s", f.Name, f.FieldID, relName, f.IsPrimary, f.Typ, string(kindJSON))
+		}
+	}
+
+	t.Logf("")
+	t.Logf("=== RUST Student ===")
+	if rustStudent != nil {
+		t.Logf("CollectionID: %s", rustStudent.CollectionID)
+	}
+
+	t.Logf("")
+	t.Logf("=== GO Student ===")
+	if goStudent != nil {
+		t.Logf("CollectionID: %s", goStudent.CollectionID)
+	}
+
 	// Assert match
-	require.Equal(t, goSR.CollectionID, rustSR.CollectionID, "CollectionID mismatch")
+	require.Equal(t, goPerson.CollectionID, rustPerson.CollectionID, "Person CollectionID mismatch")
+	require.Equal(t, goProfile.CollectionID, rustProfile.CollectionID, "Profile CollectionID mismatch")
+	if goEmployee != nil && rustEmployee != nil {
+		require.Equal(t, goEmployee.CollectionID, rustEmployee.CollectionID, "Employee CollectionID mismatch")
+	}
+	if goEnrollment != nil && rustEnrollment != nil {
+		require.Equal(t, goEnrollment.CollectionID, rustEnrollment.CollectionID, "Enrollment CollectionID mismatch")
+	}
 }

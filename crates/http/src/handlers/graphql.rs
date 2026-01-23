@@ -40,6 +40,7 @@ use crate::router::{AppState, NodePermission};
 fn permission_for_query(query: &str) -> NodePermission {
     match parse_request(query) {
         Ok(ParsedOperation::Query { .. }) => NodePermission::DocumentRead,
+        Ok(ParsedOperation::Subscription { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Mutation(_)) => NodePermission::DocumentUpdate,
         // Parse failures default to the more restrictive permission
         Err(_) => NodePermission::DocumentUpdate,
@@ -461,4 +462,15 @@ pub async fn graphql_transactional(
         tracing::warn!(errors = ?response.errors, "GraphQL query returned errors");
     }
     Ok(Json(response))
+}
+
+/// GraphQL WebSocket handler for subscriptions.
+///
+/// Subscriptions over WebSocket are not yet implemented.
+/// This handler returns 501 Not Implemented.
+pub async fn graphql_ws_handler() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "GraphQL subscriptions over WebSocket are not yet implemented",
+    )
 }

@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use document::Document;
+use schema::{CollectionVersion, FieldKind, ScalarKind};
 use serde_json::Value as JsonValue;
 use tracing;
 
@@ -36,13 +38,37 @@ impl CreateInput {
         self
     }
 
-    /// Convert to a Document for storage.
+    /// Convert to a Document for storage (without schema-aware type coercion).
     pub fn to_document(&self) -> Result<Document> {
         let mut doc = Document::new();
 
         for (field_name, value) in &self.fields {
             // Convert JsonValue to appropriate NormalValue
             let normal_value = json_to_normal_value(value)?;
+            doc.set(field_name.clone(), normal_value);
+        }
+
+        Ok(doc)
+    }
+
+    /// Convert to a Document for storage with schema-aware type coercion.
+    ///
+    /// This method uses the collection schema to properly coerce values,
+    /// such as parsing RFC 3339 strings as DateTime values when the field
+    /// type is DateTime (matching Go DefraDB behavior).
+    pub fn to_document_with_schema(&self, collection: &CollectionVersion) -> Result<Document> {
+        let mut doc = Document::new();
+
+        for (field_name, value) in &self.fields {
+            // Look up the field in the schema to get its kind
+            let field_kind = collection
+                .fields
+                .iter()
+                .find(|f| f.name == *field_name)
+                .map(|f| &f.kind);
+
+            // Convert JsonValue to appropriate NormalValue, using schema for type coercion
+            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
             doc.set(field_name.clone(), normal_value);
         }
 
@@ -165,6 +191,70 @@ pub fn json_to_normal_value(value: &JsonValue) -> Result<document::NormalValue> 
     }
 }
 
+/// Convert a JSON value to a document NormalValue with schema-aware type coercion.
+///
+/// This function uses the field kind to properly coerce values. For example,
+/// when the field kind is DateTime, it parses RFC 3339 strings as DateTime values.
+/// This matches Go DefraDB's `validateFieldSchema` behavior.
+pub fn json_to_normal_value_with_kind(
+    value: &JsonValue,
+    field_kind: Option<&FieldKind>,
+) -> Result<document::NormalValue> {
+    use document::NormalValue;
+
+    // Handle null regardless of expected type
+    if value.is_null() {
+        return Ok(NormalValue::Null);
+    }
+
+    // If we have schema information, use it for type coercion
+    if let Some(kind) = field_kind {
+        match kind {
+            // DateTime fields: parse RFC 3339 strings
+            FieldKind::Scalar(ScalarKind::DateTime) => {
+                match value {
+                    JsonValue::String(s) => {
+                        // Parse RFC 3339 string to DateTime (matching Go's time.Parse(time.RFC3339, s))
+                        let dt: DateTime<Utc> = s.parse().map_err(|e| {
+                            QueryError::execution(format!(
+                                "Invalid DateTime format '{}': expected RFC 3339 (e.g., '2024-01-15T10:30:00Z'). Error: {}",
+                                s, e
+                            ))
+                        })?;
+                        Ok(NormalValue::Time(dt))
+                    }
+                    // Already a number (Unix timestamp) - not common but handle it
+                    JsonValue::Number(n) => {
+                        if let Some(ts) = n.as_i64() {
+                            let dt = DateTime::from_timestamp(ts, 0).ok_or_else(|| {
+                                QueryError::execution(format!(
+                                    "Invalid Unix timestamp: {}",
+                                    ts
+                                ))
+                            })?;
+                            Ok(NormalValue::Time(dt))
+                        } else {
+                            Err(QueryError::execution(format!(
+                                "Expected DateTime string or Unix timestamp, got: {:?}",
+                                value
+                            )))
+                        }
+                    }
+                    _ => Err(QueryError::execution(format!(
+                        "Expected DateTime string, got: {:?}",
+                        value
+                    ))),
+                }
+            }
+            // For other scalar types, fall through to default conversion
+            _ => json_to_normal_value(value),
+        }
+    } else {
+        // No schema info - use default conversion
+        json_to_normal_value(value)
+    }
+}
+
 /// CreateNode creates new documents in a collection.
 ///
 /// This node implements the Volcano iterator model, yielding created documents
@@ -196,6 +286,8 @@ pub struct CreateNode {
     mutator: Arc<dyn DocMutator>,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
+    /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
+    collection: Option<Arc<CollectionVersion>>,
     /// Input documents to create
     inputs: Vec<CreateInput>,
     /// Created documents (populated after first next())
@@ -227,6 +319,7 @@ impl CreateNode {
             collection_name: collection_name.into(),
             mutator,
             document_mapping,
+            collection: None,
             inputs: Vec::new(),
             created_docs: Vec::new(),
             position: 0,
@@ -245,6 +338,15 @@ impl CreateNode {
     /// Add multiple input documents.
     pub fn with_inputs(mut self, inputs: Vec<CreateInput>) -> Self {
         self.inputs = inputs;
+        self
+    }
+
+    /// Set the collection schema for schema-aware type coercion.
+    ///
+    /// When set, the node will use the schema to properly coerce values during
+    /// document creation (e.g., parsing RFC 3339 strings as DateTime values).
+    pub fn with_collection(mut self, collection: Arc<CollectionVersion>) -> Self {
+        self.collection = Some(collection);
         self
     }
 
@@ -355,6 +457,20 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
                 })
                 .collect(),
         ),
+        // DateTime handling - convert to RFC 3339 string with Z suffix for UTC (matching Go DefraDB)
+        // Go's time.RFC3339 format uses "Z" for UTC, not "+00:00"
+        NormalValue::Time(t) => {
+            JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        }
+        NormalValue::NillableTime(Some(t)) => {
+            JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        }
+        NormalValue::NillableTime(None) => JsonValue::Null,
+        NormalValue::TimeArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|t| JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+                .collect(),
+        ),
         // For unknown types, log a warning and return null
         other => {
             tracing::warn!("Unexpected NormalValue variant encountered, converting to null: {:?}", other);
@@ -387,8 +503,12 @@ impl PlanNode for CreateNode {
         // On first call, create all documents
         if !self.did_create {
             for input in &self.inputs {
-                // Convert input to Document
-                let doc = input.to_document()?;
+                // Convert input to Document (using schema-aware conversion if available)
+                let doc = if let Some(ref collection) = self.collection {
+                    input.to_document_with_schema(collection)?
+                } else {
+                    input.to_document()?
+                };
 
                 // Create in storage (generates DocID)
                 let result = self.mutator.create(&self.collection_name, doc).await?;
