@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"sync/atomic"
 
 	"github.com/sourcenetwork/defradb/acp/identity"
@@ -24,9 +23,9 @@ var _ clients.Client = (*ClientWrapper)(nil)
 
 // ClientWrapper wraps an FFI Node to implement the DefraDB client.TxnStore interface.
 type ClientWrapper struct {
-	node      *Node
-	events    *eventBus
-	txnIDGen  uint64
+	node     *Node
+	events   *eventBus
+	txnIDGen uint64
 }
 
 // NewClientWrapper creates a new client wrapper around an FFI node.
@@ -374,7 +373,10 @@ func (c *ClientWrapper) AddView(
 func (c *ClientWrapper) RefreshViews(ctx context.Context, opts client.CollectionFetchOptions) error {
 	optsJSON := ""
 	if opts.Name.HasValue() || opts.VersionID.HasValue() {
-		data, _ := json.Marshal(opts)
+		data, err := json.Marshal(opts)
+		if err != nil {
+			return fmt.Errorf("failed to marshal options: %w", err)
+		}
 		optsJSON = string(data)
 	}
 	return c.node.RefreshViews(optsJSON)
@@ -628,19 +630,43 @@ func (t *TxnWrapper) ListAllEncryptedIndexes(ctx context.Context) (map[client.Co
 }
 
 // P2P methods - not available in transactions
-func (t *TxnWrapper) PeerInfo() ([]string, error)                                               { return nil, fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) Connect(ctx context.Context, addresses []string) error                    { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) SetReplicator(ctx context.Context, addresses []string, collections ...string) error { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) DeleteReplicator(ctx context.Context, id string, collections ...string) error { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) GetAllReplicators(ctx context.Context) ([]client.Replicator, error)       { return nil, fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) AddP2PCollections(ctx context.Context, collectionNames ...string) error   { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) RemoveP2PCollections(ctx context.Context, collectionNames ...string) error { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) GetAllP2PCollections(ctx context.Context) ([]string, error)               { return nil, fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) AddP2PDocuments(ctx context.Context, docIDs ...string) error              { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) RemoveP2PDocuments(ctx context.Context, docIDs ...string) error           { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) GetAllP2PDocuments(ctx context.Context) ([]string, error)                 { return nil, fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) SyncDocuments(ctx context.Context, collectionName string, docIDs []string) error { return fmt.Errorf("P2P not available") }
-func (t *TxnWrapper) SyncCollections(ctx context.Context, versionIDs ...string) error          { return fmt.Errorf("P2P not available") }
+func (t *TxnWrapper) PeerInfo() ([]string, error) { return nil, fmt.Errorf("P2P not available") }
+func (t *TxnWrapper) Connect(ctx context.Context, addresses []string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) SetReplicator(ctx context.Context, addresses []string, collections ...string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) DeleteReplicator(ctx context.Context, id string, collections ...string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) GetAllReplicators(ctx context.Context) ([]client.Replicator, error) {
+	return nil, fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) AddP2PCollections(ctx context.Context, collectionNames ...string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) RemoveP2PCollections(ctx context.Context, collectionNames ...string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) GetAllP2PCollections(ctx context.Context) ([]string, error) {
+	return nil, fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) AddP2PDocuments(ctx context.Context, docIDs ...string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) RemoveP2PDocuments(ctx context.Context, docIDs ...string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) GetAllP2PDocuments(ctx context.Context) ([]string, error) {
+	return nil, fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) SyncDocuments(ctx context.Context, collectionName string, docIDs []string) error {
+	return fmt.Errorf("P2P not available")
+}
+func (t *TxnWrapper) SyncCollections(ctx context.Context, versionIDs ...string) error {
+	return fmt.Errorf("P2P not available")
+}
 
 // ============================================================================
 // eventBus implements event.Bus for testing
@@ -851,13 +877,36 @@ func (c *CollectionWrapper) DeleteWithFilter(ctx context.Context, filter any) (*
 }
 
 func (c *CollectionWrapper) Get(ctx context.Context, docID client.DocID, showDeleted bool) (*client.Document, error) {
+	// Query the document by ID
 	query := fmt.Sprintf(`{ %s(docID: "%s") { _docID } }`, c.version.Name, docID.String())
 	result := c.client.ExecRequest(ctx, query)
 	if len(result.GQL.Errors) > 0 {
 		return nil, result.GQL.Errors[0]
 	}
-	// Parse result and create Document - simplified for now
-	return nil, fmt.Errorf("Get not fully implemented")
+
+	// Parse the result to check if document exists
+	data, ok := result.GQL.Data.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("document not found: %s", docID.String())
+	}
+
+	docs, ok := data[c.version.Name].([]any)
+	if !ok || len(docs) == 0 {
+		return nil, fmt.Errorf("document not found: %s", docID.String())
+	}
+
+	docData, ok := docs[0].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("document not found: %s", docID.String())
+	}
+
+	// Create a new document from the retrieved data
+	doc, err := client.NewDocFromMap(docData, c.version)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create document: %w", err)
+	}
+
+	return doc, nil
 }
 
 func (c *CollectionWrapper) GetAllDocIDs(ctx context.Context) (<-chan client.DocIDResult, error) {
@@ -959,10 +1008,4 @@ func (c *CollectionWrapper) DeleteEncryptedIndex(ctx context.Context, fieldName 
 
 func (c *CollectionWrapper) ListEncryptedIndexes(ctx context.Context) ([]client.EncryptedIndexDescription, error) {
 	return nil, fmt.Errorf("encrypted indexes not yet implemented in FFI")
-}
-
-// Helper to parse transaction ID from FFI
-func parseTxnID(id string) uint64 {
-	v, _ := strconv.ParseUint(id, 10, 64)
-	return v
 }
