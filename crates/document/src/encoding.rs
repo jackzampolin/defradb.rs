@@ -112,7 +112,9 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<serde_json::Value> {
             // Encode bytes as base64
             Ok(serde_json::Value::String(base64_encode(b)))
         }
-        NormalValue::Time(t) => Ok(serde_json::Value::String(t.to_rfc3339_opts(SecondsFormat::Secs, true))),
+        NormalValue::Time(t) => Ok(serde_json::Value::String(
+            t.to_rfc3339_opts(SecondsFormat::Secs, true),
+        )),
         NormalValue::Json(v) => Ok(v.clone()),
         NormalValue::IntArray(arr) => Ok(serde_json::Value::Array(
             arr.iter()
@@ -195,7 +197,9 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::Float32(f) => Ok(ciborium::Value::Float(*f as f64)),
         NormalValue::String(s) => Ok(ciborium::Value::Text(s.clone())),
         NormalValue::Bytes(b) => Ok(ciborium::Value::Bytes(b.clone())),
-        NormalValue::Time(t) => Ok(ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true))),
+        NormalValue::Time(t) => Ok(ciborium::Value::Text(
+            t.to_rfc3339_opts(SecondsFormat::Secs, true),
+        )),
         NormalValue::Json(v) => json_to_cbor_value(v),
         NormalValue::IntArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
@@ -340,7 +344,9 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
             .map(|arr| {
                 ciborium::Value::Array(
                     arr.iter()
-                        .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+                        .map(|t| {
+                            ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true))
+                        })
                         .collect(),
                 )
             })

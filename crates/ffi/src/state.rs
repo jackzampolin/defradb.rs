@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use parking_lot::RwLock;
@@ -19,16 +20,31 @@ pub type NodeHandle = usize;
 /// Type alias for the NAC manager used in FFI (in-memory).
 pub type FfiNacManager = db::NacManager<acp::MemoryZanzibarStore>;
 
+/// Type alias for subscription handles (opaque to FFI callers).
+pub type SubscriptionHandle = usize;
+
 /// State held for each FFI node.
 pub struct NodeState {
     /// The database instance.
-    pub database: std::sync::Arc<FfiDatabase>,
+    pub database: Arc<FfiDatabase>,
     /// The query runner for executing GraphQL queries.
-    pub query_runner: std::sync::Arc<dyn query::QueryExecutor>,
+    pub query_runner: Arc<dyn query::QueryExecutor>,
     /// The NAC manager for node-level access control.
-    pub nac_manager: std::sync::Arc<FfiNacManager>,
+    pub nac_manager: Arc<FfiNacManager>,
     /// The document ACP for document-level access control.
-    pub document_acp: std::sync::Arc<dyn acp::DocumentACP>,
+    pub document_acp: Arc<dyn acp::DocumentACP>,
+    /// The event bus for subscriptions.
+    pub event_bus: Arc<dyn events::Bus>,
+}
+
+/// State held for each FFI subscription.
+pub struct SubscriptionState {
+    /// The underlying events subscription.
+    pub subscription: events::Subscription,
+    /// The node handle this subscription belongs to.
+    pub node_handle: NodeHandle,
+    /// Optional collection name filter (None = all collections).
+    pub collection_filter: Option<String>,
 }
 
 /// Global registry of active nodes.
@@ -100,6 +116,94 @@ static NODE_REGISTRY: OnceLock<NodeRegistry> = OnceLock::new();
 pub fn nodes() -> &'static NodeRegistry {
     NODE_REGISTRY.get_or_init(NodeRegistry::new)
 }
+
+/// Global registry of active subscriptions.
+pub struct SubscriptionRegistry {
+    subscriptions: RwLock<HashMap<SubscriptionHandle, SubscriptionState>>,
+    next_handle: AtomicUsize,
+}
+
+impl SubscriptionRegistry {
+    fn new() -> Self {
+        Self {
+            subscriptions: RwLock::new(HashMap::new()),
+            next_handle: AtomicUsize::new(1),
+        }
+    }
+
+    /// Insert a new subscription state and return its handle.
+    pub fn insert(&self, state: SubscriptionState) -> SubscriptionHandle {
+        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+        let mut subs = self.subscriptions.write();
+        subs.insert(handle, state);
+        handle
+    }
+
+    /// Get mutable access to a subscription state (required for try_recv).
+    pub fn get_mut<F, R>(&self, handle: SubscriptionHandle, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut SubscriptionState) -> R,
+    {
+        let mut subs = self.subscriptions.write();
+        subs.get_mut(&handle).map(f)
+    }
+
+    /// Remove and return a subscription state.
+    pub fn remove(&self, handle: SubscriptionHandle) -> Option<SubscriptionState> {
+        let mut subs = self.subscriptions.write();
+        subs.remove(&handle)
+    }
+
+    /// Remove all subscriptions for a given node handle.
+    pub fn remove_for_node(&self, node_handle: NodeHandle) -> Vec<SubscriptionState> {
+        let mut subs = self.subscriptions.write();
+        let handles_to_remove: Vec<SubscriptionHandle> = subs
+            .iter()
+            .filter(|(_, state)| state.node_handle == node_handle)
+            .map(|(handle, _)| *handle)
+            .collect();
+
+        handles_to_remove
+            .into_iter()
+            .filter_map(|handle| subs.remove(&handle))
+            .collect()
+    }
+}
+
+/// Global subscription registry singleton.
+static SUBSCRIPTION_REGISTRY: OnceLock<SubscriptionRegistry> = OnceLock::new();
+
+/// Access the global subscription registry.
+pub fn subscriptions() -> &'static SubscriptionRegistry {
+    SUBSCRIPTION_REGISTRY.get_or_init(SubscriptionRegistry::new)
+}
+
+/// Convenience wrapper for subscription registry access.
+pub struct SubscriptionsAccess;
+
+impl SubscriptionsAccess {
+    pub fn insert(&self, state: SubscriptionState) -> SubscriptionHandle {
+        subscriptions().insert(state)
+    }
+
+    pub fn get_mut<F, R>(&self, handle: SubscriptionHandle, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut SubscriptionState) -> R,
+    {
+        subscriptions().get_mut(handle, f)
+    }
+
+    pub fn remove(&self, handle: SubscriptionHandle) -> Option<SubscriptionState> {
+        subscriptions().remove(handle)
+    }
+
+    pub fn remove_for_node(&self, node_handle: NodeHandle) -> Vec<SubscriptionState> {
+        subscriptions().remove_for_node(node_handle)
+    }
+}
+
+/// Global SUBSCRIPTIONS accessor.
+pub static SUBSCRIPTIONS: SubscriptionsAccess = SubscriptionsAccess;
 
 /// Convenience wrapper for NODES access (backwards compatibility).
 pub struct NodesAccess;

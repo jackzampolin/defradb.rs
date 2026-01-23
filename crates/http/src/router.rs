@@ -601,7 +601,10 @@ pub fn create_router_with_state(state: AppState) -> Router {
         // GraphQL endpoints
         .route("/graphql", post(handlers::graphql_transactional))
         .route("/graphql", get(handlers::graphql_get))
-        .route("/graphql/ws", axum::routing::any(handlers::graphql_ws_handler))
+        .route(
+            "/graphql/ws",
+            axum::routing::any(handlers::graphql_ws_handler),
+        )
         .route("/schema", get(handlers::schema))
         .route("/schema", post(handlers::schema::add_schema))
         .route("/version", get(handlers::version))

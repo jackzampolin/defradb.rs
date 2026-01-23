@@ -95,6 +95,67 @@ typedef struct NewTxnResult {
   char *txn_id;
 } NewTxnResult;
 
+/*
+ FFI result for subscription creation.
+ */
+typedef struct CreateSubscriptionResult {
+  /*
+   Status code: 0=success, 1=error
+   */
+  int status;
+  /*
+   Error message (null on success). Caller must free with `defra_free_string`.
+   */
+  char *error;
+  /*
+   Subscription handle (0 on error).
+   */
+  uintptr_t subscription_handle;
+} CreateSubscriptionResult;
+
+/*
+ FFI result for polling subscriptions.
+
+ Status codes:
+ - 0: Event available (value contains JSON event data)
+ - 1: Error occurred
+ - 2: No event available (subscription open but no pending events)
+ - 3: Subscription closed (no more events will arrive)
+ */
+typedef struct PollSubscriptionResult {
+  /*
+   Status code (see above)
+   */
+  int status;
+  /*
+   Error message (null unless status=1). Caller must free with `defra_free_string`.
+   */
+  char *error;
+  /*
+   Event data as JSON (null unless status=0). Caller must free with `defra_free_string`.
+   */
+  char *value;
+  /*
+   Number of events dropped due to buffer overflow since last poll.
+   When non-zero, the client should re-fetch data to ensure consistency.
+   */
+  uint64_t dropped_count;
+} PollSubscriptionResult;
+
+/*
+ FFI result for closing subscriptions.
+ */
+typedef struct CloseSubscriptionResult {
+  /*
+   Status code: 0=success, 1=error
+   */
+  int status;
+  /*
+   Error message (null on success). Caller must free with `defra_free_string`.
+   */
+  char *error;
+} CloseSubscriptionResult;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -492,6 +553,54 @@ struct FfiResult get_indexes(uintptr_t node_ptr, const char *collection_name);
  JSON object mapping collection names to their index arrays.
  */
 struct FfiResult get_all_indexes(uintptr_t node_ptr);
+
+/*
+ Create a subscription to database events.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `collection_filter` - Optional collection name to filter events (null for all)
+
+ # Returns
+
+ A handle that can be used with `poll_subscription` and `close_subscription`.
+
+ # Safety
+
+ The collection_filter must be either null or a valid null-terminated UTF-8 string.
+ */
+struct CreateSubscriptionResult create_subscription(uintptr_t node_ptr,
+                                                    const char *collection_filter);
+
+/*
+ Poll a subscription for the next event (non-blocking).
+
+ # Arguments
+
+ * `subscription_handle` - Handle from `create_subscription`
+
+ # Returns
+
+ - status=0: Event available (value contains JSON)
+ - status=1: Error occurred
+ - status=2: No event available yet
+ - status=3: Subscription closed
+ */
+struct PollSubscriptionResult poll_subscription(uintptr_t subscription_handle);
+
+/*
+ Close a subscription and release resources.
+
+ # Arguments
+
+ * `subscription_handle` - Handle from `create_subscription`
+
+ # Safety
+
+ After this call, the subscription handle is no longer valid.
+ */
+struct CloseSubscriptionResult close_subscription(uintptr_t subscription_handle);
 
 #ifdef __cplusplus
 }  // extern "C"

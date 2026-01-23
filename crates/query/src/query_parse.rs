@@ -668,10 +668,8 @@ fn graphql_value_to_json_no_vars(value: &Value<'_, String>) -> Result<JsonValue>
         Value::Boolean(b) => Ok(JsonValue::Bool(*b)),
         Value::Enum(e) => Ok(JsonValue::String(e.clone())),
         Value::List(items) => {
-            let arr: Result<Vec<JsonValue>> = items
-                .iter()
-                .map(graphql_value_to_json_no_vars)
-                .collect();
+            let arr: Result<Vec<JsonValue>> =
+                items.iter().map(graphql_value_to_json_no_vars).collect();
             Ok(JsonValue::Array(arr?))
         }
         Value::Object(obj) => {
@@ -681,12 +679,10 @@ fn graphql_value_to_json_no_vars(value: &Value<'_, String>) -> Result<JsonValue>
             }
             Ok(JsonValue::Object(map))
         }
-        Value::Variable(name) => {
-            Err(QueryError::parse(format!(
-                "variable '{}' cannot be used in default value",
-                name
-            )))
-        }
+        Value::Variable(name) => Err(QueryError::parse(format!(
+            "variable '{}' cannot be used in default value",
+            name
+        ))),
     }
 }
 
@@ -728,9 +724,9 @@ fn graphql_value_to_json(
                     name
                 ))
             })?;
-            vars.get(name)
-                .cloned()
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))
+            vars.get(name).cloned().ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })
         }
     }
 }
@@ -751,12 +747,12 @@ fn parse_int_value(
                     name
                 ))
             })?;
-            let json_val = vars
-                .get(name)
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
-            json_val
-                .as_i64()
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type Int", name)))
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            json_val.as_i64().ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" must be of type Int", name))
+            })
         }
         _ => Err(QueryError::parse("expected integer value")),
     }
@@ -837,7 +833,10 @@ fn parse_group_by_value(
                             QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                            QueryError::parse(format!("Variable \"${}\" must be of type String", name))
+                            QueryError::parse(format!(
+                                "Variable \"${}\" must be of type String",
+                                name
+                            ))
                         })
                     }
                     _ => Err(QueryError::parse("groupBy items must be strings")),
@@ -852,9 +851,9 @@ fn parse_group_by_value(
                     name
                 ))
             })?;
-            let json_val = vars
-                .get(name)
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
             let arr = json_val.as_array().ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" must be of type [String]", name))
             })?;
@@ -902,7 +901,10 @@ fn parse_aggregate_field(
                         json_val
                             .as_str()
                             .ok_or_else(|| {
-                                QueryError::parse(format!("Variable \"${}\" must be of type String", name))
+                                QueryError::parse(format!(
+                                    "Variable \"${}\" must be of type String",
+                                    name
+                                ))
                             })?
                             .to_string()
                     }
@@ -976,7 +978,10 @@ fn parse_doc_ids_value(
                             QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                            QueryError::parse(format!("Variable \"${}\" must be of type String", name))
+                            QueryError::parse(format!(
+                                "Variable \"${}\" must be of type String",
+                                name
+                            ))
                         })
                     }
                     _ => Err(QueryError::parse("docIDs items must be strings")),
@@ -992,9 +997,9 @@ fn parse_doc_ids_value(
                     name
                 ))
             })?;
-            let json_val = vars
-                .get(name)
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
             // Variable can be a string (single ID) or array of strings
             if let Some(s) = json_val.as_str() {
                 Ok(vec![s.to_string()])
@@ -1032,13 +1037,12 @@ fn resolve_string_value(
                     name
                 ))
             })?;
-            let json_val = vars
-                .get(name)
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
-            json_val
-                .as_str()
-                .map(|s| s.to_string())
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type String", name)))
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" must be of type String", name))
+            })
         }
         _ => Err(QueryError::parse(format!(
             "{} argument must be a string",
@@ -1062,12 +1066,12 @@ fn resolve_bool_value(
                     name
                 ))
             })?;
-            let json_val = vars
-                .get(name)
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" was not provided", name)))?;
-            json_val
-                .as_bool()
-                .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type Boolean", name)))
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            json_val.as_bool().ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" must be of type Boolean", name))
+            })
         }
         _ => Err(QueryError::parse(format!(
             "{} argument must be a boolean",
@@ -1718,10 +1722,7 @@ mod variable_tests {
         let variables = HashMap::new();
         let result = parse_request_with_variables(query, Some(&variables));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("was not provided"));
+        assert!(result.unwrap_err().to_string().contains("was not provided"));
     }
 
     #[test]

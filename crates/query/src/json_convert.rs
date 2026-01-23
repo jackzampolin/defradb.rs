@@ -19,7 +19,9 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
         NormalValue::Float32(f) => float32_to_json(*f),
         NormalValue::String(s) => Ok(JsonValue::String(s.clone())),
         NormalValue::Bytes(b) => bytes_to_json(b),
-        NormalValue::Time(t) => Ok(JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true))),
+        NormalValue::Time(t) => Ok(JsonValue::String(
+            t.to_rfc3339_opts(SecondsFormat::Secs, true),
+        )),
         NormalValue::Json(j) => Ok(j.clone()),
         NormalValue::IntArray(arr) => Ok(JsonValue::Array(
             arr.iter().map(|i| JsonValue::Number((*i).into())).collect(),

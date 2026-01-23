@@ -284,7 +284,10 @@ mod tests {
         let result = avg_node.value();
         // Go DefraDB returns 0 for empty set, not null
         let avg_val = result.get(3).unwrap();
-        assert!(avg_val.is_number(), "AVG of empty set should return 0, not null");
+        assert!(
+            avg_val.is_number(),
+            "AVG of empty set should return 0, not null"
+        );
         assert_eq!(avg_val.as_f64().unwrap(), 0.0);
 
         avg_node.close().await.unwrap();

@@ -723,3 +723,122 @@ func (n *Node) GetNodeIdentity() (string, error) {
 
 	return response.DID, nil
 }
+
+// ============================================================================
+// Subscription Functions
+// ============================================================================
+
+// Subscription represents an active subscription to database events.
+type Subscription struct {
+	node   *Node
+	handle C.uintptr_t
+}
+
+// SubscriptionEvent represents an event received from a subscription.
+type SubscriptionEvent struct {
+	Type         string `json:"type"`
+	DocID        string `json:"doc_id,omitempty"`
+	CID          string `json:"cid,omitempty"`
+	CollectionID string `json:"collection_id,omitempty"`
+	IsRetry      bool   `json:"is_retry,omitempty"`
+	IsRelay      bool   `json:"is_relay,omitempty"`
+}
+
+// PollResult represents the result of polling a subscription.
+type PollResult struct {
+	// HasEvent is true if an event was received.
+	HasEvent bool
+	// Event contains the event data when HasEvent is true.
+	Event *SubscriptionEvent
+	// DroppedCount indicates how many events were dropped due to buffer overflow.
+	DroppedCount uint64
+	// IsClosed is true if the subscription has been closed.
+	IsClosed bool
+}
+
+// ErrSubscriptionClosed is returned when polling a closed subscription.
+var ErrSubscriptionClosed = errors.New("ffi: subscription closed")
+
+// ErrNoEvent is returned when polling returns no event.
+var ErrNoEvent = errors.New("ffi: no event available")
+
+// Subscribe creates a subscription to database events.
+// The optional collectionFilter limits events to a specific collection.
+// The subscription must be closed with Close() when done.
+func (n *Node) Subscribe(collectionFilter string) (*Subscription, error) {
+	var cFilter *C.char
+	if collectionFilter != "" {
+		cFilter = C.CString(collectionFilter)
+		defer C.free(unsafe.Pointer(cFilter))
+	}
+
+	result := C.create_subscription(n.ptr, cFilter)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return nil, fmt.Errorf("ffi: create_subscription failed: %s", err)
+	}
+
+	return &Subscription{
+		node:   n,
+		handle: result.subscription_handle,
+	}, nil
+}
+
+// Poll checks for the next event without blocking.
+// Returns a PollResult indicating the status and any event data.
+func (s *Subscription) Poll() (*PollResult, error) {
+	result := C.poll_subscription(s.handle)
+
+	switch result.status {
+	case 0: // Event available
+		value := C.GoString(result.value)
+		C.defra_free_string(result.value)
+
+		var event SubscriptionEvent
+		if err := json.Unmarshal([]byte(value), &event); err != nil {
+			return nil, fmt.Errorf("ffi: failed to parse event: %w", err)
+		}
+
+		return &PollResult{
+			HasEvent:     true,
+			Event:        &event,
+			DroppedCount: uint64(result.dropped_count),
+		}, nil
+
+	case 1: // Error
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return nil, fmt.Errorf("ffi: poll_subscription failed: %s", err)
+
+	case 2: // No event available
+		return &PollResult{
+			HasEvent:     false,
+			DroppedCount: uint64(result.dropped_count),
+		}, nil
+
+	case 3: // Subscription closed
+		return &PollResult{
+			HasEvent: false,
+			IsClosed: true,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("ffi: unknown poll status: %d", result.status)
+	}
+}
+
+// Close closes the subscription and releases resources.
+// After calling Close, the subscription handle is no longer valid.
+func (s *Subscription) Close() error {
+	result := C.close_subscription(s.handle)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: close_subscription failed: %s", err)
+	}
+
+	return nil
+}

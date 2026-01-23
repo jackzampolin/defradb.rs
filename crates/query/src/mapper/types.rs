@@ -534,8 +534,7 @@ mod tests {
     #[test]
     fn test_to_subscription_select() {
         // Test adding doc_id when none present
-        let select = Select::new("users")
-            .with_field(Field::new("name"));
+        let select = Select::new("users").with_field(Field::new("name"));
 
         assert!(select.doc_ids.is_none());
 
@@ -563,8 +562,7 @@ mod tests {
     #[test]
     fn test_to_subscription_select_no_duplicate() {
         // Test that existing doc_id is not duplicated
-        let select = Select::new("users")
-            .with_doc_ids(vec!["doc-123".to_string()]);
+        let select = Select::new("users").with_doc_ids(vec!["doc-123".to_string()]);
 
         let filtered = select.to_subscription_select("doc-123".to_string());
         let doc_ids = filtered.doc_ids.unwrap();

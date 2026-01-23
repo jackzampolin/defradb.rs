@@ -33,6 +33,7 @@ parking_lot.workspace = true
 
 # Internal crates
 db = { path = "../db" }
+events = { path = "../events" }
 storage = { path = "../storage" }
 query = { path = "../query" }
 schema = { path = "../schema" }

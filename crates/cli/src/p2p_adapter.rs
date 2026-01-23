@@ -325,12 +325,18 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(Vec::new())
     }
 
-    async fn add_documents(&self, _docs: Vec<defra_http::router::P2pDocumentRequest>) -> Result<(), String> {
+    async fn add_documents(
+        &self,
+        _docs: Vec<defra_http::router::P2pDocumentRequest>,
+    ) -> Result<(), String> {
         // Document-level P2P replication not yet implemented
         Err("document-level P2P replication not yet implemented".to_string())
     }
 
-    async fn remove_documents(&self, _docs: Vec<defra_http::router::P2pDocumentRequest>) -> Result<(), String> {
+    async fn remove_documents(
+        &self,
+        _docs: Vec<defra_http::router::P2pDocumentRequest>,
+    ) -> Result<(), String> {
         // Document-level P2P replication not yet implemented
         Err("document-level P2P replication not yet implemented".to_string())
     }

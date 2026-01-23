@@ -227,10 +227,7 @@ pub fn json_to_normal_value_with_kind(
                     JsonValue::Number(n) => {
                         if let Some(ts) = n.as_i64() {
                             let dt = DateTime::from_timestamp(ts, 0).ok_or_else(|| {
-                                QueryError::execution(format!(
-                                    "Invalid Unix timestamp: {}",
-                                    ts
-                                ))
+                                QueryError::execution(format!("Invalid Unix timestamp: {}", ts))
                             })?;
                             Ok(NormalValue::Time(dt))
                         } else {

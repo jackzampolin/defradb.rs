@@ -185,10 +185,7 @@ fn test_parse_query_rejects_subscription() {
     let result = parse_query(query);
     assert!(result.is_err());
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("subscription"),
+        result.unwrap_err().to_string().contains("subscription"),
         "Error should mention that subscriptions are not expected by parse_query()"
     );
 }

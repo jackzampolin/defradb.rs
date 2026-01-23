@@ -143,7 +143,10 @@ impl Bus for ChannelBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     // Subscriber channel closed, mark for cleanup
-                    tracing::debug!(sub_id = *id, "Subscriber channel closed, marking for cleanup");
+                    tracing::debug!(
+                        sub_id = *id,
+                        "Subscriber channel closed, marking for cleanup"
+                    );
                     dead_subs.push(*id);
                     dropped += 1;
                 }
@@ -401,8 +404,7 @@ mod tests {
 
     #[test]
     fn test_channel_bus_config() {
-        let config = ChannelBusConfig::new()
-            .with_event_buffer_size(500);
+        let config = ChannelBusConfig::new().with_event_buffer_size(500);
 
         assert_eq!(config.event_buffer_size, 500);
 

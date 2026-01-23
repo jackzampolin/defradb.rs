@@ -40,6 +40,7 @@ pub mod query;
 pub mod runtime;
 pub mod schema;
 pub mod state;
+pub mod subscription;
 pub mod txn;
 pub mod types;
 
@@ -55,6 +56,7 @@ pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use node::{new_node, node_close};
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections};
+pub use subscription::{close_subscription, create_subscription, poll_subscription};
 pub use txn::{begin_txn, commit_txn, exec_request_in_txn, rollback_txn};
 pub use types::defra_free_string;
 

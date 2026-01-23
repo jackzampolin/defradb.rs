@@ -12,7 +12,7 @@
 
 use query::document::DocumentMapping;
 use query::mapper::Filter;
-use query::plan::{AverageNode, ScanNode, SumNode, CountNode};
+use query::plan::{AverageNode, CountNode, ScanNode, SumNode};
 use query::planner::{Doc, PlanNode};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use serde_json::{json, Value as JsonValue};
@@ -150,10 +150,7 @@ fn make_filter_mapping() -> DocumentMapping {
 fn test_p0_null_gt_comparison_returns_false() {
     // Go DefraDB behavior: null _gt 5 returns false (not error)
     // From gt.go: if data is nil, returns false
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_gt": 25}),
-    )]));
+    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -165,17 +162,18 @@ fn test_p0_null_gt_comparison_returns_false() {
 
     // Should return false (Go behavior), not error
     let result = filter.matches(&fields, &mapping);
-    assert!(result.is_ok(), "null _gt comparison should not error, but got: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "null _gt comparison should not error, but got: {:?}",
+        result
+    );
     assert!(!result.unwrap(), "null _gt 25 should return false");
 }
 
 #[test]
 fn test_p0_null_lt_comparison_returns_false() {
     // Go DefraDB behavior: null _lt 5 returns false
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_lt": 25}),
-    )]));
+    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lt": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -192,10 +190,7 @@ fn test_p0_null_lt_comparison_returns_false() {
 
 #[test]
 fn test_p0_null_gte_comparison_returns_false() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_gte": 25}),
-    )]));
+    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gte": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -212,10 +207,7 @@ fn test_p0_null_gte_comparison_returns_false() {
 
 #[test]
 fn test_p0_null_lte_comparison_returns_false() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_lte": 25}),
-    )]));
+    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lte": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -233,10 +225,7 @@ fn test_p0_null_lte_comparison_returns_false() {
 #[test]
 fn test_p0_missing_field_gt_returns_false() {
     // Missing field (None) should also return false, not error
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_gt": 25}),
-    )]));
+    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -247,7 +236,10 @@ fn test_p0_missing_field_gt_returns_false() {
     ];
 
     let result = filter.matches(&fields, &mapping);
-    assert!(result.is_ok(), "missing field _gt comparison should not error");
+    assert!(
+        result.is_ok(),
+        "missing field _gt comparison should not error"
+    );
     assert!(!result.unwrap(), "missing field _gt 25 should return false");
 }
 
@@ -278,7 +270,11 @@ fn test_p0_int_gt_float_coercion() {
 
     // Should work: 30 > 25.5 = true
     let result = filter.matches(&fields, &mapping);
-    assert!(result.is_ok(), "int vs float comparison should work, got: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "int vs float comparison should work, got: {:?}",
+        result
+    );
     assert!(result.unwrap(), "30 > 25.5 should be true");
 }
 
@@ -328,10 +324,8 @@ fn test_p0_int_eq_float_coercion() {
 #[test]
 fn test_p0_int_lt_float_boundary() {
     // Boundary test: 30 < 30.1 should be true
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_lt": 30.1}),
-    )]));
+    let filter =
+        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lt": 30.1}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -354,10 +348,8 @@ fn test_p0_int_lt_float_boundary() {
 #[test]
 fn test_compatible_null_eq_null() {
     // Both Go and Rust: null == null is true
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_eq": null}),
-    )]));
+    let filter =
+        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_eq": null}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -375,10 +367,7 @@ fn test_compatible_null_eq_null() {
 #[test]
 fn test_compatible_null_ne_value() {
     // Both Go and Rust: null != 25 is true
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_ne": 25}),
-    )]));
+    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ne": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -396,10 +385,8 @@ fn test_compatible_null_ne_value() {
 #[test]
 fn test_compatible_value_eq_null_false() {
     // Both Go and Rust: 30 == null is false
-    let filter = Filter::from_conditions(HashMap::from([(
-        "age".to_string(),
-        json!({"_eq": null}),
-    )]));
+    let filter =
+        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_eq": null}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -514,5 +501,8 @@ fn test_p2_string_vs_int_comparison_strict() {
     // Rust returns error for string vs number comparison
     // This is intentionally different from Go (which returns false)
     let result = filter.matches(&fields, &mapping);
-    assert!(result.is_err(), "String vs number comparison should error in Rust");
+    assert!(
+        result.is_err(),
+        "String vs number comparison should error in Rust"
+    );
 }

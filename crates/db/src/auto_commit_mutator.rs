@@ -104,7 +104,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let update = Update::new(
                         doc_id.to_string(),
                         Cid::default(), // CID not available at this layer
-                        collection.collection_id().to_string(),
+                        collection.name().to_string(),
                         vec![], // Block data not available at this layer
                         false,  // is_retry
                         false,  // is_relay (local mutation)
@@ -181,7 +181,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         let update = Update::new(
                             doc_id.to_string(),
                             Cid::default(),
-                            collection.collection_id().to_string(),
+                            collection.name().to_string(),
                             vec![],
                             false, // is_retry
                             false, // is_relay (local mutation)
@@ -260,7 +260,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let update = Update::new(
                         doc_id.to_string(),
                         Cid::default(),
-                        collection.collection_id().to_string(),
+                        collection.name().to_string(),
                         vec![],
                         false, // is_retry
                         false, // is_relay (local mutation)

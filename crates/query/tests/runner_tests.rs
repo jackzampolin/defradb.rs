@@ -1007,9 +1007,18 @@ async fn test_execute_delete_mutation_with_filter() {
         .iter()
         .map(|u| u.get("_docID").unwrap().as_str().unwrap())
         .collect();
-    assert!(deleted_ids.contains(&doc1_id.as_str()), "Alice should be deleted");
-    assert!(deleted_ids.contains(&doc3_id.as_str()), "Charlie should be deleted");
-    assert!(!deleted_ids.contains(&doc2_id.as_str()), "Bob should NOT be deleted");
+    assert!(
+        deleted_ids.contains(&doc1_id.as_str()),
+        "Alice should be deleted"
+    );
+    assert!(
+        deleted_ids.contains(&doc3_id.as_str()),
+        "Charlie should be deleted"
+    );
+    assert!(
+        !deleted_ids.contains(&doc2_id.as_str()),
+        "Bob should NOT be deleted"
+    );
 }
 
 #[tokio::test]
