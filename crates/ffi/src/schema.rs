@@ -31,7 +31,7 @@ use crate::types::{c_str_to_string, FfiResult};
 pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) -> FfiResult {
     let rt = match RUNTIME.get() {
         Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
+        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
     };
 
     let schema_str = match c_str_to_string(schema_sdl) {
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) 
 pub extern "C" fn get_collections(node_ptr: usize) -> FfiResult {
     let rt = match RUNTIME.get() {
         Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
+        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
     };
 
     let result = rt.block_on(async {
@@ -94,11 +94,19 @@ pub extern "C" fn get_collections(node_ptr: usize) -> FfiResult {
             .list_collections()
             .map_err(|e| format!("failed to list collections: {}", e))?;
 
-        // Get schemas for each collection
+        // Get schemas for each collection, propagating errors
         let mut collections = Vec::new();
         for name in names {
-            if let Ok(Some(collection)) = database.get_collection(&name) {
-                collections.push(collection.schema().clone());
+            match database.get_collection(&name) {
+                Ok(Some(collection)) => {
+                    collections.push(collection.schema().clone());
+                }
+                Ok(None) => {
+                    // Collection was deleted between list and get - skip it
+                }
+                Err(e) => {
+                    return Err(format!("failed to get collection '{}': {}", name, e));
+                }
             }
         }
 
@@ -125,7 +133,7 @@ mod tests {
     #[test]
     fn test_add_schema_and_get_collections() {
         // Initialize runtime
-        crate::runtime::init_runtime();
+        assert!(crate::runtime::init_runtime());
 
         // Create node
         let options = NodeInitOptions::default();

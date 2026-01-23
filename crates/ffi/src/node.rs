@@ -88,7 +88,7 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
 pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
     let rt = match RUNTIME.get() {
         Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
+        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
     };
 
     // Remove from registry
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn test_node_lifecycle() {
         // Initialize runtime
-        crate::runtime::init_runtime();
+        assert!(crate::runtime::init_runtime());
 
         // Create node
         let options = NodeInitOptions::default();
@@ -130,5 +130,58 @@ mod tests {
         // Double close should fail
         let result = node_close(handle);
         assert_eq!(result.status, 1, "double close should fail");
+    }
+
+    // Edge case tests (H2)
+
+    #[test]
+    fn test_node_close_invalid_handle() {
+        assert!(crate::runtime::init_runtime());
+
+        // Closing an invalid handle should return error, not panic
+        let result = node_close(0);
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+
+        let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(error.contains("invalid"), "should indicate invalid handle");
+
+        unsafe { crate::types::defra_free_string(result.error) };
+    }
+
+    #[test]
+    fn test_node_close_nonexistent_handle() {
+        assert!(crate::runtime::init_runtime());
+
+        // Closing a random handle should return error
+        let result = node_close(999999);
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+
+        unsafe { crate::types::defra_free_string(result.error) };
+    }
+
+    #[test]
+    fn test_multiple_nodes() {
+        assert!(crate::runtime::init_runtime());
+
+        // Create multiple nodes
+        let options = NodeInitOptions::default();
+        let result1 = new_node(options);
+        assert_eq!(result1.status, 0);
+
+        let options = NodeInitOptions::default();
+        let result2 = new_node(options);
+        assert_eq!(result2.status, 0);
+
+        // Handles should be different
+        assert_ne!(result1.node_ptr, result2.node_ptr);
+
+        // Both should be closeable
+        let close1 = node_close(result1.node_ptr);
+        assert_eq!(close1.status, 0);
+
+        let close2 = node_close(result2.node_ptr);
+        assert_eq!(close2.status, 0);
     }
 }

@@ -54,7 +54,8 @@ pub use types::defra_free_string;
 /// Safe to call multiple times.
 #[no_mangle]
 pub extern "C" fn defra_init() {
-    runtime::init_runtime();
+    // Ignore return value - errors will surface when operations are attempted
+    let _ = runtime::init_runtime();
 }
 
 /// Get the library version.
@@ -63,7 +64,10 @@ pub extern "C" fn defra_init() {
 #[no_mangle]
 pub extern "C" fn defra_version() -> *mut c_char {
     let version = env!("CARGO_PKG_VERSION");
-    CString::new(version).unwrap().into_raw()
+    // CARGO_PKG_VERSION is a compile-time constant without null bytes
+    CString::new(version)
+        .unwrap_or_else(|_| CString::new("unknown").unwrap())
+        .into_raw()
 }
 
 #[cfg(test)]

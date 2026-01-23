@@ -21,8 +21,19 @@ pub struct FfiResult {
 
 impl FfiResult {
     /// Create a success result with a JSON value.
+    ///
+    /// If the value contains null bytes, they are replaced with the Unicode
+    /// replacement character to avoid panicking at the FFI boundary.
     pub fn success(value: impl Into<String>) -> Self {
-        let value_cstring = CString::new(value.into()).unwrap();
+        let value_str = value.into();
+        let value_cstring = match CString::new(value_str.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                // Value contains null bytes - replace them to avoid panic
+                let sanitized = value_str.replace('\0', "\u{FFFD}");
+                CString::new(sanitized).unwrap_or_else(|_| CString::new("{}").unwrap())
+            }
+        };
         Self {
             status: 0,
             error: ptr::null_mut(),
@@ -31,8 +42,19 @@ impl FfiResult {
     }
 
     /// Create an error result.
+    ///
+    /// If the message contains null bytes, they are replaced with the Unicode
+    /// replacement character to avoid panicking at the FFI boundary.
     pub fn error(message: impl Into<String>) -> Self {
-        let error_cstring = CString::new(message.into()).unwrap();
+        let msg_str = message.into();
+        let error_cstring = match CString::new(msg_str.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                // Message contains null bytes - replace them to avoid panic
+                let sanitized = msg_str.replace('\0', "\u{FFFD}");
+                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
+            }
+        };
         Self {
             status: 1,
             error: error_cstring.into_raw(),
@@ -74,8 +96,19 @@ impl NewNodeResult {
     }
 
     /// Create an error result.
+    ///
+    /// If the message contains null bytes, they are replaced with the Unicode
+    /// replacement character to avoid panicking at the FFI boundary.
     pub fn error(message: impl Into<String>) -> Self {
-        let error_cstring = CString::new(message.into()).unwrap();
+        let msg_str = message.into();
+        let error_cstring = match CString::new(msg_str.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                // Message contains null bytes - replace them to avoid panic
+                let sanitized = msg_str.replace('\0', "\u{FFFD}");
+                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
+            }
+        };
         Self {
             status: 1,
             error: error_cstring.into_raw(),
@@ -161,5 +194,75 @@ mod tests {
         assert_eq!(result.status, 0);
         assert_eq!(result.node_ptr, 42);
         assert!(result.error.is_null());
+    }
+
+    // Edge case tests for null byte handling (H2)
+
+    #[test]
+    fn test_ffi_result_success_with_null_bytes() {
+        // String with embedded null byte should not panic
+        let value_with_null = "hello\0world";
+        let result = FfiResult::success(value_with_null);
+        assert_eq!(result.status, 0);
+        assert!(!result.value.is_null());
+
+        // Value should have null bytes replaced
+        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.contains('\u{FFFD}'), "null byte should be replaced");
+        assert!(!value.contains('\0'), "should not contain null byte");
+
+        unsafe { defra_free_string(result.value) };
+    }
+
+    #[test]
+    fn test_ffi_result_error_with_null_bytes() {
+        // Error message with embedded null byte should not panic
+        let error_with_null = "error\0message";
+        let result = FfiResult::error(error_with_null);
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+
+        // Error should have null bytes replaced
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(error.contains('\u{FFFD}'), "null byte should be replaced");
+        assert!(!error.contains('\0'), "should not contain null byte");
+
+        unsafe { defra_free_string(result.error) };
+    }
+
+    #[test]
+    fn test_new_node_result_error_with_null_bytes() {
+        // Error message with embedded null byte should not panic
+        let error_with_null = "node\0error";
+        let result = NewNodeResult::error(error_with_null);
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+        assert_eq!(result.node_ptr, 0);
+
+        // Error should have null bytes replaced
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(error.contains('\u{FFFD}'), "null byte should be replaced");
+
+        unsafe { defra_free_string(result.error) };
+    }
+
+    #[test]
+    fn test_c_str_to_string_null_ptr() {
+        let result = unsafe { c_str_to_string(ptr::null()) };
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_defra_free_string_null_ptr() {
+        // Should not panic when freeing null pointer
+        unsafe { defra_free_string(ptr::null_mut()) };
+    }
+
+    #[test]
+    fn test_ffi_result_ok() {
+        let result = FfiResult::ok();
+        assert_eq!(result.status, 0);
+        assert!(result.error.is_null());
+        assert!(result.value.is_null());
     }
 }

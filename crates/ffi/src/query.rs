@@ -38,7 +38,7 @@ pub unsafe extern "C" fn exec_request(
 ) -> FfiResult {
     let rt = match RUNTIME.get() {
         Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
+        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
     };
 
     let query_str = match c_str_to_string(request_query) {
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn test_exec_request() {
         // Initialize runtime
-        crate::runtime::init_runtime();
+        assert!(crate::runtime::init_runtime());
 
         // Create node
         let options = NodeInitOptions::default();
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn test_exec_mutation() {
         // Initialize runtime
-        crate::runtime::init_runtime();
+        assert!(crate::runtime::init_runtime());
 
         // Create node
         let options = NodeInitOptions::default();
@@ -158,6 +158,79 @@ mod tests {
 
         // Cleanup
         unsafe { crate::types::defra_free_string(result.value) };
+        node_close(node);
+    }
+
+    // Edge case tests (H2)
+
+    #[test]
+    fn test_exec_request_null_query() {
+        assert!(crate::runtime::init_runtime());
+
+        // Create node
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Null query should return error
+        let result = unsafe { exec_request(node, ptr::null(), ptr::null(), ptr::null()) };
+        assert_eq!(result.status, 1, "null query should fail");
+        assert!(!result.error.is_null());
+
+        let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(error.contains("null"), "should indicate null query");
+
+        unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_exec_request_invalid_handle() {
+        assert!(crate::runtime::init_runtime());
+
+        // Query with invalid handle should return error
+        let query_str = CString::new("{ User { name } }").unwrap();
+        let result = unsafe { exec_request(0, query_str.as_ptr(), ptr::null(), ptr::null()) };
+        assert_eq!(result.status, 1, "invalid handle should fail");
+        assert!(!result.error.is_null());
+
+        let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(error.contains("invalid"), "should indicate invalid handle");
+
+        unsafe { crate::types::defra_free_string(result.error) };
+    }
+
+    #[test]
+    fn test_exec_request_invalid_variables_json() {
+        assert!(crate::runtime::init_runtime());
+
+        // Create node
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type User { name: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+
+        // Query with invalid JSON variables should return error
+        let query_str = CString::new("{ User { name } }").unwrap();
+        let invalid_json = CString::new("not valid json").unwrap();
+        let result =
+            unsafe { exec_request(node, query_str.as_ptr(), ptr::null(), invalid_json.as_ptr()) };
+        assert_eq!(result.status, 1, "invalid JSON should fail");
+        assert!(!result.error.is_null());
+
+        let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(
+            error.contains("parse") || error.contains("variables"),
+            "should indicate parse error"
+        );
+
+        unsafe { crate::types::defra_free_string(result.error) };
         node_close(node);
     }
 }
