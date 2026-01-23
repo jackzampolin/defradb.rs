@@ -1,0 +1,46 @@
+[package]
+name = "ffi"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FFI bindings for DefraDB Rust implementation"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Synchronization
+parking_lot.workspace = true
+
+# Internal crates
+db = { path = "../db" }
+storage = { path = "../storage" }
+query = { path = "../query" }
+schema = { path = "../schema" }
+identity = { path = "../identity" }
+acp = { path = "../acp" }
+
+[build-dependencies]
+cbindgen = "0.28"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

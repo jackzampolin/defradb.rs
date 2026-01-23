@@ -1,0 +1,37 @@
+# cbindgen configuration for defra FFI crate
+# Generate headers with: cbindgen --config cbindgen.toml --crate ffi --output defra.h
+
+language = "C"
+header = """
+/*
+ * DefraDB Rust FFI - Auto-generated header
+ *
+ * This header provides C bindings for the DefraDB Rust implementation.
+ * Use with CGO to integrate with Go code.
+ *
+ * Usage:
+ *   1. Build library: cargo build --release -p ffi
+ *   2. Link with: -L target/release -lffi
+ */
+"""
+include_guard = "DEFRA_H"
+cpp_compat = true
+documentation = true
+documentation_style = "c"
+
+[export]
+include = [
+    "FfiResult",
+    "NewNodeResult",
+    "NewTxnResult",
+    "NodeInitOptions",
+]
+
+[fn]
+rename_args = "SnakeCase"
+
+[struct]
+rename_fields = "SnakeCase"
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
