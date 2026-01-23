@@ -38,6 +38,7 @@ pub mod query;
 pub mod runtime;
 pub mod schema;
 pub mod state;
+pub mod txn;
 pub mod types;
 
 use std::ffi::{c_char, CString};
@@ -46,6 +47,7 @@ use std::ffi::{c_char, CString};
 pub use node::{new_node, node_close};
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections};
+pub use txn::{begin_txn, commit_txn, exec_request_in_txn, rollback_txn};
 pub use types::defra_free_string;
 
 /// Initialize the FFI library.

@@ -117,6 +117,53 @@ impl NewNodeResult {
     }
 }
 
+/// FFI result for transaction creation, containing a transaction ID.
+#[repr(C)]
+pub struct NewTxnResult {
+    /// Status code: 0=success, 1=error
+    pub status: c_int,
+    /// Error message (null on success). Caller must free with `defra_free_string`.
+    pub error: *mut c_char,
+    /// Transaction ID (null on error). Caller must free with `defra_free_string`.
+    pub txn_id: *mut c_char,
+}
+
+impl NewTxnResult {
+    /// Create a success result with a transaction ID.
+    pub fn success(txn_id: impl Into<String>) -> Self {
+        let txn_str = txn_id.into();
+        let txn_cstring = match CString::new(txn_str.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                let sanitized = txn_str.replace('\0', "\u{FFFD}");
+                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown").unwrap())
+            }
+        };
+        Self {
+            status: 0,
+            error: ptr::null_mut(),
+            txn_id: txn_cstring.into_raw(),
+        }
+    }
+
+    /// Create an error result.
+    pub fn error(message: impl Into<String>) -> Self {
+        let msg_str = message.into();
+        let error_cstring = match CString::new(msg_str.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                let sanitized = msg_str.replace('\0', "\u{FFFD}");
+                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
+            }
+        };
+        Self {
+            status: 1,
+            error: error_cstring.into_raw(),
+            txn_id: ptr::null_mut(),
+        }
+    }
+}
+
 /// Options for node initialization.
 ///
 /// Matches Go's NodeInitOptions struct.

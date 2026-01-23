@@ -77,6 +77,24 @@ typedef struct FfiResult {
   char *value;
 } FfiResult;
 
+/*
+ FFI result for transaction creation, containing a transaction ID.
+ */
+typedef struct NewTxnResult {
+  /*
+   Status code: 0=success, 1=error
+   */
+  int status;
+  /*
+   Error message (null on success). Caller must free with `defra_free_string`.
+   */
+  char *error;
+  /*
+   Transaction ID (null on error). Caller must free with `defra_free_string`.
+   */
+  char *txn_id;
+} NewTxnResult;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -173,6 +191,81 @@ struct FfiResult add_schema(uintptr_t node_ptr, const char *schema_sdl);
  Returns a JSON array of collection descriptions.
  */
 struct FfiResult get_collections(uintptr_t node_ptr);
+
+/*
+ Begin a new transaction.
+
+ Returns a transaction ID that can be used with `exec_request_in_txn`,
+ `commit_txn`, and `rollback_txn`.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `readonly` - If non-zero, creates a read-only transaction
+
+ # Returns
+
+ A `NewTxnResult` containing the transaction ID on success.
+ */
+struct NewTxnResult begin_txn(uintptr_t node_ptr, int32_t readonly);
+
+/*
+ Commit a transaction.
+
+ After commit, all operations performed within the transaction become permanent.
+ The transaction ID is no longer valid after this call.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `txn_id` - Transaction ID from `begin_txn`
+
+ # Safety
+
+ `txn_id` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult commit_txn(uintptr_t node_ptr, const char *txn_id);
+
+/*
+ Rollback (discard) a transaction.
+
+ After rollback, all operations performed within the transaction are discarded.
+ The transaction ID is no longer valid after this call.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `txn_id` - Transaction ID from `begin_txn`
+
+ # Safety
+
+ `txn_id` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult rollback_txn(uintptr_t node_ptr, const char *txn_id);
+
+/*
+ Execute a GraphQL query or mutation within a transaction.
+
+ The operation will be part of the specified transaction and will not
+ be visible to other transactions until committed.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `txn_id` - Transaction ID from `begin_txn`
+ * `request_query` - GraphQL query string (required)
+ * `operation_name` - Optional operation name (null if not used)
+ * `variables` - Optional JSON string of variables (null if not used)
+
+ # Safety
+
+ All string pointers must be either null or valid null-terminated UTF-8 strings.
+ */
+struct FfiResult exec_request_in_txn(uintptr_t node_ptr,
+                                     const char *txn_id,
+                                     const char *request_query,
+                                     const char *operation_name,
+                                     const char *variables);
 
 /*
  Free a string allocated by FFI functions.

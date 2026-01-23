@@ -225,3 +225,124 @@ func (n *Node) QueryWithVars(query string, operationName string, variables map[s
 func (n *Node) Mutate(mutation string) (*QueryResult, error) {
 	return n.Query(mutation)
 }
+
+// Transaction represents an active database transaction.
+type Transaction struct {
+	node *Node
+	id   string
+}
+
+// BeginTxn starts a new transaction.
+// If readonly is true, the transaction cannot perform write operations.
+// The transaction must be committed or rolled back when done.
+func (n *Node) BeginTxn(readonly bool) (*Transaction, error) {
+	var readonlyInt C.int32_t
+	if readonly {
+		readonlyInt = 1
+	}
+
+	result := C.begin_txn(n.ptr, readonlyInt)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return nil, fmt.Errorf("ffi: begin_txn failed: %s", err)
+	}
+
+	txnID := C.GoString(result.txn_id)
+	C.defra_free_string(result.txn_id)
+
+	return &Transaction{node: n, id: txnID}, nil
+}
+
+// ID returns the transaction ID.
+func (t *Transaction) ID() string {
+	return t.id
+}
+
+// Commit commits the transaction, making all changes permanent.
+// After commit, the transaction is no longer valid.
+func (t *Transaction) Commit() error {
+	cTxnID := C.CString(t.id)
+	defer C.free(unsafe.Pointer(cTxnID))
+
+	result := C.commit_txn(t.node.ptr, cTxnID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: commit_txn failed: %s", err)
+	}
+
+	return nil
+}
+
+// Rollback discards all changes made in the transaction.
+// After rollback, the transaction is no longer valid.
+func (t *Transaction) Rollback() error {
+	cTxnID := C.CString(t.id)
+	defer C.free(unsafe.Pointer(cTxnID))
+
+	result := C.rollback_txn(t.node.ptr, cTxnID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: rollback_txn failed: %s", err)
+	}
+
+	return nil
+}
+
+// ExecRequest executes a GraphQL query or mutation within the transaction.
+func (t *Transaction) ExecRequest(query string, operationName string, variables string) (string, error) {
+	cTxnID := C.CString(t.id)
+	defer C.free(unsafe.Pointer(cTxnID))
+
+	cQuery := C.CString(query)
+	defer C.free(unsafe.Pointer(cQuery))
+
+	var cOpName *C.char
+	if operationName != "" {
+		cOpName = C.CString(operationName)
+		defer C.free(unsafe.Pointer(cOpName))
+	}
+
+	var cVars *C.char
+	if variables != "" {
+		cVars = C.CString(variables)
+		defer C.free(unsafe.Pointer(cVars))
+	}
+
+	result := C.exec_request_in_txn(t.node.ptr, cTxnID, cQuery, cOpName, cVars)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: exec_request_in_txn failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value, nil
+}
+
+// Query executes a GraphQL query within the transaction.
+func (t *Transaction) Query(query string) (*QueryResult, error) {
+	responseJSON, err := t.ExecRequest(query, "", "")
+	if err != nil {
+		return nil, err
+	}
+
+	var result QueryResult
+	if err := json.Unmarshal([]byte(responseJSON), &result); err != nil {
+		return nil, fmt.Errorf("ffi: failed to parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// Mutate executes a GraphQL mutation within the transaction.
+func (t *Transaction) Mutate(mutation string) (*QueryResult, error) {
+	return t.Query(mutation)
+}
