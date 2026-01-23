@@ -528,23 +528,196 @@ impl<'a> SdlParser<'a> {
     }
 
     fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
-        let mut collections = Vec::new();
-
         // Build collection names set for relation detection
         let type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
 
-        for type_def in self.type_defs.values() {
-            let collection = self.build_collection(type_def, &type_names)?;
+        // Detect circular relation sets - types that reference each other form a "collection set"
+        // Within a set, Go uses SelfKind with relative indices instead of CollectionKind
+        let collection_set = self.detect_collection_set(&type_names);
+
+        // Process types in alphabetical order (Go behavior)
+        let mut sorted_type_names: Vec<_> = self.type_defs.keys().cloned().collect();
+        sorted_type_names.sort();
+
+        // TWO-PASS APPROACH (matches Go behavior):
+        // Pass 1: Calculate CollectionIDs for ALL types first
+        // CollectionIDs are based on scalar fields and FK fields only (not relation object fields)
+        // This allows us to know all CollectionIDs before resolving relation field Kinds
+        let mut all_collection_ids: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        for type_name in &sorted_type_names {
+            let type_def = self.type_defs.get(type_name).unwrap();
+            let collection = self.build_collection(
+                type_def,
+                &type_names,
+                &collection_set,
+                &std::collections::HashMap::new(), // Empty - relation fields use NamedKind
+            )?;
+            all_collection_ids.insert(type_name.clone(), collection.collection_id.clone());
+        }
+
+        // Pass 2: Now rebuild collections with ALL CollectionIDs known
+        // Relation fields will now use CollectionKind with the correct CollectionID
+        let mut collections = Vec::new();
+        for type_name in &sorted_type_names {
+            let type_def = self.type_defs.get(type_name).unwrap();
+            let collection = self.build_collection(
+                type_def,
+                &type_names,
+                &collection_set,
+                &all_collection_ids,
+            )?;
             collections.push(collection);
         }
 
         Ok(collections)
     }
 
+    /// Detect types that form circular relation sets.
+    /// Returns a map from type name to its sorted index within its connected cycle group.
+    /// Types with circular relations use SelfKind with relative indices for CID generation.
+    ///
+    /// IMPORTANT: Only PRIMARY relation fields (single-object relations, not arrays) contribute
+    /// to circular reference detection. Secondary fields (arrays) are skipped during CID
+    /// generation, so they don't create circular dependencies.
+    ///
+    /// IMPORTANT: Only types that are ACTUALLY part of a cycle are included.
+    /// Different cycle groups (e.g., Person<->Profile vs Employee self-ref) are treated
+    /// as separate collection sets with their own index numbering starting from 0.
+    fn detect_collection_set(
+        &self,
+        type_names: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<String, i32> {
+        // Build relation graph: which types reference which other types via PRIMARY relations only
+        // A field is primary if it's a single-object relation (not an array)
+        let mut references: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+
+        for (type_name, type_def) in &self.type_defs {
+            let mut refs = std::collections::HashSet::new();
+            for field in &type_def.fields {
+                let target = &field.field_type.base_type;
+                // Only consider relations to other types that are:
+                // 1. In the current schema (type_names)
+                // 2. Single-object relations (not arrays) - these are PRIMARY
+                // Array relations are secondary and don't contribute to CID
+                if type_names.contains(target) && !field.field_type.is_list {
+                    refs.insert(target.clone());
+                }
+            }
+            references.insert(type_name.clone(), refs);
+        }
+
+        // Build bidirectional cycle edges: only keep edges that form cycles
+        // A->B is a cycle edge if A->B and B->A (mutual reference) or A->A (self-ref)
+        let mut cycle_edges: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+
+        for (type_a, refs_a) in &references {
+            let mut edges = std::collections::HashSet::new();
+
+            // Self-reference
+            if refs_a.contains(type_a) {
+                edges.insert(type_a.clone());
+            }
+
+            // Mutual references
+            for type_b in refs_a {
+                if type_a != type_b {
+                    if let Some(refs_b) = references.get(type_b) {
+                        if refs_b.contains(type_a) {
+                            edges.insert(type_b.clone());
+                        }
+                    }
+                }
+            }
+
+            if !edges.is_empty() {
+                cycle_edges.insert(type_a.clone(), edges);
+            }
+        }
+
+        if cycle_edges.is_empty() {
+            return std::collections::HashMap::new();
+        }
+
+        // Find connected components of cycle graph using union-find style approach
+        let mut component: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        fn find_root(
+            node: &str,
+            component: &mut std::collections::HashMap<String, String>,
+        ) -> String {
+            if let Some(parent) = component.get(node).cloned() {
+                if parent != node {
+                    let root = find_root(&parent, component);
+                    component.insert(node.to_string(), root.clone());
+                    return root;
+                }
+            }
+            node.to_string()
+        }
+
+        fn union(
+            a: &str,
+            b: &str,
+            component: &mut std::collections::HashMap<String, String>,
+        ) {
+            let root_a = find_root(a, component);
+            let root_b = find_root(b, component);
+            if root_a != root_b {
+                // Use lexicographically smaller as root for determinism
+                if root_a < root_b {
+                    component.insert(root_b, root_a);
+                } else {
+                    component.insert(root_a, root_b);
+                }
+            }
+        }
+
+        // Initialize each node as its own component
+        for type_name in cycle_edges.keys() {
+            component.insert(type_name.clone(), type_name.clone());
+        }
+
+        // Union nodes that are connected via cycle edges
+        for (type_a, edges) in &cycle_edges {
+            for type_b in edges {
+                union(type_a, type_b, &mut component);
+            }
+        }
+
+        // Group types by their component root
+        let mut components: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for type_name in cycle_edges.keys() {
+            let root = find_root(type_name, &mut component);
+            components
+                .entry(root)
+                .or_insert_with(Vec::new)
+                .push(type_name.clone());
+        }
+
+        // Build result: each type gets index within its component
+        let mut result = std::collections::HashMap::new();
+        for (_root, mut members) in components {
+            members.sort(); // Sort alphabetically within component
+            for (idx, name) in members.into_iter().enumerate() {
+                result.insert(name, idx as i32);
+            }
+        }
+
+        result
+    }
+
     fn build_collection(
         &self,
         type_def: &ParsedTypeDef,
         type_names: &std::collections::HashSet<String>,
+        collection_set: &std::collections::HashMap<String, i32>,
+        known_collection_ids: &std::collections::HashMap<String, String>,
     ) -> Result<CollectionVersion> {
         // collection_id will be generated after fields are created (like Go)
         let mut fields = Vec::new();
@@ -553,27 +726,67 @@ impl<'a> SdlParser<'a> {
 
         // Add implicit _docID field
         // NOTE: Go uses CType::None (0) for _docID, not LwwRegister (1)
-        let doc_id_field_id = generate_field_id(&type_def.name, "_docID");
+        let doc_id_kind = FieldKind::doc_id();
+        let doc_id_field_id = generate_field_id("_docID", &doc_id_kind, CType::None);
         fields.push(
-            FieldDescription::new(&doc_id_field_id, "_docID", FieldKind::doc_id())
+            FieldDescription::new(&doc_id_field_id, "_docID", doc_id_kind)
                 .with_crdt_type(CType::None),
         );
         field_id_counter += 1;
 
         // Process user-defined fields
         for parsed_field in &type_def.fields {
-            let field_id = generate_field_id(&type_def.name, &parsed_field.name);
-            let kind =
-                self.resolve_field_kind(&parsed_field.field_type, type_names, &type_def.name)?;
+            let kind = self.resolve_field_kind(
+                &parsed_field.field_type,
+                type_names,
+                &type_def.name,
+                collection_set,
+                known_collection_ids,
+            )?;
 
-            let mut field = FieldDescription::new(&field_id, &parsed_field.name, kind.clone());
+            // Determine if this relation creates an implicit _id field (FK):
+            // - Single-object relations (not arrays) get an implicit {field}_id field
+            // - BOTH the relation object field AND the _id field are marked as primary in Go
+            // - This allows them to be saved to the blockstore
+            let creates_fk_field = kind.is_relation() && !kind.is_array();
 
-            // Apply directives
-            if parsed_field.directives.is_primary {
+            // Check if this is a self-reference relation (field type == current type)
+            let is_self_ref_relation = kind.is_relation()
+                && parsed_field.field_type.base_type == type_def.name;
+
+            // Determine CRDT type: directive overrides > relation defaults > LwwRegister
+            // Go uses NONE_CRDT (Typ=0) for ALL relation object fields, not just single-object
+            let crdt_type = if let Some(ct) = parsed_field.directives.crdt_type {
+                ct
+            } else if kind.is_relation() {
+                // All relation object fields use NONE_CRDT in Go
+                CType::None
+            } else {
+                CType::LwwRegister
+            };
+
+            // Generate field ID using actual kind and CRDT type
+            // Go uses empty FieldID for self-reference relation object fields
+            let field_id = if is_self_ref_relation {
+                String::new()
+            } else {
+                generate_field_id(&parsed_field.name, &kind, crdt_type)
+            };
+
+            let mut field = FieldDescription::new(&field_id, &parsed_field.name, kind.clone())
+                .with_crdt_type(crdt_type);
+
+            // For single-object relations, the relation field itself IS primary in Go
+            // This is different from array relations which are secondary
+            let is_primary = if creates_fk_field {
+                true // Single-object relation is primary
+            } else if kind.is_relation() {
+                false // Array relation is secondary (not saved)
+            } else {
+                parsed_field.directives.is_primary // Non-relation: use explicit @primary
+            };
+            if is_primary {
                 field = field.as_primary();
-            }
-            if let Some(crdt_type) = parsed_field.directives.crdt_type {
-                field = field.with_crdt_type(crdt_type);
             }
             if let Some(ref default_value) = parsed_field.directives.default_value {
                 field = field.with_default(default_value.clone());
@@ -596,7 +809,26 @@ impl<'a> SdlParser<'a> {
                             &parsed_field.field_type.base_type,
                         )
                     });
-                field = field.with_relation_name(relation_name);
+                field = field.with_relation_name(relation_name.clone());
+
+                // For single-object relations (not arrays), Go automatically creates an
+                // implicit {field}_id field to store the foreign key. This FK field:
+                // - IS primary (saved to blockstore, contributes to CID)
+                // - HAS relation_name set (same as the relation object field)
+                // - Has LWW_REGISTER CRDT type
+                if creates_fk_field {
+                    let id_field_name = format!("{}_id", parsed_field.name);
+                    let id_field_kind = FieldKind::doc_id();
+                    let id_field_crdt = CType::LwwRegister;
+                    let id_field_id = generate_field_id(&id_field_name, &id_field_kind, id_field_crdt);
+                    // FK field has same relation_name as the relation object field and is primary
+                    let id_field = FieldDescription::new(&id_field_id, &id_field_name, id_field_kind)
+                        .with_crdt_type(id_field_crdt)
+                        .with_relation_name(relation_name)
+                        .as_primary();
+                    fields.push(id_field);
+                    field_id_counter += 1;
+                }
             }
 
             // Handle field-level @index directive
@@ -695,6 +927,8 @@ impl<'a> SdlParser<'a> {
         parsed_type: &ParsedType,
         type_names: &std::collections::HashSet<String>,
         current_type: &str,
+        collection_set: &std::collections::HashMap<String, i32>,
+        known_collection_ids: &std::collections::HashMap<String, String>,
     ) -> Result<FieldKind> {
         let base = &parsed_type.base_type;
 
@@ -714,16 +948,29 @@ impl<'a> SdlParser<'a> {
             return Ok(FieldKind::Scalar(scalar_kind));
         }
 
-        // Check if it's a self-reference
+        // Check if it's a self-reference (same type or "Self" keyword)
         if base == current_type || base == "Self" {
+            // For self-references (type pointing to itself), Go ALWAYS uses empty RelativeID
+            // The RelativeID indices are only used for cross-type references within a collection set
             return Ok(FieldKind::self_ref("", parsed_type.is_list));
         }
 
         // Check if it references another type in the schema
         if type_names.contains(base) {
             // This is a relation to another type
-            // We use Named here because collection IDs aren't known yet
-            // The relation will be resolved later during schema finalization
+            // If the target type is in the collection set (circular relations),
+            // use SelfRef with the target's relative index
+            if let Some(&target_idx) = collection_set.get(base) {
+                return Ok(FieldKind::self_ref(&target_idx.to_string(), parsed_type.is_list));
+            }
+
+            // If target type was already processed (alphabetically earlier),
+            // use Relation with the known CollectionID (matches Go behavior)
+            if let Some(collection_id) = known_collection_ids.get(base) {
+                return Ok(FieldKind::relation(collection_id.clone(), parsed_type.is_list));
+            }
+
+            // For non-circular relations where target not yet processed, use Named
             return Ok(FieldKind::named(base, parsed_type.is_list));
         }
 
@@ -790,10 +1037,34 @@ fn hash_to_hex(hash: &[u8]) -> String {
 /// IMPORTANT: Go uses priority=1 for ALL fields and the collection block,
 /// not incrementing priorities. This was verified by comparing actual AddSchema
 /// output with manual CID generation.
+///
+/// IMPORTANT: Secondary relation fields (where relation_name is set but is_primary is false)
+/// are NOT saved to the blockstore in Go and must be excluded from CID generation.
+/// See Go's internal/core/crdt/field_definition.go lines 95-98.
 fn generate_collection_id(type_name: &str, fields: &[FieldDescription]) -> String {
+    // Sort fields to match Go's order: _docID first, then alphabetically by name
+    // Skip:
+    // - Secondary relation fields (array relations - Go skips these)
+    // - Fields with empty id (self-reference relation fields)
+    // Include primary relation object fields AND their FK fields
+    let mut sorted_fields: Vec<&FieldDescription> = fields
+        .iter()
+        .filter(|f| !f.is_secondary_relation() && !f.id.is_empty())
+        .collect();
+    sorted_fields.sort_by(|a, b| {
+        // _docID always comes first
+        if a.name == "_docID" {
+            std::cmp::Ordering::Less
+        } else if b.name == "_docID" {
+            std::cmp::Ordering::Greater
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+
     // Generate CIDs for each field definition with priority=1 (like Go does)
     // All fields use the same priority=1, not incrementing priorities
-    let field_cids: Vec<Cid> = fields
+    let field_cids: Vec<Cid> = sorted_fields
         .iter()
         .filter_map(|f| {
             schema::generate_field_cid_with_priority(f, 1).ok() // Priority=1 for all
@@ -815,14 +1086,22 @@ fn generate_collection_id(type_name: &str, fields: &[FieldDescription]) -> Strin
 
 /// Generate a deterministic field ID from collection name and field name.
 ///
+/// Generate a deterministic field ID using the same CID format as Go DefraDB.
+///
+/// The field ID is a CID derived from the field's delta payload which includes:
+/// - Field name
+/// - CRDT type
+/// - Scalar kind (for scalar fields) or collection ID (for relation fields)
+///
 /// Uses the same CID format as Go DefraDB for interoperability.
-fn generate_field_id(type_name: &str, field_name: &str) -> String {
+fn generate_field_id(field_name: &str, kind: &FieldKind, crdt_type: CType) -> String {
     // Build a temporary FieldDescription to get the CID
     let field = FieldDescription::new(
         String::new(), // ID will be generated
         field_name.to_string(),
-        FieldKind::Scalar(ScalarKind::String), // Kind doesn't significantly affect CID for name-based fields
-    );
+        kind.clone(),
+    )
+    .with_crdt_type(crdt_type);
 
     match schema::generate_field_cid(&field) {
         Ok(cid) => cid.to_string(),
@@ -830,8 +1109,6 @@ fn generate_field_id(type_name: &str, field_name: &str) -> String {
             // Fallback to simple hash if CID generation fails
             let mut hasher = Sha256::new();
             hasher.update(b"field:");
-            hasher.update(type_name.as_bytes());
-            hasher.update(b":");
             hasher.update(field_name.as_bytes());
             format!("field_{}", hash_to_hex(&hasher.finalize()))
         }
@@ -849,15 +1126,16 @@ fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
 
 /// Generate a relation name following Go DefraDB conventions.
 /// Go uses lexicographic sort of type names to create deterministic relation names.
-fn generate_relation_name(from_type: &str, field_name: &str, to_type: &str) -> String {
-    let from_lower = from_type.to_lowercase();
-    let to_lower = to_type.to_lowercase();
-    let (first, second) = if from_lower < to_lower {
-        (from_lower, to_lower)
+fn generate_relation_name(from_type: &str, _field_name: &str, to_type: &str) -> String {
+    // Go's genRelationName simply concatenates the two type names in alphabetical order
+    // Format: {type1}_{type2} where type1 < type2 lexicographically
+    let t1 = from_type.to_lowercase();
+    let t2 = to_type.to_lowercase();
+    if t1 < t2 {
+        format!("{}_{}", t1, t2)
     } else {
-        (to_lower, from_lower)
-    };
-    format!("{}_{}_{}", first, field_name, second)
+        format!("{}_{}", t2, t1)
+    }
 }
 
 /// Parse SDL string into CollectionVersion schemas.
@@ -1510,14 +1788,24 @@ mod tests {
 
     #[test]
     fn test_field_ids_are_deterministic() {
-        let id1 = generate_field_id("User", "name");
-        let id2 = generate_field_id("User", "name");
-        assert_eq!(id1, id2, "same type+field should produce same field ID");
+        let string_kind = FieldKind::Scalar(ScalarKind::String);
+        let id1 = generate_field_id("name", &string_kind, CType::LwwRegister);
+        let id2 = generate_field_id("name", &string_kind, CType::LwwRegister);
+        assert_eq!(id1, id2, "same field should produce same field ID");
 
-        let id3 = generate_field_id("User", "email");
+        let id3 = generate_field_id("email", &string_kind, CType::LwwRegister);
         assert_ne!(
             id1, id3,
             "different field names should produce different IDs"
+        );
+
+        // Different types should produce different IDs
+        let int_kind = FieldKind::Scalar(ScalarKind::Int);
+        let id4 = generate_field_id("count", &string_kind, CType::LwwRegister);
+        let id5 = generate_field_id("count", &int_kind, CType::LwwRegister);
+        assert_ne!(
+            id4, id5,
+            "different field types should produce different IDs"
         );
     }
 
