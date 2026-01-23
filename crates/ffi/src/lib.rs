@@ -33,6 +33,7 @@
 //! - `exec_request()` - Execute GraphQL queries/mutations
 //! - `defra_free_string()` - Free strings allocated by FFI functions
 
+pub mod acp;
 pub mod index;
 pub mod node;
 pub mod query;
@@ -45,6 +46,11 @@ pub mod types;
 use std::ffi::{c_char, CString};
 
 // Re-export FFI functions at crate root
+pub use acp::{
+    add_dac_actor_relationship, add_nac_actor_relationship, delete_dac_actor_relationship,
+    delete_nac_actor_relationship, disable_nac, enable_nac, get_nac_status, get_node_identity,
+    re_enable_nac,
+};
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use node::{new_node, node_close};
 pub use query::exec_request;

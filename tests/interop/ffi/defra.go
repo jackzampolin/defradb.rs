@@ -347,6 +347,10 @@ func (t *Transaction) Mutate(mutation string) (*QueryResult, error) {
 	return t.Query(mutation)
 }
 
+// ============================================================================
+// Index Functions
+// ============================================================================
+
 // IndexField describes a field within an index.
 type IndexField struct {
 	Name       string `json:"Name"`
@@ -465,4 +469,257 @@ func (n *Node) GetAllIndexes() (map[string][]IndexDescription, error) {
 	}
 
 	return indexes, nil
+}
+
+// ============================================================================
+// NAC (Node Access Control) Functions
+// ============================================================================
+
+// NACStatus represents the NAC status response.
+type NACStatus struct {
+	Status            string  `json:"status"`
+	ConfiguredEnabled bool    `json:"configured_enabled"`
+	DevMode           bool    `json:"dev_mode"`
+	Owner             *string `json:"owner,omitempty"`
+}
+
+// GetNACStatus returns the current NAC status.
+func (n *Node) GetNACStatus() (*NACStatus, error) {
+	result := C.get_nac_status(n.ptr)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return nil, fmt.Errorf("ffi: get_nac_status failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var status NACStatus
+	if err := json.Unmarshal([]byte(value), &status); err != nil {
+		return nil, fmt.Errorf("ffi: failed to parse NAC status: %w", err)
+	}
+
+	return &status, nil
+}
+
+// EnableNAC enables NAC with the given owner DID.
+func (n *Node) EnableNAC(ownerDID string) error {
+	cOwnerDID := C.CString(ownerDID)
+	defer C.free(unsafe.Pointer(cOwnerDID))
+
+	result := C.enable_nac(n.ptr, cOwnerDID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: enable_nac failed: %s", err)
+	}
+
+	return nil
+}
+
+// DisableNAC temporarily disables NAC.
+// The requestor must be an admin.
+func (n *Node) DisableNAC(requestorDID string) error {
+	cRequestorDID := C.CString(requestorDID)
+	defer C.free(unsafe.Pointer(cRequestorDID))
+
+	result := C.disable_nac(n.ptr, cRequestorDID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: disable_nac failed: %s", err)
+	}
+
+	return nil
+}
+
+// ReEnableNAC re-enables NAC after temporary disable.
+// The requestor must be an admin.
+func (n *Node) ReEnableNAC(requestorDID string) error {
+	cRequestorDID := C.CString(requestorDID)
+	defer C.free(unsafe.Pointer(cRequestorDID))
+
+	result := C.re_enable_nac(n.ptr, cRequestorDID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: re_enable_nac failed: %s", err)
+	}
+
+	return nil
+}
+
+// AddNACActorRelationship grants admin to target.
+// Returns true if added, false if already exists.
+func (n *Node) AddNACActorRelationship(requestorDID, targetDID string) (bool, error) {
+	cRequestorDID := C.CString(requestorDID)
+	defer C.free(unsafe.Pointer(cRequestorDID))
+
+	cTargetDID := C.CString(targetDID)
+	defer C.free(unsafe.Pointer(cTargetDID))
+
+	result := C.add_nac_actor_relationship(n.ptr, cRequestorDID, cTargetDID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return false, fmt.Errorf("ffi: add_nac_actor_relationship failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var response struct {
+		Added bool `json:"added"`
+	}
+	if err := json.Unmarshal([]byte(value), &response); err != nil {
+		return false, fmt.Errorf("ffi: failed to parse response: %w", err)
+	}
+
+	return response.Added, nil
+}
+
+// DeleteNACActorRelationship revokes admin from target.
+// Returns true if deleted, false if didn't exist.
+func (n *Node) DeleteNACActorRelationship(requestorDID, targetDID string) (bool, error) {
+	cRequestorDID := C.CString(requestorDID)
+	defer C.free(unsafe.Pointer(cRequestorDID))
+
+	cTargetDID := C.CString(targetDID)
+	defer C.free(unsafe.Pointer(cTargetDID))
+
+	result := C.delete_nac_actor_relationship(n.ptr, cRequestorDID, cTargetDID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return false, fmt.Errorf("ffi: delete_nac_actor_relationship failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var response struct {
+		Deleted bool `json:"deleted"`
+	}
+	if err := json.Unmarshal([]byte(value), &response); err != nil {
+		return false, fmt.Errorf("ffi: failed to parse response: %w", err)
+	}
+
+	return response.Deleted, nil
+}
+
+// ============================================================================
+// DAC (Document Access Control) Functions
+// ============================================================================
+
+// AddDACActorRelationship shares document access with target.
+// Relation can be "reader", "updater", or "deleter".
+// Returns true if added, false if already exists.
+func (n *Node) AddDACActorRelationship(requestorDID, targetDID, collectionID, docID, relation string) (bool, error) {
+	cRequestorDID := C.CString(requestorDID)
+	defer C.free(unsafe.Pointer(cRequestorDID))
+
+	cTargetDID := C.CString(targetDID)
+	defer C.free(unsafe.Pointer(cTargetDID))
+
+	cCollectionID := C.CString(collectionID)
+	defer C.free(unsafe.Pointer(cCollectionID))
+
+	cDocID := C.CString(docID)
+	defer C.free(unsafe.Pointer(cDocID))
+
+	cRelation := C.CString(relation)
+	defer C.free(unsafe.Pointer(cRelation))
+
+	result := C.add_dac_actor_relationship(n.ptr, cRequestorDID, cTargetDID, cCollectionID, cDocID, cRelation)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return false, fmt.Errorf("ffi: add_dac_actor_relationship failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var response struct {
+		Added bool `json:"added"`
+	}
+	if err := json.Unmarshal([]byte(value), &response); err != nil {
+		return false, fmt.Errorf("ffi: failed to parse response: %w", err)
+	}
+
+	return response.Added, nil
+}
+
+// DeleteDACActorRelationship revokes document access from target.
+// Returns true if deleted, false if didn't exist.
+func (n *Node) DeleteDACActorRelationship(requestorDID, targetDID, collectionID, docID, relation string) (bool, error) {
+	cRequestorDID := C.CString(requestorDID)
+	defer C.free(unsafe.Pointer(cRequestorDID))
+
+	cTargetDID := C.CString(targetDID)
+	defer C.free(unsafe.Pointer(cTargetDID))
+
+	cCollectionID := C.CString(collectionID)
+	defer C.free(unsafe.Pointer(cCollectionID))
+
+	cDocID := C.CString(docID)
+	defer C.free(unsafe.Pointer(cDocID))
+
+	cRelation := C.CString(relation)
+	defer C.free(unsafe.Pointer(cRelation))
+
+	result := C.delete_dac_actor_relationship(n.ptr, cRequestorDID, cTargetDID, cCollectionID, cDocID, cRelation)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return false, fmt.Errorf("ffi: delete_dac_actor_relationship failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var response struct {
+		Deleted bool `json:"deleted"`
+	}
+	if err := json.Unmarshal([]byte(value), &response); err != nil {
+		return false, fmt.Errorf("ffi: failed to parse response: %w", err)
+	}
+
+	return response.Deleted, nil
+}
+
+// ============================================================================
+// Identity Functions
+// ============================================================================
+
+// GetNodeIdentity returns the node's DID if configured.
+func (n *Node) GetNodeIdentity() (string, error) {
+	result := C.get_node_identity(n.ptr)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: get_node_identity failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+
+	var response struct {
+		DID string `json:"did"`
+	}
+	if err := json.Unmarshal([]byte(value), &response); err != nil {
+		return "", fmt.Errorf("ffi: failed to parse response: %w", err)
+	}
+
+	return response.DID, nil
 }

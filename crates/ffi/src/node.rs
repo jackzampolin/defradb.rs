@@ -48,16 +48,21 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
         let mutator: Arc<dyn query::DocMutator> =
             Arc::new(db::AutoCommitMutator::new(database.clone()));
 
-        // Create in-memory ACP store
+        // Create in-memory ACP store for document-level access control
         let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
         let document_acp: Arc<dyn acp::DocumentACP> =
             Arc::new(acp::LocalDocumentACP::new(acp_store));
+
+        // Create NAC manager for node-level access control
+        let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
+        let nac_config = db::NacConfig::new().with_dev_mode();
+        let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
 
         // Create query runner with transaction, mutation, and ACP support
         let query_runner =
             query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
                 .with_mutator(mutator)
-                .with_acp(document_acp);
+                .with_acp(document_acp.clone());
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
@@ -65,6 +70,8 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
         let state = NodeState {
             database,
             query_runner: runner,
+            nac_manager,
+            document_acp,
         };
 
         // Register and get handle
