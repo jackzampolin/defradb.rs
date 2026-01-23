@@ -760,6 +760,339 @@ impl<S: Store> DB<S> {
         Ok(CollectionSnapshot::new(cache.clone()))
     }
 
+    /// Set the active collection version.
+    ///
+    /// This activates the collection with the given version ID and deactivates
+    /// any other versions of the same collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `version_id` - The version ID of the collection to activate
+    ///
+    /// # Errors
+    ///
+    /// - `CollectionVersionNotFound` if no collection with the given version ID exists
+    pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
+        // Find the collection by version_id in the cache
+        let (name, mut schema) = {
+            let cache = self.collections.read().map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    version_id = %version_id,
+                    "Collection cache lock poisoned during set_active_collection_version"
+                );
+                Error::LockPoisoned(
+                    "collection cache lock poisoned during set_active_collection_version".into(),
+                )
+            })?;
+
+            let found = cache
+                .iter()
+                .find(|(_, c)| c.schema().version_id == version_id)
+                .map(|(n, c)| (n.clone(), c.schema().clone()));
+
+            found.ok_or_else(|| Error::CollectionVersionNotFound(version_id.to_string()))?
+        };
+
+        // Set is_active to true
+        schema.is_active = true;
+
+        // Create transaction and update the schema in the store
+        let txn = self.new_txn(false).await?;
+        let key = CollectionNameKey::new(&name);
+        let data = serde_json::to_vec(&schema).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize schema for collection '{}': {}",
+                name, e
+            ))
+        })?;
+        txn.systemstore()?
+            .set(&key.bytes(), &data)
+            .await
+            .map_err(Error::Storage)?;
+        txn.commit().await?;
+
+        // Update the cache
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_name = %name,
+                "Collection cache lock poisoned during set_active_collection_version update"
+            );
+            Error::CacheUpdateFailedAfterCommit(name.clone())
+        })?;
+        cache.insert(name, Collection::new(schema));
+
+        Ok(())
+    }
+
+    /// Get a collection by its version ID.
+    ///
+    /// This searches all collections for one matching the given version ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `version_id` - The version ID to search for
+    ///
+    /// # Returns
+    ///
+    /// The collection if found, None otherwise.
+    pub fn get_collection_by_version_id(&self, version_id: &str) -> Result<Option<Collection>> {
+        let cache = self.collections.read().map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                version_id = %version_id,
+                "Collection cache lock poisoned during get_collection_by_version_id"
+            );
+            Error::LockPoisoned(
+                "collection cache lock poisoned during get_collection_by_version_id".into(),
+            )
+        })?;
+
+        Ok(cache
+            .values()
+            .find(|c| c.schema().version_id == version_id)
+            .cloned())
+    }
+
+    /// Patch a collection's schema using JSON patch operations.
+    ///
+    /// This applies the given JSON patch to the collection's schema,
+    /// validates the result, and updates the collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `collection_name` - The name of the collection to patch
+    /// * `patch` - A JSON patch string (RFC 6902 format)
+    ///
+    /// # Returns
+    ///
+    /// The updated collection version.
+    ///
+    /// # Errors
+    ///
+    /// - `CollectionNotFound` if the collection doesn't exist
+    /// - `InvalidPatch` if the patch is invalid or cannot be applied
+    /// - `Schema` if the resulting schema is invalid
+    pub async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> Result<CollectionVersion> {
+        // Get the current schema
+        let collection = self
+            .get_collection(collection_name)?
+            .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
+        let mut schema = collection.schema().clone();
+
+        // Parse the patch
+        let patch_ops: serde_json::Value =
+            serde_json::from_str(patch).map_err(|e| Error::InvalidPatch(e.to_string()))?;
+
+        // Apply the patch to the schema JSON
+        let mut schema_json = serde_json::to_value(&schema).map_err(|e| {
+            Error::Serialization(format!("failed to serialize schema to JSON: {}", e))
+        })?;
+
+        // Apply JSON patch operations
+        if let serde_json::Value::Array(ops) = patch_ops {
+            for op in ops {
+                let operation = op.get("op").and_then(|v| v.as_str());
+                let path = op.get("path").and_then(|v| v.as_str());
+                let value = op.get("value");
+
+                match (operation, path) {
+                    (Some("replace"), Some(path)) | (Some("add"), Some(path)) => {
+                        let value = value.ok_or_else(|| {
+                            Error::InvalidPatch(format!(
+                                "missing 'value' for operation at {}",
+                                path
+                            ))
+                        })?;
+                        Self::json_pointer_set(&mut schema_json, path, value.clone())?;
+                    }
+                    (Some("remove"), Some(path)) => {
+                        Self::json_pointer_remove(&mut schema_json, path)?;
+                    }
+                    _ => {
+                        return Err(Error::InvalidPatch(format!(
+                            "unsupported or invalid patch operation: {:?}",
+                            op
+                        )));
+                    }
+                }
+            }
+        } else {
+            return Err(Error::InvalidPatch(
+                "patch must be an array of operations".to_string(),
+            ));
+        }
+
+        // Deserialize back to CollectionVersion
+        schema = serde_json::from_value(schema_json)
+            .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
+
+        // Validate the new schema
+        schema.validate()?;
+
+        // Update the collection
+        let txn = self.new_txn(false).await?;
+        let key = CollectionNameKey::new(collection_name);
+        let data = serde_json::to_vec(&schema).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize patched schema for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+        txn.systemstore()?
+            .set(&key.bytes(), &data)
+            .await
+            .map_err(Error::Storage)?;
+        txn.commit().await?;
+
+        // Update cache
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                collection_name = %collection_name,
+                "Collection cache lock poisoned during patch_collection update"
+            );
+            Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
+        })?;
+        cache.insert(collection_name.to_string(), Collection::new(schema.clone()));
+
+        Ok(schema)
+    }
+
+    /// Helper: Set a value at a JSON pointer path.
+    fn json_pointer_set(
+        json: &mut serde_json::Value,
+        path: &str,
+        value: serde_json::Value,
+    ) -> Result<()> {
+        // Convert JSON pointer to path segments
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return Err(Error::InvalidPatch("empty path".to_string()));
+        }
+
+        let mut current = json;
+        for (i, segment) in segments.iter().enumerate() {
+            if i == segments.len() - 1 {
+                // Last segment - set the value
+                match current {
+                    serde_json::Value::Object(map) => {
+                        map.insert(segment.to_string(), value);
+                        return Ok(());
+                    }
+                    serde_json::Value::Array(arr) => {
+                        let idx: usize = segment.parse().map_err(|_| {
+                            Error::InvalidPatch(format!("invalid array index: {}", segment))
+                        })?;
+                        if idx >= arr.len() {
+                            arr.push(value);
+                        } else {
+                            arr[idx] = value;
+                        }
+                        return Ok(());
+                    }
+                    _ => {
+                        return Err(Error::InvalidPatch(format!(
+                            "cannot set value at path {}",
+                            path
+                        )));
+                    }
+                }
+            } else {
+                // Navigate to the next level
+                match current {
+                    serde_json::Value::Object(map) => {
+                        current = map.get_mut(*segment).ok_or_else(|| {
+                            Error::InvalidPatch(format!("path not found: {}", path))
+                        })?;
+                    }
+                    serde_json::Value::Array(arr) => {
+                        let idx: usize = segment.parse().map_err(|_| {
+                            Error::InvalidPatch(format!("invalid array index: {}", segment))
+                        })?;
+                        current = arr.get_mut(idx).ok_or_else(|| {
+                            Error::InvalidPatch(format!("path not found: {}", path))
+                        })?;
+                    }
+                    _ => {
+                        return Err(Error::InvalidPatch(format!(
+                            "cannot navigate path: {}",
+                            path
+                        )));
+                    }
+                }
+            }
+        }
+
+        Err(Error::InvalidPatch("failed to set value".to_string()))
+    }
+
+    /// Helper: Remove a value at a JSON pointer path.
+    fn json_pointer_remove(json: &mut serde_json::Value, path: &str) -> Result<()> {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return Err(Error::InvalidPatch("empty path".to_string()));
+        }
+
+        let mut current = json;
+        for (i, segment) in segments.iter().enumerate() {
+            if i == segments.len() - 1 {
+                // Last segment - remove the value
+                match current {
+                    serde_json::Value::Object(map) => {
+                        map.remove(*segment);
+                        return Ok(());
+                    }
+                    serde_json::Value::Array(arr) => {
+                        let idx: usize = segment.parse().map_err(|_| {
+                            Error::InvalidPatch(format!("invalid array index: {}", segment))
+                        })?;
+                        if idx < arr.len() {
+                            arr.remove(idx);
+                        }
+                        return Ok(());
+                    }
+                    _ => {
+                        return Err(Error::InvalidPatch(format!(
+                            "cannot remove value at path {}",
+                            path
+                        )));
+                    }
+                }
+            } else {
+                // Navigate to the next level
+                match current {
+                    serde_json::Value::Object(map) => {
+                        current = map.get_mut(*segment).ok_or_else(|| {
+                            Error::InvalidPatch(format!("path not found: {}", path))
+                        })?;
+                    }
+                    serde_json::Value::Array(arr) => {
+                        let idx: usize = segment.parse().map_err(|_| {
+                            Error::InvalidPatch(format!("invalid array index: {}", segment))
+                        })?;
+                        current = arr.get_mut(idx).ok_or_else(|| {
+                            Error::InvalidPatch(format!("path not found: {}", path))
+                        })?;
+                    }
+                    _ => {
+                        return Err(Error::InvalidPatch(format!(
+                            "cannot navigate path: {}",
+                            path
+                        )));
+                    }
+                }
+            }
+        }
+
+        Err(Error::InvalidPatch("failed to remove value".to_string()))
+    }
+
     /// Extract a Merkle proof from the blockstore.
     ///
     /// This generates a proof demonstrating that the block at `leaf_cid` is part

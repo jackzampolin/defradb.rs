@@ -393,6 +393,206 @@ struct FfiResult add_schema(uintptr_t node_ptr, const char *schema_sdl);
 struct FfiResult get_collections(uintptr_t node_ptr);
 
 /*
+ Get a collection by name.
+
+ Returns a JSON object containing the collection's schema (CollectionVersion)
+ if found, or an error if the collection doesn't exist.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `name` - The collection name
+
+ # Safety
+
+ `name` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult get_collection_by_name(uintptr_t node_ptr, const char *name);
+
+/*
+ Check if a collection exists by name.
+
+ Returns "true" or "false" as the value.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `name` - The collection name to check
+
+ # Safety
+
+ `name` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult has_collection(uintptr_t node_ptr, const char *name);
+
+/*
+ Delete a collection by name.
+
+ Deletes the collection and all its documents.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `name` - The collection name to delete
+
+ # Safety
+
+ `name` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult delete_collection(uintptr_t node_ptr, const char *name);
+
+/*
+ Find a collection by its collection ID (schema version ID).
+
+ This is useful for P2P sync where we receive blocks with schema_version_id
+ and need to find the corresponding collection.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `collection_id` - The collection ID (schema version ID)
+
+ # Returns
+
+ Value contains JSON CollectionVersion or "null" if not found.
+
+ # Safety
+
+ `collection_id` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult find_collection_by_id(uintptr_t node_ptr, const char *collection_id);
+
+/*
+ Set the active collection version.
+
+ This activates the collection with the given version ID and deactivates
+ any other versions of the same collection.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `version_id` - The version ID of the collection to activate
+
+ # Safety
+
+ `version_id` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult set_active_collection_version(uintptr_t node_ptr, const char *version_id);
+
+/*
+ Patch a collection's schema using JSON patch operations.
+
+ This applies the given JSON patch to the collection's schema,
+ validates the result, and updates the collection.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `collection_name` - The name of the collection to patch
+ * `patch` - A JSON patch string (RFC 6902 format)
+
+ # Returns
+
+ Value contains the updated CollectionVersion as JSON.
+
+ # Safety
+
+ `collection_name` and `patch` must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult patch_collection(uintptr_t node_ptr, const char *collection_name, const char *patch);
+
+/*
+ Get a collection by its version ID.
+
+ This searches all collections for one matching the given version ID.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `version_id` - The version ID to search for
+
+ # Returns
+
+ Value contains JSON CollectionVersion or "null" if not found.
+
+ # Safety
+
+ `version_id` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult get_collection_by_version_id(uintptr_t node_ptr, const char *version_id);
+
+/*
+ Add a view to the database.
+
+ Creates a new Defra View from a GQL query and SDL schema.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `gql_query` - The GraphQL query defining the view
+ * `sdl` - The SDL schema for the view output type
+ * `transform` - Optional Lens transform configuration (JSON, null for none)
+
+ # Returns
+
+ Value contains JSON array of CollectionVersions.
+
+ # Safety
+
+ All string pointers must be valid null-terminated UTF-8 strings or null.
+
+ # Note
+
+ Not yet implemented. See issue #178.
+ */
+struct FfiResult add_view(uintptr_t node_ptr, const char *gql_query, const char *sdl, const char *transform);
+
+/*
+ Refresh view caches.
+
+ Refreshes the caches of all views matching the given options.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `options` - JSON string of CollectionFetchOptions (null for all views)
+
+ # Safety
+
+ `options` must be null or a valid null-terminated UTF-8 string.
+
+ # Note
+
+ Not yet implemented. See issue #178.
+ */
+struct FfiResult refresh_views(uintptr_t node_ptr, const char *options);
+
+/*
+ Set migration for collection versions.
+
+ Sets the migration for all collections using the given source-destination
+ collection version IDs.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `config` - JSON string of LensConfig
+
+ # Returns
+
+ Value contains the Lens transform ID.
+
+ # Safety
+
+ `config` must be a valid null-terminated UTF-8 string.
+
+ # Note
+
+ Not yet implemented. See issue #179.
+ */
+struct FfiResult set_migration(uintptr_t node_ptr, const char *config);
+
+/*
  Begin a new transaction.
 
  Returns a transaction ID that can be used with `exec_request_in_txn`,

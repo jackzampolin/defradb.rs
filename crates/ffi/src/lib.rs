@@ -34,6 +34,7 @@
 //! - `defra_free_string()` - Free strings allocated by FFI functions
 
 pub mod acp;
+pub mod collection;
 pub mod index;
 pub mod node;
 pub mod query;
@@ -51,6 +52,11 @@ pub use acp::{
     add_dac_actor_relationship, add_nac_actor_relationship, delete_dac_actor_relationship,
     delete_nac_actor_relationship, disable_nac, enable_nac, get_nac_status, get_node_identity,
     re_enable_nac,
+};
+pub use collection::{
+    add_view, delete_collection, find_collection_by_id, get_collection_by_name,
+    get_collection_by_version_id, has_collection, patch_collection, refresh_views,
+    set_active_collection_version, set_migration,
 };
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use node::{new_node, node_close};
