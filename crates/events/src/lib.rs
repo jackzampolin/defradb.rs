@@ -9,6 +9,6 @@ mod event;
 mod subscription;
 
 pub use bus::Bus;
-pub use channel_bus::ChannelBus;
+pub use channel_bus::{ChannelBus, ChannelBusConfig};
 pub use event::{EventName, Message, Update};
 pub use subscription::Subscription;

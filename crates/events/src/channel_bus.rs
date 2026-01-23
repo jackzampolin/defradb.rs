@@ -10,18 +10,49 @@ use crate::bus::Bus;
 use crate::event::{EventName, Message};
 use crate::subscription::Subscription;
 
+/// Configuration for the channel-based event bus.
+#[derive(Debug, Clone)]
+pub struct ChannelBusConfig {
+    /// Buffer size for subscriber event channels.
+    /// When the buffer is full, new messages are dropped with a warning.
+    /// Default: 100
+    pub event_buffer_size: usize,
+}
+
+impl Default for ChannelBusConfig {
+    fn default() -> Self {
+        Self {
+            event_buffer_size: 100,
+        }
+    }
+}
+
+impl ChannelBusConfig {
+    /// Create a new configuration with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the event buffer size.
+    pub fn with_event_buffer_size(mut self, size: usize) -> Self {
+        self.event_buffer_size = size;
+        self
+    }
+}
+
 /// Subscriber entry with channel and event filter.
 struct Subscriber {
     /// Sender channel for messages.
-    sender: mpsc::UnboundedSender<Message>,
+    sender: mpsc::Sender<Message>,
     /// Events this subscriber is interested in.
     events: Vec<EventName>,
 }
 
-/// Channel-based event bus using tokio broadcast channels.
+/// Channel-based event bus using tokio mpsc channels.
 ///
-/// This implementation uses unbounded mpsc channels per subscriber.
+/// This implementation uses bounded mpsc channels per subscriber.
 /// Messages are fan-out to all matching subscribers.
+/// When a subscriber's buffer is full, messages are dropped (non-blocking).
 pub struct ChannelBus {
     /// Counter for generating unique subscription IDs.
     next_id: AtomicU64,
@@ -29,21 +60,34 @@ pub struct ChannelBus {
     subscribers: RwLock<HashMap<u64, Subscriber>>,
     /// Whether the bus is closed.
     closed: AtomicBool,
+    /// Configuration for the bus.
+    config: ChannelBusConfig,
 }
 
 impl ChannelBus {
-    /// Create a new channel-based event bus.
+    /// Create a new channel-based event bus with default configuration.
     pub fn new() -> Self {
+        Self::with_config(ChannelBusConfig::default())
+    }
+
+    /// Create a new channel-based event bus with custom configuration.
+    pub fn with_config(config: ChannelBusConfig) -> Self {
         Self {
             next_id: AtomicU64::new(1),
             subscribers: RwLock::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            config,
         }
     }
 
     /// Get the number of active subscribers.
     pub fn subscriber_count(&self) -> usize {
         self.subscribers.read().len()
+    }
+
+    /// Get the current configuration.
+    pub fn config(&self) -> &ChannelBusConfig {
+        &self.config
     }
 }
 
@@ -63,6 +107,7 @@ impl Bus for ChannelBus {
         let subscribers = self.subscribers.read();
         let mut delivered = 0;
         let mut dropped = 0;
+        let mut buffer_full = 0;
 
         for (id, subscriber) in subscribers.iter() {
             // Check if subscriber is interested in this event
@@ -71,10 +116,19 @@ impl Bus for ChannelBus {
                 continue;
             }
 
-            // Try to send (non-blocking)
-            match subscriber.sender.send(msg.clone()) {
+            // Try to send (non-blocking) - use try_send to avoid blocking
+            match subscriber.sender.try_send(msg.clone()) {
                 Ok(()) => delivered += 1,
-                Err(_) => {
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // Buffer full - log and drop message (non-blocking behavior)
+                    tracing::warn!(
+                        sub_id = *id,
+                        event = %msg.name,
+                        "Subscriber buffer full, dropping message"
+                    );
+                    buffer_full += 1;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
                     // Subscriber channel closed, will be cleaned up later
                     tracing::debug!(sub_id = *id, "Subscriber channel closed");
                     dropped += 1;
@@ -86,6 +140,7 @@ impl Bus for ChannelBus {
             event = %msg.name,
             delivered = delivered,
             dropped = dropped,
+            buffer_full = buffer_full,
             "Published event"
         );
     }
@@ -93,12 +148,12 @@ impl Bus for ChannelBus {
     fn subscribe(&self, events: &[EventName]) -> Subscription {
         if self.closed.load(Ordering::Acquire) {
             // Return a subscription with a closed channel
-            let (_tx, rx) = mpsc::unbounded_channel();
+            let (_tx, rx) = mpsc::channel(1);
             return Subscription::new(0, rx);
         }
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(self.config.event_buffer_size);
 
         let subscriber = Subscriber {
             sender: tx,
@@ -110,6 +165,7 @@ impl Bus for ChannelBus {
         tracing::debug!(
             sub_id = id,
             events = ?events,
+            buffer_size = self.config.event_buffer_size,
             "New subscription"
         );
 
@@ -280,5 +336,41 @@ mod tests {
         let msg2 = sub2.recv().await.unwrap();
         assert_eq!(msg1.name, EventName::Update);
         assert_eq!(msg2.name, EventName::Update);
+    }
+
+    #[tokio::test]
+    async fn test_channel_bus_buffer_overflow() {
+        // Create bus with small buffer for testing
+        let config = ChannelBusConfig::new().with_event_buffer_size(2);
+        let bus = ChannelBus::with_config(config);
+
+        // Subscribe but don't consume
+        let sub = bus.subscribe(&[EventName::Merge]);
+        assert_eq!(bus.subscriber_count(), 1);
+
+        // Fill the buffer
+        bus.publish(Message::merge());
+        bus.publish(Message::merge());
+
+        // This should be dropped (buffer full) - non-blocking
+        bus.publish(Message::merge());
+        bus.publish(Message::merge());
+
+        // Subscriber should still be active
+        assert_eq!(bus.subscriber_count(), 1);
+
+        // Drop subscription
+        drop(sub);
+    }
+
+    #[test]
+    fn test_channel_bus_config() {
+        let config = ChannelBusConfig::new()
+            .with_event_buffer_size(500);
+
+        assert_eq!(config.event_buffer_size, 500);
+
+        let bus = ChannelBus::with_config(config);
+        assert_eq!(bus.config().event_buffer_size, 500);
     }
 }

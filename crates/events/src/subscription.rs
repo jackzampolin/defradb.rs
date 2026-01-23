@@ -7,17 +7,17 @@ use crate::event::Message;
 /// Subscription to events from the event bus.
 ///
 /// Provides access to a channel of messages and the subscription ID
-/// for unsubscribing.
+/// for unsubscribing. Uses bounded channels to prevent memory exhaustion.
 pub struct Subscription {
     /// Unique subscription identifier.
     id: u64,
-    /// Receiver channel for messages.
-    receiver: mpsc::UnboundedReceiver<Message>,
+    /// Receiver channel for messages (bounded).
+    receiver: mpsc::Receiver<Message>,
 }
 
 impl Subscription {
     /// Create a new subscription with the given ID and receiver.
-    pub(crate) fn new(id: u64, receiver: mpsc::UnboundedReceiver<Message>) -> Self {
+    pub(crate) fn new(id: u64, receiver: mpsc::Receiver<Message>) -> Self {
         Self { id, receiver }
     }
 
@@ -43,7 +43,7 @@ impl Subscription {
     }
 
     /// Convert into the underlying receiver for use with streams.
-    pub fn into_receiver(self) -> mpsc::UnboundedReceiver<Message> {
+    pub fn into_receiver(self) -> mpsc::Receiver<Message> {
         self.receiver
     }
 }
@@ -62,12 +62,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_recv() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(10);
         let mut sub = Subscription::new(1, rx);
 
         // Send a message
         let msg = Message::merge();
-        tx.send(msg).unwrap();
+        tx.send(msg).await.unwrap();
 
         // Receive it
         let received = sub.recv().await;
@@ -84,15 +84,15 @@ mod tests {
 
     #[test]
     fn test_subscription_try_recv() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(10);
         let mut sub = Subscription::new(1, rx);
 
         // No message yet
         assert!(sub.try_recv().is_err());
 
-        // Send a message
+        // Send a message (blocking send in sync context)
         let msg = Message::merge();
-        tx.send(msg).unwrap();
+        tx.blocking_send(msg).unwrap();
 
         // Now we can receive
         let received = sub.try_recv();

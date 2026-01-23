@@ -25,13 +25,19 @@ use axum::{
     Json,
 };
 use futures::{SinkExt, StreamExt};
+use std::time::Duration;
 
 /// Go DefraDB transaction header name.
 const TX_HEADER_NAME: &str = "x-defradb-tx";
+
+/// Connection init timeout per graphql-ws spec (5 seconds).
+const CONNECTION_INIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use events::EventName;
+use identity::{Did, Identity};
 use query::executor::{QueryRequest, QueryResponse};
 use query::{parse_request, ParsedOperation};
 
@@ -485,19 +491,50 @@ pub struct SubscriptionPayload {
     pub variables: Option<JsonValue>,
 }
 
-/// WebSocket message for GraphQL subscriptions (graphql-ws protocol).
+/// Connection parameters from connection_init (may contain identity).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ConnectionParams {
+    /// Optional authorization token for identity.
+    #[serde(rename = "Authorization")]
+    pub authorization: Option<String>,
+    /// Alternative: bearer token directly.
+    #[serde(rename = "authToken")]
+    pub auth_token: Option<String>,
+}
+
+/// Raw WebSocket message for GraphQL subscriptions (graphql-ws protocol).
+/// Uses generic payload to handle both connection_init and subscribe messages.
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SubscriptionMessage {
-    /// Message type: "subscribe", "complete", "ping", "pong"
+pub struct RawSubscriptionMessage {
+    /// Message type: "connection_init", "subscribe", "complete", "ping", "pong"
     #[serde(rename = "type")]
     pub msg_type: String,
     /// Subscription ID (for subscribe/complete)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// GraphQL payload (for subscribe)
+    /// Payload - varies by message type (connection params or subscription query)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<SubscriptionPayload>,
+    pub payload: Option<JsonValue>,
 }
+
+impl RawSubscriptionMessage {
+    /// Extract connection params from connection_init payload.
+    pub fn get_connection_params(&self) -> Option<ConnectionParams> {
+        self.payload
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Extract subscription payload from subscribe message.
+    pub fn get_subscription_payload(&self) -> Option<SubscriptionPayload> {
+        self.payload
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+}
+
+/// Legacy message type alias (used in response messages).
+pub type SubscriptionMessage = RawSubscriptionMessage;
 
 /// WebSocket data message sent to client.
 #[derive(Debug, Serialize)]
@@ -524,7 +561,25 @@ pub async fn graphql_ws_handler(
     ws.on_upgrade(move |socket| handle_subscription_socket(socket, state))
 }
 
+/// Subscription state tracking for active subscriptions.
+struct SubscriptionState {
+    /// Identity extracted from connection_init (if any).
+    identity: Option<Did>,
+    /// The subscription query.
+    query: String,
+    /// Query variables.
+    variables: Option<JsonValue>,
+    /// Collection name being subscribed to.
+    collection_name: String,
+}
+
 /// Handle an established WebSocket connection for subscriptions.
+///
+/// Implements the graphql-ws protocol:
+/// 1. Wait for connection_init message (with timeout)
+/// 2. Send connection_ack
+/// 3. Accept subscribe messages
+/// 4. Stream updates until complete or close
 async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -533,13 +588,10 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
         Some(bus) => bus.clone(),
         None => {
             tracing::error!("WebSocket subscription attempted but no event bus configured");
-            let error_msg = SubscriptionData {
-                msg_type: "error".to_string(),
-                id: "".to_string(),
-                payload: Some(QueryResponse::error(
-                    "Subscriptions not enabled: no event bus configured",
-                )),
-            };
+            let error_msg = serde_json::json!({
+                "type": "error",
+                "payload": {"message": "Subscriptions not enabled: no event bus configured"}
+            });
             let _ = sender
                 .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
                 .await;
@@ -547,7 +599,36 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
         }
     };
 
-    // Process incoming messages
+    // === Phase 1: Wait for connection_init with timeout ===
+    let connection_identity = match wait_for_connection_init(&mut receiver, CONNECTION_INIT_TIMEOUT).await {
+        Ok(identity) => {
+            // Send connection_ack
+            let ack = serde_json::json!({"type": "connection_ack"});
+            if sender
+                .send(Message::Text(serde_json::to_string(&ack).unwrap()))
+                .await
+                .is_err()
+            {
+                tracing::debug!("Failed to send connection_ack, closing connection");
+                return;
+            }
+            tracing::debug!(identity = ?identity, "WebSocket connection initialized");
+            identity
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "WebSocket handshake failed");
+            let error_msg = serde_json::json!({
+                "type": "connection_error",
+                "payload": {"message": e}
+            });
+            let _ = sender
+                .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                .await;
+            return;
+        }
+    };
+
+    // === Phase 2: Process subscription messages ===
     while let Some(msg_result) = receiver.next().await {
         let msg = match msg_result {
             Ok(Message::Text(text)) => text,
@@ -567,7 +648,7 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
         };
 
         // Parse the subscription message
-        let sub_msg: SubscriptionMessage = match serde_json::from_str(&msg) {
+        let sub_msg: RawSubscriptionMessage = match serde_json::from_str(&msg) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(error = %e, "Invalid subscription message format");
@@ -576,9 +657,14 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
         };
 
         match sub_msg.msg_type.as_str() {
+            "connection_init" => {
+                // Already initialized - per spec, we can ignore duplicate connection_init
+                tracing::debug!("Ignoring duplicate connection_init");
+                continue;
+            }
             "subscribe" => {
-                let sub_id = sub_msg.id.unwrap_or_else(|| "default".to_string());
-                let payload = match sub_msg.payload {
+                let sub_id = sub_msg.id.clone().unwrap_or_else(|| "default".to_string());
+                let payload = match sub_msg.get_subscription_payload() {
                     Some(p) => p,
                     None => {
                         let error_msg = SubscriptionData {
@@ -593,9 +679,24 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
                     }
                 };
 
-                // Parse to verify it's a subscription
-                let parsed = match parse_request(&payload.query) {
-                    Ok(p) => p,
+                // Parse to verify it's a subscription and extract the Select
+                let (collection_name, _parsed_select) = match parse_request(&payload.query) {
+                    Ok(ParsedOperation::Subscription { select }) => {
+                        (select.collection_name.clone(), select)
+                    }
+                    Ok(_) => {
+                        let error_msg = SubscriptionData {
+                            msg_type: "error".to_string(),
+                            id: sub_id,
+                            payload: Some(QueryResponse::error(
+                                "Expected subscription operation",
+                            )),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                            .await;
+                        continue;
+                    }
                     Err(e) => {
                         let error_msg = SubscriptionData {
                             msg_type: "error".to_string(),
@@ -609,35 +710,24 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
                     }
                 };
 
-                let collection_name = match parsed {
-                    ParsedOperation::Subscription { ref select } => select.collection_name.clone(),
-                    _ => {
-                        let error_msg = SubscriptionData {
-                            msg_type: "error".to_string(),
-                            id: sub_id,
-                            payload: Some(QueryResponse::error(
-                                "Expected subscription operation",
-                            )),
-                        };
-                        let _ = sender
-                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
-                            .await;
-                        continue;
-                    }
+                // Store subscription state
+                let sub_state = SubscriptionState {
+                    identity: connection_identity.clone(),
+                    query: payload.query.clone(),
+                    variables: payload.variables.clone(),
+                    collection_name: collection_name.clone(),
                 };
 
                 // Subscribe to events and start streaming
                 let mut subscription = event_bus.subscribe(&[EventName::Update]);
                 let executor = state.executor.clone();
-                let query = payload.query.clone();
-                let variables = payload.variables.clone();
 
-                // Execute initial query
+                // Execute initial query with identity
                 let initial_request = QueryRequest {
-                    query: query.clone(),
+                    query: sub_state.query.clone(),
                     operation_name: None,
-                    variables: variables.clone(),
-                    identity: None,
+                    variables: sub_state.variables.clone(),
+                    identity: sub_state.identity.clone(),
                 };
                 let initial_response = executor.execute(initial_request).await;
 
@@ -660,16 +750,27 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
                     match subscription.recv().await {
                         Some(message) => {
                             if let Some(update_data) = message.as_update() {
+                                // Skip relay events to avoid duplicates (Issue #6)
+                                if update_data.is_relay {
+                                    tracing::trace!(
+                                        doc_id = %update_data.doc_id,
+                                        "Skipping relay event for subscription"
+                                    );
+                                    continue;
+                                }
+
                                 // Check if update is relevant to this subscription
-                                if update_data.collection_id == collection_name
+                                if update_data.collection_id == sub_state.collection_name
                                     || update_data.collection_id.is_empty()
                                 {
-                                    // Re-execute query
+                                    // Re-execute query with identity preserved
+                                    // Note: For better performance, we could filter by doc_id
+                                    // using parsed_select.with_doc_ids([update_data.doc_id])
                                     let request = QueryRequest {
-                                        query: query.clone(),
+                                        query: sub_state.query.clone(),
                                         operation_name: None,
-                                        variables: variables.clone(),
-                                        identity: None,
+                                        variables: sub_state.variables.clone(),
+                                        identity: sub_state.identity.clone(),
                                     };
                                     let response = executor.execute(request).await;
 
@@ -718,4 +819,87 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
     }
 
     tracing::debug!("WebSocket subscription connection closed");
+}
+
+/// Wait for connection_init message from client.
+///
+/// Returns the identity DID extracted from connectionParams if present.
+/// Token validation is simplified for WebSocket (signature verified, but no audience check
+/// since we don't have HTTP Host header in this context).
+async fn wait_for_connection_init(
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    timeout: Duration,
+) -> Result<Option<Did>, String> {
+    let init_future = async {
+        while let Some(msg_result) = receiver.next().await {
+            let msg = match msg_result {
+                Ok(Message::Text(text)) => text,
+                Ok(Message::Ping(_)) => continue, // Ignore pings during handshake
+                Ok(Message::Close(_)) => return Err("Connection closed before init".to_string()),
+                Ok(_) => continue,
+                Err(e) => return Err(format!("Receive error: {}", e)),
+            };
+
+            // Parse the message
+            let sub_msg: RawSubscriptionMessage = match serde_json::from_str(&msg) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Invalid message format during handshake");
+                    continue;
+                }
+            };
+
+            if sub_msg.msg_type == "connection_init" {
+                // Extract and parse token from connectionParams if present
+                let identity = sub_msg.get_connection_params().and_then(|params| {
+                    // Get the raw token (strip Bearer prefix if present)
+                    let token = params.authorization
+                        .as_ref()
+                        .map(|auth| auth.strip_prefix("Bearer ").unwrap_or(auth).trim())
+                        .or(params.auth_token.as_deref());
+
+                    let token = token?;
+                    if token.is_empty() {
+                        return None;
+                    }
+
+                    // Parse token and extract DID (validates signature)
+                    // Skip audience verification since we don't have HTTP Host header
+                    match identity::from_token(token.as_bytes()) {
+                        Ok(token_identity) => {
+                            match token_identity.did() {
+                                Ok(did) => {
+                                    tracing::debug!(did = %did, "Extracted identity from WebSocket connection");
+                                    Some(did)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Failed to extract DID from token");
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to parse auth token from connectionParams");
+                            None
+                        }
+                    }
+                });
+
+                tracing::debug!(has_identity = identity.is_some(), "Received connection_init");
+                return Ok(identity);
+            } else {
+                // Per graphql-ws spec, must send connection_init first
+                return Err(format!(
+                    "Expected connection_init, got {}",
+                    sub_msg.msg_type
+                ));
+            }
+        }
+        Err("Connection closed without init".to_string())
+    };
+
+    match tokio::time::timeout(timeout, init_future).await {
+        Ok(result) => result,
+        Err(_) => Err("Connection init timeout".to_string()),
+    }
 }
