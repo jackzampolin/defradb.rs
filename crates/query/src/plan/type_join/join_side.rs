@@ -55,8 +55,12 @@ impl JoinSide {
         relation_field_index: usize,
         require_fk: bool,
     ) -> Result<Self> {
-        // Auto-derive the FK field index for non-array relations
-        let relation_id_field_index = if !relation_field.kind.is_array() {
+        // Auto-derive the FK field index for non-array relations.
+        // IMPORTANT: Only use the FK field if the relation field is PRIMARY.
+        // Secondary relations (is_primary=false) should use inverted joins,
+        // looking up by the child's FK field instead.
+        let relation_id_field_index = if !relation_field.kind.is_array() && relation_field.is_primary
+        {
             let id_field_name = CollectionVersion::relation_id_field_name(&relation_field.name);
             let idx = collection
                 .fields
@@ -79,13 +83,15 @@ impl JoinSide {
                     collection = %collection.name,
                     relation_field = %relation_field.name,
                     expected_fk_field = %id_field_name,
-                    "Non-array relation is missing its FK field. This may indicate a schema \
+                    "Non-array primary relation is missing its FK field. This may indicate a schema \
                      misconfiguration. The join will use inverted lookup (by parent's _docID)."
                 );
             }
 
             idx
         } else {
+            // Array relations always use inverted joins (FK is on the "many" side)
+            // Secondary relations also use inverted joins (FK is on the primary side, not here)
             None
         };
 

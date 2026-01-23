@@ -180,6 +180,16 @@ impl TypeJoinOne {
 
         let child_fk_idx = self.child_side.relation_id_field_index();
 
+        // Debug: Log join configuration
+        tracing::debug!(
+            direction = ?self.direction,
+            child_collection = %self.child_side.collection().name,
+            child_fk_idx = ?child_fk_idx,
+            child_relation_field = %self.child_side.relation_field().name,
+            child_relation_is_primary = self.child_side.relation_field().is_primary,
+            "TypeJoinOne: Building child cache"
+        );
+
         while self.child_plan.next().await? {
             let child_doc = self.child_plan.value().deep_clone();
 
@@ -190,11 +200,15 @@ impl TypeJoinOne {
                 }
                 JoinDirection::Inverted => {
                     // Index by child's FK field value for reverse lookup
-                    child_fk_idx.and_then(|idx| {
-                        child_doc
-                            .get(idx)
-                            .and_then(|v| v.as_str().map(String::from))
-                    })
+                    let fk_value = child_fk_idx.and_then(|idx| child_doc.get(idx).cloned());
+                    tracing::debug!(
+                        child_doc_id = ?child_doc.doc_id(),
+                        child_fk_idx = ?child_fk_idx,
+                        fk_value = ?fk_value,
+                        num_fields = child_doc.fields().len(),
+                        "TypeJoinOne: Extracting FK from child doc for inverted join"
+                    );
+                    fk_value.and_then(|v| v.as_str().map(String::from))
                 }
             };
 

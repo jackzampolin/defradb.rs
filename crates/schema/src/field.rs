@@ -93,6 +93,20 @@ impl FieldDescription {
         self
     }
 
+    /// Returns true if this is a secondary (non-primary) relation field.
+    ///
+    /// Secondary relation fields are local-only and do not get saved in the blockstore.
+    /// This matches Go DefraDB behavior where:
+    /// ```go
+    /// if new.RelationName.HasValue() && !new.IsPrimary {
+    ///     // secondary fields are local-only
+    ///     return nil, false, nil
+    /// }
+    /// ```
+    pub fn is_secondary_relation(&self) -> bool {
+        self.relation_name.is_some() && !self.is_primary
+    }
+
     /// Validate this field description
     pub fn validate(&self) -> Result<()> {
         if !self.crdt_type.is_compatible_with(&self.kind) {
@@ -197,5 +211,27 @@ mod tests {
         let json = serde_json::to_string(&field).unwrap();
         let parsed: FieldDescription = serde_json::from_str(&json).unwrap();
         assert_eq!(field, parsed);
+    }
+
+    #[test]
+    fn test_is_secondary_relation() {
+        // Primary relation field - NOT secondary
+        let primary = FieldDescription::new("1", "author", FieldKind::relation("users", false))
+            .with_relation_name("author_posts")
+            .as_primary();
+        assert!(!primary.is_secondary_relation());
+
+        // Secondary relation field (has relation_name but not primary)
+        let secondary = FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+            .with_relation_name("author_posts");
+        assert!(secondary.is_secondary_relation());
+
+        // Non-relation field - NOT secondary
+        let scalar = FieldDescription::new("3", "name", FieldKind::string());
+        assert!(!scalar.is_secondary_relation());
+
+        // Relation field without relation_name - NOT secondary (invalid state, but test anyway)
+        let no_name = FieldDescription::new("4", "ref", FieldKind::relation("other", false));
+        assert!(!no_name.is_secondary_relation());
     }
 }

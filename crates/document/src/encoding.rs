@@ -10,6 +10,8 @@
 
 //! Encoding helpers for JSON and CBOR conversion
 
+use chrono::SecondsFormat;
+
 use crate::error::{Error, Result};
 use crate::NormalValue;
 
@@ -110,7 +112,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<serde_json::Value> {
             // Encode bytes as base64
             Ok(serde_json::Value::String(base64_encode(b)))
         }
-        NormalValue::Time(t) => Ok(serde_json::Value::String(t.to_rfc3339())),
+        NormalValue::Time(t) => Ok(serde_json::Value::String(t.to_rfc3339_opts(SecondsFormat::Secs, true))),
         NormalValue::Json(v) => Ok(v.clone()),
         NormalValue::IntArray(arr) => Ok(serde_json::Value::Array(
             arr.iter()
@@ -193,7 +195,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::Float32(f) => Ok(ciborium::Value::Float(*f as f64)),
         NormalValue::String(s) => Ok(ciborium::Value::Text(s.clone())),
         NormalValue::Bytes(b) => Ok(ciborium::Value::Bytes(b.clone())),
-        NormalValue::Time(t) => Ok(ciborium::Value::Text(t.to_rfc3339())),
+        NormalValue::Time(t) => Ok(ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true))),
         NormalValue::Json(v) => json_to_cbor_value(v),
         NormalValue::IntArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
@@ -243,7 +245,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
             .map(|b| ciborium::Value::Bytes(b.clone()))
             .unwrap_or(ciborium::Value::Null)),
         NormalValue::NillableTime(opt) => Ok(opt
-            .map(|t| ciborium::Value::Text(t.to_rfc3339()))
+            .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
             .unwrap_or(ciborium::Value::Null)),
         // Document value - propagate errors instead of silently converting to null
         NormalValue::Document(doc) => {
@@ -267,7 +269,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         )),
         NormalValue::TimeArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
-                .map(|t| ciborium::Value::Text(t.to_rfc3339()))
+                .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
                 .collect(),
         )),
         NormalValue::DocumentArray(arr) => {
@@ -338,7 +340,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
             .map(|arr| {
                 ciborium::Value::Array(
                     arr.iter()
-                        .map(|t| ciborium::Value::Text(t.to_rfc3339()))
+                        .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
                         .collect(),
                 )
             })
@@ -397,7 +399,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::NillableTimeElementArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
                 .map(|opt| {
-                    opt.map(|t| ciborium::Value::Text(t.to_rfc3339()))
+                    opt.map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
                         .unwrap_or(ciborium::Value::Null)
                 })
                 .collect(),
