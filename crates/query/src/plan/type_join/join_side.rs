@@ -59,7 +59,8 @@ impl JoinSide {
         // IMPORTANT: Only use the FK field if the relation field is PRIMARY.
         // Secondary relations (is_primary=false) should use inverted joins,
         // looking up by the child's FK field instead.
-        let relation_id_field_index = if !relation_field.kind.is_array() && relation_field.is_primary
+        let relation_id_field_index = if !relation_field.kind.is_array()
+            && relation_field.is_primary
         {
             let id_field_name = CollectionVersion::relation_id_field_name(&relation_field.name);
             let idx = collection

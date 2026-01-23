@@ -59,7 +59,10 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 }
 
 /// Build the document mapping for a select operation.
-pub(crate) fn build_mapping(select: &Select, collection: &CollectionVersion) -> Result<DocumentMapping> {
+pub(crate) fn build_mapping(
+    select: &Select,
+    collection: &CollectionVersion,
+) -> Result<DocumentMapping> {
     let mut mapping = DocumentMapping::new();
 
     // Add requested fields and aggregates

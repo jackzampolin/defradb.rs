@@ -637,7 +637,12 @@ impl<'a> SdlParser<'a> {
         // Queue starts with types that have no dependencies
         let mut queue: Vec<&String> = sorted_type_names
             .iter()
-            .filter(|name| dependencies.get(*name).map(|d| d.is_empty()).unwrap_or(true))
+            .filter(|name| {
+                dependencies
+                    .get(*name)
+                    .map(|d| d.is_empty())
+                    .unwrap_or(true)
+            })
             .collect();
         // Sort queue alphabetically for determinism
         queue.sort();
@@ -829,11 +834,7 @@ impl<'a> SdlParser<'a> {
             node.to_string()
         }
 
-        fn union(
-            a: &str,
-            b: &str,
-            component: &mut std::collections::HashMap<String, String>,
-        ) {
+        fn union(a: &str, b: &str, component: &mut std::collections::HashMap<String, String>) {
             let root_a = find_root(a, component);
             let root_b = find_root(b, component);
             if root_a != root_b {
@@ -920,8 +921,8 @@ impl<'a> SdlParser<'a> {
             let creates_fk_field = kind.is_relation() && !kind.is_array();
 
             // Check if this is a self-reference relation (field type == current type)
-            let is_self_ref_relation = kind.is_relation()
-                && parsed_field.field_type.base_type == type_def.name;
+            let is_self_ref_relation =
+                kind.is_relation() && parsed_field.field_type.base_type == type_def.name;
 
             // Determine the actual primary status for this relation field
             // In Go, a field is PRIMARY if:
@@ -1172,13 +1173,19 @@ impl<'a> SdlParser<'a> {
             // If the target type is in the collection set (circular relations),
             // use SelfRef with the target's relative index
             if let Some(&target_idx) = collection_set.get(base) {
-                return Ok(FieldKind::self_ref(&target_idx.to_string(), parsed_type.is_list));
+                return Ok(FieldKind::self_ref(
+                    &target_idx.to_string(),
+                    parsed_type.is_list,
+                ));
             }
 
             // If target type was already processed (alphabetically earlier),
             // use Relation with the known CollectionID (matches Go behavior)
             if let Some(collection_id) = known_collection_ids.get(base) {
-                return Ok(FieldKind::relation(collection_id.clone(), parsed_type.is_list));
+                return Ok(FieldKind::relation(
+                    collection_id.clone(),
+                    parsed_type.is_list,
+                ));
             }
 
             // For non-circular relations where target not yet processed, use Named

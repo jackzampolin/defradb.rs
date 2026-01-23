@@ -239,7 +239,10 @@ async fn test_wildcard_subscription_receives_all_events() {
         .expect("timeout waiting for event")
         .expect("event channel closed");
 
-    assert!(event.as_update().is_some(), "wildcard should receive Update events");
+    assert!(
+        event.as_update().is_some(),
+        "wildcard should receive Update events"
+    );
 }
 
 #[tokio::test]

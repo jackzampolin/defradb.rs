@@ -291,10 +291,18 @@ impl Filter {
             FilterOp::Eq => Ok(Self::values_equal(actual, expected)),
             FilterOp::Ne => Ok(!Self::values_equal(actual, expected)),
             // Comparison operators: None (from null or NaN) returns false (Go DefraDB behavior)
-            FilterOp::Gt => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_gt())),
-            FilterOp::Gte => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_ge())),
-            FilterOp::Lt => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_lt())),
-            FilterOp::Lte => self.compare(actual, expected).map(|opt| opt.is_some_and(|ord| ord.is_le())),
+            FilterOp::Gt => self
+                .compare(actual, expected)
+                .map(|opt| opt.is_some_and(|ord| ord.is_gt())),
+            FilterOp::Gte => self
+                .compare(actual, expected)
+                .map(|opt| opt.is_some_and(|ord| ord.is_ge())),
+            FilterOp::Lt => self
+                .compare(actual, expected)
+                .map(|opt| opt.is_some_and(|ord| ord.is_lt())),
+            FilterOp::Lte => self
+                .compare(actual, expected)
+                .map(|opt| opt.is_some_and(|ord| ord.is_le())),
             FilterOp::In => {
                 let arr = expected
                     .as_array()
@@ -748,7 +756,7 @@ mod tests {
         )]));
         let mapping = make_mapping();
         let fields = make_fields(); // name = "Alice"
-        // "Al_ce" should NOT match "Alice" because _ is literal, not wildcard
+                                    // "Al_ce" should NOT match "Alice" because _ is literal, not wildcard
         assert!(!filter.matches(&fields, &mapping).unwrap());
 
         // But "Al_ce" should match "Al_ce" exactly

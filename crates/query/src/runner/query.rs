@@ -117,10 +117,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             "planExecutions".to_string(),
             serde_json::json!(total_executions),
         );
-        explain_result.insert(
-            "sizeOfResult".to_string(),
-            serde_json::json!(total_docs),
-        );
+        explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -201,7 +198,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Add execution metrics to the explain output (Go format).
-    fn add_iterations_to_explain(mut explanation: JsonValue, iterations: u64, doc_fetches: usize) -> JsonValue {
+    fn add_iterations_to_explain(
+        mut explanation: JsonValue,
+        iterations: u64,
+        doc_fetches: usize,
+    ) -> JsonValue {
         // The explanation is { "nodeKind": { ... } }
         // We need to add iterations to the inner object
         if let Some(obj) = explanation.as_object_mut() {
@@ -216,7 +217,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Generate an explanation of a single Select operation.
-    async fn explain_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
+    async fn explain_select(
+        &self,
+        select: &Select,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
         // Get collection schema
         let collection = self
             .collection_provider

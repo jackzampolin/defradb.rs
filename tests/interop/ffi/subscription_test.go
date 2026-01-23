@@ -152,3 +152,56 @@ func TestSubscriptionMultipleEvents(t *testing.T) {
 	// We should have received at least some events (exact count may vary due to timing)
 	require.GreaterOrEqual(t, eventCount, 1, "should have received at least 1 event")
 }
+
+func TestSubscriptionCollectionFilter(t *testing.T) {
+	Init()
+
+	// Create node
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err, "failed to create node")
+	defer node.Close()
+
+	// Add two schemas
+	_, err = node.AddSchema("type Author { name: String }")
+	require.NoError(t, err, "failed to add Author schema")
+
+	_, err = node.AddSchema("type Article { title: String }")
+	require.NoError(t, err, "failed to add Article schema")
+
+	// Create subscription filtered to Author only
+	sub, err := node.Subscribe("Author")
+	require.NoError(t, err, "failed to create subscription")
+	defer sub.Close()
+
+	// Create an Article (should NOT trigger filtered subscription)
+	_, err = node.Mutate(`mutation { create_Article(input: {title: "Test Article"}) { _docID } }`)
+	require.NoError(t, err, "Article mutation should succeed")
+
+	// Give time for event to be published
+	time.Sleep(50 * time.Millisecond)
+
+	// Poll should return no event (Article is filtered out)
+	result, err := sub.Poll()
+	require.NoError(t, err, "poll should succeed")
+	require.False(t, result.HasEvent, "should have no event for filtered collection")
+
+	// Create an Author (should trigger subscription)
+	_, err = node.Mutate(`mutation { create_Author(input: {name: "Bob"}) { _docID } }`)
+	require.NoError(t, err, "Author mutation should succeed")
+
+	// Poll for the Author event
+	var gotAuthorEvent bool
+	for i := 0; i < 10; i++ {
+		result, err := sub.Poll()
+		require.NoError(t, err, "poll should succeed")
+		if result.HasEvent {
+			require.Equal(t, "update", result.Event.Type)
+			require.Contains(t, result.Event.CollectionID, "Author", "event should be for Author")
+			gotAuthorEvent = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	require.True(t, gotAuthorEvent, "should have received Author event")
+}
