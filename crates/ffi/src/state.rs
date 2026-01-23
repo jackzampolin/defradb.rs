@@ -16,12 +16,19 @@ pub type FfiDatabase = db::DB<MemoryStore>;
 /// Type alias for node handles (opaque to FFI callers).
 pub type NodeHandle = usize;
 
+/// Type alias for the NAC manager used in FFI (in-memory).
+pub type FfiNacManager = db::NacManager<acp::MemoryZanzibarStore>;
+
 /// State held for each FFI node.
 pub struct NodeState {
     /// The database instance.
     pub database: std::sync::Arc<FfiDatabase>,
     /// The query runner for executing GraphQL queries.
     pub query_runner: std::sync::Arc<dyn query::QueryExecutor>,
+    /// The NAC manager for node-level access control.
+    pub nac_manager: std::sync::Arc<FfiNacManager>,
+    /// The document ACP for document-level access control.
+    pub document_acp: std::sync::Arc<dyn acp::DocumentACP>,
 }
 
 /// Global registry of active nodes.
