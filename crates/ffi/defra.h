@@ -522,6 +522,77 @@ struct FfiResult patch_collection(uintptr_t node_ptr, const char *collection_nam
 struct FfiResult get_collection_by_version_id(uintptr_t node_ptr, const char *version_id);
 
 /*
+ Add a view to the database.
+
+ Creates a new Defra View from a GQL query and SDL schema.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `gql_query` - The GraphQL query defining the view
+ * `sdl` - The SDL schema for the view output type
+ * `transform` - Optional Lens transform configuration (JSON, null for none)
+
+ # Returns
+
+ Value contains JSON array of CollectionVersions.
+
+ # Safety
+
+ All string pointers must be valid null-terminated UTF-8 strings or null.
+
+ # Note
+
+ Not yet implemented. See issue #178.
+ */
+struct FfiResult add_view(uintptr_t node_ptr, const char *gql_query, const char *sdl, const char *transform);
+
+/*
+ Refresh view caches.
+
+ Refreshes the caches of all views matching the given options.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `options` - JSON string of CollectionFetchOptions (null for all views)
+
+ # Safety
+
+ `options` must be null or a valid null-terminated UTF-8 string.
+
+ # Note
+
+ Not yet implemented. See issue #178.
+ */
+struct FfiResult refresh_views(uintptr_t node_ptr, const char *options);
+
+/*
+ Set migration for collection versions.
+
+ Sets the migration for all collections using the given source-destination
+ collection version IDs.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `config` - JSON string of LensConfig
+
+ # Returns
+
+ Value contains the Lens transform ID.
+
+ # Safety
+
+ `config` must be a valid null-terminated UTF-8 string.
+
+ # Note
+
+ Not yet implemented. See issue #179.
+ */
+struct FfiResult set_migration(uintptr_t node_ptr, const char *config);
+
+/*
  Begin a new transaction.
 
  Returns a transaction ID that can be used with `exec_request_in_txn`,

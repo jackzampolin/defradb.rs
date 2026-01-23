@@ -383,6 +383,105 @@ pub unsafe extern "C" fn get_collection_by_version_id(
     }
 }
 
+// =============================================================================
+// TODO: View and Migration APIs (see issues #178 and #179)
+// =============================================================================
+
+/// Add a view to the database.
+///
+/// Creates a new Defra View from a GQL query and SDL schema.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `gql_query` - The GraphQL query defining the view
+/// * `sdl` - The SDL schema for the view output type
+/// * `transform` - Optional Lens transform configuration (JSON, null for none)
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains JSON array of CollectionVersions)
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// All string pointers must be valid null-terminated UTF-8 strings or null.
+///
+/// # Note
+///
+/// Not yet implemented. See issue #178.
+#[no_mangle]
+pub unsafe extern "C" fn add_view(
+    _node_ptr: usize,
+    _gql_query: *const c_char,
+    _sdl: *const c_char,
+    _transform: *const c_char,
+) -> FfiResult {
+    FfiResult::error("add_view is not yet implemented - see issue #178")
+}
+
+/// Refresh view caches.
+///
+/// Refreshes the caches of all views matching the given options.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `options` - JSON string of CollectionFetchOptions (null for all views)
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `options` must be null or a valid null-terminated UTF-8 string.
+///
+/// # Note
+///
+/// Not yet implemented. See issue #178.
+#[no_mangle]
+pub unsafe extern "C" fn refresh_views(
+    _node_ptr: usize,
+    _options: *const c_char,
+) -> FfiResult {
+    FfiResult::error("refresh_views is not yet implemented - see issue #178")
+}
+
+/// Set migration for collection versions.
+///
+/// Sets the migration for all collections using the given source-destination
+/// collection version IDs.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `config` - JSON string of LensConfig containing:
+///   - `source_version_id`: Source collection version ID
+///   - `destination_version_id`: Destination collection version ID
+///   - `lens`: Lens transform configuration
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains the Lens transform ID)
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `config` must be a valid null-terminated UTF-8 string.
+///
+/// # Note
+///
+/// Not yet implemented. See issue #179.
+#[no_mangle]
+pub unsafe extern "C" fn set_migration(
+    _node_ptr: usize,
+    _config: *const c_char,
+) -> FfiResult {
+    FfiResult::error("set_migration is not yet implemented - see issue #179")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

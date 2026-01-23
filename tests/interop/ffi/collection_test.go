@@ -307,3 +307,41 @@ func TestGetCollectionByVersionIDNotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "null", result)
 }
+
+// Tests for unimplemented APIs - verify they return appropriate errors
+
+func TestAddViewNotImplemented(t *testing.T) {
+	Init()
+
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err)
+	defer node.Close()
+
+	_, err = node.AddView("{ User { name } }", "type UserView { name: String }", "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not yet implemented")
+}
+
+func TestRefreshViewsNotImplemented(t *testing.T) {
+	Init()
+
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err)
+	defer node.Close()
+
+	err = node.RefreshViews("")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not yet implemented")
+}
+
+func TestSetMigrationNotImplemented(t *testing.T) {
+	Init()
+
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err)
+	defer node.Close()
+
+	_, err = node.SetMigration(`{"source": "v1", "destination": "v2"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not yet implemented")
+}
