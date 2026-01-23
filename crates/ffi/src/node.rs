@@ -28,10 +28,17 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
         // Create in-memory storage (for MVP)
         let store = Arc::new(storage::MemoryStore::new());
 
+        // Create event bus for subscriptions (created early so it can be wired to database)
+        let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
+
         // Open database and load collections
-        let database = db::DB::open_from_arc(store.clone())
+        let mut database = db::DB::open_from_arc(store.clone())
             .await
             .map_err(|e| format!("failed to open database: {}", e))?;
+
+        // Wire event bus to database so mutations publish events
+        database.set_event_bus(event_bus.clone());
+
         let database = Arc::new(database);
 
         // Create auto-committing fetcher for non-transactional queries
@@ -72,6 +79,7 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
             query_runner: runner,
             nac_manager,
             document_acp,
+            event_bus,
         };
 
         // Register and get handle
@@ -91,18 +99,33 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
 ///
 /// The `node_ptr` must be a valid handle returned by `new_node`.
 /// After this call, the handle is no longer valid.
+/// All subscriptions associated with this node will be closed.
 #[no_mangle]
 pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
+    use crate::state::SUBSCRIPTIONS;
+
     let rt = match RUNTIME.get() {
         Some(rt) => rt,
         None => return FfiResult::error("runtime not initialized - call defra_init() first"),
     };
+
+    // Remove all subscriptions for this node
+    let removed_subs = SUBSCRIPTIONS.remove_for_node(node_ptr);
+    for sub_state in removed_subs {
+        // Unsubscribe from the event bus
+        NODES.get(node_ptr, |state| {
+            state.event_bus.unsubscribe(sub_state.subscription.id());
+        });
+    }
 
     // Remove from registry
     let state = match NODES.remove(node_ptr) {
         Some(state) => state,
         None => return FfiResult::error("invalid node handle"),
     };
+
+    // Close the event bus
+    state.event_bus.close();
 
     // Close the database
     let result = rt.block_on(async { state.database.close().await });
