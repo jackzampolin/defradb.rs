@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
+use crate::mutator::DocMutator;
 use crate::runner::DocFetcher;
 
 /// Transaction context that provides storage access within a transaction.
 ///
 /// This is implemented by the database layer to provide transaction-scoped
-/// document fetching.
+/// document fetching and mutation.
 pub trait TransactionContext: Send + Sync {
     /// Get the transaction ID.
     fn id(&self) -> &str;
@@ -17,6 +18,17 @@ pub trait TransactionContext: Send + Sync {
 
     /// Get a document fetcher scoped to this transaction.
     fn doc_fetcher(&self) -> Arc<dyn DocFetcher>;
+
+    /// Get a document mutator scoped to this transaction.
+    ///
+    /// Returns `None` if this is a read-only transaction or if mutators
+    /// are not supported by this context implementation.
+    ///
+    /// The mutator shares the same underlying transaction as the fetcher,
+    /// so all read and write operations are within the same transaction context.
+    fn doc_mutator(&self) -> Option<Arc<dyn DocMutator>> {
+        None
+    }
 
     /// Check if the transaction is still active (not yet committed or rolled back).
     ///

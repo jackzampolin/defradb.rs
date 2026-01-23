@@ -101,15 +101,69 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
             }
         };
 
+        // Parse the request to determine if it's a query or mutation
+        let parsed = match parse_request(&request.query) {
+            Ok(p) => p,
+            Err(e) => {
+                return QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: format!("parse error: {}", e),
+                        path: None,
+                        locations: None,
+                    }],
+                };
+            }
+        };
+
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
 
-        // Get the transaction-scoped fetcher and execute with identity for ACP
-        let fetcher = txn_ctx.doc_fetcher();
-        match self
-            .execute_query_internal(&request.query, fetcher.as_ref(), identity)
-            .await
-        {
+        // Route to appropriate handler based on operation type
+        let result = match parsed {
+            ParsedOperation::Query { explain, .. } => {
+                // Get the transaction-scoped fetcher and execute with identity for ACP
+                let fetcher = txn_ctx.doc_fetcher();
+                if let Some(explain_type) = explain {
+                    // Return query plan instead of executing
+                    self.explain_query_with_identity(&request.query, identity, explain_type)
+                        .await
+                } else {
+                    self.execute_query_internal(&request.query, fetcher.as_ref(), identity)
+                        .await
+                }
+            }
+            ParsedOperation::Mutation(_) => {
+                // Check if this is a read-only transaction
+                if txn_ctx.is_readonly() {
+                    return QueryResponse::error(
+                        "cannot execute mutation in read-only transaction".to_string(),
+                    );
+                }
+
+                // Get the transaction-scoped mutator
+                let mutator = match txn_ctx.doc_mutator() {
+                    Some(m) => m,
+                    None => {
+                        return QueryResponse::error(
+                            "mutations not supported in this transaction context".to_string(),
+                        );
+                    }
+                };
+
+                self.execute_mutation_internal(&request.query, mutator, identity)
+                    .await
+            }
+            ParsedOperation::Subscription { .. } => {
+                // Subscriptions require SSE transport
+                Err(crate::error::QueryError::parse(
+                    "Subscriptions must be executed via Server-Sent Events (SSE). \
+                     Send the request with Accept: text/event-stream header.",
+                ))
+            }
+        };
+
+        match result {
             Ok(data) => QueryResponse {
                 data: Some(data),
                 errors: vec![],
