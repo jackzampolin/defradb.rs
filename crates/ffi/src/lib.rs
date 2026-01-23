@@ -33,6 +33,7 @@
 //! - `exec_request()` - Execute GraphQL queries/mutations
 //! - `defra_free_string()` - Free strings allocated by FFI functions
 
+pub mod index;
 pub mod node;
 pub mod query;
 pub mod runtime;
@@ -44,6 +45,7 @@ pub mod types;
 use std::ffi::{c_char, CString};
 
 // Re-export FFI functions at crate root
+pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use node::{new_node, node_close};
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections};

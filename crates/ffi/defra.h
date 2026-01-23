@@ -276,6 +276,84 @@ struct FfiResult exec_request_in_txn(uintptr_t node_ptr,
  */
 void defra_free_string(char *ptr);
 
+/*
+ Create a new index on a collection.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `collection_name` - Name of the collection to create the index on
+ * `index_json` - JSON object describing the index to create
+
+ # Index JSON Format
+
+ ```json
+ {
+     "Name": "my_index",
+     "Fields": [
+         {"Name": "field1", "Descending": false},
+         {"Name": "field2", "Descending": true}
+     ],
+     "Unique": false
+ }
+ ```
+
+ # Safety
+
+ All string pointers must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult create_index(uintptr_t node_ptr,
+                              const char *collection_name,
+                              const char *index_json);
+
+/*
+ Drop an index from a collection.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `collection_name` - Name of the collection
+ * `index_name` - Name of the index to drop
+
+ # Safety
+
+ All string pointers must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult drop_index(uintptr_t node_ptr,
+                            const char *collection_name,
+                            const char *index_name);
+
+/*
+ Get all indexes for a collection.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+ * `collection_name` - Name of the collection
+
+ # Returns
+
+ JSON array of index descriptions.
+
+ # Safety
+
+ `collection_name` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult get_indexes(uintptr_t node_ptr, const char *collection_name);
+
+/*
+ Get all indexes across all collections.
+
+ # Arguments
+
+ * `node_ptr` - Handle to the node
+
+ # Returns
+
+ JSON object mapping collection names to their index arrays.
+ */
+struct FfiResult get_all_indexes(uintptr_t node_ptr);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus
