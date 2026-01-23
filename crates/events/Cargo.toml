@@ -1,0 +1,30 @@
+[package]
+name = "events"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Event bus for DefraDB subscriptions"
+
+[dependencies]
+# Async runtime
+tokio.workspace = true
+tokio-stream = "0.1"
+async-trait.workspace = true
+
+# IPLD
+cid.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Synchronization
+parking_lot.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

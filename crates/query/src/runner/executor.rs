@@ -47,6 +47,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> 
                 self.execute_mutation_with_identity(&request.query, identity)
                     .await
             }
+            ParsedOperation::Subscription { .. } => {
+                // Subscriptions require SSE transport - they cannot be executed via regular request/response
+                Err(crate::error::QueryError::parse(
+                    "Subscriptions must be executed via Server-Sent Events (SSE). \
+                     Send the request with Accept: text/event-stream header.",
+                ))
+            }
         };
 
         match result {

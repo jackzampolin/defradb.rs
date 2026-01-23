@@ -56,7 +56,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut results = Map::new();
 
                 for select in selects {
-                    let explanation = self.explain_select(&select, explain_type)?;
+                    let explanation = self.explain_select(&select, explain_type).await?;
                     let key = select.field.output_name();
                     results.insert(key.to_string(), explanation);
                 }
@@ -141,12 +141,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<(JsonValue, usize, u64)> {
         // Get collection schema
         let collection = self
-            .collections
-            .get(&select.collection_name)
+            .collection_provider
+            .get_collection(&select.collection_name)
+            .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
         // Build document mapping and plan
-        let mapping = plan::build_mapping(select, collection, &self.collections)?;
+        let mapping = plan::build_mapping(select, &collection)?;
 
         // Fetch documents
         let fetcher = self.fetcher.as_ref();
@@ -162,8 +163,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let doc_count = plan_docs.len();
 
         // Build the plan
-        let mut plan =
-            plan::build_plan(select, plan_docs.clone(), mapping.clone(), &self.collections)?;
+        let mut plan = plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection)?;
 
         // Wrap with permission filter if needed
         if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
@@ -216,11 +216,12 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Generate an explanation of a single Select operation.
-    fn explain_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
+    async fn explain_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
         // Get collection schema
         let collection = self
-            .collections
-            .get(&select.collection_name)
+            .collection_provider
+            .get_collection(&select.collection_name)
+            .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
         // Check if this query has nested selections (relations)
@@ -231,22 +232,27 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         if has_nested {
             // Use the Planner for queries with nested selections
-            self.explain_nested_select(select, explain_type)
+            self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
-            self.explain_simple_select(select, collection, explain_type)
+            self.explain_simple_select(select, &collection, explain_type)
         }
     }
 
     /// Generate an explanation for a query with nested selections.
-    fn explain_nested_select(
+    async fn explain_nested_select(
         &self,
         select: &Select,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
         // Build the plan using the Planner
-        let collections: Vec<CollectionVersion> =
-            self.collections.values().map(|c| (**c).clone()).collect();
+        let collection_names = self.collection_provider.list_collections().await?;
+        let mut collections = Vec::new();
+        for name in collection_names {
+            if let Some(coll) = self.collection_provider.get_collection(&name).await? {
+                collections.push((*coll).clone());
+            }
+        }
 
         let planner = Planner::new(collections);
         let plan_result = planner.plan_with_index_info(select)?;
@@ -263,14 +269,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     fn explain_simple_select(
         &self,
         select: &Select,
-        collection: &Arc<CollectionVersion>,
+        collection: &CollectionVersion,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
         // Build document mapping and plan
-        let mapping = plan::build_mapping(select, collection, &self.collections)?;
+        let mapping = plan::build_mapping(select, collection)?;
 
         // Create an empty plan with no documents for explanation purposes
-        let plan = plan::build_plan(select, vec![], mapping, &self.collections)?;
+        let plan = plan::build_plan(select, vec![], mapping, collection)?;
 
         // Return the plan explanation based on type
         match explain_type {
@@ -439,17 +445,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             fetcher.get_all(&select.collection_name).await?
         };
 
-        // Get all collections for mapping and plan building
-        let collections_map = self.collections_map().await?;
-
         // Build document mapping
-        let mapping = plan::build_mapping(select, collection, &collections_map)?;
+        let mapping = plan::build_mapping(select, collection)?;
 
         // Convert storage documents to plan docs
         let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
 
         // Build and execute the plan
-        let mut plan = plan::build_plan(select, plan_docs, mapping.clone(), &collections_map)?;
+        let mut plan = plan::build_plan(select, plan_docs, mapping.clone(), collection)?;
 
         // Wrap with permission filter if collection has ACP policy and ACP is configured
         if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {

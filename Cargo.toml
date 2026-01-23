@@ -17,6 +17,7 @@ members = [
     "crates/keyring",
     "crates/identity",
     "crates/acp",
+    "crates/events",
 ]
 
 [workspace.package]
@@ -69,7 +70,7 @@ libipld = { version = "0.16", features = ["serde-codec"] }
 graphql-parser = "0.4"
 
 # HTTP
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 hyper = "1.0"
@@ -89,6 +90,9 @@ proptest = "1.4"
 
 # Synchronization (non-poisoning locks)
 parking_lot = "0.12"
+
+# Async streams
+tokio-stream = "0.1"
 
 [profile.dev]
 opt-level = 0

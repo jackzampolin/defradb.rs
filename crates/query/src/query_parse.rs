@@ -52,6 +52,11 @@ pub enum ParsedOperation {
     },
     /// Mutation operations (CREATE, UPDATE, DELETE)
     Mutation(Vec<Mutation>),
+    /// Subscription operations (single root field only per GraphQL spec)
+    Subscription {
+        /// The single select for the subscription.
+        select: Select,
+    },
 }
 
 /// Check if a directive list contains @explain and parse its type.
@@ -155,6 +160,9 @@ pub fn parse_query(query: &str) -> Result<Vec<Select>> {
         ParsedOperation::Mutation(_) => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_request() for mutations.",
         )),
+        ParsedOperation::Subscription { .. } => Err(QueryError::parse(
+            "Expected query but got subscription. Use parse_request() for subscriptions.",
+        )),
     }
 }
 
@@ -165,6 +173,9 @@ pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
     match parse_request(query)? {
         ParsedOperation::Mutation(mutations) => Ok(mutations),
         ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
+        ParsedOperation::Subscription { .. } => {
+            Err(QueryError::parse("Expected mutation but got subscription"))
+        }
     }
 }
 
@@ -208,8 +219,10 @@ pub fn parse_request_with_variables(
 
     let mut selects = Vec::new();
     let mut mutations = Vec::new();
+    let mut subscription_selects = Vec::new();
     let mut has_query = false;
     let mut has_mutation = false;
+    let mut has_subscription = false;
     let mut explain: Option<ExplainType> = None;
 
     // Second pass: parse operations with fragments available
@@ -281,8 +294,36 @@ pub fn parse_request_with_variables(
                             }
                         }
                     }
-                    OperationDefinition::Subscription(_) => {
-                        return Err(QueryError::parse("subscriptions not supported"))
+                    OperationDefinition::Subscription(s) => {
+                        has_subscription = true;
+
+                        // Extract default values from variable definitions and merge with provided variables
+                        let defaults = extract_variable_defaults(&s.variable_definitions)?;
+                        let effective_variables = merge_variables(variables, &defaults);
+                        let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
+                            Some(&effective_variables)
+                        } else {
+                            None
+                        };
+
+                        // Parse selections (same as Query)
+                        let mut visiting = HashSet::new();
+                        for selection in &s.selection_set.items {
+                            parse_selection_to_selects(
+                                selection,
+                                effective_vars_ref,
+                                &fragments,
+                                &mut subscription_selects,
+                                &mut visiting,
+                            )?;
+                        }
+
+                        // Validate single root field (GraphQL spec requirement)
+                        if subscription_selects.len() != 1 {
+                            return Err(QueryError::parse(
+                                "subscription must have exactly one root field",
+                            ));
+                        }
                     }
                 };
             }
@@ -292,14 +333,23 @@ pub fn parse_request_with_variables(
         }
     }
 
-    // Cannot mix queries and mutations
-    if has_query && has_mutation {
+    // Cannot mix operation types
+    let op_count = [has_query, has_mutation, has_subscription]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+    if op_count > 1 {
         return Err(QueryError::parse(
-            "Cannot mix queries and mutations in same request",
+            "Cannot mix queries, mutations, and subscriptions in same request",
         ));
     }
 
-    if has_mutation {
+    if has_subscription {
+        // subscription_selects is guaranteed to have exactly one element due to earlier validation
+        Ok(ParsedOperation::Subscription {
+            select: subscription_selects.into_iter().next().unwrap(),
+        })
+    } else if has_mutation {
         Ok(ParsedOperation::Mutation(mutations))
     } else {
         Ok(ParsedOperation::Query { selects, explain })
@@ -2074,5 +2124,195 @@ mod variable_tests {
             "Expected error for variable reference in default value, but got: {:?}",
             result
         );
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_subscription_basic() {
+        let query = r#"
+            subscription {
+                User {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let result = parse_request(query).unwrap();
+        match result {
+            ParsedOperation::Subscription { select } => {
+                assert_eq!(select.collection_name, "User");
+                assert_eq!(select.fields.len(), 2);
+            }
+            _ => panic!("Expected subscription"),
+        }
+    }
+
+    #[test]
+    fn test_parse_subscription_with_filter() {
+        let query = r#"
+            subscription {
+                User(filter: {active: {_eq: true}}) {
+                    _docID
+                    name
+                    email
+                }
+            }
+        "#;
+
+        let result = parse_request(query).unwrap();
+        match result {
+            ParsedOperation::Subscription { select } => {
+                assert_eq!(select.collection_name, "User");
+                assert!(select.filter.is_some());
+            }
+            _ => panic!("Expected subscription"),
+        }
+    }
+
+    #[test]
+    fn test_parse_subscription_with_variables() {
+        let query = r#"
+            subscription($active: Boolean!) {
+                User(filter: {active: {_eq: $active}}) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let variables = HashMap::from([("active".to_string(), serde_json::json!(true))]);
+        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        match result {
+            ParsedOperation::Subscription { select } => {
+                assert_eq!(select.collection_name, "User");
+                let filter = select.filter.as_ref().unwrap();
+                let conditions = filter.conditions();
+                assert_eq!(
+                    conditions.get("active").unwrap().get("_eq"),
+                    Some(&serde_json::json!(true))
+                );
+            }
+            _ => panic!("Expected subscription"),
+        }
+    }
+
+    #[test]
+    fn test_parse_subscription_multiple_root_fields_error() {
+        let query = r#"
+            subscription {
+                User {
+                    name
+                }
+                Post {
+                    title
+                }
+            }
+        "#;
+
+        let result = parse_request(query);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one root field"));
+    }
+
+    #[test]
+    fn test_parse_subscription_with_nested_fields() {
+        let query = r#"
+            subscription {
+                User {
+                    _docID
+                    name
+                    posts {
+                        _docID
+                        title
+                    }
+                }
+            }
+        "#;
+
+        let result = parse_request(query).unwrap();
+        match result {
+            ParsedOperation::Subscription { select } => {
+                assert_eq!(select.collection_name, "User");
+                // Should have 3 fields: _docID, name, and posts (nested)
+                assert_eq!(select.fields.len(), 3);
+            }
+            _ => panic!("Expected subscription"),
+        }
+    }
+
+    #[test]
+    fn test_cannot_mix_subscription_and_query() {
+        // GraphQL doesn't allow mixing operation types in a single document
+        // But we can test that our parser handles it correctly
+        let query = r#"
+            subscription {
+                User { name }
+            }
+        "#;
+
+        let query_op = r#"
+            query {
+                User { name }
+            }
+        "#;
+
+        // Each should parse independently
+        assert!(matches!(
+            parse_request(query).unwrap(),
+            ParsedOperation::Subscription { .. }
+        ));
+        assert!(matches!(
+            parse_request(query_op).unwrap(),
+            ParsedOperation::Query { .. }
+        ));
+    }
+
+    #[test]
+    fn test_subscription_with_doc_id() {
+        let query = r#"
+            subscription {
+                User(docID: "bae-123") {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        let result = parse_request(query).unwrap();
+        match result {
+            ParsedOperation::Subscription { select } => {
+                assert_eq!(select.doc_ids, Some(vec!["bae-123".to_string()]));
+            }
+            _ => panic!("Expected subscription"),
+        }
+    }
+
+    #[test]
+    fn test_subscription_with_default_variable() {
+        let query = r#"
+            subscription($limit: Int = 10) {
+                User(limit: $limit) {
+                    _docID
+                    name
+                }
+            }
+        "#;
+
+        // Don't provide the variable - should use default
+        let result = parse_request_with_variables(query, None).unwrap();
+        match result {
+            ParsedOperation::Subscription { select } => {
+                assert_eq!(select.limit.as_ref().unwrap().limit, Some(10));
+            }
+            _ => panic!("Expected subscription"),
+        }
     }
 }

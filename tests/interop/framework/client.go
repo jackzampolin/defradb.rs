@@ -8,6 +8,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // Client wraps HTTP communication with a DefraDB node.
@@ -362,4 +366,179 @@ func (c *Client) AddSchema(ctx context.Context, sdl string) ([]AddSchemaResponse
 	}
 
 	return schemas, nil
+}
+
+// SubscriptionMessage represents a graphql-ws protocol message.
+type SubscriptionMessage struct {
+	Type    string          `json:"type"`
+	ID      string          `json:"id,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// SubscriptionPayload represents the payload for a subscribe message.
+type SubscriptionPayload struct {
+	Query     string         `json:"query"`
+	Variables map[string]any `json:"variables,omitempty"`
+}
+
+// SubscriptionData represents data received from a subscription.
+type SubscriptionData struct {
+	Data   json.RawMessage `json:"data,omitempty"`
+	Errors []GraphQLError  `json:"errors,omitempty"`
+}
+
+// Subscription represents an active GraphQL subscription.
+type Subscription struct {
+	conn     *websocket.Conn
+	id       string
+	dataCh   chan SubscriptionData
+	errCh    chan error
+	closeCh  chan struct{}
+	closeOnce sync.Once
+}
+
+// Data returns the channel that receives subscription data.
+func (s *Subscription) Data() <-chan SubscriptionData {
+	return s.dataCh
+}
+
+// Err returns the channel that receives errors.
+func (s *Subscription) Err() <-chan error {
+	return s.errCh
+}
+
+// Close closes the subscription.
+func (s *Subscription) Close() error {
+	var closeErr error
+	s.closeOnce.Do(func() {
+		close(s.closeCh)
+
+		// Send complete message
+		completeMsg := SubscriptionMessage{
+			Type: "complete",
+			ID:   s.id,
+		}
+		if err := s.conn.WriteJSON(completeMsg); err != nil {
+			closeErr = err
+		}
+
+		s.conn.Close()
+	})
+	return closeErr
+}
+
+// Subscribe opens a WebSocket subscription.
+func (c *Client) Subscribe(ctx context.Context, query string, vars map[string]any) (*Subscription, error) {
+	// Convert HTTP URL to WebSocket URL
+	wsURL := strings.Replace(c.baseURL, "http://", "ws://", 1) + "/api/v0/graphql/ws"
+
+	// Connect to WebSocket
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to websocket: %w", err)
+	}
+
+	// Send connection_init
+	initMsg := SubscriptionMessage{Type: "connection_init"}
+	if err := conn.WriteJSON(initMsg); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to send connection_init: %w", err)
+	}
+
+	// Wait for connection_ack
+	var ackMsg SubscriptionMessage
+	if err := conn.ReadJSON(&ackMsg); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to read connection_ack: %w", err)
+	}
+	if ackMsg.Type != "connection_ack" {
+		conn.Close()
+		return nil, fmt.Errorf("expected connection_ack, got %s", ackMsg.Type)
+	}
+
+	// Create subscription
+	sub := &Subscription{
+		conn:    conn,
+		id:      "1",
+		dataCh:  make(chan SubscriptionData, 10),
+		errCh:   make(chan error, 1),
+		closeCh: make(chan struct{}),
+	}
+
+	// Send subscribe message
+	payload, _ := json.Marshal(SubscriptionPayload{Query: query, Variables: vars})
+	subMsg := SubscriptionMessage{
+		Type:    "subscribe",
+		ID:      sub.id,
+		Payload: payload,
+	}
+	if err := conn.WriteJSON(subMsg); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to send subscribe: %w", err)
+	}
+
+	// Start reading messages in background
+	go sub.readLoop()
+
+	return sub, nil
+}
+
+// readLoop reads messages from the WebSocket and dispatches them.
+func (s *Subscription) readLoop() {
+	defer close(s.dataCh)
+	defer close(s.errCh)
+
+	for {
+		select {
+		case <-s.closeCh:
+			return
+		default:
+		}
+
+		// Set read deadline to allow periodic close checks
+		s.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+
+		var msg SubscriptionMessage
+		if err := s.conn.ReadJSON(&msg); err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				return
+			}
+			// Check if it's a timeout (expected, we'll retry)
+			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+				continue
+			}
+			select {
+			case s.errCh <- err:
+			default:
+			}
+			return
+		}
+
+		switch msg.Type {
+		case "next":
+			var data SubscriptionData
+			if err := json.Unmarshal(msg.Payload, &data); err != nil {
+				select {
+				case s.errCh <- fmt.Errorf("failed to unmarshal data: %w", err):
+				default:
+				}
+				continue
+			}
+			select {
+			case s.dataCh <- data:
+			case <-s.closeCh:
+				return
+			}
+		case "error":
+			var data SubscriptionData
+			if err := json.Unmarshal(msg.Payload, &data); err == nil && len(data.Errors) > 0 {
+				select {
+				case s.errCh <- fmt.Errorf("subscription error: %s", data.Errors[0].Message):
+				default:
+				}
+			}
+		case "complete":
+			return
+		}
+	}
 }

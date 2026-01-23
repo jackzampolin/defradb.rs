@@ -448,6 +448,29 @@ impl Select {
             })
             .collect()
     }
+
+    /// Create a version of this Select filtered to a specific document ID.
+    ///
+    /// This is used by subscriptions to efficiently query only the document
+    /// that was updated, rather than re-executing the full query.
+    ///
+    /// If the Select already has doc_ids set, they are preserved and the
+    /// new doc_id is added if not already present.
+    pub fn to_subscription_select(&self, doc_id: String) -> Self {
+        let mut select = self.clone();
+        match &mut select.doc_ids {
+            Some(ids) => {
+                // Add doc_id if not already present
+                if !ids.contains(&doc_id) {
+                    ids.push(doc_id);
+                }
+            }
+            None => {
+                select.doc_ids = Some(vec![doc_id]);
+            }
+        }
+        select
+    }
 }
 
 #[cfg(test)]
@@ -506,5 +529,46 @@ mod tests {
         let agg = Aggregate::sum(AggregateTarget::with_field("users", "age"));
         assert_eq!(agg.aggregate_type, AggregateType::Sum);
         assert_eq!(agg.targets[0].field_name, Some("age".to_string()));
+    }
+
+    #[test]
+    fn test_to_subscription_select() {
+        // Test adding doc_id when none present
+        let select = Select::new("users")
+            .with_field(Field::new("name"));
+
+        assert!(select.doc_ids.is_none());
+
+        let filtered = select.to_subscription_select("doc-123".to_string());
+        assert_eq!(filtered.doc_ids, Some(vec!["doc-123".to_string()]));
+        assert_eq!(filtered.collection_name, "users");
+        assert_eq!(filtered.fields.len(), 1);
+    }
+
+    #[test]
+    fn test_to_subscription_select_with_existing_doc_ids() {
+        // Test adding doc_id when some already present
+        let select = Select::new("users")
+            .with_field(Field::new("name"))
+            .with_doc_ids(vec!["doc-1".to_string(), "doc-2".to_string()]);
+
+        let filtered = select.to_subscription_select("doc-3".to_string());
+        let doc_ids = filtered.doc_ids.unwrap();
+        assert_eq!(doc_ids.len(), 3);
+        assert!(doc_ids.contains(&"doc-1".to_string()));
+        assert!(doc_ids.contains(&"doc-2".to_string()));
+        assert!(doc_ids.contains(&"doc-3".to_string()));
+    }
+
+    #[test]
+    fn test_to_subscription_select_no_duplicate() {
+        // Test that existing doc_id is not duplicated
+        let select = Select::new("users")
+            .with_doc_ids(vec!["doc-123".to_string()]);
+
+        let filtered = select.to_subscription_select("doc-123".to_string());
+        let doc_ids = filtered.doc_ids.unwrap();
+        assert_eq!(doc_ids.len(), 1);
+        assert_eq!(doc_ids[0], "doc-123");
     }
 }
