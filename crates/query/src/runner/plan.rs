@@ -2,8 +2,6 @@
 
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -61,11 +59,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 }
 
 /// Build the document mapping for a select operation.
-pub(crate) fn build_mapping(
-    select: &Select,
-    collection: &CollectionVersion,
-    _collections: &HashMap<String, Arc<CollectionVersion>>,
-) -> Result<DocumentMapping> {
+pub(crate) fn build_mapping(select: &Select, collection: &CollectionVersion) -> Result<DocumentMapping> {
     let mut mapping = DocumentMapping::new();
 
     // Add requested fields and aggregates
@@ -150,14 +144,10 @@ pub(crate) fn build_plan(
     select: &Select,
     docs: Vec<Doc>,
     mapping: DocumentMapping,
-    collections: &HashMap<String, Arc<CollectionVersion>>,
+    collection: &CollectionVersion,
 ) -> Result<Box<dyn PlanNode>> {
-    let collection = collections
-        .get(&select.collection_name)
-        .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
-
     // Create ScanNode with preloaded documents
-    let scan = ScanNode::new((**collection).clone(), mapping.clone())
+    let scan = ScanNode::new(collection.clone(), mapping.clone())
         .with_docs(docs)
         .with_show_deleted(select.show_deleted);
 

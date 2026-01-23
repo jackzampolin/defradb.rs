@@ -5,22 +5,33 @@
 //! GraphQL endpoint permissions are checked based on the operation type:
 //! - Query operations require `DocumentRead` permission
 //! - Mutation operations require `DocumentUpdate` permission
+//! - Subscription operations require `DocumentRead` permission
 //!
 //! This matches Go DefraDB's per-operation permission model more closely,
 //! where each operation type has its own permission requirement.
+//!
+//! # Subscriptions via WebSocket
+//!
+//! GraphQL subscriptions are supported via WebSocket connections.
+//! Connect to `/api/v0/graphql/ws` to establish a subscription.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
+use futures::{SinkExt, StreamExt};
 
 /// Go DefraDB transaction header name.
 const TX_HEADER_NAME: &str = "x-defradb-tx";
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use events::EventName;
 use query::executor::{QueryRequest, QueryResponse};
 use query::{parse_request, ParsedOperation};
 
@@ -32,6 +43,7 @@ use crate::router::{AppState, NodePermission};
 /// Determine the required NAC permission based on GraphQL operation type.
 ///
 /// - Query operations require `DocumentRead` permission
+/// - Subscription operations require `DocumentRead` permission
 /// - Mutation operations require `DocumentUpdate` permission
 /// - Parse failures default to `DocumentUpdate` (fail-secure)
 ///
@@ -39,7 +51,8 @@ use crate::router::{AppState, NodePermission};
 /// operation types have different permission requirements.
 fn permission_for_query(query: &str) -> NodePermission {
     match parse_request(query) {
-        Ok(ParsedOperation::Query(_)) => NodePermission::DocumentRead,
+        Ok(ParsedOperation::Query { .. }) => NodePermission::DocumentRead,
+        Ok(ParsedOperation::Subscription { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Mutation(_)) => NodePermission::DocumentUpdate,
         // Parse failures default to the more restrictive permission
         Err(_) => NodePermission::DocumentUpdate,
@@ -461,4 +474,248 @@ pub async fn graphql_transactional(
         tracing::warn!(errors = ?response.errors, "GraphQL query returned errors");
     }
     Ok(Json(response))
+}
+
+/// GraphQL subscription payload (query + variables).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SubscriptionPayload {
+    pub query: String,
+    #[serde(rename = "operationName")]
+    pub operation_name: Option<String>,
+    pub variables: Option<JsonValue>,
+}
+
+/// WebSocket message for GraphQL subscriptions (graphql-ws protocol).
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SubscriptionMessage {
+    /// Message type: "subscribe", "complete", "ping", "pong"
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    /// Subscription ID (for subscribe/complete)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// GraphQL payload (for subscribe)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<SubscriptionPayload>,
+}
+
+/// WebSocket data message sent to client.
+#[derive(Debug, Serialize)]
+pub struct SubscriptionData {
+    /// Message type: "next", "error", "complete"
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    /// Subscription ID
+    pub id: String,
+    /// Query response payload
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<QueryResponse>,
+}
+
+/// WebSocket upgrade handler for GraphQL subscriptions.
+///
+/// This endpoint handles WebSocket connections for GraphQL subscriptions.
+/// Clients should connect to `/api/v0/graphql/ws` and send subscription
+/// messages using the graphql-ws protocol format.
+pub async fn graphql_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_subscription_socket(socket, state))
+}
+
+/// Handle an established WebSocket connection for subscriptions.
+async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
+    let (mut sender, mut receiver) = socket.split();
+
+    // Get the event bus
+    let event_bus = match &state.event_bus {
+        Some(bus) => bus.clone(),
+        None => {
+            tracing::error!("WebSocket subscription attempted but no event bus configured");
+            let error_msg = SubscriptionData {
+                msg_type: "error".to_string(),
+                id: "".to_string(),
+                payload: Some(QueryResponse::error(
+                    "Subscriptions not enabled: no event bus configured",
+                )),
+            };
+            let _ = sender
+                .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                .await;
+            return;
+        }
+    };
+
+    // Process incoming messages
+    while let Some(msg_result) = receiver.next().await {
+        let msg = match msg_result {
+            Ok(Message::Text(text)) => text,
+            Ok(Message::Close(_)) => {
+                tracing::debug!("WebSocket closed by client");
+                break;
+            }
+            Ok(Message::Ping(data)) => {
+                let _ = sender.send(Message::Pong(data)).await;
+                continue;
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!(error = %e, "WebSocket receive error");
+                break;
+            }
+        };
+
+        // Parse the subscription message
+        let sub_msg: SubscriptionMessage = match serde_json::from_str(&msg) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "Invalid subscription message format");
+                continue;
+            }
+        };
+
+        match sub_msg.msg_type.as_str() {
+            "subscribe" => {
+                let sub_id = sub_msg.id.unwrap_or_else(|| "default".to_string());
+                let payload = match sub_msg.payload {
+                    Some(p) => p,
+                    None => {
+                        let error_msg = SubscriptionData {
+                            msg_type: "error".to_string(),
+                            id: sub_id,
+                            payload: Some(QueryResponse::error("Missing payload in subscribe message")),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                            .await;
+                        continue;
+                    }
+                };
+
+                // Parse to verify it's a subscription
+                let parsed = match parse_request(&payload.query) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let error_msg = SubscriptionData {
+                            msg_type: "error".to_string(),
+                            id: sub_id,
+                            payload: Some(QueryResponse::error(format!("Parse error: {}", e))),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                            .await;
+                        continue;
+                    }
+                };
+
+                let collection_name = match parsed {
+                    ParsedOperation::Subscription { ref select } => select.collection_name.clone(),
+                    _ => {
+                        let error_msg = SubscriptionData {
+                            msg_type: "error".to_string(),
+                            id: sub_id,
+                            payload: Some(QueryResponse::error(
+                                "Expected subscription operation",
+                            )),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                            .await;
+                        continue;
+                    }
+                };
+
+                // Subscribe to events and start streaming
+                let mut subscription = event_bus.subscribe(&[EventName::Update]);
+                let executor = state.executor.clone();
+                let query = payload.query.clone();
+                let variables = payload.variables.clone();
+
+                // Execute initial query
+                let initial_request = QueryRequest {
+                    query: query.clone(),
+                    operation_name: None,
+                    variables: variables.clone(),
+                    identity: None,
+                };
+                let initial_response = executor.execute(initial_request).await;
+
+                // Send initial result
+                let initial_msg = SubscriptionData {
+                    msg_type: "next".to_string(),
+                    id: sub_id.clone(),
+                    payload: Some(initial_response),
+                };
+                if sender
+                    .send(Message::Text(serde_json::to_string(&initial_msg).unwrap()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+
+                // Stream updates until connection closes
+                loop {
+                    match subscription.recv().await {
+                        Some(message) => {
+                            if let Some(update_data) = message.as_update() {
+                                // Check if update is relevant to this subscription
+                                if update_data.collection_id == collection_name
+                                    || update_data.collection_id.is_empty()
+                                {
+                                    // Re-execute query
+                                    let request = QueryRequest {
+                                        query: query.clone(),
+                                        operation_name: None,
+                                        variables: variables.clone(),
+                                        identity: None,
+                                    };
+                                    let response = executor.execute(request).await;
+
+                                    let data_msg = SubscriptionData {
+                                        msg_type: "next".to_string(),
+                                        id: sub_id.clone(),
+                                        payload: Some(response),
+                                    };
+                                    if sender
+                                        .send(Message::Text(
+                                            serde_json::to_string(&data_msg).unwrap(),
+                                        ))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            // Event bus closed
+                            break;
+                        }
+                    }
+                }
+
+                // Subscription ended - exit the main loop too
+                break;
+            }
+            "ping" => {
+                let pong = serde_json::json!({"type": "pong"});
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&pong).unwrap()))
+                    .await;
+            }
+            "complete" => {
+                // Client wants to end subscription
+                tracing::debug!(id = ?sub_msg.id, "Subscription complete requested");
+                break;
+            }
+            _ => {
+                tracing::debug!(msg_type = %sub_msg.msg_type, "Unknown message type");
+            }
+        }
+    }
+
+    tracing::debug!("WebSocket subscription connection closed");
 }

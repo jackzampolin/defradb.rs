@@ -22,8 +22,8 @@ pub mod utility;
 
 // Re-export GraphQL handlers for backwards compatibility
 pub use graphql::{
-    graphql, graphql_get, graphql_transactional, health_check, schema, tx_begin,
-    tx_begin_concurrent, tx_commit, tx_discard, version, GraphqlQueryParams,
+    graphql, graphql_get, graphql_transactional, graphql_ws_handler, health_check, schema,
+    tx_begin, tx_begin_concurrent, tx_commit, tx_discard, version, GraphqlQueryParams,
     TransactionalQueryRequest, TxBeginQuery, TxBeginResponse, TxPathParam, VersionResponse,
 };
 

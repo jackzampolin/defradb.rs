@@ -17,9 +17,11 @@ query = { path = "../query" }
 identity = { path = "../identity" }
 schema = { path = "../schema" }
 acp = { path = "../acp" }
+events = { path = "../events" }
 
 # Async runtime
 tokio.workspace = true
+tokio-stream.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 

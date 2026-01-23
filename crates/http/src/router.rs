@@ -312,6 +312,7 @@ pub struct AppState {
     pub backup: Option<Arc<dyn BackupOperations>>,
     pub schema: Option<Arc<dyn SchemaOperations>>,
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
+    pub event_bus: Option<Arc<dyn events::Bus>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -331,6 +332,7 @@ impl std::fmt::Debug for AppState {
                 &self.schema.as_ref().map(|_| "<SchemaOperations>"),
             )
             .field("nac", &self.nac.as_ref().map(|_| "<NodeAcpOperations>"))
+            .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
             .finish()
     }
 }
@@ -401,6 +403,7 @@ pub struct AppStateBuilder {
     backup: Option<Arc<dyn BackupOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
+    event_bus: Option<Arc<dyn events::Bus>>,
 }
 
 impl AppStateBuilder {
@@ -415,6 +418,7 @@ impl AppStateBuilder {
             backup: None,
             schema: None,
             nac: None,
+            event_bus: None,
         }
     }
 
@@ -460,6 +464,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set event bus for subscriptions.
+    pub fn with_event_bus(mut self, bus: Arc<dyn events::Bus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
     /// Build the AppState.
     pub fn build(self) -> AppState {
         AppState {
@@ -471,6 +481,7 @@ impl AppStateBuilder {
             backup: self.backup,
             schema: self.schema,
             nac: self.nac,
+            event_bus: self.event_bus,
         }
     }
 }
@@ -590,6 +601,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         // GraphQL endpoints
         .route("/graphql", post(handlers::graphql_transactional))
         .route("/graphql", get(handlers::graphql_get))
+        .route("/graphql/ws", axum::routing::any(handlers::graphql_ws_handler))
         .route("/schema", get(handlers::schema))
         .route("/schema", post(handlers::schema::add_schema))
         .route("/version", get(handlers::version))

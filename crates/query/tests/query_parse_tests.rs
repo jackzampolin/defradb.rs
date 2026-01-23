@@ -178,14 +178,19 @@ fn test_parse_mutations_works() {
 }
 
 #[test]
-fn test_parse_subscription_returns_error() {
+fn test_parse_query_rejects_subscription() {
+    // parse_query() specifically expects queries, not subscriptions
+    // Use parse_request() to parse subscriptions
     let query = "subscription { Users { name } }";
     let result = parse_query(query);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("subscriptions not supported"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("subscription"),
+        "Error should mention that subscriptions are not expected by parse_query()"
+    );
 }
 
 #[test]

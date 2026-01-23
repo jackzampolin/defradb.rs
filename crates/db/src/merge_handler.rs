@@ -24,6 +24,7 @@ use datastore::NamespaceView;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
+use events::{Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
 use storage::corekv::Store;
 
@@ -520,6 +521,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     fields_merged = field_values.len(),
                     "Composite delta processed and committed successfully"
                 );
+
+                // Emit update event for subscriptions (P2P relay)
+                if let Some(bus) = self.db.event_bus() {
+                    let update = Update::new(
+                        doc_id_str.clone(),
+                        *cid,
+                        payload.schema_version_id.clone(),
+                        vec![], // Block data not needed for subscription re-query
+                        false,  // is_retry
+                        true,   // is_relay (P2P update)
+                    );
+                    bus.publish(Message::update(update));
+                }
+
                 Ok(MergeOutcome::Merged)
             }
             Some(e) => {

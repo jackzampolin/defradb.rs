@@ -6,7 +6,9 @@
 //! transactional semantics per operation.
 
 use async_trait::async_trait;
+use cid::Cid;
 use document::{DocID, Document};
+use events::{Message, Update};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
@@ -96,6 +98,20 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         e
                     )));
                 }
+
+                // Emit update event for subscriptions
+                if let Some(bus) = self.db.event_bus() {
+                    let update = Update::new(
+                        doc_id.to_string(),
+                        Cid::default(), // CID not available at this layer
+                        collection.collection_id().to_string(),
+                        vec![], // Block data not available at this layer
+                        false,  // is_retry
+                        false,  // is_relay (local mutation)
+                    );
+                    bus.publish(Message::update(update));
+                }
+
                 Ok(CreateResult::new(doc_id, doc))
             }
             Err(e) => {
@@ -157,6 +173,21 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         "commit error: {}",
                         e
                     )));
+                }
+
+                // Emit update event for subscriptions
+                if let Some(bus) = self.db.event_bus() {
+                    if let Some(doc_id) = doc.id() {
+                        let update = Update::new(
+                            doc_id.to_string(),
+                            Cid::default(),
+                            collection.collection_id().to_string(),
+                            vec![],
+                            false, // is_retry
+                            false, // is_relay (local mutation)
+                        );
+                        bus.publish(Message::update(update));
+                    }
                 }
 
                 // Count modified fields
@@ -223,6 +254,20 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         e
                     )));
                 }
+
+                // Emit update event for subscriptions (deletes are also "updates")
+                if let Some(bus) = self.db.event_bus() {
+                    let update = Update::new(
+                        doc_id.to_string(),
+                        Cid::default(),
+                        collection.collection_id().to_string(),
+                        vec![],
+                        false, // is_retry
+                        false, // is_relay (local mutation)
+                    );
+                    bus.publish(Message::update(update));
+                }
+
                 Ok(DeleteResult::new(doc_id.clone(), existed))
             }
             Err(e) => {

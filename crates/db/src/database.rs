@@ -9,6 +9,7 @@ use crate::collection_snapshot::CollectionSnapshot;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
 use datastore::BasicTxn;
+use events::Bus;
 use identity::{Identity, RawIdentity};
 use schema::CollectionVersion;
 use std::collections::HashMap;
@@ -93,6 +94,8 @@ pub struct DB<S: Store> {
     txn_id_counter: AtomicU64,
     /// In-memory collection cache (name -> Collection).
     collections: RwLock<HashMap<String, Collection>>,
+    /// Event bus for subscription notifications.
+    event_bus: Option<Arc<dyn Bus>>,
 }
 
 impl<S: Store> DB<S> {
@@ -114,6 +117,7 @@ impl<S: Store> DB<S> {
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
+            event_bus: None,
         }
     }
 
@@ -155,6 +159,7 @@ impl<S: Store> DB<S> {
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
+            event_bus: None,
         }
     }
 
@@ -172,6 +177,19 @@ impl<S: Store> DB<S> {
         let db = Self::from_arc_with_options(store, options);
         db.load_collections().await?;
         Ok(db)
+    }
+
+    /// Set the event bus for subscription notifications.
+    ///
+    /// When an event bus is set, document mutations (create, update, delete)
+    /// will emit update events that can be received by subscribers.
+    pub fn set_event_bus(&mut self, bus: Arc<dyn Bus>) {
+        self.event_bus = Some(bus);
+    }
+
+    /// Get a reference to the event bus, if configured.
+    pub fn event_bus(&self) -> Option<&Arc<dyn Bus>> {
+        self.event_bus.as_ref()
     }
 
     /// Get the next transaction ID.
