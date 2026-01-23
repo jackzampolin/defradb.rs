@@ -348,6 +348,212 @@ func (t *Transaction) Mutate(mutation string) (*QueryResult, error) {
 }
 
 // ============================================================================
+// Collection Functions
+// ============================================================================
+
+// GetCollectionByName returns a collection by its name.
+// Returns the collection's schema as JSON if found.
+func (n *Node) GetCollectionByName(name string) (string, error) {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	result := C.get_collection_by_name(n.ptr, cName)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: get_collection_by_name failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value, nil
+}
+
+// HasCollection checks if a collection exists by name.
+func (n *Node) HasCollection(name string) (bool, error) {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	result := C.has_collection(n.ptr, cName)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return false, fmt.Errorf("ffi: has_collection failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value == "true", nil
+}
+
+// DeleteCollection deletes a collection and all its documents.
+func (n *Node) DeleteCollection(name string) error {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	result := C.delete_collection(n.ptr, cName)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: delete_collection failed: %s", err)
+	}
+
+	C.defra_free_string(result.value)
+	return nil
+}
+
+// FindCollectionByID finds a collection by its collection ID (schema version ID).
+// Returns the collection's schema as JSON if found, or "null" if not found.
+func (n *Node) FindCollectionByID(collectionID string) (string, error) {
+	cID := C.CString(collectionID)
+	defer C.free(unsafe.Pointer(cID))
+
+	result := C.find_collection_by_id(n.ptr, cID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: find_collection_by_id failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value, nil
+}
+
+// SetActiveCollectionVersion activates the collection with the given version ID.
+func (n *Node) SetActiveCollectionVersion(versionID string) error {
+	cVersionID := C.CString(versionID)
+	defer C.free(unsafe.Pointer(cVersionID))
+
+	result := C.set_active_collection_version(n.ptr, cVersionID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: set_active_collection_version failed: %s", err)
+	}
+
+	C.defra_free_string(result.value)
+	return nil
+}
+
+// PatchCollection applies a JSON patch to a collection's schema.
+// Returns the updated collection schema as JSON.
+func (n *Node) PatchCollection(collectionName string, patch string) (string, error) {
+	cName := C.CString(collectionName)
+	defer C.free(unsafe.Pointer(cName))
+
+	cPatch := C.CString(patch)
+	defer C.free(unsafe.Pointer(cPatch))
+
+	result := C.patch_collection(n.ptr, cName, cPatch)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: patch_collection failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value, nil
+}
+
+// GetCollectionByVersionID returns a collection by its version ID.
+// Returns the collection's schema as JSON if found, or "null" if not found.
+func (n *Node) GetCollectionByVersionID(versionID string) (string, error) {
+	cVersionID := C.CString(versionID)
+	defer C.free(unsafe.Pointer(cVersionID))
+
+	result := C.get_collection_by_version_id(n.ptr, cVersionID)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: get_collection_by_version_id failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value, nil
+}
+
+// AddView creates a new Defra View from a GQL query and SDL schema.
+// The transform parameter is optional (pass empty string for none).
+// Note: Not yet implemented - see issue #178.
+func (n *Node) AddView(gqlQuery string, sdl string, transform string) (string, error) {
+	cQuery := C.CString(gqlQuery)
+	defer C.free(unsafe.Pointer(cQuery))
+
+	cSDL := C.CString(sdl)
+	defer C.free(unsafe.Pointer(cSDL))
+
+	var cTransform *C.char
+	if transform != "" {
+		cTransform = C.CString(transform)
+		defer C.free(unsafe.Pointer(cTransform))
+	}
+
+	result := C.add_view(n.ptr, cQuery, cSDL, cTransform)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: add_view failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value, nil
+}
+
+// RefreshViews refreshes the caches of all views matching the given options.
+// Pass empty string for options to refresh all views.
+// Note: Not yet implemented - see issue #178.
+func (n *Node) RefreshViews(options string) error {
+	var cOptions *C.char
+	if options != "" {
+		cOptions = C.CString(options)
+		defer C.free(unsafe.Pointer(cOptions))
+	}
+
+	result := C.refresh_views(n.ptr, cOptions)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return fmt.Errorf("ffi: refresh_views failed: %s", err)
+	}
+
+	C.defra_free_string(result.value)
+	return nil
+}
+
+// SetMigration sets the migration for collection versions.
+// The config parameter should be a JSON string containing LensConfig.
+// Note: Not yet implemented - see issue #179.
+func (n *Node) SetMigration(config string) (string, error) {
+	cConfig := C.CString(config)
+	defer C.free(unsafe.Pointer(cConfig))
+
+	result := C.set_migration(n.ptr, cConfig)
+
+	if result.status != 0 {
+		err := C.GoString(result.error)
+		C.defra_free_string(result.error)
+		return "", fmt.Errorf("ffi: set_migration failed: %s", err)
+	}
+
+	value := C.GoString(result.value)
+	C.defra_free_string(result.value)
+	return value, nil
+}
+
+// ============================================================================
 // Index Functions
 // ============================================================================
 

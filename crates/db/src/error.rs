@@ -18,8 +18,14 @@ pub enum Error {
     #[error("collection not found: {0}")]
     CollectionNotFound(String),
 
+    #[error("collection version not found: {0}")]
+    CollectionVersionNotFound(String),
+
     #[error("collection already exists: {0}")]
     CollectionAlreadyExists(String),
+
+    #[error("invalid patch: {0}")]
+    InvalidPatch(String),
 
     #[error("document not found: {0}")]
     DocumentNotFound(String),
