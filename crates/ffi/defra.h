@@ -19,6 +19,29 @@
 #include <stdlib.h>
 
 /*
+ FFI result type matching Go's Result struct.
+
+ Status codes:
+ - 0: Success
+ - 1: Error (message in error field)
+ - 2: Subscription (ID in value field, not yet implemented)
+ */
+typedef struct FfiResult {
+  /*
+   Status code: 0=success, 1=error, 2=subscription
+   */
+  int status;
+  /*
+   Error message (null on success). Caller must free with `defra_free_string`.
+   */
+  char *error;
+  /*
+   JSON value (null on error). Caller must free with `defra_free_string`.
+   */
+  char *value;
+} FfiResult;
+
+/*
  FFI result for node creation, containing a node handle.
 
  Matches Go's NewNodeResult struct.
@@ -53,29 +76,6 @@ typedef struct NodeInitOptions {
    */
   int in_memory;
 } NodeInitOptions;
-
-/*
- FFI result type matching Go's Result struct.
-
- Status codes:
- - 0: Success
- - 1: Error (message in error field)
- - 2: Subscription (ID in value field, not yet implemented)
- */
-typedef struct FfiResult {
-  /*
-   Status code: 0=success, 1=error, 2=subscription
-   */
-  int status;
-  /*
-   Error message (null on success). Caller must free with `defra_free_string`.
-   */
-  char *error;
-  /*
-   JSON value (null on error). Caller must free with `defra_free_string`.
-   */
-  char *value;
-} FfiResult;
 
 /*
  FFI result for transaction creation, containing a transaction ID.
@@ -113,6 +113,145 @@ void defra_init(void);
  Returns a null-terminated string that must be freed with `defra_free_string`.
  */
 char *defra_version(void);
+
+/*
+ Get the current NAC status.
+
+ Returns a JSON object with NAC status information:
+ ```json
+ {
+   "status": "enabled" | "disabled_temporarily" | "not_configured",
+   "configured_enabled": true | false,
+   "dev_mode": true | false,
+   "owner": "did:key:..." | null
+ }
+ ```
+ */
+struct FfiResult get_nac_status(uintptr_t node_ptr);
+
+/*
+ Temporarily disable NAC.
+
+ The requestor_did must be an admin. Returns success on completion.
+
+ # Safety
+
+ `requestor_did` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult disable_nac(uintptr_t node_ptr, const char *requestor_did);
+
+/*
+ Re-enable NAC after temporary disable.
+
+ The requestor_did must be an admin. Returns success on completion.
+
+ # Safety
+
+ `requestor_did` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult re_enable_nac(uintptr_t node_ptr, const char *requestor_did);
+
+/*
+ Enable NAC with the given owner identity.
+
+ This initializes NAC and sets the owner. Can only be called when NAC
+ is not already enabled.
+
+ # Safety
+
+ `owner_did` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult enable_nac(uintptr_t node_ptr, const char *owner_did);
+
+/*
+ Add a NAC actor relationship (grant admin to target).
+
+ The requestor must be an admin. Returns JSON with success status:
+ ```json
+ { "added": true }  // or false if already exists
+ ```
+
+ # Safety
+
+ All string parameters must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult add_nac_actor_relationship(uintptr_t node_ptr,
+                                            const char *requestor_did,
+                                            const char *target_did);
+
+/*
+ Delete a NAC actor relationship (remove admin from target).
+
+ The requestor must be an admin. The owner cannot be removed.
+ Returns JSON with success status:
+ ```json
+ { "deleted": true }  // or false if didn't exist
+ ```
+
+ # Safety
+
+ All string parameters must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult delete_nac_actor_relationship(uintptr_t node_ptr,
+                                               const char *requestor_did,
+                                               const char *target_did);
+
+/*
+ Add a DAC actor relationship (share document access with target).
+
+ The requestor must be the document owner. Relation can be:
+ - "reader" - read access
+ - "updater" - read + update access
+ - "deleter" - read + delete access
+
+ Returns JSON with success status:
+ ```json
+ { "added": true }  // or false if already exists
+ ```
+
+ # Safety
+
+ All string parameters must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult add_dac_actor_relationship(uintptr_t node_ptr,
+                                            const char *requestor_did,
+                                            const char *target_did,
+                                            const char *collection_id,
+                                            const char *doc_id,
+                                            const char *relation);
+
+/*
+ Delete a DAC actor relationship (revoke document access from target).
+
+ The requestor must be the document owner.
+
+ Returns JSON with success status:
+ ```json
+ { "deleted": true }  // or false if didn't exist
+ ```
+
+ # Safety
+
+ All string parameters must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult delete_dac_actor_relationship(uintptr_t node_ptr,
+                                               const char *requestor_did,
+                                               const char *target_did,
+                                               const char *collection_id,
+                                               const char *doc_id,
+                                               const char *relation);
+
+/*
+ Get the node's identity (DID).
+
+ Returns JSON with the node identity:
+ ```json
+ { "did": "did:key:z6Mk..." }
+ ```
+
+ Returns an error if no node identity is configured.
+ */
+struct FfiResult get_node_identity(uintptr_t node_ptr);
 
 /*
  Create a new DefraDB node.
