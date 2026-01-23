@@ -554,12 +554,26 @@ pub struct SubscriptionData {
 /// This endpoint handles WebSocket connections for GraphQL subscriptions.
 /// Clients should connect to `/api/v0/graphql/ws` and send subscription
 /// messages using the graphql-ws protocol format.
+///
+/// # NAC Permission Check
+///
+/// Before upgrading, this checks that the client has DocumentRead permission
+/// if NAC is enabled. This prevents unauthorized users from establishing
+/// WebSocket connections even though per-query permission checks also occur.
 pub async fn graphql_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_subscription_socket(socket, state))
+    identity: ExtractIdentity,
+) -> Result<impl IntoResponse, HttpError> {
+    // NAC check: Subscriptions require DocumentRead permission
+    // Check before WebSocket upgrade to prevent unauthorized connections
+    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+
+    Ok(ws.on_upgrade(move |socket| handle_subscription_socket(socket, state)))
 }
+
+/// Keep-alive interval for WebSocket connections.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Subscription state tracking for active subscriptions.
 struct SubscriptionState {
@@ -571,6 +585,8 @@ struct SubscriptionState {
     variables: Option<JsonValue>,
     /// Collection name being subscribed to.
     collection_name: String,
+    /// Event bus subscription handle.
+    subscription: events::Subscription,
 }
 
 /// Handle an established WebSocket connection for subscriptions.
@@ -578,8 +594,8 @@ struct SubscriptionState {
 /// Implements the graphql-ws protocol:
 /// 1. Wait for connection_init message (with timeout)
 /// 2. Send connection_ack
-/// 3. Accept subscribe messages
-/// 4. Stream updates until complete or close
+/// 3. Accept multiple subscribe messages (supports multiple subscriptions per connection)
+/// 4. Stream updates with keep-alive until complete or close
 async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -628,197 +644,304 @@ async fn handle_subscription_socket(socket: WebSocket, state: AppState) {
         }
     };
 
-    // === Phase 2: Process subscription messages ===
-    while let Some(msg_result) = receiver.next().await {
-        let msg = match msg_result {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) => {
-                tracing::debug!("WebSocket closed by client");
-                break;
-            }
-            Ok(Message::Ping(data)) => {
-                let _ = sender.send(Message::Pong(data)).await;
-                continue;
-            }
-            Ok(_) => continue,
-            Err(e) => {
-                tracing::warn!(error = %e, "WebSocket receive error");
-                break;
-            }
-        };
+    // === Phase 2: Process subscription messages with multiple subscription support ===
+    // Track active subscriptions by their client-provided ID
+    let mut active_subscriptions: std::collections::HashMap<String, SubscriptionState> =
+        std::collections::HashMap::new();
 
-        // Parse the subscription message
-        let sub_msg: RawSubscriptionMessage = match serde_json::from_str(&msg) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(error = %e, "Invalid subscription message format");
-                continue;
-            }
-        };
+    // Keep-alive timer
+    let mut keep_alive_interval = tokio::time::interval(KEEP_ALIVE_INTERVAL);
+    keep_alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        match sub_msg.msg_type.as_str() {
-            "connection_init" => {
-                // Already initialized - per spec, we can ignore duplicate connection_init
-                tracing::debug!("Ignoring duplicate connection_init");
-                continue;
+    loop {
+        // Use select! to handle WebSocket messages, event bus updates, and keep-alive concurrently
+        tokio::select! {
+            // Keep-alive tick
+            _ = keep_alive_interval.tick() => {
+                let ka = serde_json::json!({"type": "ka"});
+                if sender.send(Message::Text(serde_json::to_string(&ka).unwrap())).await.is_err() {
+                    tracing::debug!("Failed to send keep-alive, closing connection");
+                    break;
+                }
+                tracing::trace!("Sent keep-alive");
             }
-            "subscribe" => {
-                let sub_id = sub_msg.id.clone().unwrap_or_else(|| "default".to_string());
-                let payload = match sub_msg.get_subscription_payload() {
-                    Some(p) => p,
+
+            // WebSocket message received
+            msg_result = receiver.next() => {
+                let msg = match msg_result {
+                    Some(Ok(Message::Text(text))) => text,
+                    Some(Ok(Message::Close(_))) => {
+                        tracing::debug!("WebSocket closed by client");
+                        break;
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = sender.send(Message::Pong(data)).await;
+                        continue;
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "WebSocket receive error");
+                        break;
+                    }
                     None => {
-                        let error_msg = SubscriptionData {
-                            msg_type: "error".to_string(),
-                            id: sub_id,
-                            payload: Some(QueryResponse::error("Missing payload in subscribe message")),
-                        };
-                        let _ = sender
-                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
-                            .await;
-                        continue;
+                        tracing::debug!("WebSocket stream ended");
+                        break;
                     }
                 };
 
-                // Parse to verify it's a subscription and extract the Select
-                let (collection_name, _parsed_select) = match parse_request(&payload.query) {
-                    Ok(ParsedOperation::Subscription { select }) => {
-                        (select.collection_name.clone(), select)
-                    }
-                    Ok(_) => {
-                        let error_msg = SubscriptionData {
-                            msg_type: "error".to_string(),
-                            id: sub_id,
-                            payload: Some(QueryResponse::error(
-                                "Expected subscription operation",
-                            )),
-                        };
-                        let _ = sender
-                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
-                            .await;
-                        continue;
-                    }
+                // Parse the subscription message
+                let sub_msg: RawSubscriptionMessage = match serde_json::from_str(&msg) {
+                    Ok(m) => m,
                     Err(e) => {
-                        let error_msg = SubscriptionData {
-                            msg_type: "error".to_string(),
-                            id: sub_id,
-                            payload: Some(QueryResponse::error(format!("Parse error: {}", e))),
-                        };
-                        let _ = sender
-                            .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
-                            .await;
+                        tracing::warn!(error = %e, "Invalid subscription message format");
                         continue;
                     }
                 };
 
-                // Store subscription state
-                let sub_state = SubscriptionState {
-                    identity: connection_identity.clone(),
-                    query: payload.query.clone(),
-                    variables: payload.variables.clone(),
-                    collection_name: collection_name.clone(),
-                };
+                match sub_msg.msg_type.as_str() {
+                    "connection_init" => {
+                        // Already initialized - per spec, we can ignore duplicate connection_init
+                        tracing::debug!("Ignoring duplicate connection_init");
+                        continue;
+                    }
+                    "connection_terminate" => {
+                        // Client requested clean termination
+                        tracing::debug!("Client requested connection termination");
+                        break;
+                    }
+                    "subscribe" => {
+                        let sub_id = sub_msg.id.clone().unwrap_or_else(|| "default".to_string());
 
-                // Subscribe to events and start streaming
-                let mut subscription = event_bus.subscribe(&[EventName::Update]);
-                let executor = state.executor.clone();
+                        // Check for duplicate subscription ID
+                        if active_subscriptions.contains_key(&sub_id) {
+                            let error_msg = SubscriptionData {
+                                msg_type: "error".to_string(),
+                                id: sub_id,
+                                payload: Some(QueryResponse::error("Subscriber for this ID already exists")),
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                                .await;
+                            continue;
+                        }
 
-                // Execute initial query with identity
-                let initial_request = QueryRequest {
+                        let payload = match sub_msg.get_subscription_payload() {
+                            Some(p) => p,
+                            None => {
+                                let error_msg = SubscriptionData {
+                                    msg_type: "error".to_string(),
+                                    id: sub_id,
+                                    payload: Some(QueryResponse::error("Missing payload in subscribe message")),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                                    .await;
+                                continue;
+                            }
+                        };
+
+                        // Parse to verify it's a subscription and extract the Select
+                        let collection_name = match parse_request(&payload.query) {
+                            Ok(ParsedOperation::Subscription { select }) => {
+                                select.collection_name.clone()
+                            }
+                            Ok(_) => {
+                                let error_msg = SubscriptionData {
+                                    msg_type: "error".to_string(),
+                                    id: sub_id,
+                                    payload: Some(QueryResponse::error(
+                                        "Expected subscription operation",
+                                    )),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                                    .await;
+                                continue;
+                            }
+                            Err(e) => {
+                                let error_msg = SubscriptionData {
+                                    msg_type: "error".to_string(),
+                                    id: sub_id,
+                                    payload: Some(QueryResponse::error(format!("Parse error: {}", e))),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(serde_json::to_string(&error_msg).unwrap()))
+                                    .await;
+                                continue;
+                            }
+                        };
+
+                        // Subscribe to events
+                        let subscription = event_bus.subscribe(&[EventName::Update]);
+
+                        // Store subscription state
+                        let sub_state = SubscriptionState {
+                            identity: connection_identity.clone(),
+                            query: payload.query.clone(),
+                            variables: payload.variables.clone(),
+                            collection_name: collection_name.clone(),
+                            subscription,
+                        };
+
+                        // Execute initial query with identity
+                        let initial_request = QueryRequest {
+                            query: sub_state.query.clone(),
+                            operation_name: None,
+                            variables: sub_state.variables.clone(),
+                            identity: sub_state.identity.clone(),
+                        };
+                        let initial_response = state.executor.execute(initial_request).await;
+
+                        // Send initial result
+                        let initial_msg = SubscriptionData {
+                            msg_type: "next".to_string(),
+                            id: sub_id.clone(),
+                            payload: Some(initial_response),
+                        };
+                        if sender
+                            .send(Message::Text(serde_json::to_string(&initial_msg).unwrap()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+
+                        active_subscriptions.insert(sub_id.clone(), sub_state);
+                        tracing::debug!(sub_id = %sub_id, collection = %collection_name, "Subscription started");
+                    }
+                    "ping" => {
+                        let pong = serde_json::json!({"type": "pong"});
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&pong).unwrap()))
+                            .await;
+                    }
+                    "complete" => {
+                        // Client wants to end a specific subscription
+                        if let Some(sub_id) = sub_msg.id {
+                            if active_subscriptions.remove(&sub_id).is_some() {
+                                tracing::debug!(sub_id = %sub_id, "Subscription completed by client");
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::debug!(msg_type = %sub_msg.msg_type, "Unknown message type");
+                    }
+                }
+            }
+        }
+
+        // Check all active subscriptions for updates
+        // We need to do this outside of select! to avoid borrow issues
+        let mut subscriptions_to_remove: Vec<String> = Vec::new();
+
+        for (sub_id, sub_state) in active_subscriptions.iter_mut() {
+            // Check for dropped messages (resync needed)
+            let dropped = sub_state.subscription.check_and_reset_dropped();
+            if dropped > 0 {
+                tracing::warn!(
+                    sub_id = %sub_id,
+                    dropped = dropped,
+                    "Messages were dropped, client may need to resync"
+                );
+                // Re-execute the full query to give the client fresh state
+                let request = QueryRequest {
                     query: sub_state.query.clone(),
                     operation_name: None,
                     variables: sub_state.variables.clone(),
                     identity: sub_state.identity.clone(),
                 };
-                let initial_response = executor.execute(initial_request).await;
+                let response = state.executor.execute(request).await;
 
-                // Send initial result
-                let initial_msg = SubscriptionData {
+                let data_msg = SubscriptionData {
                     msg_type: "next".to_string(),
                     id: sub_id.clone(),
-                    payload: Some(initial_response),
+                    payload: Some(response),
                 };
                 if sender
-                    .send(Message::Text(serde_json::to_string(&initial_msg).unwrap()))
+                    .send(Message::Text(serde_json::to_string(&data_msg).unwrap()))
                     .await
                     .is_err()
                 {
-                    break;
+                    subscriptions_to_remove.push(sub_id.clone());
+                    continue;
                 }
+            }
 
-                // Stream updates until connection closes
-                loop {
-                    match subscription.recv().await {
-                        Some(message) => {
-                            if let Some(update_data) = message.as_update() {
-                                // Skip relay events to avoid duplicates (Issue #6)
-                                if update_data.is_relay {
-                                    tracing::trace!(
-                                        doc_id = %update_data.doc_id,
-                                        "Skipping relay event for subscription"
-                                    );
-                                    continue;
-                                }
+            // Try to receive any pending events (non-blocking)
+            while let Ok(message) = sub_state.subscription.try_recv() {
+                if let Some(update_data) = message.as_update() {
+                    // Skip relay events to avoid duplicates (Issue #6)
+                    if update_data.is_relay {
+                        tracing::trace!(
+                            doc_id = %update_data.doc_id,
+                            sub_id = %sub_id,
+                            "Skipping relay event for subscription"
+                        );
+                        continue;
+                    }
 
-                                // Check if update is relevant to this subscription
-                                if update_data.collection_id == sub_state.collection_name
-                                    || update_data.collection_id.is_empty()
-                                {
-                                    // Re-execute query with identity preserved
-                                    // Note: For better performance, we could filter by doc_id
-                                    // using parsed_select.with_doc_ids([update_data.doc_id])
-                                    let request = QueryRequest {
-                                        query: sub_state.query.clone(),
-                                        operation_name: None,
-                                        variables: sub_state.variables.clone(),
-                                        identity: sub_state.identity.clone(),
-                                    };
-                                    let response = executor.execute(request).await;
+                    // Check if update is relevant to this subscription
+                    // SECURITY FIX: Removed empty collection_id fallback that could leak data
+                    if update_data.collection_id == sub_state.collection_name {
+                        // Re-execute query with identity preserved
+                        let request = QueryRequest {
+                            query: sub_state.query.clone(),
+                            operation_name: None,
+                            variables: sub_state.variables.clone(),
+                            identity: sub_state.identity.clone(),
+                        };
+                        let response = state.executor.execute(request).await;
 
-                                    let data_msg = SubscriptionData {
-                                        msg_type: "next".to_string(),
-                                        id: sub_id.clone(),
-                                        payload: Some(response),
-                                    };
-                                    if sender
-                                        .send(Message::Text(
-                                            serde_json::to_string(&data_msg).unwrap(),
-                                        ))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        None => {
-                            // Event bus closed
+                        let data_msg = SubscriptionData {
+                            msg_type: "next".to_string(),
+                            id: sub_id.clone(),
+                            payload: Some(response),
+                        };
+                        if sender
+                            .send(Message::Text(serde_json::to_string(&data_msg).unwrap()))
+                            .await
+                            .is_err()
+                        {
+                            subscriptions_to_remove.push(sub_id.clone());
                             break;
                         }
+                    } else if update_data.collection_id.is_empty() {
+                        // Log warning instead of silently matching
+                        tracing::warn!(
+                            doc_id = %update_data.doc_id,
+                            "Received event with empty collection_id, ignoring"
+                        );
                     }
                 }
+            }
+        }
 
-                // Subscription ended - exit the main loop too
-                break;
-            }
-            "ping" => {
-                let pong = serde_json::json!({"type": "pong"});
-                let _ = sender
-                    .send(Message::Text(serde_json::to_string(&pong).unwrap()))
-                    .await;
-            }
-            "complete" => {
-                // Client wants to end subscription
-                tracing::debug!(id = ?sub_msg.id, "Subscription complete requested");
-                break;
-            }
-            _ => {
-                tracing::debug!(msg_type = %sub_msg.msg_type, "Unknown message type");
-            }
+        // Remove failed subscriptions
+        for sub_id in subscriptions_to_remove {
+            active_subscriptions.remove(&sub_id);
+        }
+
+        // Small yield to prevent busy-loop when there are no events
+        if !active_subscriptions.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
-    tracing::debug!("WebSocket subscription connection closed");
+    // Send complete messages for all active subscriptions before closing
+    for sub_id in active_subscriptions.keys() {
+        let complete_msg = serde_json::json!({
+            "type": "complete",
+            "id": sub_id
+        });
+        let _ = sender
+            .send(Message::Text(serde_json::to_string(&complete_msg).unwrap()))
+            .await;
+    }
+
+    tracing::debug!(
+        subscriptions_closed = active_subscriptions.len(),
+        "WebSocket subscription connection closed"
+    );
 }
 
 /// Wait for connection_init message from client.

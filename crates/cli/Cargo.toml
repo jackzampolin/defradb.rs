@@ -28,6 +28,7 @@ defra-http = { path = "../http" }
 query = { path = "../query" }
 db = { path = "../db" }
 schema = { path = "../schema" }
+events = { path = "../events" }
 document = { path = "../document" }
 keyring = { path = "../keyring" }
 

@@ -465,11 +465,17 @@ impl Node {
         }
 
         // Open database and load collections from storage
-        let database = Arc::new(
-            db::DB::open_from_arc_with_options(store.clone(), db_options)
-                .await
-                .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?,
-        );
+        let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
+            .await
+            .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?;
+
+        // Create and configure event bus for GraphQL subscriptions
+        let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::new());
+        database.set_event_bus(event_bus.clone());
+        info!("Event bus configured for subscriptions");
+
+        // Now wrap database in Arc
+        let database = Arc::new(database);
 
         let collection_count = database
             .list_collections()
@@ -715,6 +721,10 @@ impl Node {
             let schema_adapter = crate::schema_adapter::SchemaAdapter::new_arc(database.clone());
             server = server.with_schema_arc(schema_adapter);
             info!("Schema HTTP endpoint enabled");
+
+            // Wire event bus to HTTP server for GraphQL subscriptions
+            server = server.with_event_bus_arc(event_bus);
+            info!("Subscription event bus enabled");
 
             info!(
                 "HTTP server configured on {} with REST endpoints enabled",

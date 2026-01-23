@@ -42,6 +42,7 @@ pub struct Server {
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
+    event_bus: Option<Arc<dyn events::Bus>>,
 }
 
 impl Server {
@@ -53,6 +54,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            event_bus: None,
         }
     }
 
@@ -64,6 +66,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            event_bus: None,
         }
     }
 
@@ -75,6 +78,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            event_bus: None,
         }
     }
 
@@ -86,6 +90,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            event_bus: None,
         }
     }
 
@@ -142,6 +147,16 @@ impl Server {
         self
     }
 
+    /// Set event bus for GraphQL subscriptions.
+    ///
+    /// When an event bus is configured, the server enables WebSocket
+    /// subscriptions at `/api/v0/graphql/ws`. Without an event bus,
+    /// subscription requests will receive an error.
+    pub fn with_event_bus_arc(mut self, bus: Arc<dyn events::Bus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
     /// Build the router with all routes and middleware.
     ///
     /// CORS configuration matches Go DefraDB behavior:
@@ -163,6 +178,9 @@ impl Server {
         }
         if let Some(ref schema) = self.schema {
             builder = builder.with_schema(Arc::clone(schema));
+        }
+        if let Some(ref event_bus) = self.event_bus {
+            builder = builder.with_event_bus(Arc::clone(event_bus));
         }
         let state = builder.build();
         let router = create_router_with_state(state);

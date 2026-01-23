@@ -17,12 +17,17 @@ pub struct ChannelBusConfig {
     /// When the buffer is full, new messages are dropped with a warning.
     /// Default: 100
     pub event_buffer_size: usize,
+    /// Whether to send a resync signal when messages are dropped due to buffer overflow.
+    /// When enabled, a special "resync_needed" flag is tracked per subscriber.
+    /// Default: true
+    pub signal_resync_on_overflow: bool,
 }
 
 impl Default for ChannelBusConfig {
     fn default() -> Self {
         Self {
             event_buffer_size: 100,
+            signal_resync_on_overflow: true,
         }
     }
 }
@@ -46,6 +51,9 @@ struct Subscriber {
     sender: mpsc::Sender<Message>,
     /// Events this subscriber is interested in.
     events: Vec<EventName>,
+    /// Shared count of messages dropped due to buffer overflow.
+    /// Used to signal clients that they may need to resync.
+    dropped_count: std::sync::Arc<AtomicU64>,
 }
 
 /// Channel-based event bus using tokio mpsc channels.
@@ -104,6 +112,9 @@ impl Bus for ChannelBus {
             return;
         }
 
+        // Collect dead subscriber IDs for lazy cleanup
+        let mut dead_subs: Vec<u64> = Vec::new();
+
         let subscribers = self.subscribers.read();
         let mut delivered = 0;
         let mut dropped = 0;
@@ -120,20 +131,41 @@ impl Bus for ChannelBus {
             match subscriber.sender.try_send(msg.clone()) {
                 Ok(()) => delivered += 1,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    // Buffer full - log and drop message (non-blocking behavior)
+                    // Buffer full - track dropped count for resync signaling
+                    let prev_dropped = subscriber.dropped_count.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
                         sub_id = *id,
                         event = %msg.name,
-                        "Subscriber buffer full, dropping message"
+                        total_dropped = prev_dropped + 1,
+                        "Subscriber buffer full, dropping message (client may need to resync)"
                     );
                     buffer_full += 1;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    // Subscriber channel closed, will be cleaned up later
-                    tracing::debug!(sub_id = *id, "Subscriber channel closed");
+                    // Subscriber channel closed, mark for cleanup
+                    tracing::debug!(sub_id = *id, "Subscriber channel closed, marking for cleanup");
+                    dead_subs.push(*id);
                     dropped += 1;
                 }
             }
+        }
+
+        // Release read lock before acquiring write lock for cleanup
+        drop(subscribers);
+
+        // Lazy cleanup: remove dead subscribers
+        if !dead_subs.is_empty() {
+            let mut subscribers_mut = self.subscribers.write();
+            for id in &dead_subs {
+                if subscribers_mut.remove(id).is_some() {
+                    tracing::debug!(sub_id = *id, "Cleaned up dead subscriber");
+                }
+            }
+            tracing::info!(
+                cleaned_up = dead_subs.len(),
+                remaining = subscribers_mut.len(),
+                "Cleaned up dead subscribers"
+            );
         }
 
         tracing::trace!(
@@ -155,9 +187,13 @@ impl Bus for ChannelBus {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel(self.config.event_buffer_size);
 
+        // Create shared dropped counter for both Subscriber and Subscription
+        let dropped_count = std::sync::Arc::new(AtomicU64::new(0));
+
         let subscriber = Subscriber {
             sender: tx,
             events: events.to_vec(),
+            dropped_count: dropped_count.clone(),
         };
 
         self.subscribers.write().insert(id, subscriber);
@@ -169,7 +205,7 @@ impl Bus for ChannelBus {
             "New subscription"
         );
 
-        Subscription::new(id, rx)
+        Subscription::with_dropped_counter(id, rx, dropped_count)
     }
 
     fn unsubscribe(&self, sub_id: u64) {
