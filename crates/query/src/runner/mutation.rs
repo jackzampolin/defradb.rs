@@ -63,7 +63,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Execute a GraphQL mutation with a specific mutator and caller_identity.
-    async fn execute_mutation_internal(
+    pub(crate) async fn execute_mutation_internal(
         &self,
         mutation_str: &str,
         mutator: Arc<dyn DocMutator>,

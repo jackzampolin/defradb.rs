@@ -84,4 +84,12 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
     fn doc_fetcher(&self) -> Arc<dyn DocFetcher> {
         self.fetcher.clone()
     }
+
+    fn doc_mutator(&self) -> Option<Arc<dyn DocMutator>> {
+        if self.readonly {
+            None
+        } else {
+            Some(self.doc_mutator())
+        }
+    }
 }
