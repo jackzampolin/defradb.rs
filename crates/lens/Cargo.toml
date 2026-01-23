@@ -1,0 +1,37 @@
+[package]
+name = "lens"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lens schema migration support for DefraDB"
+
+[dependencies]
+# Core
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Encoding
+base64.workspace = true
+
+# Synchronization
+parking_lot.workspace = true
+
+# Async streams
+tokio-stream.workspace = true
+
+# WASM runtime
+wasmtime = "29"
+
+[dev-dependencies]
+proptest.workspace = true
