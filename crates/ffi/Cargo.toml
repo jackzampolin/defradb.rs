@@ -39,6 +39,7 @@ query = { path = "../query" }
 schema = { path = "../schema" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
+lens = { path = "../lens" }
 
 [build-dependencies]
 cbindgen = "0.28"

@@ -11,6 +11,7 @@ use crate::txn::DbTxn;
 use datastore::BasicTxn;
 use events::Bus;
 use identity::{Identity, RawIdentity};
+use lens::{LensConfig, TransformId, TransformStore, WasmTransformStore};
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -96,6 +97,8 @@ pub struct DB<S: Store> {
     collections: RwLock<HashMap<String, Collection>>,
     /// Event bus for subscription notifications.
     event_bus: Option<Arc<dyn Bus>>,
+    /// Lens transform store for schema migrations.
+    lens_store: Arc<dyn TransformStore>,
 }
 
 impl<S: Store> DB<S> {
@@ -112,12 +115,14 @@ impl<S: Store> DB<S> {
     /// This creates a DB with an empty collection cache. Use `open_with_options()`
     /// to load existing collections from the store.
     pub fn with_options(store: S, options: DbOptions) -> Self {
+        let lens_store = WasmTransformStore::new().expect("failed to create lens transform store");
         Self {
             store: Arc::new(store),
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
+            lens_store: Arc::new(lens_store),
         }
     }
 
@@ -154,12 +159,14 @@ impl<S: Store> DB<S> {
     /// **Warning:** When multiple DB instances share a store via `from_arc()`,
     /// transaction IDs may collide if both instances create transactions concurrently.
     pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Self {
+        let lens_store = WasmTransformStore::new().expect("failed to create lens transform store");
         Self {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
+            lens_store: Arc::new(lens_store),
         }
     }
 
@@ -295,6 +302,42 @@ impl<S: Store> DB<S> {
     /// Get the current transaction ID counter value.
     pub fn current_txn_id(&self) -> u64 {
         self.txn_id_counter.load(Ordering::SeqCst)
+    }
+
+    // =========================================================================
+    // Lens Migration Methods
+    // =========================================================================
+
+    /// Get a reference to the lens transform store.
+    ///
+    /// The lens store manages schema migration transforms that can be applied
+    /// when documents are fetched from older schema versions.
+    pub fn lens_store(&self) -> &Arc<dyn TransformStore> {
+        &self.lens_store
+    }
+
+    /// Set a migration between two schema versions.
+    ///
+    /// This registers a lens transform that will be applied to documents
+    /// when migrating from the source schema version to the destination.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The lens configuration containing source/destination versions and transform
+    ///
+    /// # Returns
+    ///
+    /// The transform ID that was registered.
+    pub async fn set_migration(&self, config: LensConfig) -> Result<TransformId> {
+        self.lens_store
+            .add(config)
+            .await
+            .map_err(|e| Error::Lens(e.to_string()))
+    }
+
+    /// Check if a migration exists between two schema versions.
+    pub fn has_migration(&self, transform_id: &TransformId) -> bool {
+        self.lens_store.has_transform(transform_id)
     }
 
     /// Load all collections from the SystemStore into the in-memory cache.

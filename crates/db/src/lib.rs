@@ -59,6 +59,7 @@ pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
 pub mod index_manager;
+pub mod lensed_fetcher;
 pub mod merge_handler;
 pub mod nac;
 pub mod peer_identity;
@@ -90,6 +91,7 @@ pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
+pub use lensed_fetcher::LensedDocFetcher;
 pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,

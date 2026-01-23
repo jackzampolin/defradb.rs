@@ -31,7 +31,7 @@ parking_lot.workspace = true
 tokio-stream.workspace = true
 
 # WASM runtime
-wasmtime = "29"
+wasmtime = "27"
 
 [dev-dependencies]
 proptest.workspace = true

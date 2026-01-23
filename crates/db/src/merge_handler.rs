@@ -1,4 +1,3 @@
-
 //! Database merge handler for processing incoming P2P blocks.
 //!
 //! This module implements the `MergeHandler` trait from the P2P layer,
