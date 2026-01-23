@@ -27,6 +27,18 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
         name == "_docID" || collection.fields.iter().any(|f| f.name == name)
     };
 
+    // Validate that all requested simple fields exist in schema
+    for requestable in &select.fields {
+        if let Requestable::Field(field) = requestable {
+            if !field_exists(&field.name) {
+                return Err(QueryError::unknown_field(format!(
+                    "Cannot query field \"{}\" on type \"{}\".",
+                    field.name, select.collection_name
+                )));
+            }
+        }
+    }
+
     // Validate aggregate target fields exist in schema
     for requestable in &select.fields {
         if let Requestable::Aggregate(agg) = requestable {

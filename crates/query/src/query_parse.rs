@@ -1121,10 +1121,10 @@ fn parse_field_to_mutation(
                 mutation.update_input = input;
             }
 
-            // UPDATE/DELETE/UPSERT: docIDs to target
+            // UPDATE/DELETE/UPSERT: docID or docIDs to target (Go uses singular docID)
             (
                 MutationType::Update | MutationType::Delete | MutationType::Upsert,
-                "docIDs" | "_docIDs",
+                "docID" | "docIDs" | "_docIDs",
             ) => {
                 let doc_ids = parse_doc_ids_value(arg_value, variables)?;
                 mutation.doc_ids = Some(doc_ids);
