@@ -372,6 +372,19 @@ impl Planner {
                     None
                 };
 
+                // Debug: Log relation field resolution
+                debug!(
+                    parent_collection = %parent_collection.name,
+                    target_collection = %target_collection.name,
+                    relation_field_name = %relation_field_name,
+                    relation_name = ?relation_field.relation_name,
+                    parent_is_primary = relation_field.is_primary,
+                    target_relation_field_found = target_relation_field.is_some(),
+                    target_field_name = ?target_relation_field.map(|f| &f.name),
+                    target_is_primary = ?target_relation_field.map(|f| f.is_primary),
+                    "Resolving relation for join"
+                );
+
                 // Get child relation field index (if it exists).
                 // For bidirectional relations, this is the index of the back-reference field
                 // (e.g., `author` field on posts when joining from users.posts).

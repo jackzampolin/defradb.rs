@@ -84,11 +84,6 @@ impl Subscription {
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count.load(Ordering::SeqCst)
     }
-
-    /// Get a clone of the dropped counter for sharing.
-    pub(crate) fn dropped_counter(&self) -> Arc<AtomicU64> {
-        self.dropped_count.clone()
-    }
 }
 
 impl std::fmt::Debug for Subscription {
