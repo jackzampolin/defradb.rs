@@ -2,17 +2,37 @@
 //!
 //! This fetcher wraps an inner fetcher and applies lens transforms to documents
 //! that are stored with older schema versions.
+//!
+//! # Migration Flow
+//!
+//! When a document is fetched:
+//! 1. The fetcher checks if the collection has any registered migrations
+//! 2. If migrations exist and the document's schema version differs from
+//!    the target version, the document is transformed through the lens pipeline
+//! 3. Migrated values are cached in the datastore to avoid re-migration
+//!
+//! # Current Limitations
+//!
+//! Per-document schema version tracking is not yet implemented. Documents
+//! are currently assumed to be at the current collection version. Full
+//! migration support requires storing schema version with each document.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use document::Document;
-use lens::{LensDoc, TargetedHistoryLink, TransformStore, DOC_ID_FIELD};
+use lens::{
+    build_targeted_history, CollectionHistoryLink, LensDoc, TargetedHistoryLink, TransformStore,
+    DOC_ID_FIELD,
+};
 use query::runner::{DocFetcher, FetchByIdsResult};
+use schema::CollectionVersion;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
+use tracing::{debug, trace};
 
+use crate::collection::Collection;
 use crate::collection_loader::get_collection_with_lazy_load;
 use crate::txn::DbTxn;
 
@@ -30,7 +50,6 @@ pub struct LensedDocFetcher<S: Store> {
     history_cache: tokio::sync::RwLock<HashMap<String, HashMap<String, TargetedHistoryLink>>>,
 }
 
-#[allow(dead_code)]
 impl<S: Store> LensedDocFetcher<S> {
     /// Create a new lensed document fetcher.
     ///
@@ -61,6 +80,55 @@ impl<S: Store> LensedDocFetcher<S> {
         self.txn.clone()
     }
 
+    /// Check if a collection has migrations registered.
+    ///
+    /// A collection has migrations if its schema or any of its previous versions
+    /// have a transform configured in the previous_version field.
+    fn collection_has_migrations(collection: &Collection) -> bool {
+        // Check if the current collection version has a previous version with a transform
+        if let Some(ref prev) = collection.schema().previous_version {
+            if prev.transform.is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Build the version history for a collection.
+    ///
+    /// This traverses the previous_version links to build a map of all known
+    /// schema versions for the collection. Returns a targeted history that
+    /// links each version to the path toward the target version.
+    ///
+    /// Note: Currently only builds history from the current version backwards.
+    /// Full history building requires loading all versions from the systemstore.
+    #[allow(dead_code)]
+    fn build_collection_history(
+        collection: &CollectionVersion,
+    ) -> Option<HashMap<String, TargetedHistoryLink>> {
+        let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
+
+        // Add the current version
+        let mut current_link =
+            CollectionHistoryLink::new(&collection.version_id, &collection.collection_id);
+
+        // Check if there's a previous version and add transform if present
+        if let Some(ref prev) = collection.previous_version {
+            current_link = current_link.with_previous(&prev.source_collection_id);
+            if let Some(ref transform_id) = prev.transform {
+                current_link = current_link.with_transform(transform_id);
+            }
+        }
+
+        full_history.insert(collection.version_id.clone(), current_link);
+
+        // Note: This is a simplified version that only knows about the current version.
+        // Full support requires loading all collection versions from systemstore
+        // (GetCollectionsByCollectionID in Go) and building the complete history graph.
+
+        build_targeted_history(&full_history, &collection.version_id)
+    }
+
     /// Convert a Document to a LensDoc.
     fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
         // Use Document's to_map which handles all field conversions properly
@@ -76,6 +144,7 @@ impl<S: Store> LensedDocFetcher<S> {
     }
 
     /// Convert a LensDoc back to a Document.
+    #[allow(dead_code)]
     fn lens_doc_to_doc(lens_doc: LensDoc, original_doc: &Document) -> Document {
         let mut doc = Document::new();
 
@@ -101,14 +170,37 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
+        // Check if collection has migrations registered
+        let has_migrations = Self::collection_has_migrations(&collection);
+        if has_migrations {
+            debug!(
+                collection = %collection_name,
+                version_id = %collection.schema().version_id,
+                "Collection has migrations registered"
+            );
+        }
+
         let docs = collection
             .get_all_with_datastore(&datastore)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
-        // For now, return docs without transformation
-        // Full migration support requires building the version history
-        // and applying transforms for each document's source version
+        // Log document count for tracing
+        trace!(
+            collection = %collection_name,
+            doc_count = docs.len(),
+            has_migrations = has_migrations,
+            "Fetched documents"
+        );
+
+        // Currently returns docs without transformation.
+        // Full migration support requires per-document schema version tracking
+        // to determine which documents need migration.
+        //
+        // When per-document versions are available, the flow will be:
+        // 1. For each doc, check doc.schema_version_id vs collection.version_id
+        // 2. If different and migrations registered, transform through lens pipeline
+        // 3. Cache migrated values in datastore
         Ok(docs)
     }
 
@@ -119,6 +211,8 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     ) -> query::error::Result<FetchByIdsResult> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        let has_migrations = Self::collection_has_migrations(&collection);
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();
@@ -140,6 +234,15 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             }
         }
 
+        trace!(
+            collection = %collection_name,
+            requested = doc_ids.len(),
+            found = docs.len(),
+            missing = missing_ids.len(),
+            has_migrations = has_migrations,
+            "Fetched documents by ID"
+        );
+
         Ok(FetchByIdsResult::partial(docs, missing_ids))
     }
 
@@ -151,6 +254,8 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     ) -> query::error::Result<Vec<Document>> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        let has_migrations = Self::collection_has_migrations(&collection);
 
         let all_docs = collection
             .get_all_with_datastore(&datastore)
@@ -166,6 +271,15 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
                     .unwrap_or(false)
             })
             .collect();
+
+        trace!(
+            collection = %collection_name,
+            field = %field_name,
+            value = %value,
+            matches = matching_docs.len(),
+            has_migrations = has_migrations,
+            "Fetched documents by field value"
+        );
 
         Ok(matching_docs)
     }
