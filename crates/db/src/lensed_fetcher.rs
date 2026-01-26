@@ -59,6 +59,7 @@ impl<S: Store> LensedDocFetcher<S> {
     ///
     /// * `txn` - The database transaction
     /// * `lens_store` - The lens transform store for applying migrations
+    #[allow(dead_code)]
     pub(crate) fn new(txn: DbTxn<S>, lens_store: Arc<dyn TransformStore>) -> Self {
         Self {
             txn: Arc::new(TokioMutex::new(Some(txn))),
@@ -68,6 +69,7 @@ impl<S: Store> LensedDocFetcher<S> {
     }
 
     /// Take the transaction out of the fetcher (for commit/rollback).
+    #[allow(dead_code)]
     pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
         self.txn.lock().await.take()
     }
@@ -78,6 +80,7 @@ impl<S: Store> LensedDocFetcher<S> {
     }
 
     /// Get the shared transaction reference.
+    #[allow(dead_code)]
     pub(crate) fn shared_txn(&self) -> Arc<TokioMutex<Option<DbTxn<S>>>> {
         self.txn.clone()
     }

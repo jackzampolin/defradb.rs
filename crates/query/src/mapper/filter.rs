@@ -693,19 +693,43 @@ impl Filter {
 
             if is_relation_filter {
                 // This is a relation filter like {author: {verified: {_eq: true}}}
-                // The field_value should be a JSON object (the related document)
+                // The field_value can be:
+                // - null (no related document)
+                // - an object (one-to-one relation)
+                // - an array (one-to-many relation)
                 if field_value.is_null() {
                     // No related document - filter doesn't match
                     return Ok(false);
                 }
 
-                let related_obj = field_value.as_object().ok_or_else(|| {
-                    QueryError::invalid_filter(format!("relation field '{}' is not an object", key))
-                })?;
-
-                // Recursively evaluate the nested conditions against the related object
-                if !self.eval_relation_conditions(ops, related_obj)? {
-                    return Ok(false);
+                // Handle arrays (one-to-many relations) with existential semantics
+                // If ANY element matches, the filter passes
+                if let Some(arr) = field_value.as_array() {
+                    let mut any_match = false;
+                    for elem in arr {
+                        if let Some(obj) = elem.as_object() {
+                            if self.eval_relation_conditions(ops, obj)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                        // Non-object elements in array are skipped
+                    }
+                    if !any_match {
+                        return Ok(false);
+                    }
+                } else if let Some(related_obj) = field_value.as_object() {
+                    // Handle objects (one-to-one relations)
+                    if !self.eval_relation_conditions(ops, related_obj)? {
+                        return Ok(false);
+                    }
+                } else {
+                    // Field value is neither array nor object - invalid for relation filter
+                    return Err(QueryError::invalid_filter(format!(
+                        "relation field '{}' must be an object or array, got {:?}",
+                        key,
+                        field_value
+                    )));
                 }
             } else {
                 // Standard operator conditions
@@ -794,17 +818,34 @@ impl Filter {
 
             if is_nested {
                 // Another level of relation nesting
+                // Handle null, array (one-to-many), or object (one-to-one)
                 if field_value.is_null() {
                     return Ok(false);
                 }
-                let nested_obj = field_value.as_object().ok_or_else(|| {
-                    QueryError::invalid_filter(format!(
-                        "nested relation field '{}' is not an object",
+
+                // Handle arrays with existential semantics
+                if let Some(arr) = field_value.as_array() {
+                    let mut any_match = false;
+                    for elem in arr {
+                        if let Some(obj) = elem.as_object() {
+                            if self.eval_relation_conditions(ops, obj)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !any_match {
+                        return Ok(false);
+                    }
+                } else if let Some(nested_obj) = field_value.as_object() {
+                    if !self.eval_relation_conditions(ops, nested_obj)? {
+                        return Ok(false);
+                    }
+                } else {
+                    return Err(QueryError::invalid_filter(format!(
+                        "nested relation field '{}' must be an object or array",
                         key
-                    ))
-                })?;
-                if !self.eval_relation_conditions(ops, nested_obj)? {
-                    return Ok(false);
+                    )));
                 }
             } else {
                 // Operator conditions
