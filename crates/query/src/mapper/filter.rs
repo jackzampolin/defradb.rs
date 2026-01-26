@@ -291,6 +291,169 @@ impl Filter {
         false
     }
 
+    /// Get all multi-level relation paths in this filter.
+    ///
+    /// For a filter like `{author: {published: {rating: {_eq: 4.9}}}}`, this returns
+    /// `[["author", "published"]]` - the path through relations (not including the leaf scalar).
+    ///
+    /// This is used to detect filters that require nested joins beyond a single level.
+    pub fn get_multi_level_relation_paths(&self) -> Vec<Vec<String>> {
+        let mut paths = Vec::new();
+        Self::collect_relation_paths(&self.conditions, &mut Vec::new(), &mut paths);
+        // Only return paths with more than one element (multi-level)
+        paths.into_iter().filter(|p| p.len() > 1).collect()
+    }
+
+    /// Recursively collect relation paths from filter conditions.
+    ///
+    /// A relation path is a sequence of nested field names before reaching a scalar condition.
+    /// For `{author: {published: {rating: {_eq: 4.9}}}}`:
+    /// - "author" is a relation (its value has non-operator keys)
+    /// - "published" is a relation (its value has non-operator keys)
+    /// - "rating" is a scalar (its value only has operator keys like "_eq")
+    /// So the path is ["author", "published"].
+    ///
+    /// This function only saves the deepest path (the full chain of relations).
+    fn collect_relation_paths(
+        conditions: &HashMap<String, JsonValue>,
+        current_path: &mut Vec<String>,
+        paths: &mut Vec<Vec<String>>,
+    ) {
+        for (key, value) in conditions {
+            // Skip logical operators at this level
+            if FilterOp::parse(key).is_some() {
+                // For _and/_or/_not, recurse into their contents
+                if let Some(op) = FilterOp::parse(key) {
+                    match op {
+                        FilterOp::And | FilterOp::Or => {
+                            if let JsonValue::Array(arr) = value {
+                                for item in arr {
+                                    if let JsonValue::Object(obj) = item {
+                                        let nested: HashMap<String, JsonValue> =
+                                            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                        Self::collect_relation_paths(&nested, current_path, paths);
+                                    }
+                                }
+                            }
+                        }
+                        FilterOp::Not => {
+                            if let JsonValue::Object(obj) = value {
+                                let nested: HashMap<String, JsonValue> =
+                                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                Self::collect_relation_paths(&nested, current_path, paths);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            // Check if this key maps to a relation (nested object with non-operator keys)
+            if let JsonValue::Object(obj) = value {
+                let has_non_operator_keys = obj.keys().any(|k| FilterOp::parse(k).is_none());
+
+                if has_non_operator_keys {
+                    // This is a relation - add to path and recurse
+                    current_path.push(key.clone());
+
+                    let nested: HashMap<String, JsonValue> =
+                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+                    // Check if nested has any relations (non-operator keys that are objects with non-operator keys)
+                    let nested_has_relations = nested.iter().any(|(k, v)| {
+                        if FilterOp::parse(k).is_some() {
+                            return false;
+                        }
+                        if let JsonValue::Object(inner) = v {
+                            inner.keys().any(|ik| FilterOp::parse(ik).is_none())
+                        } else {
+                            false
+                        }
+                    });
+
+                    if nested_has_relations {
+                        // Continue recursing - there are more relations
+                        Self::collect_relation_paths(&nested, current_path, paths);
+                    } else {
+                        // This is the deepest level - save the path
+                        paths.push(current_path.clone());
+                    }
+
+                    current_path.pop();
+                }
+            }
+        }
+    }
+
+    /// Extract filter conditions at a specific relation path.
+    ///
+    /// For a filter like `{author: {published: {rating: {_eq: 4.9}}}}` and path `["author"]`,
+    /// this returns a Filter with conditions `{published: {rating: {_eq: 4.9}}}`.
+    ///
+    /// For path `["author", "published"]`, returns `{rating: {_eq: 4.9}}`.
+    pub fn extract_filter_at_path(&self, path: &[String]) -> Option<Filter> {
+        if path.is_empty() {
+            return Some(self.clone());
+        }
+
+        Self::extract_at_path_recursive(&self.conditions, path)
+    }
+
+    fn extract_at_path_recursive(
+        conditions: &HashMap<String, JsonValue>,
+        path: &[String],
+    ) -> Option<Filter> {
+        if path.is_empty() {
+            return Some(Filter::from_conditions(conditions.clone()));
+        }
+
+        let current_key = &path[0];
+        let remaining_path = &path[1..];
+
+        // Look for the key at this level
+        if let Some(value) = conditions.get(current_key) {
+            if let Some(obj) = value.as_object() {
+                let nested: HashMap<String, JsonValue> =
+                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+                if remaining_path.is_empty() {
+                    // We've reached the end of the path - return this level's conditions
+                    return Some(Filter::from_conditions(nested));
+                } else {
+                    // Continue down the path
+                    return Self::extract_at_path_recursive(&nested, remaining_path);
+                }
+            }
+        }
+
+        // Also check inside _and and _or blocks
+        for (key, value) in conditions {
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And | FilterOp::Or => {
+                        if let Some(arr) = value.as_array() {
+                            for item in arr {
+                                if let Some(obj) = item.as_object() {
+                                    let nested: HashMap<String, JsonValue> =
+                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                    if let Some(filter) =
+                                        Self::extract_at_path_recursive(&nested, path)
+                                    {
+                                        return Some(filter);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        None
+    }
+
     /// Check if this filter is "complex" - contains relation conditions inside logical operators.
     ///
     /// A filter is complex when `_and`, `_or`, or `_not` contains a mix of scalar and relation
@@ -1727,5 +1890,116 @@ mod tests {
             json!({"author": {"verified": {"_eq": true}}}),
         )]));
         assert!(filter.is_complex());
+    }
+
+    // =========================================================================
+    // Multi-level relation path detection tests
+    // =========================================================================
+
+    #[test]
+    fn test_get_multi_level_relation_paths_simple_relation() {
+        // Single-level relation like {author: {verified: {_eq: true}}}
+        // Path is ["author"] which has length 1, so should NOT be in multi-level paths
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"verified": {"_eq": true}}),
+        )]));
+        let paths = filter.get_multi_level_relation_paths();
+        assert!(paths.is_empty(), "Single-level relation should not return multi-level paths");
+    }
+
+    #[test]
+    fn test_get_multi_level_relation_paths_two_level() {
+        // Two-level relation like {author: {published: {rating: {_eq: 4.9}}}}
+        // Path is ["author", "published"] which has length 2
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"published": {"rating": {"_eq": 4.9}}}),
+        )]));
+        let paths = filter.get_multi_level_relation_paths();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], vec!["author".to_string(), "published".to_string()]);
+    }
+
+    #[test]
+    fn test_get_multi_level_relation_paths_three_level() {
+        // Three-level relation like {author: {publisher: {country: {name: {_eq: "USA"}}}}}
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"publisher": {"country": {"name": {"_eq": "USA"}}}}),
+        )]));
+        let paths = filter.get_multi_level_relation_paths();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], vec![
+            "author".to_string(),
+            "publisher".to_string(),
+            "country".to_string()
+        ]);
+    }
+
+    #[test]
+    fn test_get_multi_level_relation_paths_no_relation() {
+        // Scalar filter, no relations
+        let filter = Filter::from_conditions(HashMap::from([(
+            "rating".to_string(),
+            json!({"_eq": 4.9}),
+        )]));
+        let paths = filter.get_multi_level_relation_paths();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_extract_filter_at_path_single_level() {
+        // Extract filter at ["author"] from {author: {verified: {_eq: true}}}
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"verified": {"_eq": true}}),
+        )]));
+        let extracted = filter.extract_filter_at_path(&["author".to_string()]);
+        assert!(extracted.is_some());
+        let extracted = extracted.unwrap();
+        // Should contain {verified: {_eq: true}}
+        assert!(extracted.conditions().contains_key("verified"));
+    }
+
+    #[test]
+    fn test_extract_filter_at_path_two_level() {
+        // Extract filter at ["author", "published"] from {author: {published: {rating: {_eq: 4.9}}}}
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"published": {"rating": {"_eq": 4.9}}}),
+        )]));
+        let extracted = filter.extract_filter_at_path(&[
+            "author".to_string(),
+            "published".to_string(),
+        ]);
+        assert!(extracted.is_some());
+        let extracted = extracted.unwrap();
+        // Should contain {rating: {_eq: 4.9}}
+        assert!(extracted.conditions().contains_key("rating"));
+    }
+
+    #[test]
+    fn test_extract_filter_at_path_empty_path() {
+        // Empty path should return the full filter
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"verified": {"_eq": true}}),
+        )]));
+        let extracted = filter.extract_filter_at_path(&[]);
+        assert!(extracted.is_some());
+        let extracted = extracted.unwrap();
+        assert!(extracted.conditions().contains_key("author"));
+    }
+
+    #[test]
+    fn test_extract_filter_at_path_nonexistent() {
+        // Path that doesn't exist should return None
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"verified": {"_eq": true}}),
+        )]));
+        let extracted = filter.extract_filter_at_path(&["nonexistent".to_string()]);
+        assert!(extracted.is_none());
     }
 }

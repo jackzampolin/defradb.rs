@@ -229,13 +229,6 @@ impl TypeJoinOne {
                 JoinDirection::Inverted => {
                     // Index by child's FK field value for reverse lookup
                     let fk_value = child_fk_idx.and_then(|idx| child_doc.get(idx).cloned());
-                    tracing::debug!(
-                        child_doc_id = ?child_doc.doc_id(),
-                        child_fk_idx = ?child_fk_idx,
-                        fk_value = ?fk_value,
-                        num_fields = child_doc.fields().len(),
-                        "TypeJoinOne: Extracting FK from child doc for inverted join"
-                    );
                     fk_value.and_then(|v| v.as_str().map(String::from))
                 }
             };
@@ -337,9 +330,8 @@ impl PlanNode for TypeJoinOne {
             let mut parent_doc = self.parent_plan.value().deep_clone();
 
             // Extract FK and lookup child in cache (O(1) lookup)
-            let child_doc = self
-                .extract_fk(&parent_doc)
-                .and_then(|fk| self.find_child_doc(&fk));
+            let fk = self.extract_fk(&parent_doc);
+            let child_doc = fk.and_then(|fk| self.find_child_doc(&fk));
 
             // Apply relation filter if present
             if let Some(ref rel_filter) = self.relation_filter {

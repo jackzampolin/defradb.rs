@@ -3711,3 +3711,117 @@ async fn test_nested_query_three_levels_with_many_documents() {
     assert_eq!(total_posts, 50, "Should have 50 total posts");
     assert_eq!(total_comments, 200, "Should have 200 total comments");
 }
+
+#[tokio::test]
+async fn test_multi_level_relation_filter() {
+    // Test multi-level relation filter: Book(filter: {author: {published: {rating: {_eq: 4.9}}}})
+    // This filters Books where the author's published book has rating 4.9.
+    // Book → Author → Book (published) → rating
+    //
+    // Data setup:
+    // Book 0: "Painted House" (rating 4.9)
+    // Book 1: "Theif Lord" (rating 4.8)
+    // Author 0: John Grisham -> published Book 0
+    // Author 1: Cornelia Funke -> published Book 1
+    //
+    // Expected: Only Book 0 should be returned (its author's published book has rating 4.9)
+
+    let fetcher = MockFetcher::new();
+
+    // Add books
+    let mut book0 = Document::new();
+    book0.set("_docID", "book-0");
+    book0.set("name", "Painted House");
+    book0.set("rating", 4.9f64);
+    fetcher.add_doc("Book", book0);
+
+    let mut book1 = Document::new();
+    book1.set("_docID", "book-1");
+    book1.set("name", "Theif Lord");
+    book1.set("rating", 4.8f64);
+    fetcher.add_doc("Book", book1);
+
+    // Add authors with published_id (FK to the book they published)
+    let mut author0 = Document::new();
+    author0.set("_docID", "author-0");
+    author0.set("name", "John Grisham");
+    author0.set("age", 65);
+    author0.set("published_id", "book-0");
+    fetcher.add_doc("Author", author0);
+
+    let mut author1 = Document::new();
+    author1.set("_docID", "author-1");
+    author1.set("name", "Cornelia Funke");
+    author1.set("age", 62);
+    author1.set("published_id", "book-1");
+    fetcher.add_doc("Author", author1);
+
+    // Create Book collection - author is inverted (Author.published_id points to Book._docID)
+    let book_collection = CollectionVersion::new(
+        "Book",
+        "v1",
+        "coll-book",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "rating", FieldKind::float64()),
+            FieldDescription::new("4", "author", FieldKind::relation("Author", false))
+                .with_relation_name("published"),
+        ],
+    );
+
+    // Create Author collection - published is primary (has published_id FK)
+    let author_collection = CollectionVersion::new(
+        "Author",
+        "v1",
+        "coll-author",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "age", FieldKind::int()),
+            FieldDescription::new("4", "published", FieldKind::relation("Book", false))
+                .as_primary()
+                .with_relation_name("published"),
+            FieldDescription::new("5", "published_id", FieldKind::string()),
+        ],
+    );
+
+    let runner = QueryRunner::new(fetcher, vec![book_collection, author_collection]);
+
+    // Query with multi-level filter: Book where author.published.rating == 4.9
+    let result = runner
+        .execute_query(
+            r#"{ Book(filter: {author: {published: {rating: {_eq: 4.9}}}}) { name rating author { name age } } }"#,
+        )
+        .await;
+
+    eprintln!("Query result: {:?}", result);
+
+    assert!(result.is_ok(), "Multi-level filter query should succeed. Error: {:?}", result.err());
+    let result_data = result.unwrap();
+    let books = result_data.get("Book").unwrap().as_array().unwrap();
+
+    eprintln!("Books returned: {:?}", books);
+
+    // Should return exactly 1 book (Painted House)
+    assert_eq!(books.len(), 1, "Should return 1 book matching the filter");
+
+    let book = &books[0];
+    assert_eq!(
+        book.get("name").unwrap().as_str().unwrap(),
+        "Painted House",
+        "Should be Painted House"
+    );
+    assert_eq!(
+        book.get("rating").unwrap().as_f64().unwrap(),
+        4.9,
+        "Rating should be 4.9"
+    );
+
+    let author = book.get("author").unwrap();
+    assert_eq!(
+        author.get("name").unwrap().as_str().unwrap(),
+        "John Grisham",
+        "Author should be John Grisham"
+    );
+}

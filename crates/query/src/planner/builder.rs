@@ -175,12 +175,14 @@ impl Planner {
         // Filter handling depends on complexity:
         // - Simple filters: Split into scalar (before join) and relation (inside TypeJoin)
         // - Complex filters (_and/_or with mixed scalar+relation): Apply whole filter after join
+        // - Multi-level relation filters: Apply after all joins (like complex filters)
 
         // Check if filter is complex (has relation conditions inside logical operators)
+        // or has multi-level relation paths (e.g., {author: {published: {rating: ...}}})
         let is_complex_filter = select
             .filter
             .as_ref()
-            .map(|f| f.is_complex())
+            .map(|f| f.is_complex() || !f.get_multi_level_relation_paths().is_empty())
             .unwrap_or(false);
 
         // Split filter into scalar and relation parts (only useful for non-complex filters)
@@ -232,11 +234,51 @@ impl Planner {
         };
         plan = self.apply_joins(plan, select, &collection, scan_mapping.clone(), 0, filter_for_joins)?;
 
-        // 3b. Apply joins for relation fields referenced in filter but NOT in selection set.
+        // 3b. Apply joins for multi-level relation filter paths where the first relation
+        // is NOT in the selection set. If the first relation IS selected, then apply_joins
+        // already handles it via apply_multi_level_sub_joins.
+        // Example: Book(filter: {author: {published: {rating: {_eq: 4.9}}}}) { name }
+        // (no author selection, so we need to add the full join chain here)
+        if let Some(ref filter) = select.filter {
+            // Get relation names from selection
+            let selected_relation_names: Vec<&str> = select
+                .fields
+                .iter()
+                .filter_map(|f| {
+                    if let Requestable::Select(s) = f {
+                        Some(s.field.name.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let multi_level_paths = filter.get_multi_level_relation_paths();
+            for path in multi_level_paths {
+                // Only handle paths where the first relation is NOT in the selection set
+                if let Some(first_relation) = path.first() {
+                    if selected_relation_names.contains(&first_relation.as_str()) {
+                        // This path is handled by apply_joins via apply_multi_level_sub_joins
+                        continue;
+                    }
+                    plan = self.apply_multi_level_filter_joins(
+                        plan,
+                        &path,
+                        &collection,
+                        filter,
+                        scan_mapping.clone(),
+                    )?;
+                }
+            }
+        }
+
+        // 3c. Apply joins for single-level relation fields referenced in filter but NOT in selection set.
         // This allows complex filters to evaluate conditions on relations even when those
         // relations aren't being returned in the output.
         // Example: Book(filter: {author: {verified: true}}) { name rating }
         // The `author` relation must be joined for the filter even though it's not selected.
+        //
+        // Skip relations that are part of multi-level paths (already handled above).
         if filter_has_relations {
             // Get the names of relation fields already joined from selection
             let selected_relation_names: Vec<&str> = select
@@ -251,10 +293,25 @@ impl Planner {
                 })
                 .collect();
 
-            // Create joins for filter relations not in selection
+            // Get relation names that are already handled as part of multi-level paths
+            let multi_level_first_relations: Vec<String> = select
+                .filter
+                .as_ref()
+                .map(|f| {
+                    f.get_multi_level_relation_paths()
+                        .into_iter()
+                        .filter_map(|path| path.into_iter().next())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Create joins for filter relations not in selection and not in multi-level paths
             for relation_field_name in &filter_relation_fields {
                 if selected_relation_names.contains(&relation_field_name.as_str()) {
                     continue; // Already joined from selection
+                }
+                if multi_level_first_relations.contains(relation_field_name) {
+                    continue; // Already joined as part of multi-level path
                 }
 
                 // Find the relation field in the parent collection
@@ -470,6 +527,33 @@ impl Planner {
                     }
                 }
 
+                // Check if parent's filter has multi-level paths starting with this relation.
+                // If so, we need to add nested relation fields to the child mapping and build
+                // sub-joins for them so the filter can be evaluated on the merged document.
+                let multi_level_paths_for_relation: Vec<Vec<String>> = select
+                    .filter
+                    .as_ref()
+                    .map(|f| {
+                        f.get_multi_level_relation_paths()
+                            .into_iter()
+                            .filter(|path| path.first().map_or(false, |first| first == relation_field_name))
+                            .map(|path| path[1..].to_vec()) // Get remaining path after this relation
+                            .filter(|remaining| !remaining.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Add render_keys for nested relation fields needed by multi-level filters
+                for remaining_path in &multi_level_paths_for_relation {
+                    if let Some(first_nested) = remaining_path.first() {
+                        if let Some(idx) = child_scan_mapping.first_index_of_name(first_nested) {
+                            if !child_scan_mapping.render_keys.iter().any(|rk| rk.key == *first_nested) {
+                                child_scan_mapping.add_render_key(idx, first_nested);
+                            }
+                        }
+                    }
+                }
+
                 // Get the relation field index in the parent mapping
                 let relation_field_index = mapping
                     .first_index_of_name(relation_field_name)
@@ -539,6 +623,24 @@ impl Planner {
                     depth + 1,
                     None, // Nested relation filters handled differently
                 )?;
+
+                // Apply sub-joins for multi-level filter paths within this relation.
+                // For example, if we're joining Book → Author and the filter has path
+                // ["author", "published"], we need to add a sub-join for "published" here.
+                for remaining_path in &multi_level_paths_for_relation {
+                    let (new_child_plan, new_child_mapping) = self.apply_multi_level_sub_joins(
+                        child_plan,
+                        remaining_path,
+                        &target_collection,
+                        child_scan_mapping.clone(),
+                    )?;
+                    child_plan = new_child_plan;
+                    child_scan_mapping = new_child_mapping;
+                }
+
+                // Update parent mapping with the final child mapping (after sub-joins)
+                // This ensures the nested relation mappings are included
+                mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
 
                 // Find the other side of the relation
                 let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
@@ -794,6 +896,294 @@ impl Planner {
         );
 
         Ok(Box::new(join))
+    }
+
+    /// Apply sub-joins for remaining elements of a multi-level filter path.
+    ///
+    /// This is called when processing a relation that's the start of a multi-level filter path.
+    /// For example, when processing the "author" relation and the filter has path ["author", "published"],
+    /// this method adds a sub-join for "published" within the author's child plan.
+    ///
+    /// Returns both the updated plan and the updated mapping, since the mapping must be modified
+    /// to include the child mappings for the nested relations.
+    fn apply_multi_level_sub_joins(
+        &self,
+        mut plan: Box<dyn PlanNode>,
+        remaining_path: &[String],
+        parent_collection: &CollectionVersion,
+        mut mapping: DocumentMapping,
+    ) -> Result<(Box<dyn PlanNode>, DocumentMapping)> {
+        if remaining_path.is_empty() {
+            return Ok((plan, mapping));
+        }
+
+        let mut current_collection = parent_collection.clone();
+
+        // Build sub-joins for each remaining element in the path
+        for relation_field_name in remaining_path {
+            // Find the relation field in the current collection
+            let relation_field = current_collection
+                .field_by_name(relation_field_name)
+                .ok_or_else(|| QueryError::unknown_field(relation_field_name))?;
+
+            if !relation_field.kind.is_relation() {
+                return Err(QueryError::execution(format!(
+                    "field '{}' on collection '{}' is not a relation",
+                    relation_field_name, current_collection.name
+                )));
+            }
+
+            // Get the target collection for this relation
+            let target_collection_id = relation_field
+                .kind
+                .relation_collection_id()
+                .ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "relation field '{}' has no target collection",
+                        relation_field_name
+                    ))
+                })?;
+
+            let target_collection = if target_collection_id.is_empty() {
+                Arc::new(current_collection.clone())
+            } else {
+                self.get_collection(target_collection_id)
+                    .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
+            };
+
+            // Build a child scan mapping with all fields for filter evaluation
+            let child_scan_mapping = {
+                let mut m = DocumentMapping::new();
+                for (i, field) in target_collection.fields.iter().enumerate() {
+                    m.add(i, &field.name);
+                    // Add render_key so field appears in merged JSON for filter evaluation
+                    m.add_render_key(i, &field.name);
+                }
+                m
+            };
+
+            // Get the relation field index in the parent mapping
+            let relation_field_index = mapping
+                .first_index_of_name(relation_field_name)
+                .ok_or_else(|| QueryError::internal(format!(
+                    "relation field '{}' not in mapping", relation_field_name
+                )))?;
+
+            // Set up child mapping in parent for TypeJoin
+            mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
+
+            // Create the child scan plan
+            let mut child_scan =
+                ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
+            if let Some(ref fetcher) = self.fetcher {
+                child_scan = child_scan.with_fetcher(fetcher.clone());
+            }
+            let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+            // Find the other side of the relation
+            let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
+                target_collection.field_by_relation(
+                    rel_name,
+                    &current_collection.name,
+                    relation_field_name,
+                )
+            } else {
+                None
+            };
+
+            let child_relation_index = target_relation_field
+                .and_then(|f| {
+                    target_collection
+                        .fields
+                        .iter()
+                        .position(|tf| tf.name == f.name)
+                })
+                .unwrap_or(0);
+
+            // Create join sides
+            let parent_side = JoinSide::new(
+                current_collection.clone(),
+                relation_field.clone(),
+                relation_field_index,
+            )?;
+
+            let child_side = JoinSide::new(
+                (*target_collection).clone(),
+                target_relation_field
+                    .cloned()
+                    .unwrap_or_else(|| relation_field.clone()),
+                child_relation_index,
+            )?;
+
+            // Create TypeJoinOne for the sub-join
+            let join = TypeJoinOne::new(
+                plan,
+                child_plan,
+                parent_side,
+                child_side,
+                mapping.clone(),
+            );
+
+            plan = Box::new(join);
+
+            // Update current collection for next iteration
+            current_collection = (*target_collection).clone();
+        }
+
+        Ok((plan, mapping))
+    }
+
+    /// Apply joins for a multi-level relation filter path.
+    ///
+    /// For a path like ["author", "published"] with filter {author: {published: {rating: {_eq: 4.9}}}},
+    /// this builds a chain of TypeJoin nodes:
+    /// 1. Join parent (Book) → first relation (Author) via "author"
+    /// 2. Join first relation (Author) → second relation (Book) via "published"
+    /// 3. Apply the scalar filter (rating == 4.9) at the innermost level
+    ///
+    /// The filter is extracted at each level of the path and applied to the appropriate join.
+    fn apply_multi_level_filter_joins(
+        &self,
+        mut plan: Box<dyn PlanNode>,
+        path: &[String],
+        start_collection: &CollectionVersion,
+        filter: &crate::mapper::Filter,
+        mut mapping: DocumentMapping,
+    ) -> Result<Box<dyn PlanNode>> {
+        if path.is_empty() {
+            return Ok(plan);
+        }
+
+        let mut current_collection = start_collection.clone();
+
+        // Build nested joins for each level of the path
+        for (level, relation_field_name) in path.iter().enumerate() {
+            // Find the relation field in the current collection
+            let relation_field = current_collection
+                .field_by_name(relation_field_name)
+                .ok_or_else(|| QueryError::unknown_field(relation_field_name))?;
+
+            if !relation_field.kind.is_relation() {
+                return Err(QueryError::execution(format!(
+                    "field '{}' on collection '{}' is not a relation",
+                    relation_field_name, current_collection.name
+                )));
+            }
+
+            // Get the target collection for this relation
+            let target_collection_id = relation_field
+                .kind
+                .relation_collection_id()
+                .ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "relation field '{}' has no target collection",
+                        relation_field_name
+                    ))
+                })?;
+
+            let target_collection = if target_collection_id.is_empty() {
+                Arc::new(current_collection.clone())
+            } else {
+                self.get_collection(target_collection_id)
+                    .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
+            };
+
+            // Build a child scan mapping with all fields for filter evaluation
+            let child_scan_mapping = {
+                let mut m = DocumentMapping::new();
+                for (i, field) in target_collection.fields.iter().enumerate() {
+                    m.add(i, &field.name);
+                    // Add render_key so field appears in merged JSON for filter evaluation
+                    m.add_render_key(i, &field.name);
+                }
+                m
+            };
+
+            // Get the relation field index in the parent mapping
+            let relation_field_index = mapping
+                .first_index_of_name(relation_field_name)
+                .ok_or_else(|| QueryError::internal("relation field not in parent mapping"))?;
+
+            // Set up child mapping in parent for TypeJoin
+            mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
+
+            // Create the child scan plan
+            let mut child_scan =
+                ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
+            if let Some(ref fetcher) = self.fetcher {
+                child_scan = child_scan.with_fetcher(fetcher.clone());
+            }
+
+            // Check if this is the last level in the path (where scalar filter applies)
+            let is_last_level = level == path.len() - 1;
+
+            let child_plan: Box<dyn PlanNode> = if is_last_level {
+                // Extract and apply the scalar filter at the deepest level
+                // The filter at this path level should be the scalar conditions
+                if let Some(leaf_filter) = filter.extract_filter_at_path(path) {
+                    Box::new(
+                        SelectNode::new(Box::new(child_scan), child_scan_mapping.clone())
+                            .with_filter(leaf_filter),
+                    )
+                } else {
+                    Box::new(child_scan)
+                }
+            } else {
+                Box::new(child_scan)
+            };
+
+            // Find the other side of the relation
+            let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
+                target_collection.field_by_relation(
+                    rel_name,
+                    &current_collection.name,
+                    relation_field_name,
+                )
+            } else {
+                None
+            };
+
+            let child_relation_index = target_relation_field
+                .and_then(|f| {
+                    target_collection
+                        .fields
+                        .iter()
+                        .position(|tf| tf.name == f.name)
+                })
+                .unwrap_or(0);
+
+            // Create join sides
+            let parent_side = JoinSide::new(
+                current_collection.clone(),
+                relation_field.clone(),
+                relation_field_index,
+            )?;
+
+            let child_side = JoinSide::new(
+                (*target_collection).clone(),
+                target_relation_field
+                    .cloned()
+                    .unwrap_or_else(|| relation_field.clone()),
+                child_relation_index,
+            )?;
+
+            // For multi-level filters, create TypeJoinOne with relation filter
+            // that filters parents based on whether their children exist after the nested filter
+            let join = if is_last_level {
+                // Last level: create a relation filter that uses the scalar filter from the leaf
+                // This ensures parents are only included if their matched child exists
+                TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone())
+            } else {
+                TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone())
+            };
+
+            plan = Box::new(join);
+
+            // Update current collection for next iteration
+            current_collection = (*target_collection).clone();
+        }
+
+        Ok(plan)
     }
 
     /// Build the document mapping for a Select operation.
