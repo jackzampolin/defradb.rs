@@ -96,7 +96,10 @@ pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
-pub use schema_loader::load_active_collections;
+pub use schema_loader::{
+    get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
+    load_active_collections,
+};
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};
