@@ -116,6 +116,10 @@ pub enum QueryError {
     #[error("type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: String, actual: String },
 
+    /// Unexpected type in filter condition (Go-compatible format)
+    #[error("unexpected type. Property: {property}, Actual: {actual}")]
+    UnexpectedType { property: String, actual: String },
+
     /// Storage layer error
     #[error("storage error: {0}")]
     Storage(#[from] storage::corekv::Error),

@@ -951,10 +951,10 @@ impl Filter {
             }
             FilterOp::None => {
                 // Return true if NO elements match the nested condition
-                // Non-array field → true (no elements match, like empty array)
+                // Non-array field → false (not an array, so _none doesn't apply - Go behavior)
                 let arr = match actual.as_array() {
                     Some(a) => a,
-                    None => return Ok(true), // Non-array has no elements matching
+                    None => return Ok(false), // Non-array excluded from _none results
                 };
                 // Empty array → true (no elements match)
                 if arr.is_empty() {
@@ -1069,19 +1069,38 @@ impl Filter {
             }
 
             // Type mismatch handling:
-            // - If filter value is a valid comparable type (number/string) but stored value isn't,
-            //   return None (no match) - this is the "AllTypes" case
-            // - If filter value is an invalid type for comparison (bool, object, array),
-            //   return an error - this is the "ReturnsError" case
-            (_, JsonValue::Number(_)) | (_, JsonValue::String(_)) => {
-                // Filter value is valid (number or string), but stored value type doesn't match
+            // - If filter value is a number but stored value isn't, return None (no match)
+            //   This is the "AllTypes" case where we have mixed-type JSON fields
+            // - If filter value is string, bool, object, or array, return an error
+            //   Go DefraDB only allows numeric comparisons with _gt/_ge/_lt/_le
+            (_, JsonValue::Number(_)) => {
+                // Filter value is number, but stored value type doesn't match
                 // Return no match instead of error
                 Ok(None)
             }
-            _ => Err(QueryError::TypeMismatch {
-                expected: "comparable types".to_string(),
-                actual: format!("{:?} vs {:?}", a, b),
+            // String filter values are NOT valid for comparison operators
+            (_, JsonValue::String(_)) => Err(QueryError::UnexpectedType {
+                property: "condition".to_string(),
+                actual: Self::go_type_name(b),
             }),
+            // Error case: filter value (b) is an invalid type for comparison
+            // Use Go-compatible error format: "unexpected type. Property: condition, Actual: <type>"
+            _ => Err(QueryError::UnexpectedType {
+                property: "condition".to_string(),
+                actual: Self::go_type_name(b),
+            }),
+        }
+    }
+
+    /// Get Go-compatible type name for a JSON value
+    fn go_type_name(value: &JsonValue) -> String {
+        match value {
+            JsonValue::Null => "nil".to_string(),
+            JsonValue::Bool(_) => "bool".to_string(),
+            JsonValue::Number(_) => "float64".to_string(),
+            JsonValue::String(_) => "string".to_string(),
+            JsonValue::Array(_) => "[]interface {}".to_string(),
+            JsonValue::Object(_) => "map[string]interface {}".to_string(),
         }
     }
 
