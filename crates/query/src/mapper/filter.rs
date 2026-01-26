@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -895,11 +896,31 @@ impl Filter {
                     false
                 }
             }
-            (JsonValue::String(a), JsonValue::String(b)) => a == b,
+            (JsonValue::String(a), JsonValue::String(b)) => {
+                // Try direct string comparison first
+                if a == b {
+                    return true;
+                }
+                // Try parsing as datetime values - stored values are in UTC format,
+                // filter values may have timezone offsets. Both represent the same time
+                // if they parse to the same UTC timestamp.
+                Self::datetimes_equal(a, b)
+            }
             (JsonValue::Array(a), JsonValue::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Self::values_equal(a, b))
             }
             _ => false,
+        }
+    }
+
+    /// Try to compare two strings as datetime values.
+    /// Returns true if both can be parsed as RFC 3339 datetime strings and represent the same time.
+    fn datetimes_equal(a: &str, b: &str) -> bool {
+        let a_dt: Option<DateTime<Utc>> = a.parse().ok();
+        let b_dt: Option<DateTime<Utc>> = b.parse().ok();
+        match (a_dt, b_dt) {
+            (Some(a), Some(b)) => a == b,
+            _ => false, // If either isn't a valid datetime, they're not equal
         }
     }
 
@@ -934,8 +955,16 @@ impl Filter {
                 Ok(a_val.partial_cmp(&b_val)) // Returns None for NaN, which becomes false
             }
 
-            // String comparisons
-            (JsonValue::String(a), JsonValue::String(b)) => Ok(Some(a.cmp(b))),
+            // String comparisons - try datetime parsing first, then fall back to lexicographic
+            (JsonValue::String(a), JsonValue::String(b)) => {
+                // Try parsing as datetime values for proper temporal comparison
+                let a_dt: Option<DateTime<Utc>> = a.parse().ok();
+                let b_dt: Option<DateTime<Utc>> = b.parse().ok();
+                match (a_dt, b_dt) {
+                    (Some(a_time), Some(b_time)) => Ok(Some(a_time.cmp(&b_time))),
+                    _ => Ok(Some(a.cmp(b))), // Fall back to lexicographic comparison
+                }
+            }
 
             // Type mismatch
             _ => Err(QueryError::TypeMismatch {
