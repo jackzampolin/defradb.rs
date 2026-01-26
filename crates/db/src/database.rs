@@ -895,21 +895,55 @@ impl<S: Store> DB<S> {
         })?;
 
         // Apply JSON patch operations
+        // Go DefraDB embeds collection name in patch paths: /CollectionName/Fields/-
+        // We need to strip the collection name prefix to get paths relative to schema
+        let collection_prefix = format!("/{}/", collection_name);
+
         if let serde_json::Value::Array(ops) = patch_ops {
             for op in ops {
                 let operation = op.get("op").and_then(|v| v.as_str());
-                let path = op.get("path").and_then(|v| v.as_str());
+                let raw_path = op.get("path").and_then(|v| v.as_str());
                 let value = op.get("value");
 
-                match (operation, path) {
+                // Strip collection name prefix from path if present (Go compatibility)
+                let path = raw_path.map(|p| {
+                    if p.starts_with(&collection_prefix) {
+                        format!("/{}", &p[collection_prefix.len()..])
+                    } else {
+                        p.to_string()
+                    }
+                });
+
+                match (operation, path.as_deref()) {
                     (Some("replace"), Some(path)) | (Some("add"), Some(path)) => {
-                        let value = value.ok_or_else(|| {
-                            Error::InvalidPatch(format!(
-                                "missing 'value' for operation at {}",
-                                path
-                            ))
-                        })?;
-                        Self::json_pointer_set(&mut schema_json, path, value.clone())?;
+                        let mut value = value
+                            .ok_or_else(|| {
+                                Error::InvalidPatch(format!(
+                                    "missing 'value' for operation at {}",
+                                    path
+                                ))
+                            })?
+                            .clone();
+
+                        // Go compatibility: auto-generate FieldID when adding new fields
+                        // If path ends with /Fields/- or /Fields/<n> and value has Name but no FieldID
+                        if path.contains("/Fields/") {
+                            if let serde_json::Value::Object(ref mut map) = value {
+                                if map.contains_key("Name") && !map.contains_key("FieldID") {
+                                    // Generate next FieldID based on existing fields count
+                                    let fields_count = schema_json
+                                        .get("Fields")
+                                        .and_then(|f| f.as_array())
+                                        .map(|arr| arr.len())
+                                        .unwrap_or(0);
+                                    // FieldID starts at 1, and we need the next available
+                                    let field_id = (fields_count + 1).to_string();
+                                    map.insert("FieldID".to_string(), field_id.into());
+                                }
+                            }
+                        }
+
+                        Self::json_pointer_set(&mut schema_json, path, value)?;
                     }
                     (Some("remove"), Some(path)) => {
                         Self::json_pointer_remove(&mut schema_json, path)?;
@@ -986,13 +1020,18 @@ impl<S: Store> DB<S> {
                         return Ok(());
                     }
                     serde_json::Value::Array(arr) => {
-                        let idx: usize = segment.parse().map_err(|_| {
-                            Error::InvalidPatch(format!("invalid array index: {}", segment))
-                        })?;
-                        if idx >= arr.len() {
+                        // JSON Pointer uses "-" to mean "append to end of array"
+                        if *segment == "-" {
                             arr.push(value);
                         } else {
-                            arr[idx] = value;
+                            let idx: usize = segment.parse().map_err(|_| {
+                                Error::InvalidPatch(format!("invalid array index: {}", segment))
+                            })?;
+                            if idx >= arr.len() {
+                                arr.push(value);
+                            } else {
+                                arr[idx] = value;
+                            }
                         }
                         return Ok(());
                     }

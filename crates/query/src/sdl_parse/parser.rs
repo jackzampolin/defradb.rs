@@ -139,6 +139,15 @@ impl<'a> SdlParser<'a> {
 
     fn parse_object_type(&mut self, obj: &ObjectType<'_, String>) -> Result<()> {
         let name = obj.name.clone();
+
+        // Check for duplicate type names (Go compatibility: error on duplicates in same SDL)
+        if self.type_defs.contains_key(&name) {
+            return Err(QueryError::parse(format!(
+                "collection already exists. Name: {}",
+                name
+            )));
+        }
+
         self.current_type = Some(name.clone());
         let mut fields = Vec::new();
 
@@ -1192,8 +1201,11 @@ impl<'a> SdlParser<'a> {
             return Ok(FieldKind::named(base, parsed_type.is_list));
         }
 
-        // Unknown type - treat as named reference
-        Ok(FieldKind::named(base, parsed_type.is_list))
+        // Unknown type - error for Go compatibility
+        Err(QueryError::parse(format!(
+            "no type found for given name. Name: {}",
+            base
+        )))
     }
 }
 
