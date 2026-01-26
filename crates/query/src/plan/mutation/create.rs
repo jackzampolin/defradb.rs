@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use document::Document;
-use schema::{CollectionVersion, FieldKind, ScalarKind};
+use schema::{CollectionVersion, FieldKind, ScalarArrayKind, ScalarKind};
 use serde_json::Value as JsonValue;
 use tracing;
 
@@ -243,12 +243,212 @@ pub fn json_to_normal_value_with_kind(
                     ))),
                 }
             }
+            // ScalarArray fields: handle empty arrays and nillable elements
+            FieldKind::ScalarArray(array_kind) => {
+                match value {
+                    JsonValue::Array(arr) => {
+                        json_array_to_normal_value_with_kind(arr, *array_kind)
+                    }
+                    _ => Err(QueryError::execution(format!(
+                        "Expected array, got: {:?}",
+                        value
+                    ))),
+                }
+            }
             // For other scalar types, fall through to default conversion
             _ => json_to_normal_value(value),
         }
     } else {
         // No schema info - use default conversion
         json_to_normal_value(value)
+    }
+}
+
+/// Convert a JSON array to NormalValue using schema-aware type coercion.
+///
+/// This function properly handles:
+/// - Empty arrays: returns the correct typed empty array based on array_kind
+/// - Nillable elements: preserves null values instead of converting to defaults
+fn json_array_to_normal_value_with_kind(
+    arr: &[JsonValue],
+    array_kind: ScalarArrayKind,
+) -> Result<document::NormalValue> {
+    use document::NormalValue;
+
+    match array_kind {
+        // Boolean arrays
+        ScalarArrayKind::BoolArray => {
+            let mut bools = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Bool(b) => bools.push(*b),
+                    JsonValue::Null => bools.push(false),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a boolean (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::BoolArray(bools))
+        }
+        ScalarArrayKind::NillableBoolArray => {
+            let mut bools = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Bool(b) => bools.push(Some(*b)),
+                    JsonValue::Null => bools.push(None),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a boolean (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::NillableBoolElementArray(bools))
+        }
+
+        // Integer arrays
+        ScalarArrayKind::IntArray => {
+            let mut ints = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Number(n) if n.as_i64().is_some() => {
+                        ints.push(n.as_i64().unwrap())
+                    }
+                    JsonValue::Null => ints.push(0),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not an integer (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::IntArray(ints))
+        }
+        ScalarArrayKind::NillableIntArray => {
+            let mut ints = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Number(n) if n.as_i64().is_some() => {
+                        ints.push(Some(n.as_i64().unwrap()))
+                    }
+                    JsonValue::Null => ints.push(None),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not an integer (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::NillableIntElementArray(ints))
+        }
+
+        // Float64 arrays
+        ScalarArrayKind::Float64Array => {
+            let mut floats = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Number(n) => floats.push(n.as_f64().unwrap_or(0.0)),
+                    JsonValue::Null => floats.push(0.0),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a number (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::Float64Array(floats))
+        }
+        ScalarArrayKind::NillableFloat64Array => {
+            let mut floats = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Number(n) => floats.push(Some(n.as_f64().unwrap_or(0.0))),
+                    JsonValue::Null => floats.push(None),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a number (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::NillableFloat64ElementArray(floats))
+        }
+
+        // Float32 arrays
+        ScalarArrayKind::Float32Array => {
+            let mut floats = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Number(n) => floats.push(n.as_f64().unwrap_or(0.0) as f32),
+                    JsonValue::Null => floats.push(0.0),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a number (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::Float32Array(floats))
+        }
+        ScalarArrayKind::NillableFloat32Array => {
+            let mut floats = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::Number(n) => floats.push(Some(n.as_f64().unwrap_or(0.0) as f32)),
+                    JsonValue::Null => floats.push(None),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a number (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::NillableFloat32ElementArray(floats))
+        }
+
+        // String arrays
+        ScalarArrayKind::StringArray => {
+            let mut strings = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::String(s) => strings.push(s.clone()),
+                    JsonValue::Null => strings.push(String::new()),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a string (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::StringArray(strings))
+        }
+        ScalarArrayKind::NillableStringArray => {
+            let mut strings = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v {
+                    JsonValue::String(s) => strings.push(Some(s.clone())),
+                    JsonValue::Null => strings.push(None),
+                    _ => {
+                        return Err(QueryError::execution(format!(
+                            "Array element at index {} is not a string (found {:?})",
+                            i, v
+                        )))
+                    }
+                }
+            }
+            Ok(NormalValue::NillableStringElementArray(strings))
+        }
     }
 }
 
@@ -466,6 +666,63 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
         NormalValue::TimeArray(arr) => JsonValue::Array(
             arr.iter()
                 .map(|t| JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+                .collect(),
+        ),
+        // Arrays with nillable elements - preserve null values
+        NormalValue::NillableBoolElementArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|opt| match opt {
+                    Some(b) => JsonValue::Bool(*b),
+                    None => JsonValue::Null,
+                })
+                .collect(),
+        ),
+        NormalValue::NillableIntElementArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|opt| match opt {
+                    Some(i) => JsonValue::Number((*i).into()),
+                    None => JsonValue::Null,
+                })
+                .collect(),
+        ),
+        NormalValue::NillableFloat64ElementArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|opt| match opt {
+                    Some(f) => {
+                        if f.is_nan() || f.is_infinite() {
+                            JsonValue::Null
+                        } else {
+                            serde_json::Number::from_f64(*f)
+                                .map(JsonValue::Number)
+                                .unwrap_or(JsonValue::Null)
+                        }
+                    }
+                    None => JsonValue::Null,
+                })
+                .collect(),
+        ),
+        NormalValue::NillableFloat32ElementArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|opt| match opt {
+                    Some(f) => {
+                        if f.is_nan() || f.is_infinite() {
+                            JsonValue::Null
+                        } else {
+                            serde_json::Number::from_f64(*f as f64)
+                                .map(JsonValue::Number)
+                                .unwrap_or(JsonValue::Null)
+                        }
+                    }
+                    None => JsonValue::Null,
+                })
+                .collect(),
+        ),
+        NormalValue::NillableStringElementArray(arr) => JsonValue::Array(
+            arr.iter()
+                .map(|opt| match opt {
+                    Some(s) => JsonValue::String(s.clone()),
+                    None => JsonValue::Null,
+                })
                 .collect(),
         ),
         // For unknown types, log a warning and return null
