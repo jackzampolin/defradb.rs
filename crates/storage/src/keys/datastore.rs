@@ -9,6 +9,17 @@
 use super::utils::{encode_uvarint_ascending, InstanceType, SEPARATOR};
 use crate::corekv::Key;
 
+/// Special field ID for storing document schema version.
+///
+/// Documents store their schema version ID as a field with this ID.
+/// This allows the lens migration system to determine if a document
+/// needs to be transformed to match the current collection schema.
+///
+/// Storage key format: `/{collectionShortID}/v/{docID}/v`
+///
+/// Matches Go's `keys.DATASTORE_DOC_VERSION_FIELD_ID`.
+pub const DATASTORE_DOC_VERSION_FIELD_ID: &str = "v";
+
 /// DataStoreKey: Main key for storing field values in documents
 ///
 /// Structure: /[CollectionRootID]/[InstanceType]/[DocID]/[FieldID]
@@ -68,6 +79,36 @@ impl DataStoreKey {
         buf.extend_from_slice(doc_id.as_bytes());
         buf.push(SEPARATOR);
         buf
+    }
+
+    /// Create a key for storing the document's schema version.
+    ///
+    /// The version field uses the special field ID "v" (DATASTORE_DOC_VERSION_FIELD_ID).
+    /// This is used by the lens migration system to track which schema version
+    /// a document was stored with.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let key = DataStoreKey::version_key(1, InstanceType::Value, "bae123...");
+    /// // Results in key: /1/v/bae123.../v
+    /// ```
+    pub fn version_key(
+        collection_id: u32,
+        instance_type: InstanceType,
+        doc_id: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            collection_id,
+            instance_type,
+            doc_id,
+            DATASTORE_DOC_VERSION_FIELD_ID,
+        )
+    }
+
+    /// Check if this key represents a document version field.
+    pub fn is_version_field(&self) -> bool {
+        self.field_id == DATASTORE_DOC_VERSION_FIELD_ID
     }
 }
 
@@ -554,5 +595,42 @@ mod tests {
 
         let prefix = DataStoreKey::document_prefix(1, InstanceType::Value, "docid");
         assert!(!prefix.is_empty());
+    }
+
+    #[test]
+    fn test_version_key() {
+        let key = DataStoreKey::version_key(
+            1,
+            InstanceType::Value,
+            "bae123456789abcdef0123456789abcdef012345",
+        );
+
+        assert!(key.is_version_field());
+        assert_eq!(key.field_id, DATASTORE_DOC_VERSION_FIELD_ID);
+        assert_eq!(key.field_id, "v");
+
+        let string = key.to_string();
+        assert!(string.ends_with("/v"), "Version key should end with /v");
+        assert!(string.contains("/1/v/"));
+    }
+
+    #[test]
+    fn test_is_version_field() {
+        let version_key = DataStoreKey::new(
+            1,
+            InstanceType::Value,
+            "docid",
+            DATASTORE_DOC_VERSION_FIELD_ID,
+        );
+        assert!(version_key.is_version_field());
+
+        let regular_key = DataStoreKey::new(1, InstanceType::Value, "docid", "name");
+        assert!(!regular_key.is_version_field());
+    }
+
+    #[test]
+    fn test_version_field_id_constant() {
+        // Verify the constant matches Go's DATASTORE_DOC_VERSION_FIELD_ID
+        assert_eq!(DATASTORE_DOC_VERSION_FIELD_ID, "v");
     }
 }

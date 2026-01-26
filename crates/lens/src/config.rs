@@ -1,0 +1,172 @@
+//! Lens configuration types.
+//!
+//! Matches Go's client/lens.go types.
+
+use serde::{Deserialize, Serialize};
+
+/// Configuration for a Lens migration.
+///
+/// Matches Go's client.LensConfig.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LensConfig {
+    /// ID of the schema version to migrate from.
+    ///
+    /// The source and destination versions must be adjacent in the schema history.
+    #[serde(rename = "SourceSchemaVersionID")]
+    pub source_schema_version_id: String,
+
+    /// ID of the schema version to migrate to.
+    ///
+    /// The source and destination versions must be adjacent in the schema history.
+    #[serde(rename = "DestinationSchemaVersionID")]
+    pub destination_schema_version_id: String,
+
+    /// The Lens module configuration.
+    #[serde(rename = "Lens")]
+    pub lens: LensModule,
+}
+
+impl LensConfig {
+    /// Create a new lens configuration.
+    pub fn new(
+        source_schema_version_id: impl Into<String>,
+        destination_schema_version_id: impl Into<String>,
+        lens: LensModule,
+    ) -> Self {
+        Self {
+            source_schema_version_id: source_schema_version_id.into(),
+            destination_schema_version_id: destination_schema_version_id.into(),
+            lens,
+        }
+    }
+}
+
+/// Configuration for a Lens WASM module.
+///
+/// Matches Go's model.Lens from lens/host-go/config/model.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LensModule {
+    /// Path to the WASM module file.
+    ///
+    /// The WASM module must remain at this location as long as the migration is active.
+    #[serde(rename = "Path", default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    /// Raw WASM module bytes (alternative to path).
+    #[serde(
+        rename = "Module",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes_opt"
+    )]
+    pub module: Option<Vec<u8>>,
+
+    /// Arguments passed to the WASM module.
+    #[serde(rename = "Arguments", default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+}
+
+impl LensModule {
+    /// Create a lens module from a file path.
+    pub fn from_path(path: impl Into<String>) -> Self {
+        Self {
+            path: Some(path.into()),
+            module: None,
+            arguments: None,
+        }
+    }
+
+    /// Create a lens module from raw WASM bytes.
+    pub fn from_bytes(module: Vec<u8>) -> Self {
+        Self {
+            path: None,
+            module: Some(module),
+            arguments: None,
+        }
+    }
+
+    /// Set arguments for the module.
+    pub fn with_arguments(mut self, arguments: serde_json::Value) -> Self {
+        self.arguments = Some(arguments);
+        self
+    }
+}
+
+mod serde_bytes_opt {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(data: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match data {
+            Some(bytes) => {
+                let encoded = STANDARD.encode(bytes);
+                encoded.serialize(serializer)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => STANDARD
+                .decode(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lens_config_serialization() {
+        let config = LensConfig::new(
+            "bafkrei_v1",
+            "bafkrei_v2",
+            LensModule::from_path("/path/to/transform.wasm"),
+        );
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"SourceSchemaVersionID\""));
+        assert!(json.contains("\"DestinationSchemaVersionID\""));
+        assert!(json.contains("\"Lens\""));
+        assert!(json.contains("\"Path\""));
+
+        let parsed: LensConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn test_lens_module_from_path() {
+        let module = LensModule::from_path("/path/to/transform.wasm");
+        assert_eq!(module.path, Some("/path/to/transform.wasm".to_string()));
+        assert!(module.module.is_none());
+    }
+
+    #[test]
+    fn test_lens_module_from_bytes() {
+        let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d]; // WASM magic header
+        let module = LensModule::from_bytes(wasm_bytes.clone());
+        assert!(module.path.is_none());
+        assert_eq!(module.module, Some(wasm_bytes));
+    }
+
+    #[test]
+    fn test_lens_module_with_arguments() {
+        let args = serde_json::json!({
+            "mapping": {"old_field": "new_field"}
+        });
+        let module = LensModule::from_path("/path/to/transform.wasm").with_arguments(args.clone());
+        assert_eq!(module.arguments, Some(args));
+    }
+}

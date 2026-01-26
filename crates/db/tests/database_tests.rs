@@ -10,7 +10,7 @@ use storage::backends::MemoryStore;
 #[tokio::test]
 async fn test_db_new_txn() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let txn = db.new_txn(false).await.unwrap();
     assert_eq!(txn.id().unwrap(), 1);
@@ -22,7 +22,7 @@ async fn test_db_new_txn() {
 #[tokio::test]
 async fn test_db_txn_isolation() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     // Write in first transaction
     let txn1 = db.new_txn(false).await.unwrap();
@@ -42,7 +42,7 @@ async fn test_db_txn_isolation() {
 #[tokio::test]
 async fn test_db_with_txn() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     // Execute with_txn that commits
     db.with_txn(false, |_txn| {
@@ -59,7 +59,7 @@ async fn test_db_options() {
     let options = DbOptions::new()
         .with_max_txn_retries(5)
         .with_chunk_size(1024 * 1024);
-    let db = DB::with_options(store, options);
+    let db = DB::with_options(store, options).unwrap();
 
     assert_eq!(db.options().max_txn_retries, Some(5));
     assert_eq!(db.options().chunk_size, Some(1024 * 1024));
@@ -68,7 +68,7 @@ async fn test_db_options() {
 #[tokio::test]
 async fn test_db_with_txn_async_commits_on_success() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     // Execute async operation that succeeds
     db.with_txn_async(false, |txn| async move {
@@ -91,7 +91,7 @@ async fn test_db_with_txn_async_commits_on_success() {
 #[tokio::test]
 async fn test_db_with_txn_async_discards_on_error() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     // Execute async operation that fails
     let result: Result<(), Error> = db
@@ -129,7 +129,7 @@ fn test_users_schema() -> CollectionVersion {
 #[tokio::test]
 async fn test_create_collection_persists_schema() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let schema = test_users_schema();
     db.create_collection(schema).await.unwrap();
@@ -142,7 +142,7 @@ async fn test_create_collection_persists_schema() {
 #[tokio::test]
 async fn test_create_duplicate_collection_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let schema = test_users_schema();
     db.create_collection(schema.clone()).await.unwrap();
@@ -159,7 +159,7 @@ async fn test_create_duplicate_collection_fails() {
 #[tokio::test]
 async fn test_create_collection_with_invalid_name_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     // Empty name should fail
     let empty_schema = CollectionVersion::new(
@@ -193,7 +193,7 @@ async fn test_create_collection_with_invalid_name_fails() {
 #[tokio::test]
 async fn test_list_collections_empty() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let collections = db.list_collections().unwrap();
     assert!(collections.is_empty());
@@ -202,7 +202,7 @@ async fn test_list_collections_empty() {
 #[tokio::test]
 async fn test_list_collections_multiple() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     db.create_collection(test_users_schema()).await.unwrap();
     db.create_collection(CollectionVersion::new(
@@ -222,7 +222,7 @@ async fn test_list_collections_multiple() {
 #[tokio::test]
 async fn test_delete_collection_removes_data() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     db.create_collection(test_users_schema()).await.unwrap();
     assert!(db.has_collection("Users").unwrap());
@@ -234,7 +234,7 @@ async fn test_delete_collection_removes_data() {
 #[tokio::test]
 async fn test_delete_nonexistent_collection_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let result = db.delete_collection("Nonexistent").await;
     assert!(matches!(result, Err(Error::CollectionNotFound(_))));
@@ -243,7 +243,7 @@ async fn test_delete_nonexistent_collection_fails() {
 #[tokio::test]
 async fn test_has_collection() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     assert!(!db.has_collection("Users").unwrap());
 
@@ -254,7 +254,7 @@ async fn test_has_collection() {
 #[tokio::test]
 async fn test_get_collection() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     assert!(db.get_collection("Users").unwrap().is_none());
 
@@ -268,7 +268,7 @@ async fn test_open_loads_existing_collections() {
     let store = MemoryStore::new();
 
     {
-        let db = DB::new(store.clone());
+        let db = DB::new(store.clone()).unwrap();
         db.create_collection(test_users_schema()).await.unwrap();
     }
 
@@ -283,7 +283,7 @@ async fn test_open_with_options_loads_existing_collections() {
     let store = MemoryStore::new();
 
     {
-        let db = DB::new(store.clone());
+        let db = DB::new(store.clone()).unwrap();
         db.create_collection(test_users_schema()).await.unwrap();
     }
 
@@ -313,7 +313,7 @@ async fn test_open_empty_store_returns_empty_collections() {
 #[tokio::test]
 async fn test_collections_snapshot() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     db.create_collection(test_users_schema()).await.unwrap();
 
@@ -325,7 +325,7 @@ async fn test_collections_snapshot() {
 #[tokio::test]
 async fn test_concurrent_create_same_collection() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
 
     let schema = test_users_schema();
 
@@ -353,7 +353,7 @@ async fn test_concurrent_create_same_collection() {
 #[tokio::test]
 async fn test_concurrent_delete_same_collection() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
 
     db.create_collection(test_users_schema()).await.unwrap();
 
@@ -385,7 +385,7 @@ async fn test_load_collections_corrupted_json_returns_error() {
 
     // Write corrupted JSON directly to the store
     {
-        let db = DB::new(store.clone());
+        let db = DB::new(store.clone()).unwrap();
         let txn = db.new_txn(false).await.unwrap();
 
         // Use block to ensure systemstore is dropped before commit
@@ -422,7 +422,7 @@ async fn test_delete_collection_removes_all_documents_from_store() {
     use document::{Document, NormalValue};
 
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store.clone()));
+    let db = Arc::new(DB::new(store.clone()).unwrap());
 
     // Create collection and add documents
     db.create_collection(test_users_schema()).await.unwrap();
@@ -494,7 +494,7 @@ async fn test_schema_roundtrip_preserves_all_fields() {
 
     // Create collection and persist
     {
-        let db = DB::new(store.clone());
+        let db = DB::new(store.clone()).unwrap();
         db.create_collection(original_schema.clone()).await.unwrap();
     }
 
@@ -537,7 +537,7 @@ async fn test_delete_collection_cache_store_inconsistency() {
     use storage::keys::systemstore::CollectionNameKey;
 
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store.clone()));
+    let db = Arc::new(DB::new(store.clone()).unwrap());
 
     // Create a collection normally
     db.create_collection(test_users_schema()).await.unwrap();
@@ -574,7 +574,7 @@ async fn test_delete_collection_cache_store_inconsistency() {
 async fn test_concurrent_create_and_delete_same_collection() {
     // Test concurrent create + delete of the same collection
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
 
     // Create collection first
     db.create_collection(test_users_schema()).await.unwrap();
@@ -636,7 +636,7 @@ async fn test_concurrent_create_and_delete_same_collection() {
 #[tokio::test]
 async fn test_transaction_cache_lazy_loading_behavior() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
 
     // Create collection first
     db.create_collection(test_users_schema()).await.unwrap();
@@ -675,7 +675,7 @@ async fn test_transaction_cache_lazy_loading_behavior() {
 #[tokio::test]
 async fn test_storage_snapshot_isolation() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
 
     // Start transaction A BEFORE any collections exist
     let txn_a = db.new_txn(true).await.unwrap();
@@ -724,7 +724,7 @@ async fn test_reload_cache_recovers_from_inconsistency() {
     use storage::keys::systemstore::CollectionNameKey;
 
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store.clone()));
+    let db = Arc::new(DB::new(store.clone()).unwrap());
 
     // Create a collection normally
     db.create_collection(test_users_schema()).await.unwrap();
@@ -764,7 +764,7 @@ async fn test_reload_cache_recovers_from_inconsistency() {
 #[tokio::test]
 async fn test_db_from_arc_creates_working_database() {
     let store = Arc::new(MemoryStore::new());
-    let db = DB::from_arc(store);
+    let db = DB::from_arc(store).unwrap();
 
     // Verify transactions work
     let txn = db.new_txn(false).await.unwrap();
@@ -780,7 +780,7 @@ async fn test_db_from_arc_with_options() {
     let options = DbOptions::new()
         .with_max_txn_retries(10)
         .with_chunk_size(2048);
-    let db = DB::from_arc_with_options(store, options);
+    let db = DB::from_arc_with_options(store, options).unwrap();
 
     assert_eq!(db.options().max_txn_retries, Some(10));
     assert_eq!(db.options().chunk_size, Some(2048));
@@ -789,7 +789,7 @@ async fn test_db_from_arc_with_options() {
 #[tokio::test]
 async fn test_db_from_arc_shares_store_with_caller() {
     let store = Arc::new(MemoryStore::new());
-    let db = DB::from_arc(store.clone());
+    let db = DB::from_arc(store.clone()).unwrap();
 
     // Write via db
     let txn = db.new_txn(false).await.unwrap();
@@ -801,7 +801,7 @@ async fn test_db_from_arc_shares_store_with_caller() {
     txn.commit().await.unwrap();
 
     // Verify data is visible via same store (proves Arc sharing works)
-    let db2 = DB::from_arc(store);
+    let db2 = DB::from_arc(store).unwrap();
     let txn2 = db2.new_txn(true).await.unwrap();
     let value = txn2.datastore().unwrap().get(b"shared_key").await.unwrap();
     assert_eq!(value, Some(b"shared_value".to_vec()));
@@ -810,7 +810,7 @@ async fn test_db_from_arc_shares_store_with_caller() {
 #[tokio::test]
 async fn test_db_from_arc_txn_isolation() {
     let store = Arc::new(MemoryStore::new());
-    let db = DB::from_arc(store);
+    let db = DB::from_arc(store).unwrap();
 
     // Write in first transaction
     let txn1 = db.new_txn(false).await.unwrap();
@@ -841,7 +841,7 @@ async fn test_merkle_proof_full_workflow() {
 
     // Create database and blockstore
     let store = MemoryStore::new();
-    let db = DB::new(store.clone());
+    let db = DB::new(store.clone()).unwrap();
     let blockstore = DefraBlockstore::new(Arc::new(store), false);
 
     // Helper to create a test delta
@@ -933,7 +933,7 @@ async fn test_merkle_proof_no_path_returns_none() {
 
     // Create database and blockstore
     let store = MemoryStore::new();
-    let db = DB::new(store.clone());
+    let db = DB::new(store.clone()).unwrap();
     let blockstore = DefraBlockstore::new(Arc::new(store), false);
 
     fn create_delta(doc_id: &str, field: &str) -> CrdtDelta {
@@ -973,7 +973,7 @@ async fn test_merkle_proof_no_path_returns_none() {
 #[tokio::test]
 async fn test_create_collection_rejects_invalid_policy_path_separator() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let schema = CollectionVersion::new(
         "Users",
@@ -1004,7 +1004,7 @@ async fn test_create_collection_rejects_invalid_policy_path_separator() {
 #[tokio::test]
 async fn test_create_collection_rejects_invalid_policy_dotdot() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let schema = CollectionVersion::new(
         "Users",
@@ -1030,7 +1030,7 @@ async fn test_create_collection_rejects_invalid_policy_dotdot() {
 #[tokio::test]
 async fn test_create_collection_rejects_invalid_policy_null_byte() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let schema = CollectionVersion::new(
         "Users",
@@ -1056,7 +1056,7 @@ async fn test_create_collection_rejects_invalid_policy_null_byte() {
 #[tokio::test]
 async fn test_create_collection_accepts_valid_policy() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let schema = CollectionVersion::new(
         "Users",
@@ -1081,7 +1081,7 @@ async fn test_create_collection_accepts_valid_policy() {
 #[tokio::test]
 async fn test_db_without_node_identity() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     assert!(!db.has_node_identity());
     assert!(db.node_identity().is_none());
@@ -1097,7 +1097,7 @@ async fn test_db_with_node_identity() {
     let expected_did = identity.did().unwrap();
 
     let options = DbOptions::new().with_node_identity(identity);
-    let db = DB::with_options(store, options);
+    let db = DB::with_options(store, options).unwrap();
 
     assert!(db.has_node_identity());
     let node_id = db.node_identity().expect("should have identity");
@@ -1163,7 +1163,7 @@ async fn test_db_from_arc_with_node_identity() {
     let expected_did = identity.did().unwrap();
 
     let options = DbOptions::new().with_node_identity(identity);
-    let db = DB::from_arc_with_options(store, options);
+    let db = DB::from_arc_with_options(store, options).unwrap();
 
     assert!(db.has_node_identity());
     let node_id = db.node_identity().expect("should have identity");
@@ -1179,7 +1179,7 @@ async fn test_db_node_identity_can_sign() {
     let identity = RawIdentity::from_private_key(private_key).unwrap();
 
     let options = DbOptions::new().with_node_identity(identity);
-    let db = DB::with_options(store, options);
+    let db = DB::with_options(store, options).unwrap();
 
     let node_id = db.node_identity().expect("should have identity");
     let message = b"test message";

@@ -1,4 +1,3 @@
-
 //! Field types for document structure
 
 use schema::CType;

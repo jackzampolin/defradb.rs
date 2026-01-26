@@ -1,4 +1,3 @@
-
 //! Index matchers for filter condition evaluation
 //!
 //! Provides type-specific matchers for filter operators that can be used

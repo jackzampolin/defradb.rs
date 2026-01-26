@@ -32,7 +32,7 @@ fn test_schema() -> CollectionVersion {
 async fn test_create_emits_update_event() {
     // Set up DB with event bus
     let store = MemoryStore::new();
-    let mut db = DB::new(store);
+    let mut db = DB::new(store).unwrap();
     let event_bus = Arc::new(ChannelBus::new());
     db.set_event_bus(event_bus.clone());
     let db = Arc::new(db);
@@ -68,7 +68,7 @@ async fn test_create_emits_update_event() {
 #[tokio::test]
 async fn test_update_emits_update_event() {
     let store = MemoryStore::new();
-    let mut db = DB::new(store);
+    let mut db = DB::new(store).unwrap();
     let event_bus = Arc::new(ChannelBus::new());
     db.set_event_bus(event_bus.clone());
     let db = Arc::new(db);
@@ -107,7 +107,7 @@ async fn test_update_emits_update_event() {
 #[tokio::test]
 async fn test_delete_emits_update_event() {
     let store = MemoryStore::new();
-    let mut db = DB::new(store);
+    let mut db = DB::new(store).unwrap();
     let event_bus = Arc::new(ChannelBus::new());
     db.set_event_bus(event_bus.clone());
     let db = Arc::new(db);
@@ -143,7 +143,7 @@ async fn test_delete_emits_update_event() {
 #[tokio::test]
 async fn test_multiple_mutations_emit_multiple_events() {
     let store = MemoryStore::new();
-    let mut db = DB::new(store);
+    let mut db = DB::new(store).unwrap();
     let event_bus = Arc::new(ChannelBus::new());
     db.set_event_bus(event_bus.clone());
     let db = Arc::new(db);
@@ -183,7 +183,7 @@ async fn test_multiple_mutations_emit_multiple_events() {
 async fn test_no_event_bus_no_crash() {
     // Verify mutations work even without an event bus configured
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let mutator = AutoCommitMutator::new(db.clone());
@@ -216,7 +216,7 @@ async fn test_no_event_bus_no_crash() {
 #[tokio::test]
 async fn test_wildcard_subscription_receives_all_events() {
     let store = MemoryStore::new();
-    let mut db = DB::new(store);
+    let mut db = DB::new(store).unwrap();
     let event_bus = Arc::new(ChannelBus::new());
     db.set_event_bus(event_bus.clone());
     let db = Arc::new(db);
@@ -248,7 +248,7 @@ async fn test_wildcard_subscription_receives_all_events() {
 #[tokio::test]
 async fn test_closed_bus_does_not_block_mutations() {
     let store = MemoryStore::new();
-    let mut db = DB::new(store);
+    let mut db = DB::new(store).unwrap();
     let event_bus = Arc::new(ChannelBus::new());
     db.set_event_bus(event_bus.clone());
     let db = Arc::new(db);

@@ -1,4 +1,3 @@
-
 //! Encoding helpers for JSON and CBOR conversion
 
 use chrono::SecondsFormat;

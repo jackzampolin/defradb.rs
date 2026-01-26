@@ -39,7 +39,7 @@ async fn test_collection_name() {
 #[tokio::test]
 async fn test_collection_create_get() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -67,7 +67,7 @@ async fn test_collection_create_get() {
 #[tokio::test]
 async fn test_collection_delete() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create
@@ -96,7 +96,7 @@ async fn test_collection_delete() {
 #[tokio::test]
 async fn test_collection_exists_nonexistent() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create a document to get a valid DocID format, then check for non-existent
@@ -112,7 +112,7 @@ async fn test_collection_exists_nonexistent() {
 #[tokio::test]
 async fn test_collection_save_upsert() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Save (create)
@@ -144,7 +144,7 @@ async fn test_collection_save_upsert() {
 #[tokio::test]
 async fn test_collection_create_duplicate_returns_error() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create a document
@@ -167,7 +167,7 @@ async fn test_collection_create_duplicate_returns_error() {
 #[tokio::test]
 async fn test_collection_update_nonexistent_returns_error() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create a document to get a valid DocID, but don't save it
@@ -188,7 +188,7 @@ async fn test_collection_update_nonexistent_returns_error() {
 #[tokio::test]
 async fn test_collection_delete_nonexistent_returns_false() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create a document to get a valid DocID, but don't save it
@@ -205,7 +205,7 @@ async fn test_collection_delete_nonexistent_returns_false() {
 #[tokio::test]
 async fn test_collection_get_nonexistent_returns_none() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create a document to get a valid DocID, but don't save it
@@ -222,7 +222,7 @@ async fn test_collection_get_nonexistent_returns_none() {
 #[tokio::test]
 async fn test_collection_get_all_empty() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Get all from empty collection
@@ -234,7 +234,7 @@ async fn test_collection_get_all_empty() {
 #[tokio::test]
 async fn test_collection_get_all_multiple() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create multiple documents
@@ -256,7 +256,7 @@ async fn test_collection_get_all_multiple() {
 #[tokio::test]
 async fn test_collection_create_without_id_returns_error() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = test_collection();
 
     // Create a document without an ID using Document::new()
@@ -274,7 +274,7 @@ async fn test_collection_create_without_id_returns_error() {
 #[tokio::test]
 async fn test_collection_isolation_between_collections() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     // Create two different collections
     let col1 = Collection::new(CollectionVersion::new("users", "v1", "col-users", vec![]));
@@ -299,7 +299,7 @@ async fn test_collection_isolation_between_collections() {
 #[tokio::test]
 async fn test_validation_correct_types_passes() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -319,7 +319,7 @@ async fn test_validation_correct_types_passes() {
 #[tokio::test]
 async fn test_validation_wrong_string_type_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -340,7 +340,7 @@ async fn test_validation_wrong_string_type_fails() {
 #[tokio::test]
 async fn test_validation_wrong_int_type_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -361,7 +361,7 @@ async fn test_validation_wrong_int_type_fails() {
 #[tokio::test]
 async fn test_validation_null_values_allowed() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -380,7 +380,7 @@ async fn test_validation_null_values_allowed() {
 #[tokio::test]
 async fn test_validation_missing_fields_allowed() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -398,7 +398,7 @@ async fn test_validation_missing_fields_allowed() {
 #[tokio::test]
 async fn test_validation_update_validates() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     // First create a valid document
@@ -424,7 +424,7 @@ async fn test_validation_update_validates() {
 #[tokio::test]
 async fn test_validation_save_validates() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -442,7 +442,7 @@ async fn test_validation_save_validates() {
 #[tokio::test]
 async fn test_validation_extra_fields_allowed() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = typed_collection();
 
     let txn = db.new_txn(false).await.unwrap();
@@ -462,7 +462,7 @@ async fn test_validation_extra_fields_allowed() {
 #[tokio::test]
 async fn test_validation_schemaless_collection_accepts_any() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     // Empty schema - no validation
     let col = test_collection();
 
@@ -549,7 +549,7 @@ async fn test_collection_get_index() {
 #[tokio::test]
 async fn test_create_with_indexes() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = collection_with_indexes();
     let txn = db.new_txn(false).await.unwrap();
 
@@ -585,7 +585,7 @@ async fn test_create_with_indexes() {
 #[tokio::test]
 async fn test_update_with_indexes() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = collection_with_indexes();
     let txn = db.new_txn(false).await.unwrap();
 
@@ -637,7 +637,7 @@ async fn test_update_with_indexes() {
 #[tokio::test]
 async fn test_delete_with_indexes() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = collection_with_indexes();
     let txn = db.new_txn(false).await.unwrap();
 
@@ -687,7 +687,7 @@ async fn test_delete_with_indexes() {
 #[tokio::test]
 async fn test_delete_with_indexes_nonexistent() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let col = collection_with_indexes();
     let txn = db.new_txn(false).await.unwrap();
 

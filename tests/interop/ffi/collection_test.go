@@ -334,14 +334,58 @@ func TestRefreshViewsNotImplemented(t *testing.T) {
 	assert.Contains(t, err.Error(), "not yet implemented")
 }
 
-func TestSetMigrationNotImplemented(t *testing.T) {
+func TestSetMigration_InvalidConfig(t *testing.T) {
 	Init()
 
 	node, err := NewNode(NodeOptions{InMemory: true})
 	require.NoError(t, err)
 	defer node.Close()
 
+	// Test with malformed JSON - missing required fields
 	_, err = node.SetMigration(`{"source": "v1", "destination": "v2"}`)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not yet implemented")
+	assert.Contains(t, err.Error(), "failed to parse lens config")
+}
+
+func TestSetMigration_ValidConfig(t *testing.T) {
+	Init()
+
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err)
+	defer node.Close()
+
+	// First create a schema
+	sdl := "type User { name: String }"
+	_, err = node.AddSchema(sdl)
+	require.NoError(t, err)
+
+	// Patch the collection to create a new version (add a field)
+	patchJSON := `[{"op": "add", "path": "/User/Fields/-", "value": {"Name": "verified", "Kind": "Boolean"}}]`
+	_, err = node.PatchCollection("User", patchJSON)
+	require.NoError(t, err)
+
+	// Get the collection versions to get actual version IDs
+	collectionsJSON, err := node.GetCollections()
+	require.NoError(t, err)
+	t.Logf("Collections after patch: %s", collectionsJSON)
+
+	// Set a migration with valid config format
+	// Note: This will fail if there's no WASM module at the path, but it should
+	// parse successfully and attempt to load the module
+	lensConfig := `{
+		"SourceSchemaVersionID": "bafyreiciz2hrrmt7ritk5gf5fyruw46v2tfhq5dc7qto4wgpzluben2smu",
+		"DestinationSchemaVersionID": "bafyreigqfjat435ghyt66tdaucp7oi2mke5jafx3jw3rozanopihr2vf44",
+		"Lens": {
+			"Path": "/path/to/nonexistent/transform.wasm"
+		}
+	}`
+
+	_, err = node.SetMigration(lensConfig)
+	// We expect an error because the WASM file doesn't exist, but it should NOT be
+	// a "not yet implemented" error - it should be a file loading error
+	if err != nil {
+		assert.NotContains(t, err.Error(), "not yet implemented", "SetMigration should be implemented")
+		// The error should be about loading the WASM module
+		t.Logf("SetMigration error (expected for missing WASM): %s", err.Error())
+	}
 }

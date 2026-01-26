@@ -1,4 +1,3 @@
-
 //! Document ID type with content-addressed generation
 
 use cid::Cid;

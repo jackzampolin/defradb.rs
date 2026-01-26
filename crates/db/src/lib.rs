@@ -27,7 +27,7 @@
 ///
 /// // Create database
 /// let store = MemoryStore::new();
-/// let db = DB::new(store);
+/// let db = DB::new(store)?;
 ///
 /// // Create a transaction
 /// let txn = db.new_txn(false).await?;
@@ -59,6 +59,8 @@ pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
 pub mod index_manager;
+pub mod lensed_auto_commit_fetcher;
+pub mod lensed_fetcher;
 pub mod merge_handler;
 pub mod nac;
 pub mod peer_identity;
@@ -90,11 +92,16 @@ pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
+pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
+pub use lensed_fetcher::LensedDocFetcher;
 pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
-pub use schema_loader::load_active_collections;
+pub use schema_loader::{
+    get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
+    load_active_collections,
+};
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};

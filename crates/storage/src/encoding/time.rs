@@ -1,4 +1,3 @@
-
 //! Timestamp encoding
 
 use crate::corekv::{Error, Result};

@@ -1,4 +1,3 @@
-
 //! Field value wrapper with CRDT type and dirty tracking
 
 use schema::CType;

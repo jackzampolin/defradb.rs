@@ -29,6 +29,7 @@ query = { path = "../query" }
 db = { path = "../db" }
 schema = { path = "../schema" }
 events = { path = "../events" }
+lens = { path = "../lens" }
 document = { path = "../document" }
 keyring = { path = "../keyring" }
 

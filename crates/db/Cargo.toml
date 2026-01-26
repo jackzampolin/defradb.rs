@@ -50,6 +50,7 @@ acp = { path = "../acp" }
 p2p = { path = "../p2p" }
 crdt = { path = "../crdt" }
 events = { path = "../events" }
+lens = { path = "../lens" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -70,6 +70,9 @@ pub enum Error {
 
     #[error("acp error: {0}")]
     Acp(String),
+
+    #[error("lens error: {0}")]
+    Lens(String),
 }
 
 /// Result type for database operations.

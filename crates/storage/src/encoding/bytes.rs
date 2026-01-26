@@ -1,4 +1,3 @@
-
 //! Bytes and string encoding with escape-based termination
 
 use crate::corekv::{Error, Result};

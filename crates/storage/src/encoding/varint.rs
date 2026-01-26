@@ -1,4 +1,3 @@
-
 //! Variable-length integer encoding (varint/uvarint)
 
 use crate::corekv::{Error, Result};

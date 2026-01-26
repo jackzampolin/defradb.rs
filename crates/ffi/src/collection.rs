@@ -442,10 +442,7 @@ pub unsafe extern "C" fn add_view(
 ///
 /// Not yet implemented. See issue #178.
 #[no_mangle]
-pub unsafe extern "C" fn refresh_views(
-    _node_ptr: usize,
-    _options: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn refresh_views(_node_ptr: usize, _options: *const c_char) -> FfiResult {
     FfiResult::error("refresh_views is not yet implemented - see issue #178")
 }
 
@@ -470,16 +467,40 @@ pub unsafe extern "C" fn refresh_views(
 /// # Safety
 ///
 /// `config` must be a valid null-terminated UTF-8 string.
-///
-/// # Note
-///
-/// Not yet implemented. See issue #179.
 #[no_mangle]
-pub unsafe extern "C" fn set_migration(
-    _node_ptr: usize,
-    _config: *const c_char,
-) -> FfiResult {
-    FfiResult::error("set_migration is not yet implemented - see issue #179")
+pub unsafe extern "C" fn set_migration(node_ptr: usize, config: *const c_char) -> FfiResult {
+    let rt = match RUNTIME.get() {
+        Some(rt) => rt,
+        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
+    };
+
+    let config_str = match c_str_to_string(config) {
+        Some(s) => s,
+        None => return FfiResult::error("config is null"),
+    };
+
+    let result = rt.block_on(async {
+        // Parse the LensConfig from JSON
+        let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
+            .map_err(|e| format!("failed to parse lens config: {}", e))?;
+
+        let database = NODES
+            .get(node_ptr, |state| state.database.clone())
+            .ok_or_else(|| "invalid node handle".to_string())?;
+
+        // Register the migration with the lens store
+        let transform_id = database
+            .set_migration(lens_config)
+            .await
+            .map_err(|e| format!("failed to set migration: {}", e))?;
+
+        Ok::<String, String>(transform_id.to_string())
+    });
+
+    match result {
+        Ok(transform_id) => FfiResult::success(&transform_id),
+        Err(e) => FfiResult::error(&e),
+    }
 }
 
 #[cfg(test)]

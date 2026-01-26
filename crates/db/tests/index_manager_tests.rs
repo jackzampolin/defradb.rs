@@ -27,7 +27,7 @@ fn test_schema() -> CollectionVersion {
 #[tokio::test]
 async fn test_create_index() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -52,7 +52,7 @@ async fn test_create_index() {
 #[tokio::test]
 async fn test_create_unique_index() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -75,7 +75,7 @@ async fn test_create_unique_index() {
 #[tokio::test]
 async fn test_create_duplicate_index_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -102,7 +102,7 @@ async fn test_create_duplicate_index_fails() {
 #[tokio::test]
 async fn test_create_empty_fields_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -122,7 +122,7 @@ async fn test_create_empty_fields_fails() {
 #[tokio::test]
 async fn test_drop_index() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -148,7 +148,7 @@ async fn test_drop_index() {
 #[tokio::test]
 async fn test_drop_nonexistent_index() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -161,7 +161,7 @@ async fn test_drop_nonexistent_index() {
 #[tokio::test]
 async fn test_get_indexes() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -231,7 +231,7 @@ async fn test_from_collection_with_indexes() {
 #[tokio::test]
 async fn test_on_document_create() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -271,7 +271,7 @@ async fn test_on_document_create() {
 #[tokio::test]
 async fn test_index_id_sequence() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
 
@@ -325,7 +325,7 @@ async fn test_index_id_sequence() {
 #[tokio::test]
 async fn test_on_document_update_changes_index_entry() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -408,7 +408,7 @@ async fn test_on_document_update_changes_index_entry() {
 #[tokio::test]
 async fn test_on_document_update_no_change_when_values_same() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -460,7 +460,7 @@ async fn test_on_document_update_no_change_when_values_same() {
 #[tokio::test]
 async fn test_on_document_delete_removes_index_entries() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -526,7 +526,7 @@ async fn test_on_document_delete_removes_index_entries() {
 #[tokio::test]
 async fn test_bulk_index_indexes_all_documents() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -584,7 +584,7 @@ async fn test_bulk_index_indexes_all_documents() {
 #[tokio::test]
 async fn test_bulk_index_skips_documents_without_id() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -632,7 +632,7 @@ async fn test_bulk_index_skips_documents_without_id() {
 #[tokio::test]
 async fn test_bulk_index_nonexistent_index_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -654,7 +654,7 @@ async fn test_bulk_index_nonexistent_index_fails() {
 #[tokio::test]
 async fn test_on_document_create_without_id_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -691,7 +691,7 @@ async fn test_on_document_create_without_id_fails() {
 #[tokio::test]
 async fn test_on_document_update_without_id_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -735,7 +735,7 @@ async fn test_on_document_update_without_id_fails() {
 #[tokio::test]
 async fn test_on_document_delete_without_id_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -788,7 +788,7 @@ async fn test_from_collection_with_empty_fields_fails() {
 #[tokio::test]
 async fn test_multi_index_update() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -919,7 +919,7 @@ async fn test_multi_index_update() {
 #[tokio::test]
 async fn test_composite_index_through_manager() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     // Schema with multiple fields
@@ -1028,7 +1028,7 @@ async fn test_composite_index_through_manager() {
 #[tokio::test]
 async fn test_missing_field_indexed_as_null() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -1102,7 +1102,7 @@ async fn test_missing_field_indexed_as_null() {
 #[tokio::test]
 async fn test_unique_index_allows_multiple_nulls() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -1158,7 +1158,7 @@ async fn test_unique_constraint_violation_returns_error() {
     use storage::index::{CollectionIndex, UniqueIndex};
 
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -1196,7 +1196,7 @@ async fn test_unique_constraint_violation_returns_error() {
 
     // Now test through IndexManager
     let store2 = MemoryStore::new();
-    let db2 = DB::new(store2);
+    let db2 = DB::new(store2).unwrap();
     let txn2 = db2.new_txn(false).await.unwrap();
     let mut manager = IndexManager::new(1);
 
@@ -1263,7 +1263,7 @@ async fn test_unique_constraint_violation_returns_error() {
 #[tokio::test]
 async fn test_index_field_not_in_schema_fails() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema(); // Has: _docID, name, age, email
@@ -1310,7 +1310,7 @@ async fn test_index_field_not_in_schema_fails() {
 #[tokio::test]
 async fn test_index_idempotence_create_same_document_twice() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();
@@ -1368,7 +1368,7 @@ async fn test_index_idempotence_create_same_document_twice() {
 #[tokio::test]
 async fn test_delete_then_recreate_same_value() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
 
     let schema = test_schema();

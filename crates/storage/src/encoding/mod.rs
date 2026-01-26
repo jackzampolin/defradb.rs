@@ -1,4 +1,3 @@
-
 //! Order-preserving value encoding for secondary indexes
 //!
 //! This module implements CockroachDB-style encoding that maintains sort order

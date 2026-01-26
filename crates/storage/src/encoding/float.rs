@@ -1,4 +1,3 @@
-
 //! Float32 and Float64 encoding
 
 use crate::corekv::{Error, Result};

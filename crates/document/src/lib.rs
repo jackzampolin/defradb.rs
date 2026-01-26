@@ -1,4 +1,3 @@
-
 //! Document types for DefraDB
 //!
 //! This crate provides runtime document types for DefraDB, including:

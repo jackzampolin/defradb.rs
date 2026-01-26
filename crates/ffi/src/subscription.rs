@@ -524,7 +524,10 @@ mod tests {
 
         // Poll should return no event (Article is filtered out)
         let result = poll_subscription(sub_handle);
-        assert_eq!(result.status, 2, "should have no event for filtered collection");
+        assert_eq!(
+            result.status, 2,
+            "should have no event for filtered collection"
+        );
 
         // Create an Author (should trigger subscription)
         let mutation =

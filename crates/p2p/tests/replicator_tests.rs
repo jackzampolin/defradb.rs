@@ -22,7 +22,12 @@ fn test_replicator_info_with_addresses() {
     let collections = vec!["users".to_string()];
     let addr: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().unwrap();
 
-    let info = ReplicatorInfo::with_addresses(peer_id, collections.clone(), vec![addr.clone()]);
+    // Use from_raw to construct with addresses
+    let info = ReplicatorInfo::from_raw(
+        peer_id.to_string(),
+        collections.clone(),
+        vec![addr.to_string()],
+    );
 
     assert_eq!(info.peer_id(), Some(peer_id));
     assert_eq!(info.collections, collections);
@@ -92,7 +97,12 @@ fn test_replicator_info_cbor_roundtrip_with_addresses() {
         "comments".to_string(),
     ];
 
-    let info = ReplicatorInfo::with_addresses(peer_id, collections.clone(), vec![addr.clone()]);
+    // Use from_raw to construct with addresses
+    let info = ReplicatorInfo::from_raw(
+        peer_id.to_string(),
+        collections.clone(),
+        vec![addr.to_string()],
+    );
 
     // Serialize to CBOR bytes
     let bytes = info.to_bytes().unwrap();

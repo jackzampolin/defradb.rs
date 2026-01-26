@@ -1,4 +1,3 @@
-
 //! Field value encoding for secondary indexes
 //!
 //! This module provides encoding/decoding of document field values

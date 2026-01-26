@@ -3,12 +3,24 @@
 //! This module provides functionality to load collection schemas from the
 //! systemstore on database startup. It matches the Go DefraDB pattern of
 //! storing collection definitions as JSON in the systemstore.
+//!
+//! # Collection Version History
+//!
+//! Collections can have multiple versions linked via the `previous_version` field.
+//! The systemstore tracks all versions using:
+//! - `/collection/id/{versionID}` - Full collection definition for each version
+//! - `/collection/version/{collectionID}/{versionID}` - Index of all versions for a collection
+//! - `/collection/name/{name}` - Maps active collection names to their current version
+//!
+//! The `get_collection_version_ids` and `get_collections_by_collection_id` functions
+//! enable loading all versions for building the migration history graph.
 
 use crate::error::{Error, Result};
 use crate::DB;
+use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{IterOptions, Iterator, Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
+use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};
 
 /// Load all active collections from the systemstore.
 ///
@@ -93,6 +105,9 @@ pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<Collect
         tracing::warn!(error = %e, "Failed to close iterator during schema loading");
     }
 
+    // Always discard the read-only transaction to release resources
+    let _ = txn.discard();
+
     // Return error if any occurred during loading
     if let Some(err) = load_error {
         return Err(err);
@@ -104,4 +119,152 @@ pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<Collect
     );
 
     Ok(collections)
+}
+
+/// Get all version IDs for a collection.
+///
+/// This returns the collection ID itself (as the initial version) plus all
+/// additional version IDs found in the `/collection/version/{collectionID}/*` index.
+///
+/// Matches Go's `description.GetCollectionVersionIDs`.
+///
+/// # Arguments
+///
+/// * `systemstore` - The systemstore namespace view
+/// * `collection_id` - The collection ID (schema root)
+///
+/// # Returns
+///
+/// A list of version IDs, starting with the collection ID itself.
+pub async fn get_collection_version_ids(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<Vec<String>> {
+    // The collection ID is always the first version
+    let mut version_ids = vec![collection_id.to_string()];
+
+    // Iterate over the version index to find additional versions
+    let prefix = CollectionVersionKey::collection_prefix(collection_id);
+    let opts = IterOptions::new().with_prefix(prefix);
+    let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
+
+    loop {
+        match iter.next().await {
+            Ok(Some(kv)) => {
+                // Parse the key to extract the version ID
+                // Key format: /collection/version/{collectionID}/{versionID}
+                let key_str = String::from_utf8_lossy(&kv.key);
+                if let Some(version_id) = key_str.rsplit('/').next() {
+                    if !version_id.is_empty() && version_id != collection_id {
+                        version_ids.push(version_id.to_string());
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let _ = iter.close().await;
+                return Err(Error::Storage(e));
+            }
+        }
+    }
+
+    iter.close().await.map_err(Error::Storage)?;
+
+    tracing::debug!(
+        collection_id = %collection_id,
+        version_count = version_ids.len(),
+        "Retrieved collection version IDs"
+    );
+
+    Ok(version_ids)
+}
+
+/// Load all versions of a collection by collection ID.
+///
+/// This loads every version of the collection from the systemstore,
+/// including both active and inactive (historical) versions.
+///
+/// Matches Go's `description.GetCollectionsByCollectionID`.
+///
+/// # Arguments
+///
+/// * `systemstore` - The systemstore namespace view
+/// * `collection_id` - The collection ID (schema root)
+///
+/// # Returns
+///
+/// A list of all collection versions for the given collection ID.
+pub async fn get_collections_by_collection_id(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<Vec<CollectionVersion>> {
+    // Get all version IDs for this collection
+    let version_ids = get_collection_version_ids(systemstore, collection_id).await?;
+
+    let mut collections = Vec::with_capacity(version_ids.len());
+
+    // Load each version
+    for version_id in version_ids {
+        let collection_key = CollectionKey::new(&version_id);
+        match systemstore.get(&collection_key.bytes()).await {
+            Ok(Some(json)) => {
+                let collection: CollectionVersion = serde_json::from_slice(&json).map_err(|e| {
+                    Error::Other(format!(
+                        "Failed to deserialize collection version {}: {}",
+                        version_id, e
+                    ))
+                })?;
+                collections.push(collection);
+            }
+            Ok(None) => {
+                // Version in index but definition missing - log warning but continue
+                tracing::warn!(
+                    version_id = %version_id,
+                    collection_id = %collection_id,
+                    "Collection version in index but definition not found"
+                );
+            }
+            Err(e) => {
+                return Err(Error::Storage(e));
+            }
+        }
+    }
+
+    tracing::debug!(
+        collection_id = %collection_id,
+        loaded_count = collections.len(),
+        "Loaded collection versions"
+    );
+
+    Ok(collections)
+}
+
+/// Load a single collection version by its version ID.
+///
+/// # Arguments
+///
+/// * `systemstore` - The systemstore namespace view
+/// * `version_id` - The specific version ID to load
+///
+/// # Returns
+///
+/// The collection version if found, None otherwise.
+pub async fn get_collection_by_version_id(
+    systemstore: &NamespaceView,
+    version_id: &str,
+) -> Result<Option<CollectionVersion>> {
+    let collection_key = CollectionKey::new(version_id);
+    match systemstore.get(&collection_key.bytes()).await {
+        Ok(Some(json)) => {
+            let collection: CollectionVersion = serde_json::from_slice(&json).map_err(|e| {
+                Error::Other(format!(
+                    "Failed to deserialize collection version {}: {}",
+                    version_id, e
+                ))
+            })?;
+            Ok(Some(collection))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(Error::Storage(e)),
+    }
 }

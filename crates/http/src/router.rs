@@ -273,6 +273,25 @@ pub trait SchemaOperations: Send + Sync {
     async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
 }
 
+/// Trait for lens migration operations.
+///
+/// Enables setting up migrations between schema versions using WASM transforms.
+#[async_trait::async_trait]
+pub trait LensOperations: Send + Sync {
+    /// Set a migration between schema versions.
+    ///
+    /// The config should be a JSON string containing:
+    /// - SourceSchemaVersionID: The source version CID
+    /// - DestinationSchemaVersionID: The destination version CID
+    /// - Lens: The lens configuration with path to WASM module
+    ///
+    /// Returns the transform ID assigned to this migration.
+    async fn set_migration(&self, config: &str) -> Result<String, String>;
+
+    /// Reload all lens modules from disk.
+    async fn reload(&self) -> Result<(), String>;
+}
+
 /// Trait for backup operations.
 ///
 /// Enables exporting and importing database state as JSON. Export produces
@@ -311,6 +330,7 @@ pub struct AppState {
     pub index: Option<Arc<dyn IndexOperations>>,
     pub backup: Option<Arc<dyn BackupOperations>>,
     pub schema: Option<Arc<dyn SchemaOperations>>,
+    pub lens: Option<Arc<dyn LensOperations>>,
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
 }
@@ -331,6 +351,7 @@ impl std::fmt::Debug for AppState {
                 "schema",
                 &self.schema.as_ref().map(|_| "<SchemaOperations>"),
             )
+            .field("lens", &self.lens.as_ref().map(|_| "<LensOperations>"))
             .field("nac", &self.nac.as_ref().map(|_| "<NodeAcpOperations>"))
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
             .finish()
@@ -383,6 +404,15 @@ impl AppState {
         })
     }
 
+    /// Get lens operations or return ServiceUnavailable error.
+    pub fn require_lens(&self) -> Result<&Arc<dyn LensOperations>, crate::error::HttpError> {
+        self.lens.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Lens operations are not enabled. Start the server with lens enabled to use this feature.".into()
+            )
+        })
+    }
+
     /// Get NAC operations or return ServiceUnavailable error.
     pub fn require_nac(&self) -> Result<&Arc<dyn NodeAcpOperations>, crate::error::HttpError> {
         self.nac.as_ref().ok_or_else(|| {
@@ -402,6 +432,7 @@ pub struct AppStateBuilder {
     index: Option<Arc<dyn IndexOperations>>,
     backup: Option<Arc<dyn BackupOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
+    lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
@@ -417,6 +448,7 @@ impl AppStateBuilder {
             index: None,
             backup: None,
             schema: None,
+            lens: None,
             nac: None,
             event_bus: None,
         }
@@ -458,6 +490,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set lens operations.
+    pub fn with_lens(mut self, lens: Arc<dyn LensOperations>) -> Self {
+        self.lens = Some(lens);
+        self
+    }
+
     /// Set NAC (Node Access Control) operations.
     pub fn with_nac(mut self, nac: Arc<dyn NodeAcpOperations>) -> Self {
         self.nac = Some(nac);
@@ -480,6 +518,7 @@ impl AppStateBuilder {
             index: self.index,
             backup: self.backup,
             schema: self.schema,
+            lens: self.lens,
             nac: self.nac,
             event_bus: self.event_bus,
         }
@@ -577,6 +616,11 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/export", post(handlers::backup::export))
         .route("/import", post(handlers::backup::import));
 
+    // Lens migration routes
+    let lens_routes = Router::new()
+        .route("/set", post(handlers::lens::set_migration))
+        .route("/reload", post(handlers::lens::reload));
+
     // NAC (Node Access Control) routes
     let nac_routes = Router::new()
         .route("/status", get(handlers::nac::get_status))
@@ -622,6 +666,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/index", index_routes)
         // Backup endpoints
         .nest("/backup", backup_routes)
+        // Lens migration endpoints
+        .nest("/lens", lens_routes)
         // NAC endpoints (Rust-native routes)
         .nest("/nac", nac_routes)
         // Utility endpoints (Go-compatible)

@@ -1,4 +1,3 @@
-
 //! Normalized value types for documents
 //!
 //! NormalValue represents all possible field values in a type-safe enum.

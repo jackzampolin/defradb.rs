@@ -1,4 +1,3 @@
-
 //! Exact match iterator for index lookups
 //!
 //! Provides iteration over index entries that exactly match specific field values.

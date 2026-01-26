@@ -14,7 +14,7 @@ use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 #[tokio::test]
 async fn test_load_empty_database() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
 
     let collections = load_active_collections(&db).await.unwrap();
     assert!(
@@ -26,7 +26,7 @@ async fn test_load_empty_database() {
 #[tokio::test]
 async fn test_load_single_collection() {
     let store = Arc::new(MemoryStore::new());
-    let db = DB::new((*store).clone());
+    let db = DB::new((*store).clone()).unwrap();
 
     // Manually insert a collection into systemstore
     let collection = CollectionVersion::new("users", "bafytest123", "bafytest123", vec![]);
@@ -67,7 +67,7 @@ async fn test_load_single_collection() {
 #[tokio::test]
 async fn test_load_multiple_collections() {
     let store = Arc::new(MemoryStore::new());
-    let db = DB::new((*store).clone());
+    let db = DB::new((*store).clone()).unwrap();
 
     let collections = vec![
         ("users", "bafyuser123"),
@@ -114,7 +114,7 @@ async fn test_load_multiple_collections() {
 #[tokio::test]
 async fn test_load_missing_collection_definition_returns_error() {
     let store = Arc::new(MemoryStore::new());
-    let db = DB::new((*store).clone());
+    let db = DB::new((*store).clone()).unwrap();
 
     // Store only the name mapping, NOT the collection definition
     {
@@ -144,7 +144,7 @@ async fn test_load_missing_collection_definition_returns_error() {
 #[tokio::test]
 async fn test_load_invalid_json_collection_returns_error() {
     let store = Arc::new(MemoryStore::new());
-    let db = DB::new((*store).clone());
+    let db = DB::new((*store).clone()).unwrap();
 
     // Store name mapping pointing to invalid JSON
     {
