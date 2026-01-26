@@ -6,7 +6,7 @@ use p2p::{P2PHost, PeerId};
 #[tokio::test]
 async fn test_host_creation() {
     let store = MockBitswapStore::new();
-    let result = P2PHost::new(store);
+    let result = P2PHost::new(store).await;
     assert!(result.is_ok());
 
     let (host, handle, _events, _replicators) = result.unwrap();
@@ -20,7 +20,7 @@ async fn test_host_creation() {
 #[tokio::test]
 async fn test_replicator_management() {
     let store = MockBitswapStore::new();
-    let (host, handle, _events, replicators) = P2PHost::new(store).unwrap();
+    let (host, handle, _events, replicators) = P2PHost::new(store).await.unwrap();
 
     // Spawn the host
     tokio::spawn(host.run());

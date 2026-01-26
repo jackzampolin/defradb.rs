@@ -17,7 +17,7 @@ use tokio::time::timeout;
 /// Helper to create and start a P2P host, returning the handle and event receiver.
 async fn create_and_start_host() -> (P2PHostHandle, tokio::sync::mpsc::Receiver<HostEvent>) {
     let store = MockBitswapStore::new();
-    let (host, handle, events, _replicators) = P2PHost::new(store).expect("failed to create host");
+    let (host, handle, events, _replicators) = P2PHost::new(store).await.expect("failed to create host");
 
     // Spawn the host event loop
     tokio::spawn(host.run());
@@ -3693,7 +3693,7 @@ async fn test_pushlog_request_rejects_unauthorized_peer() {
     match send_result {
         Ok(Ok(reply)) => {
             // Check if reply contains error
-            if let Some(err_msg) = reply.metadata.err_message {
+            if let Some(err_msg) = reply.err_message {
                 assert!(
                     err_msg.contains("access denied"),
                     "Error message should indicate access denied: {}",
@@ -3824,9 +3824,9 @@ async fn test_pushlog_request_allows_authorized_replicator() {
     // The send should succeed
     if let Ok(Ok(reply)) = send_result {
         assert!(
-            reply.metadata.err_message.is_none(),
+            reply.err_message.is_none(),
             "Reply should not contain error: {:?}",
-            reply.metadata.err_message
+            reply.err_message
         );
     }
 

@@ -27,16 +27,18 @@ fn test_pushlog_request_serialization() {
 #[test]
 fn test_pushlog_reply_success() {
     let reply = PushLogReply::success("msg123");
-    assert_eq!(reply.metadata.message_id, "msg123");
-    assert!(reply.metadata.err_message.is_none());
+    // PushLogReply has flat fields (not nested metadata)
+    assert_eq!(reply.message_id, "msg123");
+    assert!(reply.err_message.is_none());
 }
 
 #[test]
 fn test_pushlog_reply_error() {
     let reply = PushLogReply::error("msg123", "something went wrong");
-    assert_eq!(reply.metadata.message_id, "msg123");
+    // PushLogReply has flat fields (not nested metadata)
+    assert_eq!(reply.message_id, "msg123");
     assert_eq!(
-        reply.metadata.err_message,
+        reply.err_message,
         Some("something went wrong".to_string())
     );
 }
@@ -71,7 +73,7 @@ fn test_message_trait_accessors_pushlog_request() {
         vec![30, 40],
     );
 
-    // Set metadata fields
+    // Set metadata fields via the embedded metadata struct
     request.metadata.message_id = "test-msg-id".to_string();
     request.metadata.sender_id = "sender-peer-id".to_string();
     request.metadata.pubkey = vec![1, 2, 3, 4, 5];
@@ -86,8 +88,8 @@ fn test_message_trait_accessors_pushlog_request() {
     assert_eq!(request.signature(), Some(&[6u8, 7, 8, 9][..]));
     assert_eq!(request.err_message(), Some("test error"));
 
-    // Test mutable access
-    request.metadata_mut().message_id = "new-msg-id".to_string();
+    // Test mutable access via metadata field
+    request.metadata.message_id = "new-msg-id".to_string();
     assert_eq!(request.message_id(), "new-msg-id");
 }
 
@@ -95,9 +97,9 @@ fn test_message_trait_accessors_pushlog_request() {
 fn test_message_trait_accessors_pushlog_reply() {
     let mut reply = PushLogReply::success("reply-id");
 
-    // Set additional metadata
-    reply.metadata.sender_id = "replier-id".to_string();
-    reply.metadata.pubkey = vec![11, 22, 33];
+    // Set additional fields directly (PushLogReply uses flat structure, not nested metadata)
+    reply.sender_id = "replier-id".to_string();
+    reply.pubkey = vec![11, 22, 33];
 
     // Test trait accessors
     assert_eq!(reply.version(), MESSAGE_VERSION);
