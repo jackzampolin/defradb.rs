@@ -38,6 +38,7 @@ func NewClientWrapper(node *Node) *ClientWrapper {
 
 // extractCollectionNameFromPatch extracts the collection name from a JSON patch path.
 // Patch format: [{"op": "add", "path": "/CollectionName/Fields/-", "value": {...}}]
+// All operations must target the same collection.
 func extractCollectionNameFromPatch(patch string) (string, error) {
 	var ops []struct {
 		Path string `json:"path"`
@@ -49,20 +50,31 @@ func extractCollectionNameFromPatch(patch string) (string, error) {
 		return "", fmt.Errorf("patch contains no operations")
 	}
 
-	// Path format: /CollectionName/Fields/- or /CollectionName/Fields/0
-	path := ops[0].Path
-	if len(path) == 0 || path[0] != '/' {
-		return "", fmt.Errorf("invalid patch path: %s", path)
-	}
+	var collectionName string
+	for i, op := range ops {
+		// Path format: /CollectionName/Fields/- or /CollectionName/Fields/0
+		path := op.Path
+		if len(path) == 0 || path[0] != '/' {
+			return "", fmt.Errorf("invalid patch path in operation %d: %s", i, path)
+		}
 
-	// Remove leading slash and extract first component
-	path = path[1:]
-	for i, c := range path {
-		if c == '/' {
-			return path[:i], nil
+		// Remove leading slash and extract first component
+		path = path[1:]
+		name := path
+		for j, c := range path {
+			if c == '/' {
+				name = path[:j]
+				break
+			}
+		}
+
+		if collectionName == "" {
+			collectionName = name
+		} else if collectionName != name {
+			return "", fmt.Errorf("patch contains operations for multiple collections (%s, %s); only single-collection patches are supported", collectionName, name)
 		}
 	}
-	return path, nil
+	return collectionName, nil
 }
 
 // ============================================================================

@@ -910,6 +910,12 @@ impl<S: Store> DB<S> {
                     if p.starts_with(&collection_prefix) {
                         format!("/{}", &p[collection_prefix.len()..])
                     } else {
+                        // Path doesn't have expected prefix - log for debugging
+                        tracing::debug!(
+                            path = %p,
+                            expected_prefix = %collection_prefix,
+                            "Patch path does not have collection prefix, using as-is"
+                        );
                         p.to_string()
                     }
                 });
@@ -930,14 +936,23 @@ impl<S: Store> DB<S> {
                         if path.contains("/Fields/") {
                             if let serde_json::Value::Object(ref mut map) = value {
                                 if map.contains_key("Name") && !map.contains_key("FieldID") {
-                                    // Generate next FieldID based on existing fields count
-                                    let fields_count = schema_json
+                                    // Find max existing FieldID to avoid collisions with gaps
+                                    let max_field_id = schema_json
                                         .get("Fields")
                                         .and_then(|f| f.as_array())
-                                        .map(|arr| arr.len())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|f| f.get("FieldID"))
+                                                .filter_map(|id| {
+                                                    id.as_str()
+                                                        .and_then(|s| s.parse::<u64>().ok())
+                                                        .or_else(|| id.as_u64())
+                                                })
+                                                .max()
+                                                .unwrap_or(0)
+                                        })
                                         .unwrap_or(0);
-                                    // FieldID starts at 1, and we need the next available
-                                    let field_id = (fields_count + 1).to_string();
+                                    let field_id = (max_field_id + 1).to_string();
                                     map.insert("FieldID".to_string(), field_id.into());
                                 }
                             }
