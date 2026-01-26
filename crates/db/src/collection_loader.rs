@@ -12,7 +12,8 @@ use storage::keys::systemstore::CollectionNameKey;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, warn};
 
-use crate::collection::Collection;
+use crate::collection::{collection_short_id, Collection};
+use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
 
 /// Load a collection from the systemstore by name.
@@ -115,4 +116,29 @@ pub(crate) async fn get_collection_with_lazy_load<S: Store + 'static>(
     };
 
     Ok((collection, datastore))
+}
+
+/// Get a collection by name with lazy loading and create an IndexManager.
+///
+/// This function is similar to `get_collection_with_lazy_load` but also creates
+/// an IndexManager for the collection, which is needed for document mutations
+/// that maintain index consistency (unique constraints, etc.).
+///
+/// Returns the collection, datastore, and IndexManager for document operations.
+pub(crate) async fn get_collection_with_index_manager<S: Store + 'static>(
+    txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
+    collection_name: &str,
+) -> query::error::Result<(Collection, NamespaceView, IndexManager)> {
+    let (collection, datastore) = get_collection_with_lazy_load(txn, collection_name).await?;
+
+    // Create an IndexManager from the collection schema
+    let short_id = collection_short_id(collection.collection_id());
+    let index_manager = IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+        query::error::QueryError::execution(format!(
+            "failed to create index manager for collection '{}': {}",
+            collection_name, e
+        ))
+    })?;
+
+    Ok((collection, datastore, index_manager))
 }

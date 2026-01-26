@@ -10,6 +10,8 @@
 /// If the document write succeeds but the index update fails, the caller MUST discard the
 /// transaction (do not commit) to maintain consistency. The underlying transaction will
 /// roll back both operations when discarded.
+use std::hash::{Hash, Hasher};
+
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
@@ -17,6 +19,14 @@ use datastore::NamespaceView;
 use document::{DocID, Document, NormalValue};
 use schema::{CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind, ScalarKind};
 use storage::corekv::{IterOptions, Store};
+
+/// Derive a short u32 ID from a collection_id string.
+/// Uses a simple hash to ensure determinism and uniqueness.
+pub fn collection_short_id(collection_id: &str) -> u32 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    collection_id.hash(&mut hasher);
+    hasher.finish() as u32
+}
 
 /// Key prefix for document data in datastore.
 const DOC_KEY_PREFIX: &[u8] = b"/d/";

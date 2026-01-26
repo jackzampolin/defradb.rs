@@ -75,7 +75,7 @@ pub use auto_commit_mutator::AutoCommitMutator;
 pub use block_builder::build_block_from_document;
 pub use block_builder::{build_blocks_from_document, BlockResult};
 pub use broadcast_mutator::BroadcastMutator;
-pub use collection::Collection;
+pub use collection::{collection_short_id, Collection};
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
     register_doc_if_needed, unregister_doc_if_needed, warn_on_unsafe_policy_transition, AcpContext,

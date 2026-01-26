@@ -14,7 +14,9 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
+use crate::collection::collection_short_id;
 use crate::database::DB;
+use crate::index_manager::IndexManager;
 
 /// Document mutator that auto-commits transactions for each operation.
 ///
@@ -78,8 +80,19 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 ))
             })?;
 
+            // Create an IndexManager for unique constraint enforcement
+            let short_id = collection_short_id(collection.collection_id());
+            let index_manager =
+                IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to create index manager for collection '{}': {}",
+                        collection_name, e
+                    ))
+                })?;
+
+            // Use create_with_indexes to enforce unique constraints and maintain indexes
             collection
-                .create_with_datastore(&datastore, &doc)
+                .create_with_indexes(&datastore, &doc, &index_manager)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("create error: {}", e)))
         };
@@ -154,8 +167,19 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 ))
             })?;
 
+            // Create an IndexManager for index maintenance
+            let short_id = collection_short_id(collection.collection_id());
+            let index_manager =
+                IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to create index manager for collection '{}': {}",
+                        collection_name, e
+                    ))
+                })?;
+
+            // Use update_with_indexes to maintain index consistency
             collection
-                .update_with_datastore(&datastore, &doc)
+                .update_with_indexes(&datastore, &doc, &index_manager)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("update error: {}", e)))
         };
@@ -234,8 +258,19 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 ))
             })?;
 
+            // Create an IndexManager for index maintenance
+            let short_id = collection_short_id(collection.collection_id());
+            let index_manager =
+                IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to create index manager for collection '{}': {}",
+                        collection_name, e
+                    ))
+                })?;
+
+            // Use delete_with_indexes to maintain index consistency
             collection
-                .delete_with_datastore(&datastore, doc_id)
+                .delete_with_indexes(&datastore, doc_id, &index_manager)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))
         };
