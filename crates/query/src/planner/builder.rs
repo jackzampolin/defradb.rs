@@ -13,8 +13,8 @@ use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{Requestable, Select};
 use crate::plan::{
-    IndexScanNode, JoinSide, LimitNode, RelationFilter, ScanNode, SelectNode, TypeJoinMany,
-    TypeJoinOne,
+    IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
+    TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
@@ -132,10 +132,18 @@ impl Planner {
             .unwrap_or_default();
         let filter_has_relations = !filter_relation_fields.is_empty();
 
-        // Build scan mapping: for queries with nested selections OR relation filters,
+        // Check if order references relation fields (needs joins even if not selected)
+        let order_relation_fields: Vec<String> = select
+            .order_by
+            .as_ref()
+            .map(|o| o.relation_field_names())
+            .unwrap_or_default();
+        let order_has_relations = !order_relation_fields.is_empty();
+
+        // Build scan mapping: for queries with nested selections, relation filters, or relation ordering,
         // use full schema mapping so that FK fields are available for TypeJoin lookups.
         // For simple queries, use the render_mapping directly.
-        let needs_joins = has_nested || filter_has_relations;
+        let needs_joins = has_nested || filter_has_relations || order_has_relations;
         let scan_mapping = if needs_joins {
             self.build_scan_mapping_for_join(&collection, &render_mapping)
         } else {
@@ -265,6 +273,52 @@ impl Planner {
             }
         }
 
+        // 3c. Apply joins for relation fields referenced in order but NOT in selection set or filter.
+        // This allows ordering through relations even when those relations aren't being returned.
+        // Example: Book(order: {author: {age: DESC}}) { name rating }
+        // The `author` relation must be joined for ordering even though it's not selected.
+        if order_has_relations {
+            // Get the names of relation fields already joined from selection or filter
+            let mut already_joined: Vec<&str> = select
+                .fields
+                .iter()
+                .filter_map(|f| {
+                    if let Requestable::Select(s) = f {
+                        Some(s.field.name.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // Add filter relations that were joined
+            for f in &filter_relation_fields {
+                if !already_joined.contains(&f.as_str()) {
+                    already_joined.push(f.as_str());
+                }
+            }
+
+            // Create joins for order relations not already joined
+            for relation_field_name in &order_relation_fields {
+                if already_joined.contains(&relation_field_name.as_str()) {
+                    continue; // Already joined
+                }
+
+                // Find the relation field in the parent collection
+                let relation_field = match collection.field_by_name(relation_field_name) {
+                    Some(f) if f.kind.is_relation() => f,
+                    _ => continue, // Not a valid relation field
+                };
+
+                plan = self.apply_filter_relation_join(
+                    plan,
+                    &collection,
+                    relation_field,
+                    relation_field_name,
+                    scan_mapping.clone(),
+                )?;
+            }
+        }
+
         // 4. Apply complex filter after join (when merged document is available)
         // Complex filters contain _and/_or with mixed scalar and relation conditions
         // that must be evaluated together on the merged document.
@@ -274,7 +328,12 @@ impl Planner {
             }
         }
 
-        // 5. Apply limit/offset if present
+        // 5. Apply order by after joins (so nested fields are available)
+        if let Some(ref order_by) = select.order_by {
+            plan = Box::new(OrderByNode::new(plan, order_by.clone(), scan_mapping.clone()));
+        }
+
+        // 6. Apply limit/offset if present
         if let Some(ref limit) = select.limit {
             plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
         }
@@ -380,8 +439,36 @@ impl Planner {
                 // Build scan mapping that includes ALL fields at schema indices.
                 // This is required because JoinSide derives FK field indices from the schema,
                 // so the doc fields must be at their schema positions for FK lookups to work.
-                let child_scan_mapping =
+                let mut child_scan_mapping =
                     self.build_scan_mapping_for_join(&target_collection, &child_render_mapping);
+
+                // Check if parent's order_by references fields in this relation.
+                // If so, add those fields to child_scan_mapping.render_keys so they're
+                // available in the merged JSON for ordering. The fields won't appear in
+                // the final output unless they're also in the selection set.
+                if let Some(ref order_by) = select.order_by {
+                    for condition in &order_by.conditions {
+                        // Check if this order condition starts with this relation field
+                        if condition.fields.len() > 1
+                            && condition.fields[0] == *relation_field_name
+                        {
+                            // Get the nested field name (e.g., "verified" from ["author", "verified"])
+                            let nested_field = &condition.fields[1];
+                            // Find the schema index for this field
+                            if let Some(idx) = child_scan_mapping.first_index_of_name(nested_field)
+                            {
+                                // Add render_key if not already present
+                                if !child_scan_mapping
+                                    .render_keys
+                                    .iter()
+                                    .any(|rk| rk.key == *nested_field)
+                                {
+                                    child_scan_mapping.add_render_key(idx, nested_field);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Get the relation field index in the parent mapping
                 let relation_field_index = mapping
@@ -629,13 +716,19 @@ impl Planner {
                 .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
         };
 
-        // Build a minimal child scan mapping with all fields (for filter evaluation)
+        // Build a child scan mapping with all fields for filter evaluation.
+        // We MUST include render_keys for all fields so that when the child doc
+        // is merged via render_doc_to_json(), the fields are present in the JSON.
+        // The filter will then be able to evaluate conditions on those fields.
+        // The relation field won't appear in the final output because the parent
+        // mapping doesn't have a render_key for it.
         let child_scan_mapping = {
             let mut m = DocumentMapping::new();
             for (i, field) in target_collection.fields.iter().enumerate() {
                 m.add(i, &field.name);
+                // Add render_key so field appears in merged JSON for filter evaluation
+                m.add_render_key(i, &field.name);
             }
-            // No render_keys - we don't want to output these fields
             m
         };
 

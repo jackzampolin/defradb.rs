@@ -343,8 +343,16 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|f| f.has_relation_filters())
             .unwrap_or(false);
 
-        // Use Planner if there are nested selections OR if filter references relations
-        let needs_planner = has_nested || filter_has_relations;
+        // Check if the order references relation fields (e.g., {author: {age: DESC}})
+        // If so, we need to use the Planner to join the relation for ordering.
+        let order_has_relations = select
+            .order_by
+            .as_ref()
+            .map(|o| o.has_relation_order())
+            .unwrap_or(false);
+
+        // Use Planner if there are nested selections, filter through relations, or order through relations
+        let needs_planner = has_nested || filter_has_relations || order_has_relations;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
