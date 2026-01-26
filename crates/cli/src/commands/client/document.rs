@@ -1,4 +1,3 @@
-
 //! Document command implementation
 
 use std::path::PathBuf;

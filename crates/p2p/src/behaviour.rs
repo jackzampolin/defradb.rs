@@ -1,4 +1,3 @@
-
 //! Composite NetworkBehaviour for DefraDB P2P protocol.
 //!
 //! This module combines multiple libp2p behaviours into a single

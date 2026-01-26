@@ -1,4 +1,3 @@
-
 //! Transaction command implementation
 
 use clap::{Args, Subcommand};

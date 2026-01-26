@@ -1,4 +1,3 @@
-
 //! Tests for file-based keyring
 
 use keyring::{Error, FileKeyring, Keyring};

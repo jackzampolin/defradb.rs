@@ -1,4 +1,3 @@
-
 //! CBOR codec for P2P messages.
 //!
 //! This module provides CBOR serialization/deserialization for P2P messages,

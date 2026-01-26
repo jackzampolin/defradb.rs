@@ -1,4 +1,3 @@
-
 //! P2P command implementation for peer-to-peer network management
 
 use clap::{Args, Subcommand};

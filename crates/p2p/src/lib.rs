@@ -1,4 +1,3 @@
-
 //! P2P networking crate for DefraDB.
 //!
 //! This crate provides peer-to-peer networking capabilities for DefraDB,

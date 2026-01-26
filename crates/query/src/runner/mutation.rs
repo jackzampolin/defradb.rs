@@ -239,8 +239,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(node)
             }
             MutationType::Upsert => {
-                let mut node =
-                    UpsertNode::new(&mutation.collection_name, mutator, mapping.clone());
+                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone());
 
                 // Set create_input (from Go's 'create' argument)
                 if !mutation.create_input.is_empty() {

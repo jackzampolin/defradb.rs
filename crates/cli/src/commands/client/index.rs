@@ -1,4 +1,3 @@
-
 //! Index command implementation for database index management
 
 use clap::{Args, Subcommand};

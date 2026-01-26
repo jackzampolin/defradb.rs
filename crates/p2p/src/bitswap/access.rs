@@ -1,4 +1,3 @@
-
 //! Access control primitives for P2P synchronization.
 //!
 //! This module provides the building blocks for access control:

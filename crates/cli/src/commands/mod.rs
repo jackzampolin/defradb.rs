@@ -1,4 +1,3 @@
-
 //! CLI subcommands
 
 pub mod client;

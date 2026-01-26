@@ -1,4 +1,3 @@
-
 //! Client commands for interacting with a running DefraDB node
 
 mod acp;

@@ -1,4 +1,3 @@
-
 //! DefraDB CLI library
 //!
 //! This library provides the core functionality for the DefraDB CLI.

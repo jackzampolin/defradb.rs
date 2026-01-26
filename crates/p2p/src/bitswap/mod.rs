@@ -1,4 +1,3 @@
-
 //! Bitswap integration for DefraDB P2P.
 //!
 //! This module provides Bitswap (IPFS block exchange) support for DefraDB,

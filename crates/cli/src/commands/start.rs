@@ -1,4 +1,3 @@
-
 //! Start command implementation
 
 use std::net::SocketAddr;

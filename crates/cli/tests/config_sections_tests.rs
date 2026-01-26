@@ -1,4 +1,3 @@
-
 //! Tests for configuration section structs
 
 use cli::config::{

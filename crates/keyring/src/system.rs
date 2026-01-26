@@ -1,4 +1,3 @@
-
 //! System keyring using OS-provided key management
 //!
 //! Uses the operating system's native keyring service:

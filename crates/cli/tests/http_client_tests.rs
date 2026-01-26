@@ -1,4 +1,3 @@
-
 //! Tests for the HTTP client
 
 use cli::commands::client::http_client::{

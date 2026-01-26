@@ -1,4 +1,3 @@
-
 //! Tests for P2P error types.
 
 use std::io;

@@ -1,4 +1,3 @@
-
 //! Two-stream protocol handler for Go compatibility.
 //!
 //! Go's DefraDB uses a two-stream pattern for request-response:

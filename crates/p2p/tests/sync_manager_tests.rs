@@ -1,4 +1,3 @@
-
 //! Tests for the sync manager module.
 
 use std::str::FromStr;

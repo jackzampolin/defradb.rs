@@ -1,4 +1,3 @@
-
 //! Message signing and verification for DefraDB P2P protocol.
 //!
 //! This module provides functions for signing outgoing messages and

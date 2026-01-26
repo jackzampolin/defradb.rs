@@ -1,4 +1,3 @@
-
 //! GossipSub topic definitions for DefraDB.
 //!
 //! Topics follow Go implementation naming conventions:

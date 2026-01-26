@@ -1,4 +1,3 @@
-
 //! Version command implementation
 
 use clap::Args;

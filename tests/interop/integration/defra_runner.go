@@ -791,8 +791,16 @@ func valueToGraphQL(v any) string {
 	case int, int64, int32:
 		return fmt.Sprintf("%d", val)
 	case float64:
+		// Check if it's actually an integer value (from JSON parsing)
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%d", int64(val))
+		}
 		return fmt.Sprintf("%v", val)
 	case float32:
+		// Check if it's actually an integer value (from JSON parsing)
+		if val == float32(int32(val)) {
+			return fmt.Sprintf("%d", int32(val))
+		}
 		return fmt.Sprintf("%v", val)
 	case map[string]any:
 		return mapToGraphQLInput(val)

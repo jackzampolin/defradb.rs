@@ -1,4 +1,3 @@
-
 //! DefraDB CLI - Command-line interface for DefraDB
 //!
 //! This binary provides the `defra` command for interacting with DefraDB nodes.

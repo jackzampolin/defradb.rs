@@ -1,4 +1,3 @@
-
 //! Tests for system keyring (OS-provided key management)
 //!
 //! These tests interact with the actual OS keyring.

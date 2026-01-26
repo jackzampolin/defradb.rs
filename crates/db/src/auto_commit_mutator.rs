@@ -82,8 +82,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
             // Create an IndexManager for unique constraint enforcement
             let short_id = collection_short_id(collection.collection_id());
-            let index_manager =
-                IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+            let index_manager = IndexManager::from_collection(short_id, collection.schema())
+                .map_err(|e| {
                     query::error::QueryError::execution(format!(
                         "failed to create index manager for collection '{}': {}",
                         collection_name, e
@@ -169,8 +169,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
             // Create an IndexManager for index maintenance
             let short_id = collection_short_id(collection.collection_id());
-            let index_manager =
-                IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+            let index_manager = IndexManager::from_collection(short_id, collection.schema())
+                .map_err(|e| {
                     query::error::QueryError::execution(format!(
                         "failed to create index manager for collection '{}': {}",
                         collection_name, e
@@ -260,8 +260,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
             // Create an IndexManager for index maintenance
             let short_id = collection_short_id(collection.collection_id());
-            let index_manager =
-                IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+            let index_manager = IndexManager::from_collection(short_id, collection.schema())
+                .map_err(|e| {
                     query::error::QueryError::execution(format!(
                         "failed to create index manager for collection '{}': {}",
                         collection_name, e

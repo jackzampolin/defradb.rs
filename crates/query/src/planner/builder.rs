@@ -232,7 +232,14 @@ impl Planner {
         } else {
             select.filter.as_ref()
         };
-        plan = self.apply_joins(plan, select, &collection, scan_mapping.clone(), 0, filter_for_joins)?;
+        plan = self.apply_joins(
+            plan,
+            select,
+            &collection,
+            scan_mapping.clone(),
+            0,
+            filter_for_joins,
+        )?;
 
         // 3b. Apply joins for multi-level relation filter paths where the first relation
         // is NOT in the selection set. If the first relation IS selected, then apply_joins
@@ -381,13 +388,19 @@ impl Planner {
         // that must be evaluated together on the merged document.
         if is_complex_filter {
             if let Some(ref filter) = select.filter {
-                plan = Box::new(SelectNode::new(plan, scan_mapping.clone()).with_filter(filter.clone()));
+                plan = Box::new(
+                    SelectNode::new(plan, scan_mapping.clone()).with_filter(filter.clone()),
+                );
             }
         }
 
         // 5. Apply order by after joins (so nested fields are available)
         if let Some(ref order_by) = select.order_by {
-            plan = Box::new(OrderByNode::new(plan, order_by.clone(), scan_mapping.clone()));
+            plan = Box::new(OrderByNode::new(
+                plan,
+                order_by.clone(),
+                scan_mapping.clone(),
+            ));
         }
 
         // 6. Apply limit/offset if present
@@ -506,8 +519,7 @@ impl Planner {
                 if let Some(ref order_by) = select.order_by {
                     for condition in &order_by.conditions {
                         // Check if this order condition starts with this relation field
-                        if condition.fields.len() > 1
-                            && condition.fields[0] == *relation_field_name
+                        if condition.fields.len() > 1 && condition.fields[0] == *relation_field_name
                         {
                             // Get the nested field name (e.g., "verified" from ["author", "verified"])
                             let nested_field = &condition.fields[1];
@@ -536,7 +548,10 @@ impl Planner {
                     .map(|f| {
                         f.get_multi_level_relation_paths()
                             .into_iter()
-                            .filter(|path| path.first().map_or(false, |first| first == relation_field_name))
+                            .filter(|path| {
+                                path.first()
+                                    .map_or(false, |first| first == relation_field_name)
+                            })
                             .map(|path| path[1..].to_vec()) // Get remaining path after this relation
                             .filter(|remaining| !remaining.is_empty())
                             .collect()
@@ -547,17 +562,30 @@ impl Planner {
                 for remaining_path in &multi_level_paths_for_relation {
                     if let Some(first_nested) = remaining_path.first() {
                         if let Some(idx) = child_scan_mapping.first_index_of_name(first_nested) {
-                            if !child_scan_mapping.render_keys.iter().any(|rk| rk.key == *first_nested) {
+                            if !child_scan_mapping
+                                .render_keys
+                                .iter()
+                                .any(|rk| rk.key == *first_nested)
+                            {
                                 child_scan_mapping.add_render_key(idx, first_nested);
                             }
                         }
                     }
                 }
 
-                // Get the relation field index in the parent mapping
+                // Get the relation field index in the parent mapping.
+                // Use output_name (alias if set) to find the correct index.
+                // This ensures aliased fields like "p1: published" and "p2: published"
+                // get distinct indices and separate child mappings/filters.
+                let output_name = nested_select.field.output_name();
                 let relation_field_index = mapping
-                    .first_index_of_name(relation_field_name)
-                    .ok_or_else(|| QueryError::internal("relation field not in mapping"))?;
+                    .try_find_index_from_render_key(output_name)
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "relation field '{}' (output name '{}') not in mapping",
+                            relation_field_name, output_name
+                        ))
+                    })?;
 
                 // Set up child scan mapping in parent (for TypeJoin to render children).
                 // We use child_scan_mapping (not child_render_mapping) because child docs
@@ -707,12 +735,11 @@ impl Planner {
 
                 // Extract relation filter for this join if parent has a filter
                 let relation_filter = parent_filter.and_then(|f| {
-                    f.extract_relation_filter(relation_field_name).map(|nested_filter| {
-                        RelationFilter {
+                    f.extract_relation_filter(relation_field_name)
+                        .map(|nested_filter| RelationFilter {
                             relation_field: relation_field_name.clone(),
                             conditions: nested_filter,
-                        }
-                    })
+                        })
                 });
 
                 // Create the appropriate join node
@@ -753,6 +780,16 @@ impl Planner {
     /// position in the collection schema. For FK lookups to work correctly, documents must
     /// have fields at their schema positions. This method ensures the mapping includes all
     /// schema fields, while render_keys only include the user-selected fields.
+    ///
+    /// # Aliased Relation Fields
+    ///
+    /// When multiple aliases reference the same relation field (e.g., `p1: published` and
+    /// `p2: published`), each alias MUST get a unique index. This is critical because
+    /// TypeJoinMany nodes use their relation_field_index to set children on the parent
+    /// document. If aliases share the same index, later joins overwrite earlier ones.
+    ///
+    /// The solution: track which indices already have render_keys. If a schema_index
+    /// already has a render_key, allocate a new index for subsequent aliases.
     fn build_scan_mapping_for_join(
         &self,
         collection: &CollectionVersion,
@@ -765,6 +802,9 @@ impl Planner {
             mapping.add(i, &field.name);
         }
 
+        // Track which schema indices already have render_keys assigned
+        let mut indices_with_render_keys = std::collections::HashSet::new();
+
         // Map render_keys from render_mapping to schema indices.
         // render_mapping uses sparse indices (0, 1, 2, ...) for only selected fields,
         // but scan_mapping uses schema indices which may differ.
@@ -772,13 +812,26 @@ impl Planner {
         // IMPORTANT: render_key.key may be an alias (e.g., "headline" for field "title").
         // We must look up the *field name* from render_mapping to find the schema index,
         // then use render_key.key (the alias) as the output key.
+        //
+        // For aliased fields referencing the same underlying field, each alias gets
+        // its own unique index to prevent TypeJoinMany nodes from overwriting each other.
         for render_key in &render_mapping.render_keys {
             // Find the field name that corresponds to this render_key's index in render_mapping
             if let Some(field_name) = render_mapping.try_find_name_from_index(render_key.index) {
                 // Look up the schema index for this field name in the new mapping
                 if let Some(schema_index) = mapping.first_index_of_name(field_name) {
-                    // Add render key with the alias/output name at the schema index
-                    mapping.add_render_key(schema_index, &render_key.key);
+                    if indices_with_render_keys.contains(&schema_index) {
+                        // This schema_index already has a render_key (aliased field).
+                        // Allocate a new index to avoid TypeJoinMany nodes overwriting each other.
+                        let new_index = mapping.next_index();
+                        mapping.add(new_index, field_name);
+                        mapping.add_render_key(new_index, &render_key.key);
+                        indices_with_render_keys.insert(new_index);
+                    } else {
+                        // First render_key for this schema_index
+                        mapping.add_render_key(schema_index, &render_key.key);
+                        indices_with_render_keys.insert(schema_index);
+                    }
                 }
             }
         }
@@ -800,15 +853,16 @@ impl Planner {
         mut mapping: DocumentMapping,
     ) -> Result<Box<dyn PlanNode>> {
         // Get the target collection for this relation
-        let target_collection_id = relation_field
-            .kind
-            .relation_collection_id()
-            .ok_or_else(|| {
-                QueryError::internal(format!(
-                    "relation field '{}' has no target collection",
-                    relation_field_name
-                ))
-            })?;
+        let target_collection_id =
+            relation_field
+                .kind
+                .relation_collection_id()
+                .ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "relation field '{}' has no target collection",
+                        relation_field_name
+                    ))
+                })?;
 
         let target_collection = if target_collection_id.is_empty() {
             Arc::new(parent_collection.clone())
@@ -886,13 +940,7 @@ impl Planner {
 
         // Create TypeJoinOne (filter relations are typically one-to-one)
         // No relation filter here - the complex filter is applied after all joins
-        let join = TypeJoinOne::new(
-            plan,
-            child_plan,
-            parent_side,
-            child_side,
-            mapping,
-        );
+        let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping);
 
         Ok(Box::new(join))
     }
@@ -933,15 +981,16 @@ impl Planner {
             }
 
             // Get the target collection for this relation
-            let target_collection_id = relation_field
-                .kind
-                .relation_collection_id()
-                .ok_or_else(|| {
-                    QueryError::internal(format!(
-                        "relation field '{}' has no target collection",
-                        relation_field_name
-                    ))
-                })?;
+            let target_collection_id =
+                relation_field
+                    .kind
+                    .relation_collection_id()
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "relation field '{}' has no target collection",
+                            relation_field_name
+                        ))
+                    })?;
 
             let target_collection = if target_collection_id.is_empty() {
                 Arc::new(current_collection.clone())
@@ -964,9 +1013,12 @@ impl Planner {
             // Get the relation field index in the parent mapping
             let relation_field_index = mapping
                 .first_index_of_name(relation_field_name)
-                .ok_or_else(|| QueryError::internal(format!(
-                    "relation field '{}' not in mapping", relation_field_name
-                )))?;
+                .ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "relation field '{}' not in mapping",
+                        relation_field_name
+                    ))
+                })?;
 
             // Set up child mapping in parent for TypeJoin
             mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
@@ -1015,13 +1067,7 @@ impl Planner {
             )?;
 
             // Create TypeJoinOne for the sub-join
-            let join = TypeJoinOne::new(
-                plan,
-                child_plan,
-                parent_side,
-                child_side,
-                mapping.clone(),
-            );
+            let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
 
             plan = Box::new(join);
 
@@ -1070,15 +1116,16 @@ impl Planner {
             }
 
             // Get the target collection for this relation
-            let target_collection_id = relation_field
-                .kind
-                .relation_collection_id()
-                .ok_or_else(|| {
-                    QueryError::internal(format!(
-                        "relation field '{}' has no target collection",
-                        relation_field_name
-                    ))
-                })?;
+            let target_collection_id =
+                relation_field
+                    .kind
+                    .relation_collection_id()
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "relation field '{}' has no target collection",
+                            relation_field_name
+                        ))
+                    })?;
 
             let target_collection = if target_collection_id.is_empty() {
                 Arc::new(current_collection.clone())

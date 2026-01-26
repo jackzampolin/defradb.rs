@@ -1,4 +1,3 @@
-
 //! Logging initialization
 
 use tracing::Level;

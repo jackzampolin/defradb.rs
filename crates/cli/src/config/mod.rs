@@ -1,4 +1,3 @@
-
 //! Configuration system for DefraDB CLI
 //!
 //! Configuration is loaded in the following priority order (highest to lowest):

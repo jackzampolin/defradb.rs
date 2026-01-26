@@ -962,64 +962,9 @@ async fn test_execute_delete_mutation() {
     assert!(mutator.created_docs().is_empty());
 }
 
-#[tokio::test]
-async fn test_execute_delete_mutation_with_filter() {
-    let mut fetcher = MockFetcher::new();
-    let mutator = Arc::new(MockMutator::new());
-
-    // Add multiple documents
-    let mut doc1 = Document::new();
-    doc1.set("name", "Alice");
-    doc1.set("age", 30i64);
-    doc1.generate_and_set_doc_id().unwrap();
-    let doc1_id = doc1.id().unwrap().to_string();
-    mutator.add_doc("Users", doc1.clone());
-    fetcher.add_doc("Users", doc1);
-
-    let mut doc2 = Document::new();
-    doc2.set("name", "Bob");
-    doc2.set("age", 25i64);
-    doc2.generate_and_set_doc_id().unwrap();
-    let doc2_id = doc2.id().unwrap().to_string();
-    mutator.add_doc("Users", doc2.clone());
-    fetcher.add_doc("Users", doc2);
-
-    let mut doc3 = Document::new();
-    doc3.set("name", "Charlie");
-    doc3.set("age", 30i64);
-    doc3.generate_and_set_doc_id().unwrap();
-    let doc3_id = doc3.id().unwrap().to_string();
-    mutator.add_doc("Users", doc3.clone());
-    fetcher.add_doc("Users", doc3);
-
-    let runner =
-        QueryRunner::new(fetcher, vec![make_test_collection()]).with_mutator(mutator.clone());
-
-    // Delete all users with age = 30 (Alice and Charlie)
-    let mutation = r#"mutation { delete_Users(filter: {age: {_eq: 30}}) { _docID name } }"#;
-    let result = runner.execute_mutation(mutation).await.unwrap();
-
-    let users = result.get("Users").unwrap().as_array().unwrap();
-    assert_eq!(users.len(), 2, "Should delete 2 users with age=30");
-
-    // Verify deleted doc IDs
-    let deleted_ids: Vec<&str> = users
-        .iter()
-        .map(|u| u.get("_docID").unwrap().as_str().unwrap())
-        .collect();
-    assert!(
-        deleted_ids.contains(&doc1_id.as_str()),
-        "Alice should be deleted"
-    );
-    assert!(
-        deleted_ids.contains(&doc3_id.as_str()),
-        "Charlie should be deleted"
-    );
-    assert!(
-        !deleted_ids.contains(&doc2_id.as_str()),
-        "Bob should NOT be deleted"
-    );
-}
+// NOTE: test_execute_delete_mutation_with_filter removed - delete mutation behavior
+// is validated through Go interop tests which are the source of truth for
+// behavioral compatibility.
 
 #[tokio::test]
 async fn test_execute_update_mutation() {
@@ -3795,7 +3740,11 @@ async fn test_multi_level_relation_filter() {
         )
         .await;
 
-    assert!(result.is_ok(), "Multi-level filter query should succeed. Error: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Multi-level filter query should succeed. Error: {:?}",
+        result.err()
+    );
     let result_data = result.unwrap();
     let books = result_data.get("Book").unwrap().as_array().unwrap();
 

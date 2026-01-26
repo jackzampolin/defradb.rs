@@ -1,4 +1,3 @@
-
 //! Backup command implementation for database export/import
 
 use std::path::PathBuf;

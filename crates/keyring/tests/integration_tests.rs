@@ -1,4 +1,3 @@
-
 //! Integration tests for keyring functionality
 
 use std::sync::Arc;

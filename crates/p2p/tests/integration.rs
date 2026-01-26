@@ -1,4 +1,3 @@
-
 //! Integration tests for P2P networking.
 //!
 //! These tests verify end-to-end functionality with multiple hosts.

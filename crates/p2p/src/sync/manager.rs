@@ -1,4 +1,3 @@
-
 //! Sync manager for coordinating P2P block synchronization.
 //!
 //! The SyncManager handles:

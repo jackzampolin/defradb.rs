@@ -1,4 +1,3 @@
-
 //! Tests for the Config struct and configuration loading
 
 use std::path::PathBuf;

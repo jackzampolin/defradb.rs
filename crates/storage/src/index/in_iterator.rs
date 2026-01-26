@@ -92,7 +92,7 @@ impl InIterator {
                     txn,
                     collection_short_id,
                     &self.desc,
-                    &[value.clone()],
+                    std::slice::from_ref(value),
                 )
                 .await?
             } else {
@@ -100,7 +100,7 @@ impl InIterator {
                     txn,
                     collection_short_id,
                     &self.desc,
-                    &[value.clone()],
+                    std::slice::from_ref(value),
                 )
                 .await?
             };

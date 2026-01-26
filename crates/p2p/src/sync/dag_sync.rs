@@ -1,4 +1,3 @@
-
 //! DAG synchronization using Bitswap.
 //!
 //! This module provides DAG sync capabilities that mirror Go DefraDB's `syncDAG`

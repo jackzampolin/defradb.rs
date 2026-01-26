@@ -212,7 +212,10 @@ impl Filter {
         names
     }
 
-    fn collect_relation_field_names(conditions: &HashMap<String, JsonValue>, names: &mut Vec<String>) {
+    fn collect_relation_field_names(
+        conditions: &HashMap<String, JsonValue>,
+        names: &mut Vec<String>,
+    ) {
         for (key, value) in conditions {
             // Check logical operators recursively
             if let Some(op) = FilterOp::parse(key) {
@@ -329,8 +332,10 @@ impl Filter {
                             if let JsonValue::Array(arr) = value {
                                 for item in arr {
                                     if let JsonValue::Object(obj) = item {
-                                        let nested: HashMap<String, JsonValue> =
-                                            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                        let nested: HashMap<String, JsonValue> = obj
+                                            .iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect();
                                         Self::collect_relation_paths(&nested, current_path, paths);
                                     }
                                 }
@@ -675,10 +680,7 @@ impl Filter {
                 }
 
                 let related_obj = field_value.as_object().ok_or_else(|| {
-                    QueryError::invalid_filter(format!(
-                        "relation field '{}' is not an object",
-                        key
-                    ))
+                    QueryError::invalid_filter(format!("relation field '{}' is not an object", key))
                 })?;
 
                 // Recursively evaluate the nested conditions against the related object
@@ -748,9 +750,9 @@ impl Filter {
                         continue;
                     }
                     FilterOp::Not => {
-                        let sub_conds = value.as_object().ok_or_else(|| {
-                            QueryError::invalid_filter("_not requires object")
-                        })?;
+                        let sub_conds = value
+                            .as_object()
+                            .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
                         if self.eval_relation_conditions(sub_conds, obj)? {
                             return Ok(false);
                         }
@@ -1053,8 +1055,9 @@ impl Filter {
                                 if let Some(obj) = item.as_object() {
                                     if let Some(rel_value) = obj.get(relation_field) {
                                         if let Some(rel_obj) = rel_value.as_object() {
-                                            let is_nested =
-                                                rel_obj.keys().any(|k| FilterOp::parse(k).is_none());
+                                            let is_nested = rel_obj
+                                                .keys()
+                                                .any(|k| FilterOp::parse(k).is_none());
                                             if is_nested {
                                                 let nested_conditions: HashMap<String, JsonValue> =
                                                     rel_obj
@@ -1905,7 +1908,10 @@ mod tests {
             json!({"verified": {"_eq": true}}),
         )]));
         let paths = filter.get_multi_level_relation_paths();
-        assert!(paths.is_empty(), "Single-level relation should not return multi-level paths");
+        assert!(
+            paths.is_empty(),
+            "Single-level relation should not return multi-level paths"
+        );
     }
 
     #[test]
@@ -1918,7 +1924,10 @@ mod tests {
         )]));
         let paths = filter.get_multi_level_relation_paths();
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0], vec!["author".to_string(), "published".to_string()]);
+        assert_eq!(
+            paths[0],
+            vec!["author".to_string(), "published".to_string()]
+        );
     }
 
     #[test]
@@ -1930,20 +1939,21 @@ mod tests {
         )]));
         let paths = filter.get_multi_level_relation_paths();
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0], vec![
-            "author".to_string(),
-            "publisher".to_string(),
-            "country".to_string()
-        ]);
+        assert_eq!(
+            paths[0],
+            vec![
+                "author".to_string(),
+                "publisher".to_string(),
+                "country".to_string()
+            ]
+        );
     }
 
     #[test]
     fn test_get_multi_level_relation_paths_no_relation() {
         // Scalar filter, no relations
-        let filter = Filter::from_conditions(HashMap::from([(
-            "rating".to_string(),
-            json!({"_eq": 4.9}),
-        )]));
+        let filter =
+            Filter::from_conditions(HashMap::from([("rating".to_string(), json!({"_eq": 4.9}))]));
         let paths = filter.get_multi_level_relation_paths();
         assert!(paths.is_empty());
     }
@@ -1969,10 +1979,8 @@ mod tests {
             "author".to_string(),
             json!({"published": {"rating": {"_eq": 4.9}}}),
         )]));
-        let extracted = filter.extract_filter_at_path(&[
-            "author".to_string(),
-            "published".to_string(),
-        ]);
+        let extracted =
+            filter.extract_filter_at_path(&["author".to_string(), "published".to_string()]);
         assert!(extracted.is_some());
         let extracted = extracted.unwrap();
         // Should contain {rating: {_eq: 4.9}}

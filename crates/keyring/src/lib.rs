@@ -1,4 +1,3 @@
-
 //! Keyring and key management for DefraDB
 //!
 //! Provides secure storage for cryptographic keys with support for multiple backends:

@@ -1,4 +1,3 @@
-
 //! Broadcasting functionality for P2P sync.
 //!
 //! This module handles broadcasting block updates to the network via GossipSub.

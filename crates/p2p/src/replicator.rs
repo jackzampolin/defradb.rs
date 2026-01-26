@@ -1,4 +1,3 @@
-
 //! Replicator types for persistent peer replication configuration.
 //!
 //! A replicator is a peer that is authorized to replicate specific collections.

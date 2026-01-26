@@ -1,4 +1,3 @@
-
 //! DefraDB P2P protocol constants.
 //!
 //! This module defines the protocol identifiers and version information
