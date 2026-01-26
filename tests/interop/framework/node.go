@@ -190,6 +190,9 @@ func (n *Node) startGo(ctx context.Context) error {
 func (n *Node) startBinary(ctx context.Context, binary string, args []string) error {
 	n.cmd = exec.CommandContext(ctx, binary, args...)
 
+	// Pass through RUST_LOG for debugging
+	n.cmd.Env = append(os.Environ(), "RUST_LOG="+os.Getenv("RUST_LOG"))
+
 	// Create log file in temp directory
 	logPath := filepath.Join(n.tempDir, "node.log")
 	logFile, err := os.Create(logPath)

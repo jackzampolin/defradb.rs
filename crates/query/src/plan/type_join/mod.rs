@@ -12,6 +12,6 @@ mod type_join_one;
 pub use direction::JoinDirection;
 pub use join_side::JoinSide;
 pub use type_join_many::TypeJoinMany;
-pub use type_join_one::TypeJoinOne;
+pub use type_join_one::{RelationFilter, TypeJoinOne};
 
 // Tests extracted to crates/query/tests/type_join_tests.rs

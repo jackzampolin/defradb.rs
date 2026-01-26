@@ -156,7 +156,10 @@ impl OrderByNode {
         }
     }
 
-    /// Static version of get_field_value
+    /// Static version of get_field_value.
+    ///
+    /// Handles both simple field paths (["age"]) and nested relation paths (["author", "age"]).
+    /// For nested paths, traverses the JSON object hierarchy to find the target value.
     fn get_field_value_static<'a>(
         doc: &'a Doc,
         fields: &[String],
@@ -168,7 +171,34 @@ impl OrderByNode {
 
         let field_name = &fields[0];
         let index = mapping.first_index_of_name(field_name)?;
-        doc.get(index)
+        let value = doc.get(index)?;
+
+        // If there are more path segments, traverse the nested object
+        if fields.len() > 1 {
+            Self::traverse_nested_value(value, &fields[1..])
+        } else {
+            Some(value)
+        }
+    }
+
+    /// Traverse a nested JSON value to find a field at the given path.
+    fn traverse_nested_value<'a>(value: &'a JsonValue, path: &[String]) -> Option<&'a JsonValue> {
+        if path.is_empty() {
+            return Some(value);
+        }
+
+        match value {
+            JsonValue::Object(obj) => {
+                let field_value = obj.get(&path[0])?;
+                if path.len() > 1 {
+                    Self::traverse_nested_value(field_value, &path[1..])
+                } else {
+                    Some(field_value)
+                }
+            }
+            JsonValue::Null => None,
+            _ => None, // Can't traverse into non-object values
+        }
     }
 }
 
@@ -181,18 +211,20 @@ impl PlanNode for OrderByNode {
     }
 
     async fn start(&mut self) -> Result<()> {
-        // Validate that all ORDER BY fields exist in the document mapping
+        // Validate that the first field of all ORDER BY paths exists in the document mapping.
+        // For nested paths like ["author", "age"], we only validate "author" exists here;
+        // the nested field traversal handles further validation during comparison.
         for condition in &self.order_by.conditions {
             if !condition.fields.is_empty() {
-                let field_name = &condition.fields[0];
+                let first_field = &condition.fields[0];
                 if self
                     .document_mapping
-                    .first_index_of_name(field_name)
+                    .first_index_of_name(first_field)
                     .is_none()
                 {
                     return Err(QueryError::execution(format!(
                         "ORDER BY field '{}' does not exist in the document schema",
-                        field_name
+                        first_field
                     )));
                 }
             }

@@ -62,6 +62,26 @@ impl OrderBy {
     pub fn is_empty(&self) -> bool {
         self.conditions.is_empty()
     }
+
+    /// Check if any order condition references a relation field (nested path).
+    ///
+    /// A path like `["author", "age"]` indicates ordering through a relation.
+    /// This returns true if any condition has a path length > 1.
+    pub fn has_relation_order(&self) -> bool {
+        self.conditions.iter().any(|c| c.fields.len() > 1)
+    }
+
+    /// Get the names of relation fields referenced in order conditions.
+    ///
+    /// For a path like `["author", "age"]`, returns `"author"`.
+    /// Only returns fields from paths with length > 1.
+    pub fn relation_field_names(&self) -> Vec<String> {
+        self.conditions
+            .iter()
+            .filter(|c| c.fields.len() > 1)
+            .filter_map(|c| c.fields.first().cloned())
+            .collect()
+    }
 }
 
 /// Limit and offset for pagination

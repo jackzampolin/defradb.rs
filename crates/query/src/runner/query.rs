@@ -334,9 +334,29 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .any(|f| matches!(f, Requestable::Select(_)));
 
+        // Check if the filter references relation fields (e.g., {author: {verified: true}})
+        // If so, we need to use the Planner to join the relation for filtering even if
+        // the relation field is not in the selection set.
+        let filter_has_relations = select
+            .filter
+            .as_ref()
+            .map(|f| f.has_relation_filters())
+            .unwrap_or(false);
+
+        // Check if the order references relation fields (e.g., {author: {age: DESC}})
+        // If so, we need to use the Planner to join the relation for ordering.
+        let order_has_relations = select
+            .order_by
+            .as_ref()
+            .map(|o| o.has_relation_order())
+            .unwrap_or(false);
+
+        // Use Planner if there are nested selections, filter through relations, or order through relations
+        let needs_planner = has_nested || filter_has_relations || order_has_relations;
+
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
-        if has_nested && self.acp.is_some() {
+        if needs_planner && self.acp.is_some() {
             // Check root collection for ACP
             if collection.policy.is_some() {
                 return Err(QueryError::execution(format!(
@@ -361,8 +381,8 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        if has_nested {
-            // Use the Planner for queries with nested selections (joins)
+        if needs_planner {
+            // Use the Planner for queries with nested selections (joins) or relation filters.
             // Note: ACP filtering for nested queries is not yet implemented.
             // Queries on ACP-protected collections are blocked above.
             self.execute_nested_select_with_planner(select, fetcher, caller_identity)
