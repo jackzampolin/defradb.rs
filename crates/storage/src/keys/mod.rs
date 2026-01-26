@@ -49,6 +49,7 @@ pub mod utils;
 pub use blockstore::{BlockstoreKey, ToMergeIndexKey, MERGE_PREFIX};
 pub use datastore::{
     DataStoreKey, DatastoreSE, IndexDataStoreKey, IndexedField, PrimaryDataStoreKey, ViewCacheKey,
+    DATASTORE_DOC_VERSION_FIELD_ID,
 };
 pub use encstore::EncstoreKey;
 pub use headstore::{

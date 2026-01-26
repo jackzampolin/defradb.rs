@@ -1,4 +1,3 @@
-
 //! Document type for DefraDB
 
 use std::collections::HashMap;
@@ -31,6 +30,7 @@ use crate::{DocID, Field, FieldValue, NormalValue};
 /// - A collection of fields with their values
 /// - A head CID representing the current state
 /// - Dirty tracking for unsaved changes
+/// - Schema version tracking for lens migrations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     /// The document ID (content-addressed)
@@ -55,6 +55,16 @@ pub struct Document {
     /// The collection schema this document belongs to
     #[serde(skip)]
     collection: Option<CollectionVersion>,
+
+    /// The schema version ID this document was stored with.
+    ///
+    /// This tracks which collection schema version was active when the document
+    /// was created or last migrated. Used by the lens system to determine if
+    /// a document needs migration to match the current collection version.
+    ///
+    /// Stored in the datastore at key `/{collectionShortID}/v/{docID}/v`.
+    #[serde(skip)]
+    schema_version_id: Option<String>,
 }
 
 impl Document {
@@ -67,11 +77,13 @@ impl Document {
             head: None,
             is_dirty: true,
             collection: None,
+            schema_version_id: None,
         }
     }
 
     /// Create a new document with a specific collection schema.
     pub fn with_collection(collection: CollectionVersion) -> Self {
+        let version_id = collection.version_id.clone();
         Self {
             id: None,
             fields: HashMap::new(),
@@ -79,6 +91,7 @@ impl Document {
             head: None,
             is_dirty: true,
             collection: Some(collection),
+            schema_version_id: Some(version_id),
         }
     }
 
@@ -91,6 +104,7 @@ impl Document {
             head: None,
             is_dirty: true,
             collection: None,
+            schema_version_id: None,
         }
     }
 
@@ -165,6 +179,36 @@ impl Document {
     /// Set the collection schema.
     pub fn set_collection(&mut self, collection: CollectionVersion) {
         self.collection = Some(collection);
+    }
+
+    /// Get the schema version ID this document was stored with.
+    ///
+    /// This is used by the lens migration system to determine if a document
+    /// needs to be transformed to match the current collection schema version.
+    pub fn schema_version_id(&self) -> Option<&str> {
+        self.schema_version_id.as_deref()
+    }
+
+    /// Set the schema version ID.
+    ///
+    /// This should be called when:
+    /// - Creating a new document (set to current collection version)
+    /// - Loading a document from storage (set to stored version)
+    /// - After migrating a document (set to target version)
+    pub fn set_schema_version_id(&mut self, version_id: impl Into<String>) {
+        self.schema_version_id = Some(version_id.into());
+    }
+
+    /// Check if this document needs migration to the target schema version.
+    ///
+    /// Returns `true` if the document has a schema version that differs from
+    /// the target, indicating lens transforms should be applied.
+    pub fn needs_migration(&self, target_version_id: &str) -> bool {
+        match &self.schema_version_id {
+            Some(version) => version != target_version_id,
+            // If no version is set, assume it's already at target (legacy behavior)
+            None => false,
+        }
     }
 
     /// Check if the document has unsaved changes.
