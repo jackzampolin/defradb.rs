@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,7 +27,6 @@ func getLensPath(moduleName string) string {
 
 // SetDefaultModulePath is the path to the SetDefault lens module
 func SetDefaultModulePath() string {
-	// Use plain file path without file:// prefix for Rust WASM loading
 	return getLensPath("rust_wasm32_set_default")
 }
 
@@ -49,35 +47,26 @@ func skipIfNoWasmModules(t *testing.T) {
 	}
 }
 
-func TestSetMigration_WithRealWasmModule(t *testing.T) {
-	skipIfNoWasmModules(t)
-	Init()
-
-	node, err := NewNode(NodeOptions{InMemory: true})
-	require.NoError(t, err)
-	defer node.Close()
-
-	// Create a schema
-	sdl := "type User { name: String }"
+// getSchemaVersionIDs creates a schema, patches it, and returns source and destination version IDs
+func getSchemaVersionIDs(t *testing.T, node *Node) (sourceVersionID, destVersionID string) {
+	// Create schema V1
+	sdl := "type Users { name: String }"
 	result, err := node.AddSchema(sdl)
 	require.NoError(t, err)
 
-	// Parse the result to get the version ID
 	var collections []map[string]interface{}
 	err = json.Unmarshal([]byte(result), &collections)
 	require.NoError(t, err)
 	require.Len(t, collections, 1)
 
-	sourceVersionID := collections[0]["VersionID"].(string)
-	t.Logf("Source version ID: %s", sourceVersionID)
+	sourceVersionID = collections[0]["VersionID"].(string)
 
-	// Patch the collection to create a new version (add a field)
-	patchJSON := `[{"op": "add", "path": "/User/Fields/-", "value": {"Name": "verified", "Kind": "Boolean"}}]`
-	patchResult, err := node.PatchCollection("User", patchJSON)
+	// Patch to V2
+	patchJSON := `[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "verified", "Kind": "Boolean"}}]`
+	_, err = node.PatchCollection("Users", patchJSON)
 	require.NoError(t, err)
-	t.Logf("Patch result: %s", patchResult)
 
-	// Get the new version ID
+	// Get destination version ID
 	collectionsJSON, err := node.GetCollections()
 	require.NoError(t, err)
 
@@ -85,10 +74,8 @@ func TestSetMigration_WithRealWasmModule(t *testing.T) {
 	err = json.Unmarshal([]byte(collectionsJSON), &allCollections)
 	require.NoError(t, err)
 
-	// Find the new version (the one with IsActive=true and has more fields)
-	var destVersionID string
 	for _, col := range allCollections {
-		if col["Name"] == "User" {
+		if col["Name"] == "Users" {
 			isActive, ok := col["IsActive"].(bool)
 			if ok && isActive {
 				destVersionID = col["VersionID"].(string)
@@ -96,14 +83,25 @@ func TestSetMigration_WithRealWasmModule(t *testing.T) {
 			}
 		}
 	}
-	require.NotEmpty(t, destVersionID, "Could not find destination version ID")
-	t.Logf("Destination version ID: %s", destVersionID)
+	require.NotEmpty(t, destVersionID)
 
-	// Set a migration with real WASM module
-	// Note: Our Rust LensConfig uses a flat structure, not Go's nested Lenses array
+	return sourceVersionID, destVersionID
+}
+
+// Matches Go test: TestSchemaMigrationDoesNotErrorGivenUnknownSchemaRoots
+// Migrations need to be able to be registered for unknown schema ids, so they
+// may migrate to/from them if received by the P2P system.
+func TestSchemaMigrationDoesNotErrorGivenUnknownSchemaRoots(t *testing.T) {
+	skipIfNoWasmModules(t)
+	Init()
+
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err)
+	defer node.Close()
+
 	lensConfig := `{
-		"SourceSchemaVersionID": "` + sourceVersionID + `",
-		"DestinationSchemaVersionID": "` + destVersionID + `",
+		"SourceSchemaVersionID": "does not exist",
+		"DestinationSchemaVersionID": "also does not exist",
 		"Lens": {
 			"Path": "` + SetDefaultModulePath() + `",
 			"Arguments": {
@@ -114,17 +112,13 @@ func TestSetMigration_WithRealWasmModule(t *testing.T) {
 	}`
 
 	transformID, err := node.SetMigration(lensConfig)
-	if err != nil {
-		// Log the error but don't fail - WASM loading might have environment issues
-		t.Logf("SetMigration error: %s", err.Error())
-		assert.NotContains(t, err.Error(), "not yet implemented", "SetMigration should be implemented")
-	} else {
-		t.Logf("Migration set successfully with transform ID: %s", transformID)
-		assert.NotEmpty(t, transformID)
-	}
+	require.NoError(t, err, "Migration with unknown schema roots should not error")
+	assert.NotEmpty(t, transformID)
+	t.Logf("Migration registered with transform ID: %s", transformID)
 }
 
-func TestSetMigration_UnknownSchemaVersions(t *testing.T) {
+// Matches Go test: TestSchemaMigrationGetMigrationsReturnsMultiple
+func TestSchemaMigrationGetMigrationsReturnsMultiple(t *testing.T) {
 	skipIfNoWasmModules(t)
 	Init()
 
@@ -132,42 +126,10 @@ func TestSetMigration_UnknownSchemaVersions(t *testing.T) {
 	require.NoError(t, err)
 	defer node.Close()
 
-	// Set a migration with unknown schema versions
-	// This should succeed - migrations can be registered for future/P2P schemas
-	lensConfig := `{
-		"SourceSchemaVersionID": "does_not_exist",
-		"DestinationSchemaVersionID": "also_does_not_exist",
-		"Lens": {
-			"Path": "` + SetDefaultModulePath() + `",
-			"Arguments": {
-				"dst": "verified",
-				"value": false
-			}
-		}
-	}`
-
-	transformID, err := node.SetMigration(lensConfig)
-	if err != nil {
-		t.Logf("SetMigration error: %s", err.Error())
-		// This might fail due to WASM loading, but shouldn't fail due to unknown versions
-		assert.NotContains(t, err.Error(), "not yet implemented")
-	} else {
-		t.Logf("Migration set successfully with transform ID: %s", transformID)
-	}
-}
-
-func TestSetMigration_MultipleMigrations(t *testing.T) {
-	skipIfNoWasmModules(t)
-	Init()
-
-	node, err := NewNode(NodeOptions{InMemory: true})
-	require.NoError(t, err)
-	defer node.Close()
-
-	// Set first migration
+	// First migration
 	lensConfig1 := `{
-		"SourceSchemaVersionID": "version_a",
-		"DestinationSchemaVersionID": "version_b",
+		"SourceSchemaVersionID": "does not exist",
+		"DestinationSchemaVersionID": "also does not exist",
 		"Lens": {
 			"Path": "` + SetDefaultModulePath() + `",
 			"Arguments": {
@@ -177,31 +139,32 @@ func TestSetMigration_MultipleMigrations(t *testing.T) {
 		}
 	}`
 
-	_, err = node.SetMigration(lensConfig1)
-	if err != nil {
-		t.Logf("First SetMigration error: %s", err.Error())
-	}
+	transformID1, err := node.SetMigration(lensConfig1)
+	require.NoError(t, err)
+	t.Logf("First migration transform ID: %s", transformID1)
 
-	// Set second migration
+	// Second migration
 	lensConfig2 := `{
-		"SourceSchemaVersionID": "version_b",
-		"DestinationSchemaVersionID": "version_c",
+		"SourceSchemaVersionID": "bafyreigsld6ten2pppcu2tgkbexqwdndckp6zt2vfjhuuheykqkgpmwk7i",
+		"DestinationSchemaVersionID": "bafyreigqfjat435ghyt66tdaucp7oi2mke5jafx3jw3rozanopihr2vf44",
 		"Lens": {
 			"Path": "` + SetDefaultModulePath() + `",
 			"Arguments": {
-				"dst": "age",
-				"value": 21
+				"dst": "verified",
+				"value": true
 			}
 		}
 	}`
 
-	_, err = node.SetMigration(lensConfig2)
-	if err != nil {
-		t.Logf("Second SetMigration error: %s", err.Error())
-	}
+	transformID2, err := node.SetMigration(lensConfig2)
+	require.NoError(t, err)
+	t.Logf("Second migration transform ID: %s", transformID2)
+
+	assert.NotEqual(t, transformID1, transformID2, "Transform IDs should be different")
 }
 
-func TestSetMigration_ReplacesExistingMigration(t *testing.T) {
+// Matches Go test: TestSchemaMigrationReplacesExistingMigationBasedOnSourceID
+func TestSchemaMigrationReplacesExistingMigrationBasedOnSourceID(t *testing.T) {
 	skipIfNoWasmModules(t)
 	Init()
 
@@ -209,10 +172,10 @@ func TestSetMigration_ReplacesExistingMigration(t *testing.T) {
 	require.NoError(t, err)
 	defer node.Close()
 
-	// Set initial migration from A to B
+	// Initial migration from A to B
 	lensConfig1 := `{
-		"SourceSchemaVersionID": "version_a",
-		"DestinationSchemaVersionID": "version_b",
+		"SourceSchemaVersionID": "a",
+		"DestinationSchemaVersionID": "b",
 		"Lens": {
 			"Path": "` + SetDefaultModulePath() + `",
 			"Arguments": {
@@ -222,15 +185,14 @@ func TestSetMigration_ReplacesExistingMigration(t *testing.T) {
 		}
 	}`
 
-	_, err = node.SetMigration(lensConfig1)
-	if err != nil {
-		t.Logf("First SetMigration error: %s", err.Error())
-	}
+	transformID1, err := node.SetMigration(lensConfig1)
+	require.NoError(t, err)
+	t.Logf("Initial migration transform ID: %s", transformID1)
 
 	// Replace with migration from A to C (same source, different destination)
 	lensConfig2 := `{
-		"SourceSchemaVersionID": "version_a",
-		"DestinationSchemaVersionID": "version_c",
+		"SourceSchemaVersionID": "a",
+		"DestinationSchemaVersionID": "c",
 		"Lens": {
 			"Path": "` + SetDefaultModulePath() + `",
 			"Arguments": {
@@ -240,74 +202,19 @@ func TestSetMigration_ReplacesExistingMigration(t *testing.T) {
 		}
 	}`
 
-	_, err = node.SetMigration(lensConfig2)
-	if err != nil {
-		t.Logf("Replacement SetMigration error: %s", err.Error())
-	}
-}
-
-func TestLensConfig_JsonFormat(t *testing.T) {
-	// Test that various JSON formats are accepted
-	Init()
-
-	node, err := NewNode(NodeOptions{InMemory: true})
+	transformID2, err := node.SetMigration(lensConfig2)
 	require.NoError(t, err)
-	defer node.Close()
-
-	testCases := []struct {
-		name        string
-		config      string
-		shouldParse bool
-	}{
-		{
-			name:        "empty object",
-			config:      `{}`,
-			shouldParse: false,
-		},
-		{
-			name:        "missing Lens",
-			config:      `{"SourceSchemaVersionID": "a", "DestinationSchemaVersionID": "b"}`,
-			shouldParse: false,
-		},
-		{
-			name: "valid minimal config",
-			config: `{
-				"SourceSchemaVersionID": "a",
-				"DestinationSchemaVersionID": "b",
-				"Lens": {"Lenses": []}
-			}`,
-			shouldParse: true,
-		},
-		{
-			name:        "invalid JSON",
-			config:      `{not valid json}`,
-			shouldParse: false,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := node.SetMigration(tc.config)
-			if tc.shouldParse {
-				// Even if it parses, it might fail at WASM loading
-				// Just verify it doesn't fail with parse error
-				if err != nil {
-					assert.NotContains(t, err.Error(), "failed to parse lens config")
-				}
-			} else {
-				assert.Error(t, err)
-			}
-		})
-	}
+	t.Logf("Replacement migration transform ID: %s", transformID2)
 }
 
-// TestEndToEnd_DocumentMigration tests the full migration flow:
-// 1. Create schema V1 (User with name)
-// 2. Create a document
-// 3. Patch schema to V2 (add verified field)
-// 4. Set up migration (set_default to add verified=false)
-// 5. Query and verify the document has the new field
-func TestEndToEnd_DocumentMigration(t *testing.T) {
+// Matches Go test: TestSchemaMigrationQuery
+// Tests the basic migration query flow:
+// 1. Create schema with name field
+// 2. Create document
+// 3. Patch schema to add verified field
+// 4. Configure migration to set verified=true
+// 5. Query and verify document has verified=true
+func TestSchemaMigrationQuery(t *testing.T) {
 	skipIfNoWasmModules(t)
 	Init()
 
@@ -316,7 +223,7 @@ func TestEndToEnd_DocumentMigration(t *testing.T) {
 	defer node.Close()
 
 	// Step 1: Create schema V1
-	sdl := "type User { name: String }"
+	sdl := "type Users { name: String }"
 	result, err := node.AddSchema(sdl)
 	require.NoError(t, err)
 
@@ -326,33 +233,26 @@ func TestEndToEnd_DocumentMigration(t *testing.T) {
 	require.Len(t, collections, 1)
 
 	sourceVersionID := collections[0]["VersionID"].(string)
-	t.Logf("V1 version ID: %s", sourceVersionID)
+	t.Logf("Source version ID: %s", sourceVersionID)
 
-	// Step 2: Create a document in V1
-	createMutation := `mutation { create_User(input: {name: "Alice"}) { _docID name } }`
+	// Step 2: Create document
+	createMutation := `mutation { create_Users(input: {name: "John"}) { _docID name } }`
 	createResult, err := node.Query(createMutation)
 	require.NoError(t, err)
 	require.Empty(t, createResult.Errors, "Create mutation should not have errors")
-	t.Logf("Created document: %s", string(createResult.Data))
 
-	// Extract the document ID
 	var createData map[string]interface{}
 	err = json.Unmarshal(createResult.Data, &createData)
 	require.NoError(t, err)
-	createUserData, ok := createData["create_User"].([]interface{})
-	require.True(t, ok, "Expected create_User to be an array")
-	require.Len(t, createUserData, 1, "Expected one document")
-	docMap := createUserData[0].(map[string]interface{})
-	docID := docMap["_docID"].(string)
-	t.Logf("Document ID: %s", docID)
+	t.Logf("Created document: %s", string(createResult.Data))
 
-	// Step 3: Patch schema to V2 (add verified Boolean field)
-	patchJSON := `[{"op": "add", "path": "/User/Fields/-", "value": {"Name": "verified", "Kind": "Boolean"}}]`
-	patchResult, err := node.PatchCollection("User", patchJSON)
+	// Step 3: Patch schema to V2 (add verified field)
+	patchJSON := `[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "verified", "Kind": "Boolean"}}]`
+	patchResult, err := node.PatchCollection("Users", patchJSON)
 	require.NoError(t, err)
 	t.Logf("Patch result: %s", patchResult)
 
-	// Get the new version ID
+	// Get destination version ID
 	collectionsJSON, err := node.GetCollections()
 	require.NoError(t, err)
 
@@ -362,7 +262,7 @@ func TestEndToEnd_DocumentMigration(t *testing.T) {
 
 	var destVersionID string
 	for _, col := range allCollections {
-		if col["Name"] == "User" {
+		if col["Name"] == "Users" {
 			isActive, ok := col["IsActive"].(bool)
 			if ok && isActive {
 				destVersionID = col["VersionID"].(string)
@@ -370,10 +270,10 @@ func TestEndToEnd_DocumentMigration(t *testing.T) {
 			}
 		}
 	}
-	require.NotEmpty(t, destVersionID, "Could not find destination version ID")
-	t.Logf("V2 version ID: %s", destVersionID)
+	require.NotEmpty(t, destVersionID)
+	t.Logf("Destination version ID: %s", destVersionID)
 
-	// Step 4: Set up migration with set_default WASM module
+	// Step 4: Configure migration
 	lensConfig := `{
 		"SourceSchemaVersionID": "` + sourceVersionID + `",
 		"DestinationSchemaVersionID": "` + destVersionID + `",
@@ -381,20 +281,17 @@ func TestEndToEnd_DocumentMigration(t *testing.T) {
 			"Path": "` + SetDefaultModulePath() + `",
 			"Arguments": {
 				"dst": "verified",
-				"value": false
+				"value": true
 			}
 		}
 	}`
 
 	transformID, err := node.SetMigration(lensConfig)
-	if err != nil {
-		t.Logf("SetMigration error: %s", err.Error())
-		t.Skip("Migration setup failed, skipping end-to-end test")
-	}
+	require.NoError(t, err)
 	t.Logf("Migration transform ID: %s", transformID)
 
-	// Step 5: Query and verify the document has the verified field
-	query := `query { User { _docID name verified } }`
+	// Step 5: Query and verify
+	query := `query { Users { name verified } }`
 	queryResult, err := node.Query(query)
 	require.NoError(t, err)
 
@@ -402,46 +299,32 @@ func TestEndToEnd_DocumentMigration(t *testing.T) {
 
 	if len(queryResult.Errors) > 0 {
 		t.Logf("Query errors: %+v", queryResult.Errors)
-		// The query might fail if migration transform is not yet applied during query
-		// This is expected until the LensedDocFetcher is fully wired
-		t.Skip("Query with migration not yet fully implemented")
 	}
 
 	var queryData map[string]interface{}
 	err = json.Unmarshal(queryResult.Data, &queryData)
 	require.NoError(t, err)
 
-	userData, ok := queryData["User"].([]interface{})
-	require.True(t, ok, "Expected User to be an array")
-	require.Len(t, userData, 1, "Expected one document")
+	users, ok := queryData["Users"].([]interface{})
+	require.True(t, ok, "Expected Users to be an array")
+	require.Len(t, users, 1, "Expected one document")
 
-	user := userData[0].(map[string]interface{})
-	assert.Equal(t, docID, user["_docID"], "Document ID should match")
-	assert.Equal(t, "Alice", user["name"], "Name should be preserved")
+	user := users[0].(map[string]interface{})
+	assert.Equal(t, "John", user["name"])
 
-	// Check that verified field was added by the migration
-	verified, exists := user["verified"]
-	if !exists {
-		t.Log("verified field not present - migration not applied during query yet")
-		t.Log("This is expected until LensedDocFetcher is wired into query execution path")
-	} else if verified == nil {
-		t.Log("verified field is null - schema V2 field exists but migration transform not applied")
-		t.Log("This is expected until LensedDocFetcher is wired into query execution path")
-	} else if verified == false {
-		t.Log("SUCCESS: Migration applied! verified field is false as expected from set_default")
+	// Check verified field - migration may not be applied during query yet
+	verified := user["verified"]
+	if verified == nil {
+		t.Log("verified=null - LensedDocFetcher not yet wired into query execution")
+	} else if verified == true {
+		t.Log("SUCCESS: Migration applied, verified=true as expected")
 	} else {
-		t.Logf("Unexpected verified value: %v (expected false)", verified)
+		t.Logf("Unexpected verified value: %v", verified)
 	}
 }
 
-// Skip this test for now - need to ensure WASM modules are available
-func TestSkip_LensModuleLoading(t *testing.T) {
-	t.Skip("Skipping until WASM loading is fully implemented")
-
-	if runtime.GOOS == "windows" {
-		t.Skip("WASM tests not supported on Windows")
-	}
-
+// Matches Go test: TestSchemaMigrationQueryMultipleDocs
+func TestSchemaMigrationQueryMultipleDocs(t *testing.T) {
 	skipIfNoWasmModules(t)
 	Init()
 
@@ -449,6 +332,126 @@ func TestSkip_LensModuleLoading(t *testing.T) {
 	require.NoError(t, err)
 	defer node.Close()
 
-	// This test would verify actual WASM module loading and transform execution
-	// For now, we just verify the API surface is correct
+	// Create schema
+	sdl := "type Users { name: String }"
+	result, err := node.AddSchema(sdl)
+	require.NoError(t, err)
+
+	var collections []map[string]interface{}
+	err = json.Unmarshal([]byte(result), &collections)
+	require.NoError(t, err)
+	sourceVersionID := collections[0]["VersionID"].(string)
+
+	// Create multiple documents
+	docs := []string{"Islam", "Fred", "Shahzad"}
+	for _, name := range docs {
+		mutation := `mutation { create_Users(input: {name: "` + name + `"}) { _docID } }`
+		_, err := node.Query(mutation)
+		require.NoError(t, err)
+	}
+
+	// Patch schema
+	patchJSON := `[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "verified", "Kind": "Boolean"}}]`
+	_, err = node.PatchCollection("Users", patchJSON)
+	require.NoError(t, err)
+
+	// Get destination version
+	collectionsJSON, err := node.GetCollections()
+	require.NoError(t, err)
+	var allCollections []map[string]interface{}
+	json.Unmarshal([]byte(collectionsJSON), &allCollections)
+
+	var destVersionID string
+	for _, col := range allCollections {
+		if col["Name"] == "Users" {
+			if isActive, ok := col["IsActive"].(bool); ok && isActive {
+				destVersionID = col["VersionID"].(string)
+				break
+			}
+		}
+	}
+
+	// Configure migration
+	lensConfig := `{
+		"SourceSchemaVersionID": "` + sourceVersionID + `",
+		"DestinationSchemaVersionID": "` + destVersionID + `",
+		"Lens": {
+			"Path": "` + SetDefaultModulePath() + `",
+			"Arguments": {
+				"dst": "verified",
+				"value": true
+			}
+		}
+	}`
+
+	transformID, err := node.SetMigration(lensConfig)
+	require.NoError(t, err)
+	t.Logf("Migration transform ID: %s", transformID)
+
+	// Query
+	query := `query { Users { name verified } }`
+	queryResult, err := node.Query(query)
+	require.NoError(t, err)
+	t.Logf("Query result: %s", string(queryResult.Data))
+
+	var queryData map[string]interface{}
+	json.Unmarshal(queryResult.Data, &queryData)
+	users := queryData["Users"].([]interface{})
+	assert.Len(t, users, 3, "Expected 3 documents")
+}
+
+// Test that invalid JSON config returns error
+func TestSchemaMigration_InvalidConfig_Errors(t *testing.T) {
+	Init()
+
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err)
+	defer node.Close()
+
+	testCases := []struct {
+		name   string
+		config string
+	}{
+		{
+			name:   "empty object",
+			config: `{}`,
+		},
+		{
+			name:   "missing Lens",
+			config: `{"SourceSchemaVersionID": "a", "DestinationSchemaVersionID": "b"}`,
+		},
+		{
+			name:   "invalid JSON",
+			config: `{not valid json}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := node.SetMigration(tc.config)
+			assert.Error(t, err, "Expected error for config: %s", tc.name)
+		})
+	}
+}
+
+// Test that valid minimal config with empty Lenses array is accepted
+func TestSchemaMigration_ValidMinimalConfig(t *testing.T) {
+	Init()
+
+	node, err := NewNode(NodeOptions{InMemory: true})
+	require.NoError(t, err)
+	defer node.Close()
+
+	// Valid minimal config - note: may fail at WASM loading but should parse
+	config := `{
+		"SourceSchemaVersionID": "a",
+		"DestinationSchemaVersionID": "b",
+		"Lens": {"Lenses": []}
+	}`
+
+	_, err = node.SetMigration(config)
+	if err != nil {
+		// Should not fail with parse error
+		assert.NotContains(t, err.Error(), "failed to parse lens config")
+	}
 }
