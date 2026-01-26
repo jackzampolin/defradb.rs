@@ -503,29 +503,39 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
             // Try to infer array type from first element
             match &arr[0] {
                 ciborium::Value::Bool(_) => {
+                    // Try to decode as BoolArray first, fall back to NillableBoolElementArray if nulls found
                     let mut bools = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    let mut has_null = false;
+                    for v in &arr {
                         match v {
-                            ciborium::Value::Bool(b) => bools.push(b),
+                            ciborium::Value::Bool(b) => bools.push(Some(*b)),
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                bools.push(None);
+                            }
                             _ => {
-                                return cbor_array_to_json_array(
-                                    std::iter::once(ciborium::Value::Bool(bools.pop().unwrap()))
-                                        .chain(std::iter::once(v))
-                                        .chain(std::iter::empty()),
-                                )
+                                // Mixed types - fall back to JSON array
+                                return cbor_array_to_json_array(arr.into_iter());
                             }
                         }
                     }
-                    Ok(NormalValue::BoolArray(bools))
+                    if has_null {
+                        Ok(NormalValue::NillableBoolElementArray(bools))
+                    } else {
+                        // All values are Some, unwrap to BoolArray
+                        Ok(NormalValue::BoolArray(bools.into_iter().map(|opt| opt.unwrap()).collect()))
+                    }
                 }
                 ciborium::Value::Integer(_) => {
+                    // Try to decode as IntArray first, fall back to NillableIntElementArray if nulls found
                     let mut ints = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    let mut has_null = false;
+                    for v in &arr {
                         match v {
                             ciborium::Value::Integer(i) => {
-                                let val: i128 = i.into();
+                                let val: i128 = (*i).into();
                                 if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
-                                    ints.push(val as i64);
+                                    ints.push(Some(val as i64));
                                 } else {
                                     return Err(Error::CborDecode(format!(
                                         "integer out of i64 range: {}",
@@ -533,52 +543,70 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                                     )));
                                 }
                             }
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                ints.push(None);
+                            }
                             _ => {
                                 // Mixed types - convert to JSON array
-                                let mut json_arr = Vec::with_capacity(ints.len() + 1);
-                                for i in ints {
-                                    json_arr.push(serde_json::json!(i));
-                                }
-                                json_arr.push(cbor_value_to_json(&v)?);
-                                return Ok(NormalValue::JsonArray(json_arr));
+                                return cbor_array_to_json_array(arr.into_iter());
                             }
                         }
                     }
-                    Ok(NormalValue::IntArray(ints))
+                    if has_null {
+                        Ok(NormalValue::NillableIntElementArray(ints))
+                    } else {
+                        // All values are Some, unwrap to IntArray
+                        Ok(NormalValue::IntArray(ints.into_iter().map(|opt| opt.unwrap()).collect()))
+                    }
                 }
                 ciborium::Value::Float(_) => {
+                    // Try to decode as Float64Array first, fall back to NillableFloat64ElementArray if nulls found
                     let mut floats = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    let mut has_null = false;
+                    for v in &arr {
                         match v {
-                            ciborium::Value::Float(f) => floats.push(f),
+                            ciborium::Value::Float(f) => floats.push(Some(*f)),
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                floats.push(None);
+                            }
                             _ => {
-                                let mut json_arr = Vec::with_capacity(floats.len() + 1);
-                                for f in floats {
-                                    json_arr.push(serde_json::json!(f));
-                                }
-                                json_arr.push(cbor_value_to_json(&v)?);
-                                return Ok(NormalValue::JsonArray(json_arr));
+                                // Mixed types - convert to JSON array
+                                return cbor_array_to_json_array(arr.into_iter());
                             }
                         }
                     }
-                    Ok(NormalValue::Float64Array(floats))
+                    if has_null {
+                        Ok(NormalValue::NillableFloat64ElementArray(floats))
+                    } else {
+                        // All values are Some, unwrap to Float64Array
+                        Ok(NormalValue::Float64Array(floats.into_iter().map(|opt| opt.unwrap()).collect()))
+                    }
                 }
                 ciborium::Value::Text(_) => {
-                    let mut strings = Vec::with_capacity(arr.len());
-                    for v in arr {
+                    // Try to decode as StringArray first, fall back to NillableStringElementArray if nulls found
+                    let mut strings: Vec<Option<String>> = Vec::with_capacity(arr.len());
+                    let mut has_null = false;
+                    for v in &arr {
                         match v {
-                            ciborium::Value::Text(s) => strings.push(s),
+                            ciborium::Value::Text(s) => strings.push(Some(s.clone())),
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                strings.push(None);
+                            }
                             _ => {
-                                let mut json_arr = Vec::with_capacity(strings.len() + 1);
-                                for s in strings {
-                                    json_arr.push(serde_json::json!(s));
-                                }
-                                json_arr.push(cbor_value_to_json(&v)?);
-                                return Ok(NormalValue::JsonArray(json_arr));
+                                // Mixed types - convert to JSON array
+                                return cbor_array_to_json_array(arr.into_iter());
                             }
                         }
                     }
-                    Ok(NormalValue::StringArray(strings))
+                    if has_null {
+                        Ok(NormalValue::NillableStringElementArray(strings))
+                    } else {
+                        // All values are Some, unwrap to StringArray
+                        Ok(NormalValue::StringArray(strings.into_iter().map(|opt| opt.unwrap()).collect()))
+                    }
                 }
                 _ => {
                     // Complex array - convert to JSON array

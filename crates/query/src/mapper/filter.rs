@@ -66,6 +66,15 @@ pub enum FilterOp {
     /// Logical NOT (_not)
     #[serde(rename = "_not")]
     Not,
+    /// Any array element matches condition (_any)
+    #[serde(rename = "_any")]
+    Any,
+    /// All array elements match condition (_all)
+    #[serde(rename = "_all")]
+    All,
+    /// No array elements match condition (_none)
+    #[serde(rename = "_none")]
+    None,
 }
 
 impl FilterOp {
@@ -91,6 +100,9 @@ impl FilterOp {
             "_and" => Some(Self::And),
             "_or" => Some(Self::Or),
             "_not" => Some(Self::Not),
+            "_any" => Some(Self::Any),
+            "_all" => Some(Self::All),
+            "_none" => Some(Self::None),
             _ => None,
         }
     }
@@ -116,12 +128,20 @@ impl FilterOp {
             Self::And => "_and",
             Self::Or => "_or",
             Self::Not => "_not",
+            Self::Any => "_any",
+            Self::All => "_all",
+            Self::None => "_none",
         }
     }
 
     /// Check if this is a logical operator
     pub fn is_logical(&self) -> bool {
         matches!(self, Self::And | Self::Or | Self::Not)
+    }
+
+    /// Check if this is an array element operator
+    pub fn is_array_element_op(&self) -> bool {
+        matches!(self, Self::Any | Self::All | Self::None)
     }
 }
 
@@ -875,6 +895,76 @@ impl Filter {
                     .ok_or_else(|| QueryError::invalid_filter("_has_key requires object field"))?;
                 Ok(obj.contains_key(key))
             }
+            FilterOp::Any => {
+                // Return true if ANY element matches the nested condition
+                // Null field → no match
+                if actual.is_null() {
+                    return Ok(false);
+                }
+                let arr = actual
+                    .as_array()
+                    .ok_or_else(|| QueryError::invalid_filter("_any requires array field"))?;
+                // Empty array → no match (no elements to match)
+                if arr.is_empty() {
+                    return Ok(false);
+                }
+                // Expected is a nested condition object like {_gt: 70}
+                let nested_filter = expected.as_object().ok_or_else(|| {
+                    QueryError::invalid_filter("_any requires object condition")
+                })?;
+                for elem in arr {
+                    if self.eval_conditions_on_value(elem, nested_filter)? {
+                        return Ok(true); // Found match
+                    }
+                }
+                Ok(false)
+            }
+            FilterOp::All => {
+                // Return true if ALL elements match the nested condition
+                // Null field → no match
+                if actual.is_null() {
+                    return Ok(false);
+                }
+                let arr = actual
+                    .as_array()
+                    .ok_or_else(|| QueryError::invalid_filter("_all requires array field"))?;
+                // Empty array → vacuous truth (all zero elements match)
+                if arr.is_empty() {
+                    return Ok(true);
+                }
+                let nested_filter = expected.as_object().ok_or_else(|| {
+                    QueryError::invalid_filter("_all requires object condition")
+                })?;
+                for elem in arr {
+                    if !self.eval_conditions_on_value(elem, nested_filter)? {
+                        return Ok(false); // Found non-match
+                    }
+                }
+                Ok(true)
+            }
+            FilterOp::None => {
+                // Return true if NO elements match the nested condition
+                // Null field → no match (treating as no array to check)
+                if actual.is_null() {
+                    return Ok(false);
+                }
+                let arr = actual
+                    .as_array()
+                    .ok_or_else(|| QueryError::invalid_filter("_none requires array field"))?;
+                // Empty array → true (no elements match)
+                if arr.is_empty() {
+                    return Ok(true);
+                }
+                let nested_filter = expected.as_object().ok_or_else(|| {
+                    QueryError::invalid_filter("_none requires object condition")
+                })?;
+                for elem in arr {
+                    if self.eval_conditions_on_value(elem, nested_filter)? {
+                        return Ok(false); // Found match → fail
+                    }
+                }
+                Ok(true)
+            }
             FilterOp::And | FilterOp::Or | FilterOp::Not => Err(QueryError::internal(
                 "logical ops should be handled at top level",
             )),
@@ -1021,6 +1111,25 @@ impl Filter {
         };
 
         Ok(if negate { !matches } else { matches })
+    }
+
+    /// Evaluate a filter condition against a single JSON value (used by array element operators).
+    ///
+    /// For example, when evaluating `{_gt: 70}` against `85`, this method checks if 85 > 70.
+    fn eval_conditions_on_value(
+        &self,
+        value: &JsonValue,
+        conditions: &serde_json::Map<String, JsonValue>,
+    ) -> Result<bool> {
+        for (op_str, expected) in conditions {
+            let op = FilterOp::parse(op_str).ok_or_else(|| {
+                QueryError::invalid_filter(format!("unknown operator in array condition: {}", op_str))
+            })?;
+            if !self.eval_op(value, op, expected)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Extract the filter conditions for a specific relation field.
@@ -2009,5 +2118,221 @@ mod tests {
         )]));
         let extracted = filter.extract_filter_at_path(&["nonexistent".to_string()]);
         assert!(extracted.is_none());
+    }
+
+    // =========================================================================
+    // Array element operator tests (_any, _all, _none)
+    // =========================================================================
+
+    fn make_scores_mapping() -> DocumentMapping {
+        let mut m = DocumentMapping::new();
+        m.add(0, "_docID");
+        m.add(1, "name");
+        m.add(2, "testScores"); // Array of integers
+        m
+    }
+
+    fn make_scores_fields() -> Vec<Option<JsonValue>> {
+        vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            Some(json!([85, 90, 75, 95])), // testScores
+        ]
+    }
+
+    #[test]
+    fn test_any_filter_match() {
+        // _any: {_gt: 90} should match because 95 > 90
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_any": {"_gt": 90}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = make_scores_fields();
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_any_filter_no_match() {
+        // _any: {_gt: 100} should not match because no score > 100
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_any": {"_gt": 100}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = make_scores_fields();
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_any_filter_empty_array() {
+        // _any on empty array should return false
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_any": {"_gt": 50}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Bob")),
+            Some(json!([])), // Empty array
+        ];
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_any_filter_null_field() {
+        // _any on null field should return false
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_any": {"_gt": 50}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Bob")),
+            Some(json!(null)), // Null field
+        ];
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_all_filter_match() {
+        // _all: {_gte: 70} should match because all scores >= 70
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_all": {"_gte": 70}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = make_scores_fields(); // [85, 90, 75, 95]
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_all_filter_no_match() {
+        // _all: {_gte: 80} should not match because 75 < 80
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_all": {"_gte": 80}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = make_scores_fields(); // [85, 90, 75, 95]
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_all_filter_empty_array() {
+        // _all on empty array should return true (vacuous truth)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_all": {"_gt": 100}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Bob")),
+            Some(json!([])), // Empty array
+        ];
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_all_filter_null_field() {
+        // _all on null field should return false
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_all": {"_gt": 50}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Bob")),
+            Some(json!(null)), // Null field
+        ];
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_none_filter_match() {
+        // _none: {_lt: 70} should match because no score < 70
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_none": {"_lt": 70}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = make_scores_fields(); // [85, 90, 75, 95]
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_none_filter_no_match() {
+        // _none: {_lt: 80} should not match because 75 < 80
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_none": {"_lt": 80}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = make_scores_fields(); // [85, 90, 75, 95]
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_none_filter_empty_array() {
+        // _none on empty array should return true (no elements match)
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_none": {"_lt": 100}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Bob")),
+            Some(json!([])), // Empty array
+        ];
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_none_filter_null_field() {
+        // _none on null field should return false
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_none": {"_gt": 50}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Bob")),
+            Some(json!(null)), // Null field
+        ];
+        assert!(!filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_any_with_multiple_conditions() {
+        // _any: {_gt: 80, _lt: 92} should match 85 and 90
+        let filter = Filter::from_conditions(HashMap::from([(
+            "testScores".to_string(),
+            json!({"_any": {"_gt": 80, "_lt": 92}}),
+        )]));
+        let mapping = make_scores_mapping();
+        let fields = make_scores_fields(); // [85, 90, 75, 95]
+        assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    #[test]
+    fn test_filter_op_parse_array_ops() {
+        assert_eq!(FilterOp::parse("_any"), Some(FilterOp::Any));
+        assert_eq!(FilterOp::parse("_all"), Some(FilterOp::All));
+        assert_eq!(FilterOp::parse("_none"), Some(FilterOp::None));
+    }
+
+    #[test]
+    fn test_filter_op_is_array_element_op() {
+        assert!(FilterOp::Any.is_array_element_op());
+        assert!(FilterOp::All.is_array_element_op());
+        assert!(FilterOp::None.is_array_element_op());
+        assert!(!FilterOp::Eq.is_array_element_op());
+        assert!(!FilterOp::Contains.is_array_element_op());
     }
 }
