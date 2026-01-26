@@ -144,11 +144,33 @@ impl Planner {
         // use full schema mapping so that FK fields are available for TypeJoin lookups.
         // For simple queries, use the render_mapping directly.
         let needs_joins = has_nested || filter_has_relations || order_has_relations;
-        let scan_mapping = if needs_joins {
+        let mut scan_mapping = if needs_joins {
             self.build_scan_mapping_for_join(&collection, &render_mapping)
         } else {
             render_mapping.clone()
         };
+
+        // Add ORDER BY fields to scan mapping if not already present (Go compatibility).
+        // Go DefraDB allows ordering by fields not in the SELECT clause.
+        if let Some(ref order_by) = select.order_by {
+            for condition in &order_by.conditions {
+                if let Some(field_name) = condition.fields.first() {
+                    // Skip if already in mapping
+                    if scan_mapping.first_index_of_name(field_name).is_some() {
+                        continue;
+                    }
+                    // Find field in collection schema and add to mapping
+                    if let Some((schema_idx, _)) = collection
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, f)| &f.name == field_name)
+                    {
+                        scan_mapping.add(schema_idx, field_name);
+                    }
+                }
+            }
+        }
 
         // Check if an index can be used for the filter.
         // Note: Index selection is disabled when a fetcher is attached because:
@@ -404,8 +426,16 @@ impl Planner {
         }
 
         // 6. Apply limit/offset if present
+        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
         if let Some(ref limit) = select.limit {
-            plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
+            let effective_limit = match limit.limit {
+                Some(0) => None, // limit: 0 means no limit (Go compatibility)
+                other => other,
+            };
+            // Only create LimitNode if there's actually a limit or offset to apply
+            if effective_limit.is_some() || limit.offset > 0 {
+                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+            }
         }
 
         Ok(PlanResult { plan, index_scan })
