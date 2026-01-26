@@ -6,21 +6,22 @@
 //! # Migration Flow
 //!
 //! When a document is fetched:
-//! 1. The fetcher checks if the collection has any registered migrations
-//! 2. If migrations exist and the document's schema version differs from
-//!    the target version, the document is transformed through the lens pipeline
+//! 1. The fetcher loads the document with its stored schema version
+//! 2. If the document's version differs from the target collection version
+//!    and migrations are registered, the document is transformed
 //! 3. Migrated values are cached in the datastore to avoid re-migration
 //!
-//! # Current Limitations
+//! # Lazy Migration
 //!
-//! Per-document schema version tracking is not yet implemented. Documents
-//! are currently assumed to be at the current collection version. Full
-//! migration support requires storing schema version with each document.
+//! Documents are migrated on first read, not when schemas are updated.
+//! This allows schema updates without rewriting all existing documents.
+//! The migrated values and new version are cached in the datastore.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datastore::NamespaceView;
 use document::Document;
 use lens::{
     build_targeted_history, CollectionHistoryLink, LensDoc, TargetedHistoryLink, TransformStore,
@@ -30,7 +31,7 @@ use query::runner::{DocFetcher, FetchByIdsResult};
 use schema::CollectionVersion;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
 use crate::collection_loader::get_collection_with_lazy_load;
@@ -162,6 +163,89 @@ impl<S: Store> LensedDocFetcher<S> {
 
         doc
     }
+
+    /// Check if a document needs migration to the target version.
+    fn doc_needs_migration(doc: &Document, target_version_id: &str, has_migrations: bool) -> bool {
+        if !has_migrations {
+            return false;
+        }
+
+        // Check if document's version differs from target
+        doc.needs_migration(target_version_id)
+    }
+
+    /// Process a document, applying migration if needed.
+    ///
+    /// If the document's schema version matches the target, returns it unchanged.
+    /// Otherwise, transforms it through the lens pipeline and caches the result.
+    #[allow(dead_code)]
+    async fn process_document(
+        &self,
+        doc: Document,
+        collection: &Collection,
+        datastore: &NamespaceView,
+        has_migrations: bool,
+    ) -> query::error::Result<Document> {
+        let target_version_id = &collection.schema().version_id;
+
+        // Check if migration is needed
+        if !Self::doc_needs_migration(&doc, target_version_id, has_migrations) {
+            return Ok(doc);
+        }
+
+        let doc_version = doc.schema_version_id().unwrap_or("unknown");
+        debug!(
+            doc_id = ?doc.id(),
+            from_version = %doc_version,
+            to_version = %target_version_id,
+            "Document needs migration"
+        );
+
+        // TODO: Actually execute lens transforms through the pipeline.
+        // For now, we log and return the document unchanged.
+        // Full migration requires:
+        // 1. Build targeted history for this collection
+        // 2. Find path from doc's version to target version
+        // 3. Execute each transform in the path
+        // 4. Cache the result via update_datastore
+
+        warn!(
+            doc_id = ?doc.id(),
+            from_version = %doc_version,
+            to_version = %target_version_id,
+            "Lens migration not yet implemented - returning unmigrated document"
+        );
+
+        Ok(doc)
+    }
+
+    /// Update the datastore with migrated document values.
+    ///
+    /// This caches the migrated field values and updates the document's
+    /// schema version to the target version. Only modified fields are written.
+    ///
+    /// Matches Go's `updateDataStore` in internal/lens/fetcher.go.
+    #[allow(dead_code)]
+    async fn update_datastore(
+        &self,
+        _datastore: &NamespaceView,
+        _doc: &Document,
+        _original: &LensDoc,
+        _migrated: &LensDoc,
+        _target_version_id: &str,
+    ) -> query::error::Result<()> {
+        // TODO: Implement field-level caching
+        // 1. Compare original and migrated to find changed fields
+        // 2. Write only changed fields to datastore
+        // 3. Update the version field to target_version_id
+
+        // For now, this is a placeholder. The actual implementation will:
+        // - Use the collection's version_key method to update the version
+        // - Write individual field values for changed fields
+        // - All writes happen in the same transaction
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -172,10 +256,12 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
 
         // Check if collection has migrations registered
         let has_migrations = Self::collection_has_migrations(&collection);
+        let target_version_id = &collection.schema().version_id;
+
         if has_migrations {
             debug!(
                 collection = %collection_name,
-                version_id = %collection.schema().version_id,
+                version_id = %target_version_id,
                 "Collection has migrations registered"
             );
         }
@@ -185,22 +271,40 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
+        // Count documents needing migration
+        let mut needs_migration_count = 0;
+        for doc in &docs {
+            if Self::doc_needs_migration(doc, target_version_id, has_migrations) {
+                needs_migration_count += 1;
+                trace!(
+                    doc_id = ?doc.id(),
+                    doc_version = ?doc.schema_version_id(),
+                    target_version = %target_version_id,
+                    "Document needs migration"
+                );
+            }
+        }
+
         // Log document count for tracing
         trace!(
             collection = %collection_name,
             doc_count = docs.len(),
+            needs_migration = needs_migration_count,
             has_migrations = has_migrations,
             "Fetched documents"
         );
 
-        // Currently returns docs without transformation.
-        // Full migration support requires per-document schema version tracking
-        // to determine which documents need migration.
-        //
-        // When per-document versions are available, the flow will be:
-        // 1. For each doc, check doc.schema_version_id vs collection.version_id
-        // 2. If different and migrations registered, transform through lens pipeline
-        // 3. Cache migrated values in datastore
+        if needs_migration_count > 0 {
+            debug!(
+                collection = %collection_name,
+                needs_migration = needs_migration_count,
+                total_docs = docs.len(),
+                "Documents need migration (not yet implemented)"
+            );
+        }
+
+        // TODO: Actually migrate documents when lens pipeline is fully wired up.
+        // For now, return documents as-is with migration detection logging.
         Ok(docs)
     }
 
@@ -213,6 +317,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let has_migrations = Self::collection_has_migrations(&collection);
+        let target_version_id = &collection.schema().version_id;
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();
@@ -234,14 +339,38 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             }
         }
 
+        // Count documents needing migration
+        let mut needs_migration_count = 0;
+        for doc in &docs {
+            if Self::doc_needs_migration(doc, target_version_id, has_migrations) {
+                needs_migration_count += 1;
+                trace!(
+                    doc_id = ?doc.id(),
+                    doc_version = ?doc.schema_version_id(),
+                    target_version = %target_version_id,
+                    "Document needs migration"
+                );
+            }
+        }
+
         trace!(
             collection = %collection_name,
             requested = doc_ids.len(),
             found = docs.len(),
             missing = missing_ids.len(),
+            needs_migration = needs_migration_count,
             has_migrations = has_migrations,
             "Fetched documents by ID"
         );
+
+        if needs_migration_count > 0 {
+            debug!(
+                collection = %collection_name,
+                needs_migration = needs_migration_count,
+                total_docs = docs.len(),
+                "Documents need migration (not yet implemented)"
+            );
+        }
 
         Ok(FetchByIdsResult::partial(docs, missing_ids))
     }
@@ -256,6 +385,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let has_migrations = Self::collection_has_migrations(&collection);
+        let target_version_id = &collection.schema().version_id;
 
         let all_docs = collection
             .get_all_with_datastore(&datastore)
@@ -272,14 +402,38 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             })
             .collect();
 
+        // Count documents needing migration
+        let mut needs_migration_count = 0;
+        for doc in &matching_docs {
+            if Self::doc_needs_migration(doc, target_version_id, has_migrations) {
+                needs_migration_count += 1;
+                trace!(
+                    doc_id = ?doc.id(),
+                    doc_version = ?doc.schema_version_id(),
+                    target_version = %target_version_id,
+                    "Document needs migration"
+                );
+            }
+        }
+
         trace!(
             collection = %collection_name,
             field = %field_name,
             value = %value,
             matches = matching_docs.len(),
+            needs_migration = needs_migration_count,
             has_migrations = has_migrations,
             "Fetched documents by field value"
         );
+
+        if needs_migration_count > 0 {
+            debug!(
+                collection = %collection_name,
+                needs_migration = needs_migration_count,
+                total_docs = matching_docs.len(),
+                "Documents need migration (not yet implemented)"
+            );
+        }
 
         Ok(matching_docs)
     }

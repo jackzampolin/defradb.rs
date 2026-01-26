@@ -210,6 +210,7 @@ impl Collection {
     ///
     /// The document must have an ID set before calling this method.
     /// The document will be validated against the collection schema.
+    /// The document's schema version will be set to the current collection version.
     pub async fn create<S: Store>(&self, txn: &DbTxn<S>, doc: &Document) -> Result<DocID> {
         // Validate document against schema
         self.validate_document(doc)?;
@@ -220,9 +221,11 @@ impl Collection {
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
+        let datastore = txn.datastore()?;
+
         // Check if document already exists
         let key = self.doc_key(&doc_id);
-        if txn.datastore()?.has(&key).await.map_err(Error::Storage)? {
+        if datastore.has(&key).await.map_err(Error::Storage)? {
             return Err(Error::InvalidDocument(format!(
                 "Document with ID {} already exists",
                 doc_id
@@ -235,18 +238,21 @@ impl Collection {
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
         // Store document
-        txn.datastore()?
-            .set(&key, &data)
-            .await
-            .map_err(Error::Storage)?;
+        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        // Store schema version
+        self.store_version(&datastore, &doc_id).await?;
 
         Ok(doc_id)
     }
 
     /// Get a document by ID.
+    ///
+    /// The returned document will have its schema version set if stored.
     pub async fn get<S: Store>(&self, txn: &DbTxn<S>, doc_id: &DocID) -> Result<Option<Document>> {
+        let datastore = txn.datastore()?;
         let key = self.doc_key(doc_id);
-        let data = txn.datastore()?.get(&key).await.map_err(Error::Storage)?;
+        let data = datastore.get(&key).await.map_err(Error::Storage)?;
 
         match data {
             Some(bytes) => {
@@ -254,6 +260,12 @@ impl Collection {
                     Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
                 // Set the document ID (stored as part of the key, not in the serialized document)
                 doc.set_id(doc_id.clone());
+
+                // Load and set the schema version
+                if let Some(version) = self.load_version(&datastore, doc_id).await? {
+                    doc.set_schema_version_id(version);
+                }
+
                 Ok(Some(doc))
             }
             None => Ok(None),
@@ -292,18 +304,22 @@ impl Collection {
     }
 
     /// Delete a document by ID.
+    ///
+    /// Also deletes the document's schema version.
     pub async fn delete<S: Store>(&self, txn: &DbTxn<S>, doc_id: &DocID) -> Result<bool> {
+        let datastore = txn.datastore()?;
         let key = self.doc_key(doc_id);
 
         // Check if document exists
-        if !txn.datastore()?.has(&key).await.map_err(Error::Storage)? {
+        if !datastore.has(&key).await.map_err(Error::Storage)? {
             return Ok(false);
         }
 
-        txn.datastore()?
-            .delete(&key)
-            .await
-            .map_err(Error::Storage)?;
+        // Delete document
+        datastore.delete(&key).await.map_err(Error::Storage)?;
+
+        // Delete schema version
+        self.delete_version(&datastore, doc_id).await?;
 
         Ok(true)
     }
@@ -405,6 +421,7 @@ impl Collection {
     ///
     /// This method takes `NamespaceView` instead of `&DbTxn` to allow
     /// use in async contexts where `Send` futures are required.
+    /// The returned document will have its schema version set if stored.
     pub async fn get_with_datastore(
         &self,
         datastore: &NamespaceView,
@@ -419,6 +436,12 @@ impl Collection {
                     Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
                 // Set the document ID (stored as part of the key, not in the serialized document)
                 doc.set_id(doc_id.clone());
+
+                // Load and set the schema version
+                if let Some(version) = self.load_version(datastore, doc_id).await? {
+                    doc.set_schema_version_id(version);
+                }
+
                 Ok(Some(doc))
             }
             None => Ok(None),
@@ -429,6 +452,7 @@ impl Collection {
     ///
     /// This method takes `NamespaceView` instead of `&DbTxn` to allow
     /// use in async contexts where `Send` futures are required.
+    /// Each returned document will have its schema version set if stored.
     pub async fn get_all_with_datastore(&self, datastore: &NamespaceView) -> Result<Vec<Document>> {
         let prefix = self.collection_key_prefix();
         let opts = IterOptions::new().with_prefix(prefix);
@@ -437,6 +461,11 @@ impl Collection {
 
         let mut docs = Vec::new();
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            // Skip version keys (end with /v)
+            if pair.key.ends_with(b"/v") {
+                continue;
+            }
+
             let mut doc = Document::from_cbor(&pair.value).map_err(|e| {
                 Error::Serialization(format!(
                     "failed to deserialize document at key {:?}: {}",
@@ -450,7 +479,12 @@ impl Collection {
             if let Some(pos) = pair.key.iter().rposition(|&b| b == b'/') {
                 let doc_id_str = String::from_utf8_lossy(&pair.key[pos + 1..]);
                 if let Ok(doc_id) = doc_id_str.parse::<DocID>() {
-                    doc.set_id(doc_id);
+                    doc.set_id(doc_id.clone());
+
+                    // Load and set the schema version
+                    if let Some(version) = self.load_version(datastore, &doc_id).await? {
+                        doc.set_schema_version_id(version);
+                    }
                 }
             }
 
@@ -465,6 +499,7 @@ impl Collection {
     ///
     /// This method takes `NamespaceView` instead of `&DbTxn` to allow
     /// use in async contexts where `Send` futures are required.
+    /// The document's schema version will be set to the current collection version.
     pub async fn create_with_datastore(
         &self,
         datastore: &NamespaceView,
@@ -495,6 +530,9 @@ impl Collection {
 
         // Store document
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        // Store schema version
+        self.store_version(datastore, &doc_id).await?;
 
         Ok(doc_id)
     }
@@ -536,6 +574,7 @@ impl Collection {
     ///
     /// This method takes `NamespaceView` instead of `&DbTxn` to allow
     /// use in async contexts where `Send` futures are required.
+    /// Also deletes the document's schema version.
     pub async fn delete_with_datastore(
         &self,
         datastore: &NamespaceView,
@@ -548,7 +587,11 @@ impl Collection {
             return Ok(false);
         }
 
+        // Delete document
         datastore.delete(&key).await.map_err(Error::Storage)?;
+
+        // Delete schema version
+        self.delete_version(datastore, doc_id).await?;
 
         Ok(true)
     }
@@ -575,7 +618,8 @@ impl Collection {
     /// create the document if it doesn't exist, or update it if it does.
     ///
     /// Note: Validation is skipped for P2P-synced documents since they
-    /// may have been created with a different schema version.
+    /// may have been created with a different schema version. The document's
+    /// schema version is preserved if set, otherwise the collection's version is used.
     pub async fn save_with_datastore(
         &self,
         datastore: &NamespaceView,
@@ -595,6 +639,16 @@ impl Collection {
 
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
 
+        // Store schema version - preserve document's version if set, otherwise use collection's
+        let version_key = self.version_key(&doc_id);
+        let version = doc
+            .schema_version_id()
+            .unwrap_or(&self.def.version_id);
+        datastore
+            .set(&version_key, version.as_bytes())
+            .await
+            .map_err(Error::Storage)?;
+
         Ok(doc_id)
     }
 
@@ -608,6 +662,19 @@ impl Collection {
         key
     }
 
+    /// Generate the storage key for a document's schema version.
+    ///
+    /// The version is stored separately from the document data to enable
+    /// efficient version checks without deserializing the full document.
+    ///
+    /// Key format: /d/<collection_id>/<doc_id>/v
+    fn version_key(&self, doc_id: &DocID) -> Vec<u8> {
+        let mut key = self.doc_key(doc_id);
+        key.push(b'/');
+        key.push(b'v'); // DATASTORE_DOC_VERSION_FIELD_ID
+        key
+    }
+
     /// Generate the key prefix for iterating collection documents.
     fn collection_key_prefix(&self) -> Vec<u8> {
         let mut key = Vec::new();
@@ -615,6 +682,33 @@ impl Collection {
         key.extend_from_slice(self.def.collection_id.as_bytes());
         key.push(b'/');
         key
+    }
+
+    /// Store the schema version for a document.
+    async fn store_version(&self, datastore: &NamespaceView, doc_id: &DocID) -> Result<()> {
+        let key = self.version_key(doc_id);
+        let version = self.def.version_id.as_bytes();
+        datastore.set(&key, version).await.map_err(Error::Storage)
+    }
+
+    /// Load the schema version for a document.
+    async fn load_version(&self, datastore: &NamespaceView, doc_id: &DocID) -> Result<Option<String>> {
+        let key = self.version_key(doc_id);
+        match datastore.get(&key).await.map_err(Error::Storage)? {
+            Some(bytes) => {
+                let version = String::from_utf8(bytes).map_err(|e| {
+                    Error::Serialization(format!("Invalid version encoding: {}", e))
+                })?;
+                Ok(Some(version))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Delete the schema version for a document.
+    async fn delete_version(&self, datastore: &NamespaceView, doc_id: &DocID) -> Result<()> {
+        let key = self.version_key(doc_id);
+        datastore.delete(&key).await.map_err(Error::Storage)
     }
 
     /// Validate a document against this collection's schema.
