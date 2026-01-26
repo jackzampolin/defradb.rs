@@ -105,6 +105,9 @@ pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<Collect
         tracing::warn!(error = %e, "Failed to close iterator during schema loading");
     }
 
+    // Always discard the read-only transaction to release resources
+    let _ = txn.discard();
+
     // Return error if any occurred during loading
     if let Some(err) = load_error {
         return Err(err);

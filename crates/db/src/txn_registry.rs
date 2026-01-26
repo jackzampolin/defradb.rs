@@ -378,7 +378,7 @@ mod tests {
 
     /// Create a test DB with collections pre-registered.
     async fn test_db_with_collections() -> Arc<DB<MemoryStore>> {
-        let db = Arc::new(DB::new(MemoryStore::new()));
+        let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
         for schema in test_schema() {
             db.create_collection(schema).await.unwrap();
         }
@@ -1171,7 +1171,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_transaction_sees_recently_created_collection() {
         // Test that a transaction started AFTER a collection is created can see that collection
-        let db = Arc::new(DB::new(MemoryStore::new()));
+        let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
         let registry = DbTransactionRegistry::new(db.clone());
 
         // Create collection after registry is created

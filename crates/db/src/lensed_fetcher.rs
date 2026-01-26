@@ -139,7 +139,7 @@ impl<S: Store> LensedDocFetcher<S> {
     async fn load_collection_history(
         &self,
         collection: &Collection,
-    ) -> Option<HashMap<String, TargetedHistoryLink>> {
+    ) -> query::error::Result<HashMap<String, TargetedHistoryLink>> {
         let collection_id = &collection.schema().collection_id;
         let target_version_id = &collection.schema().version_id;
 
@@ -147,27 +147,47 @@ impl<S: Store> LensedDocFetcher<S> {
         {
             let cache = self.history_cache.read().await;
             if let Some(history) = cache.get(collection_id) {
-                return Some(history.clone());
+                return Ok(history.clone());
             }
         }
 
         // Load all versions from systemstore
         let txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_ref()?;
-        let systemstore = txn.systemstore().ok()?;
+        let txn = txn_guard.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("transaction not available for history lookup")
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         let versions = get_collections_by_collection_id(&systemstore, collection_id)
             .await
-            .ok()?;
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to load collection versions: {}",
+                    e
+                ))
+            })?;
 
         drop(txn_guard); // Release lock before building history
 
         if versions.is_empty() {
-            return None;
+            return Err(query::error::QueryError::execution(format!(
+                "no versions found for collection {}",
+                collection_id
+            )));
         }
 
         // Build the targeted history
-        let history = Self::build_collection_history_from_versions(&versions, target_version_id)?;
+        let history =
+            Self::build_collection_history_from_versions(&versions, target_version_id).ok_or_else(
+                || {
+                    query::error::QueryError::execution(format!(
+                        "failed to build migration history for collection {}",
+                        collection_id
+                    ))
+                },
+            )?;
 
         // Cache the history
         {
@@ -175,7 +195,7 @@ impl<S: Store> LensedDocFetcher<S> {
             cache.insert(collection_id.clone(), history.clone());
         }
 
-        Some(history)
+        Ok(history)
     }
 
     /// Convert a Document to a LensDoc.
@@ -241,6 +261,7 @@ impl<S: Store> LensedDocFetcher<S> {
         }
 
         let doc_version = doc.schema_version_id().unwrap_or("unknown").to_string();
+        let doc_id_str = doc.id().map(|id| id.to_string()).unwrap_or_default();
         debug!(
             doc_id = ?doc.id(),
             from_version = %doc_version,
@@ -249,73 +270,51 @@ impl<S: Store> LensedDocFetcher<S> {
         );
 
         // Load the collection history
-        let history = match self.load_collection_history(collection).await {
-            Some(h) => h,
-            None => {
-                warn!(
-                    doc_id = ?doc.id(),
-                    "Failed to load collection history - returning unmigrated document"
-                );
-                return Ok(doc);
-            }
-        };
+        let history = self.load_collection_history(collection).await?;
 
         // Check if we have a migration path for this version
         if !history.contains_key(&doc_version) {
-            warn!(
-                doc_id = ?doc.id(),
-                from_version = %doc_version,
-                "No migration path found for document version - returning unmigrated document"
-            );
-            return Ok(doc);
+            return Err(query::error::QueryError::execution(format!(
+                "no migration path found for document {} from version {} to {}",
+                doc_id_str, doc_version, target_version_id
+            )));
         }
 
         // Convert document to LensDoc
-        let original_lens_doc = match Self::doc_to_lens_doc(&doc) {
-            Some(ld) => ld,
-            None => {
-                warn!(
-                    doc_id = ?doc.id(),
-                    "Failed to convert document to LensDoc - returning unmigrated document"
-                );
-                return Ok(doc);
-            }
-        };
+        let original_lens_doc = Self::doc_to_lens_doc(&doc).ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "failed to convert document {} to LensDoc for migration",
+                doc_id_str
+            ))
+        })?;
 
         // Create and run the lens pipeline
-        let mut lens = Lens::new(
-            self.lens_store.clone(),
-            target_version_id,
-            history,
-        );
+        let mut lens = Lens::new(self.lens_store.clone(), target_version_id, history);
 
         // Put document into pipeline
-        if let Err(e) = lens.put(&doc_version, original_lens_doc.clone()).await {
-            warn!(
-                doc_id = ?doc.id(),
-                error = %e,
-                "Failed to put document into lens pipeline - returning unmigrated document"
-            );
-            return Ok(doc);
-        }
+        lens.put(&doc_version, original_lens_doc.clone())
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to put document {} into lens pipeline: {}",
+                    doc_id_str, e
+                ))
+            })?;
 
         // Get migrated document
         let migrated_lens_doc = match lens.next().await {
             Some(Ok(migrated)) => migrated,
             Some(Err(e)) => {
-                warn!(
-                    doc_id = ?doc.id(),
-                    error = %e,
-                    "Lens migration failed - returning unmigrated document"
-                );
-                return Ok(doc);
+                return Err(query::error::QueryError::execution(format!(
+                    "lens migration failed for document {}: {}",
+                    doc_id_str, e
+                )));
             }
             None => {
-                warn!(
-                    doc_id = ?doc.id(),
-                    "Lens pipeline produced no output - returning unmigrated document"
-                );
-                return Ok(doc);
+                return Err(query::error::QueryError::execution(format!(
+                    "lens pipeline produced no output for document {}",
+                    doc_id_str
+                )));
             }
         };
 

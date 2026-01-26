@@ -2,7 +2,7 @@
 //!
 //! Matches Go's internal/lens/lens.go Lens type and behavior.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::channel::mpsc;
@@ -143,6 +143,10 @@ impl PipelineProcessor {
         let mut current_doc = input.doc;
         let mut current_version = input.schema_version_id.clone();
 
+        // Track visited versions to detect cycles
+        let mut visited = HashSet::new();
+        visited.insert(current_version.clone());
+
         loop {
             if current_version == self.target_version_id {
                 return Ok(current_doc);
@@ -155,6 +159,14 @@ impl PipelineProcessor {
 
             // Try to move forward first
             if let Some(ref next_version) = current_link.next {
+                // Check for cycle before moving forward
+                if visited.contains(next_version) {
+                    return Err(Error::Pipeline(format!(
+                        "cycle detected in migration path at version {}",
+                        next_version
+                    )));
+                }
+
                 let next_link = self
                     .collection_history
                     .get(next_version)
@@ -168,7 +180,16 @@ impl PipelineProcessor {
                 }
 
                 current_version = next_version.clone();
+                visited.insert(current_version.clone());
             } else if let Some(ref prev_version) = current_link.previous {
+                // Check for cycle before moving backward
+                if visited.contains(prev_version) {
+                    return Err(Error::Pipeline(format!(
+                        "cycle detected in migration path at version {}",
+                        prev_version
+                    )));
+                }
+
                 // Move backward (inverse transform)
                 if let Some(ref transform_id) = current_link.transform {
                     // Apply inverse transform
@@ -178,6 +199,7 @@ impl PipelineProcessor {
                 }
 
                 current_version = prev_version.clone();
+                visited.insert(current_version.clone());
             } else {
                 // No path to target
                 return Err(Error::Pipeline(format!(

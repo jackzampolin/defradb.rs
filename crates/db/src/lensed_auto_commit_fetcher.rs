@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use document::Document;
 use lens::{
     build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink,
-    TransformStore, DOC_ID_FIELD,
+    DOC_ID_FIELD,
 };
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::collection::Collection;
 use crate::database::DB;
@@ -105,21 +105,38 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     async fn load_collection_history(
         &self,
         collection: &Collection,
-    ) -> Option<HashMap<String, TargetedHistoryLink>> {
+    ) -> query::error::Result<HashMap<String, TargetedHistoryLink>> {
         let collection_id = &collection.schema().collection_id;
         let target_version_id = &collection.schema().version_id;
 
         // Create a read-only transaction to load versions
-        let txn = self.db.new_txn(true).await.ok()?;
-        let systemstore = txn.systemstore().ok()?;
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to create transaction for history lookup: {}",
+                e
+            ))
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
 
         let versions = get_collections_by_collection_id(&systemstore, collection_id)
             .await
-            .ok()?;
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to load collection versions: {}",
+                    e
+                ))
+            })?;
 
         let _ = txn.discard(); // Ignore discard errors for read-only txn
 
-        Self::build_collection_history(&versions, target_version_id)
+        Self::build_collection_history(&versions, target_version_id).ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "failed to build migration history for collection {}",
+                collection_id
+            ))
+        })
     }
 
     /// Process a document, applying migration if needed.
@@ -136,6 +153,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         }
 
         let doc_version = doc.schema_version_id().unwrap_or("unknown").to_string();
+        let doc_id_str = doc.id().map(|id| id.to_string()).unwrap_or_default();
         debug!(
             doc_id = ?doc.id(),
             from_version = %doc_version,
@@ -144,55 +162,51 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         );
 
         // Load collection history
-        let history = match self.load_collection_history(collection).await {
-            Some(h) => h,
-            None => {
-                warn!(
-                    doc_id = ?doc.id(),
-                    "Failed to load collection history - returning unmigrated document"
-                );
-                return Ok(doc);
-            }
-        };
+        let history = self.load_collection_history(collection).await?;
 
         // Check if we have a migration path
         if !history.contains_key(&doc_version) {
-            warn!(
-                doc_id = ?doc.id(),
-                from_version = %doc_version,
-                "No migration path found - returning unmigrated document"
-            );
-            return Ok(doc);
+            return Err(query::error::QueryError::execution(format!(
+                "no migration path found for document {} from version {} to {}",
+                doc_id_str, doc_version, target_version_id
+            )));
         }
 
         // Convert to LensDoc
-        let original_lens_doc = match Self::doc_to_lens_doc(&doc) {
-            Some(ld) => ld,
-            None => {
-                warn!(doc_id = ?doc.id(), "Failed to convert to LensDoc");
-                return Ok(doc);
-            }
-        };
+        let original_lens_doc = Self::doc_to_lens_doc(&doc).ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "failed to convert document {} to LensDoc for migration",
+                doc_id_str
+            ))
+        })?;
 
         // Create and run lens pipeline
         let lens_store = self.db.lens_store().clone();
         let mut lens = Lens::new(lens_store, target_version_id, history);
 
-        if let Err(e) = lens.put(&doc_version, original_lens_doc.clone()).await {
-            warn!(doc_id = ?doc.id(), error = %e, "Failed to put doc into lens pipeline");
-            return Ok(doc);
-        }
+        lens.put(&doc_version, original_lens_doc.clone())
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to put document {} into lens pipeline: {}",
+                    doc_id_str, e
+                ))
+            })?;
 
         // Get migrated document
         let migrated_lens_doc = match lens.next().await {
             Some(Ok(migrated)) => migrated,
             Some(Err(e)) => {
-                warn!(doc_id = ?doc.id(), error = %e, "Lens migration failed");
-                return Ok(doc);
+                return Err(query::error::QueryError::execution(format!(
+                    "lens migration failed for document {}: {}",
+                    doc_id_str, e
+                )));
             }
             None => {
-                warn!(doc_id = ?doc.id(), "Lens pipeline produced no output");
-                return Ok(doc);
+                return Err(query::error::QueryError::execution(format!(
+                    "lens pipeline produced no output for document {}",
+                    doc_id_str
+                )));
             }
         };
 

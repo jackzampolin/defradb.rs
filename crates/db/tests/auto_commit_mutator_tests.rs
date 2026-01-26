@@ -25,7 +25,7 @@ fn test_schema() -> CollectionVersion {
 #[tokio::test]
 async fn test_create_document() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let mutator = AutoCommitMutator::new(db.clone());
@@ -50,7 +50,7 @@ async fn test_create_document() {
 #[tokio::test]
 async fn test_update_document() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let mutator = AutoCommitMutator::new(db);
@@ -81,7 +81,7 @@ async fn test_update_document() {
 #[tokio::test]
 async fn test_delete_document() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let mutator = AutoCommitMutator::new(db);
@@ -106,7 +106,7 @@ async fn test_delete_document() {
 #[tokio::test]
 async fn test_delete_nonexistent_document() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let mutator = AutoCommitMutator::new(db);
@@ -120,7 +120,7 @@ async fn test_delete_nonexistent_document() {
 #[tokio::test]
 async fn test_get_for_update_nonexistent() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let mutator = AutoCommitMutator::new(db);
@@ -136,7 +136,7 @@ async fn test_get_for_update_nonexistent() {
 #[tokio::test]
 async fn test_unknown_collection_returns_error() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
 
     let mutator = AutoCommitMutator::new(db);
     let doc = Document::new();
@@ -151,7 +151,7 @@ async fn test_unknown_collection_returns_error() {
 #[tokio::test]
 async fn test_each_mutation_is_independent() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let mutator = AutoCommitMutator::new(db);

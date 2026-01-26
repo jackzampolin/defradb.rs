@@ -20,7 +20,7 @@ fn test_schema() -> CollectionVersion {
 
 async fn setup_db_with_collection() -> DB<MemoryStore> {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     db.create_collection(test_schema()).await.unwrap();
     db
 }
@@ -161,7 +161,7 @@ async fn test_get_for_update() {
 #[tokio::test]
 async fn test_unknown_collection_returns_error() {
     let store = MemoryStore::new();
-    let db = DB::new(store);
+    let db = DB::new(store).unwrap();
     // Don't create any collections
 
     let txn = db.new_txn(false).await.unwrap();

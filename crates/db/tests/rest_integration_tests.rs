@@ -32,7 +32,7 @@ fn test_schema() -> Vec<CollectionVersion> {
 
 /// Create a test database with the Users collection.
 async fn test_db() -> Arc<DB<MemoryStore>> {
-    let db = Arc::new(DB::new(MemoryStore::new()));
+    let db = Arc::new(DB::new(MemoryStore::new()).unwrap());
     for schema in test_schema() {
         db.create_collection(schema).await.unwrap();
     }

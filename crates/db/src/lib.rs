@@ -27,7 +27,7 @@
 ///
 /// // Create database
 /// let store = MemoryStore::new();
-/// let db = DB::new(store);
+/// let db = DB::new(store)?;
 ///
 /// // Create a transaction
 /// let txn = db.new_txn(false).await?;

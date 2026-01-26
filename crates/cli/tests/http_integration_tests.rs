@@ -308,7 +308,7 @@ async fn test_http_graphql_returns_documents_from_database() {
     // Phase 1: Pre-seed database with collection and documents
     {
         let store = storage::RedbStore::open(data_path).unwrap();
-        let database = db::DB::new(store);
+        let database = db::DB::new(store).unwrap();
 
         // Create Users collection
         let schema = CollectionVersion::new(
@@ -437,7 +437,7 @@ async fn test_http_graphql_create_mutation() {
     // Phase 1: Pre-seed database with collection (no documents)
     {
         let store = storage::RedbStore::open(data_path).unwrap();
-        let database = db::DB::new(store);
+        let database = db::DB::new(store).unwrap();
 
         let schema = CollectionVersion::new(
             "Users",
@@ -536,7 +536,7 @@ async fn test_http_graphql_update_mutation() {
     let doc_id: String;
     {
         let store = storage::RedbStore::open(data_path).unwrap();
-        let database = db::DB::new(store);
+        let database = db::DB::new(store).unwrap();
 
         let schema = CollectionVersion::new(
             "Users",
@@ -642,7 +642,7 @@ async fn test_http_graphql_delete_mutation() {
     let doc_id_to_delete: String;
     {
         let store = storage::RedbStore::open(data_path).unwrap();
-        let database = db::DB::new(store);
+        let database = db::DB::new(store).unwrap();
 
         let schema = CollectionVersion::new(
             "Users",
@@ -739,7 +739,7 @@ async fn test_http_transaction_begin() {
     // Pre-seed database with collection
     {
         let store = storage::RedbStore::open(data_path).unwrap();
-        let database = db::DB::new(store);
+        let database = db::DB::new(store).unwrap();
         let schema = CollectionVersion::new(
             "Users",
             "v1",
@@ -816,7 +816,7 @@ async fn test_http_transaction_commit_flow() {
     // Pre-seed database with collection and document
     {
         let store = storage::RedbStore::open(data_path).unwrap();
-        let database = db::DB::new(store);
+        let database = db::DB::new(store).unwrap();
         let schema = CollectionVersion::new(
             "Users",
             "v1",
@@ -914,7 +914,7 @@ async fn test_http_transaction_rollback() {
     // Pre-seed database with collection
     {
         let store = storage::RedbStore::open(data_path).unwrap();
-        let database = db::DB::new(store);
+        let database = db::DB::new(store).unwrap();
         let schema = CollectionVersion::new(
             "Users",
             "v1",

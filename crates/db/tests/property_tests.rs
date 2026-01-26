@@ -40,7 +40,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
 
@@ -98,7 +98,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
 
@@ -173,7 +173,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
 
@@ -249,7 +249,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
 
@@ -311,7 +311,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
 
@@ -374,7 +374,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
             let schema = test_schema();
 
@@ -450,7 +450,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
 
             let mut manager = IndexManager::new(1);
@@ -481,7 +481,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let store = MemoryStore::new();
-            let db = DB::new(store);
+            let db = DB::new(store).unwrap();
             let txn = db.new_txn(false).await.unwrap();
 
             let mut manager = IndexManager::new(1);

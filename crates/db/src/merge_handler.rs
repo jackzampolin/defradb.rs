@@ -634,7 +634,7 @@ mod tests {
     async fn test_merge_handler_creation() {
         let store = MemoryStore::new();
         let store_arc = Arc::new(store);
-        let db = Arc::new(DB::from_arc(store_arc.clone()));
+        let db = Arc::new(DB::from_arc(store_arc.clone()).unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store_arc, false));
         let _handler = DbMergeHandler::new(db, blockstore);
     }

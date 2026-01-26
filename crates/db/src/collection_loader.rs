@@ -8,7 +8,7 @@ use std::sync::Arc;
 use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{Key, Store};
-use storage::keys::systemstore::CollectionNameKey;
+use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, warn};
 
@@ -21,19 +21,50 @@ use crate::txn::DbTxn;
 /// This is a standalone async function that doesn't hold any locks,
 /// allowing it to be called outside the mutex lock scope.
 ///
+/// Storage layout uses two-step lookup:
+/// - `/collection/name/{name}` contains the version_id string
+/// - `/collection/id/{version_id}` contains the full JSON schema
+///
 /// Returns `Ok(Some(collection))` if found, `Ok(None)` if not found,
 /// or an error if storage/deserialization fails.
 pub(crate) async fn load_collection_from_systemstore(
     systemstore: &NamespaceView,
     name: &str,
 ) -> query::error::Result<Option<Collection>> {
-    let key = CollectionNameKey::new(name);
+    // Step 1: Get version_id from /collection/name/{name}
+    let name_key = CollectionNameKey::new(name);
 
-    match systemstore.get(&key.bytes()).await.map_err(|e| {
+    let version_id = match systemstore.get(&name_key.bytes()).await.map_err(|e| {
         error!(
             error = ?e,
             collection_name = %name,
-            "Storage error while loading collection from systemstore"
+            "Storage error while loading collection name mapping"
+        );
+        query::error::QueryError::execution(format!("storage error: {}", e))
+    })? {
+        Some(data) => String::from_utf8(data).map_err(|e| {
+            error!(
+                error = ?e,
+                collection_name = %name,
+                "Invalid UTF-8 in version_id for collection"
+            );
+            query::error::QueryError::execution(format!(
+                "invalid version_id encoding for collection '{}': {}",
+                name, e
+            ))
+        })?,
+        None => return Ok(None),
+    };
+
+    // Step 2: Get full schema from /collection/id/{version_id}
+    let collection_key = CollectionKey::new(&version_id);
+
+    match systemstore.get(&collection_key.bytes()).await.map_err(|e| {
+        error!(
+            error = ?e,
+            collection_name = %name,
+            version_id = %version_id,
+            "Storage error while loading collection definition"
         );
         query::error::QueryError::execution(format!("storage error: {}", e))
     })? {
@@ -42,6 +73,7 @@ pub(crate) async fn load_collection_from_systemstore(
                 error!(
                     error = ?e,
                     collection_name = %name,
+                    version_id = %version_id,
                     "Failed to deserialize schema for collection"
                 );
                 query::error::QueryError::execution(format!(
@@ -51,7 +83,15 @@ pub(crate) async fn load_collection_from_systemstore(
             })?;
             Ok(Some(Collection::new(schema)))
         }
-        None => Ok(None),
+        None => {
+            // version_id found but schema missing - inconsistent state
+            warn!(
+                collection_name = %name,
+                version_id = %version_id,
+                "Collection name mapping exists but schema definition not found"
+            );
+            Ok(None)
+        }
     }
 }
 

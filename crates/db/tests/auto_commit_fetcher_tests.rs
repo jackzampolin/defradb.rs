@@ -25,7 +25,7 @@ fn test_schema() -> CollectionVersion {
 #[tokio::test]
 async fn test_get_all_empty_collection() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let fetcher = AutoCommitFetcher::new(db);
@@ -36,7 +36,7 @@ async fn test_get_all_empty_collection() {
 #[tokio::test]
 async fn test_get_all_with_documents() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     // Insert some documents
@@ -66,7 +66,7 @@ async fn test_get_all_with_documents() {
 #[tokio::test]
 async fn test_get_by_ids_found() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     // Insert a document
@@ -90,7 +90,7 @@ async fn test_get_by_ids_found() {
 #[tokio::test]
 async fn test_get_by_ids_not_found() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
     db.create_collection(test_schema()).await.unwrap();
 
     let fetcher = AutoCommitFetcher::new(db);
@@ -108,7 +108,7 @@ async fn test_get_by_ids_not_found() {
 #[tokio::test]
 async fn test_unknown_collection_returns_error() {
     let store = MemoryStore::new();
-    let db = Arc::new(DB::new(store));
+    let db = Arc::new(DB::new(store).unwrap());
 
     let fetcher = AutoCommitFetcher::new(db);
     let result = fetcher.get_all("NonExistent").await;

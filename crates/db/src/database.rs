@@ -106,7 +106,7 @@ impl<S: Store> DB<S> {
     ///
     /// This creates a DB with an empty collection cache. Use `open()` to
     /// load existing collections from the store.
-    pub fn new(store: S) -> Self {
+    pub fn new(store: S) -> Result<Self> {
         Self::with_options(store, DbOptions::default())
     }
 
@@ -114,16 +114,17 @@ impl<S: Store> DB<S> {
     ///
     /// This creates a DB with an empty collection cache. Use `open_with_options()`
     /// to load existing collections from the store.
-    pub fn with_options(store: S, options: DbOptions) -> Self {
-        let lens_store = WasmTransformStore::new().expect("failed to create lens transform store");
-        Self {
+    pub fn with_options(store: S, options: DbOptions) -> Result<Self> {
+        let lens_store = WasmTransformStore::new()
+            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
+        Ok(Self {
             store: Arc::new(store),
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store: Arc::new(lens_store),
-        }
+        })
     }
 
     /// Open a database and load existing collections from the store.
@@ -133,7 +134,7 @@ impl<S: Store> DB<S> {
 
     /// Open a database with options and load existing collections from the store.
     pub async fn open_with_options(store: S, options: DbOptions) -> Result<Self> {
-        let db = Self::with_options(store, options);
+        let db = Self::with_options(store, options)?;
         db.load_collections().await?;
         Ok(db)
     }
@@ -150,7 +151,7 @@ impl<S: Store> DB<S> {
     /// transaction IDs may collide if both instances create transactions concurrently.
     /// This is acceptable for read-heavy workloads but may cause issues with
     /// concurrent writes from multiple DB instances.
-    pub fn from_arc(store: Arc<S>) -> Self {
+    pub fn from_arc(store: Arc<S>) -> Result<Self> {
         Self::from_arc_with_options(store, DbOptions::default())
     }
 
@@ -158,16 +159,17 @@ impl<S: Store> DB<S> {
     ///
     /// **Warning:** When multiple DB instances share a store via `from_arc()`,
     /// transaction IDs may collide if both instances create transactions concurrently.
-    pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Self {
-        let lens_store = WasmTransformStore::new().expect("failed to create lens transform store");
-        Self {
+    pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
+        let lens_store = WasmTransformStore::new()
+            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
+        Ok(Self {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store: Arc::new(lens_store),
-        }
+        })
     }
 
     /// Open a database from an Arc-wrapped store and load existing collections.
@@ -181,7 +183,7 @@ impl<S: Store> DB<S> {
 
     /// Open a database from an Arc-wrapped store with options and load existing collections.
     pub async fn open_from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
-        let db = Self::from_arc_with_options(store, options);
+        let db = Self::from_arc_with_options(store, options)?;
         db.load_collections().await?;
         Ok(db)
     }
@@ -487,11 +489,51 @@ impl<S: Store> DB<S> {
                     })?
                     .to_string();
 
-                let schema: CollectionVersion =
-                    serde_json::from_slice(&pair.value).map_err(|e| {
+                // The value at /collection/name/{name} is the version_id string, not full JSON
+                let version_id = String::from_utf8(pair.value.to_vec()).map_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        collection_name = %name,
+                        "Collection version ID contains invalid UTF-8"
+                    );
+                    Error::Serialization(format!(
+                        "collection version ID for '{}' contains invalid UTF-8: {}",
+                        name, e
+                    ))
+                })?;
+
+                // Look up the full collection definition from /collection/id/{version_id}
+                let collection_key = CollectionKey::new(&version_id);
+                let collection_json = systemstore
+                    .get(&collection_key.bytes())
+                    .await
+                    .map_err(|e| {
                         tracing::error!(
                             error = ?e,
                             collection_name = %name,
+                            version_id = %version_id,
+                            "Failed to get collection definition"
+                        );
+                        Error::Storage(e)
+                    })?
+                    .ok_or_else(|| {
+                        tracing::error!(
+                            collection_name = %name,
+                            version_id = %version_id,
+                            "Collection definition not found - data inconsistency"
+                        );
+                        Error::Other(format!(
+                            "collection definition not found for '{}' with version_id '{}'",
+                            name, version_id
+                        ))
+                    })?;
+
+                let schema: CollectionVersion =
+                    serde_json::from_slice(&collection_json).map_err(|e| {
+                        tracing::error!(
+                            error = ?e,
+                            collection_name = %name,
+                            version_id = %version_id,
                             "Failed to deserialize schema for collection"
                         );
                         Error::Serialization(format!(
