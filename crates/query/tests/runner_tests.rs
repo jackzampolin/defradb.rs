@@ -3795,13 +3795,9 @@ async fn test_multi_level_relation_filter() {
         )
         .await;
 
-    eprintln!("Query result: {:?}", result);
-
     assert!(result.is_ok(), "Multi-level filter query should succeed. Error: {:?}", result.err());
     let result_data = result.unwrap();
     let books = result_data.get("Book").unwrap().as_array().unwrap();
-
-    eprintln!("Books returned: {:?}", books);
 
     // Should return exactly 1 book (Painted House)
     assert_eq!(books.len(), 1, "Should return 1 book matching the filter");

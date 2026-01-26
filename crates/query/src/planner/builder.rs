@@ -719,8 +719,7 @@ impl Planner {
                 // Note: We pass child_render_mapping as the output mapping (for TypeJoin to render children)
                 // but the child_plan uses child_scan_mapping internally (for FK lookups)
                 if relation_field.kind.is_array() {
-                    // One-to-many: TypeJoinMany
-                    // TODO: Add relation filter support to TypeJoinMany
+                    // One-to-many: TypeJoinMany (relation filter support tracked in #187)
                     plan = Box::new(TypeJoinMany::new(
                         plan,
                         child_plan,
