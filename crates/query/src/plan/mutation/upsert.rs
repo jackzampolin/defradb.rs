@@ -22,7 +22,7 @@ use super::create::{json_to_normal_value, normal_value_to_json, CreateInput};
 /// Input for an upsert mutation - field values for create or update.
 #[derive(Debug, Clone)]
 pub struct UpsertInput {
-    /// Field values keyed by field name (used for update when doc exists)
+    /// Field values keyed by field name (used for both create and update operations)
     pub fields: std::collections::HashMap<String, JsonValue>,
 }
 
@@ -115,7 +115,7 @@ pub struct UpsertNode {
     mutator: Arc<dyn DocMutator>,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
-    /// Input documents to upsert (for batch operations without docIDs) - legacy
+    /// Input documents to upsert (for batch operations without docIDs)
     inputs: Vec<UpsertInput>,
     /// Document IDs to upsert (from resolved filter)
     doc_ids: Option<Vec<String>>,
@@ -123,7 +123,7 @@ pub struct UpsertNode {
     create_input: Option<UpsertInput>,
     /// Input for updating existing document (Go's 'update' argument)
     update_input: Option<UpsertInput>,
-    /// Legacy: Single input to apply to all doc_ids (for backward compat)
+    /// Single input to apply to all doc_ids (same fields for create and update)
     single_input: Option<UpsertInput>,
     /// Upserted documents (populated after first next())
     upserted_docs: Vec<Doc>,
@@ -178,8 +178,8 @@ impl UpsertNode {
         self
     }
 
-    /// Legacy: Add an input document to upsert (creates new document).
-    /// For backward compatibility - use with_create_input/with_update_input for Go semantics.
+    /// Add a single input to apply to all operations (same fields for create and update).
+    /// For Go DefraDB's separate create/update semantics, use with_create_input/with_update_input.
     pub fn with_input(mut self, input: UpsertInput) -> Self {
         self.single_input = Some(input);
         self
@@ -341,13 +341,21 @@ impl PlanNode for UpsertNode {
                     }
                     Some(ref doc_ids) if doc_ids.len() == 1 => {
                         // Exactly one match - UPDATE with update_input
-                        let update_input = self.update_input.clone().unwrap_or_default();
+                        let update_input = self.update_input.clone().ok_or_else(|| {
+                            QueryError::execution(
+                                "upsert matched existing document but no 'update' input was provided",
+                            )
+                        })?;
                         let doc_id = doc_ids[0].clone();
                         self.upsert_by_id(&doc_id, &update_input).await?;
                     }
                     _ => {
                         // No matches - CREATE with create_input
-                        let create_input = self.create_input.clone().unwrap_or_default();
+                        let create_input = self.create_input.clone().ok_or_else(|| {
+                            QueryError::execution(
+                                "upsert filter matched no documents but no 'create' input was provided",
+                            )
+                        })?;
                         self.create_new(&create_input).await?;
                     }
                 }

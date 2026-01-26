@@ -450,19 +450,6 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(update_input)
     }
 
-    /// Build UpsertInput from mutation input (legacy).
-    #[allow(dead_code)]
-    fn build_upsert_input(&self, mutation: &Mutation) -> Result<UpsertInput> {
-        let mut upsert_input = UpsertInput::new();
-
-        // Upsert uses update_input for the field values
-        for (field_name, value) in &mutation.update_input {
-            upsert_input = upsert_input.with_field(field_name.clone(), value.clone());
-        }
-
-        Ok(upsert_input)
-    }
-
     /// Build UpsertInput from a field-value map.
     fn build_upsert_input_from_map(
         &self,
