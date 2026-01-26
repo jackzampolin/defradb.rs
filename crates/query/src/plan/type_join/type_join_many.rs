@@ -165,6 +165,15 @@ impl TypeJoinMany {
         }
 
         self.child_plan.close().await?;
+
+        // Debug: Log cache contents
+        tracing::debug!(
+            parent_side_index = self.parent_side.relation_field_index(),
+            cache_keys = ?self.child_cache.keys().collect::<Vec<_>>(),
+            total_children = self.child_cache.values().map(|v| v.len()).sum::<usize>(),
+            "TypeJoinMany::build_child_cache complete"
+        );
+
         Ok(())
     }
 

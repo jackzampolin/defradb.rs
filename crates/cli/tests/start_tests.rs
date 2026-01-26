@@ -1,4 +1,3 @@
-
 //! Tests for the start command
 
 use cli::commands::StartArgs;

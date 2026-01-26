@@ -1,4 +1,3 @@
-
 //! Tests for client command functionality
 
 use std::io::Write;

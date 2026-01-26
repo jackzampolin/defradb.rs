@@ -1,4 +1,3 @@
-
 //! Wire message types for DefraDB P2P protocol.
 //!
 //! Messages are CBOR encoded for wire compatibility with the Go implementation.

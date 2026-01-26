@@ -1,4 +1,3 @@
-
 //! Tests for the wire message types module.
 
 use p2p::message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};

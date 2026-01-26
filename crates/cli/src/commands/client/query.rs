@@ -1,4 +1,3 @@
-
 //! Query command implementation
 
 use std::path::PathBuf;

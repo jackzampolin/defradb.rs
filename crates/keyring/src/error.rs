@@ -1,4 +1,3 @@
-
 //! Keyring error types
 
 use thiserror::Error;

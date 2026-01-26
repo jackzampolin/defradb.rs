@@ -1,4 +1,3 @@
-
 //! File-based keyring with JWE encryption
 //!
 //! Uses raw JWE compact serialization for Go DefraDB compatibility.

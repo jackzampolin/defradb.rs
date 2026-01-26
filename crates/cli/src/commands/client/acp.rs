@@ -1,4 +1,3 @@
-
 //! ACP (Access Control Policy) command implementation
 
 use std::path::PathBuf;

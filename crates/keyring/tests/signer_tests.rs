@@ -1,4 +1,3 @@
-
 //! Tests for key handle functionality
 
 use std::sync::Arc;

@@ -1,4 +1,3 @@
-
 //! Tests for the CBOR codec module.
 
 use std::io;

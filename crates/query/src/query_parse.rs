@@ -1163,10 +1163,7 @@ fn parse_field_to_mutation(
             }
 
             // UPDATE/DELETE: docID or docIDs to target (Go uses singular docID)
-            (
-                MutationType::Update | MutationType::Delete,
-                "docID" | "docIDs" | "_docIDs",
-            ) => {
+            (MutationType::Update | MutationType::Delete, "docID" | "docIDs" | "_docIDs") => {
                 let doc_ids = parse_doc_ids_value(arg_value, variables)?;
                 mutation.doc_ids = Some(doc_ids);
             }

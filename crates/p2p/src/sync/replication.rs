@@ -1,4 +1,3 @@
-
 //! Replication loop for processing sync events and executing CRDT merges.
 //!
 //! The replication loop is the bridge between the P2P layer and the database.

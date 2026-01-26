@@ -1,4 +1,3 @@
-
 //! Sync coordinator for DefraDB P2P synchronization.
 //!
 //! The coordinator ties together:

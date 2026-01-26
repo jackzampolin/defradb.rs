@@ -1,4 +1,3 @@
-
 //! HTTP client for communicating with DefraDB server
 
 use std::sync::OnceLock;

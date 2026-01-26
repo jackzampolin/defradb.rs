@@ -1,4 +1,3 @@
-
 //! Tests for configuration type enums
 
 use cli::config::{DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput};

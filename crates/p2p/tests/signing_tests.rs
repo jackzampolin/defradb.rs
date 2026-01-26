@@ -1,4 +1,3 @@
-
 //! Tests for message signing and verification.
 
 use uuid::Uuid;

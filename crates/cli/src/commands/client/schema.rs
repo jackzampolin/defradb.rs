@@ -1,4 +1,3 @@
-
 //! Schema command implementation
 
 use clap::{Args, Subcommand};

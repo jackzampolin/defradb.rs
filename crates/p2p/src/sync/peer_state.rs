@@ -1,4 +1,3 @@
-
 //! Peer state tracking for P2P synchronization.
 //!
 //! Tracks which blocks each peer has, enabling:

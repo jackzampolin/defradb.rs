@@ -776,15 +776,23 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
         ScalarKind::Bool => matches!(value, NormalValue::Bool(_) | NormalValue::NillableBool(_)),
         ScalarKind::Int => matches!(value, NormalValue::Int(_) | NormalValue::NillableInt(_)),
         ScalarKind::Float64 => {
+            // Accept Int values for Float64 fields (common in JSON where 5 and 5.0 are equivalent)
             matches!(
                 value,
-                NormalValue::Float64(_) | NormalValue::NillableFloat64(_)
+                NormalValue::Float64(_)
+                    | NormalValue::NillableFloat64(_)
+                    | NormalValue::Int(_)
+                    | NormalValue::NillableInt(_)
             )
         }
         ScalarKind::Float32 => {
+            // Accept Int values for Float32 fields (common in JSON where 5 and 5.0 are equivalent)
             matches!(
                 value,
-                NormalValue::Float32(_) | NormalValue::NillableFloat32(_)
+                NormalValue::Float32(_)
+                    | NormalValue::NillableFloat32(_)
+                    | NormalValue::Int(_)
+                    | NormalValue::NillableInt(_)
             )
         }
         ScalarKind::DateTime => {

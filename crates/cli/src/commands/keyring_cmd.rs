@@ -1,4 +1,3 @@
-
 //! Keyring command implementation
 
 use std::io::{self, BufRead, IsTerminal, Read, Write};

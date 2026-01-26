@@ -1,4 +1,3 @@
-
 //! Configuration section structs
 
 use std::net::SocketAddr;

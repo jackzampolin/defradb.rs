@@ -1,4 +1,3 @@
-
 //! Tests for replicator types.
 
 use p2p::replicator::{ReplicatorError, ReplicatorInfo};

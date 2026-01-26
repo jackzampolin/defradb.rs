@@ -1,4 +1,3 @@
-
 //! Key handle backed by keyring
 //!
 //! Provides access to keys stored in a keyring with on-demand fetching.

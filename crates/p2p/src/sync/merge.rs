@@ -1,4 +1,3 @@
-
 //! Merge handler trait and outcome types for CRDT block merging.
 //!
 //! This module defines the interface between the P2P layer and the database

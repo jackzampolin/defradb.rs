@@ -1,4 +1,3 @@
-
 //! Input validation utilities for GraphQL query construction
 
 use crate::error::{Error, Result};

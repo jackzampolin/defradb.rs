@@ -1,4 +1,3 @@
-
 //! P2P error types for DefraDB networking.
 
 use std::io;

@@ -1,4 +1,3 @@
-
 //! Root CLI definition with global flags
 
 use clap::{Parser, Subcommand};

@@ -1,4 +1,3 @@
-
 //! Configuration type enums
 
 use serde::{Deserialize, Serialize};

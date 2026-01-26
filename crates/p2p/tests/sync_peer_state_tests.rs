@@ -1,4 +1,3 @@
-
 //! Tests for peer state tracking.
 
 use std::str::FromStr;

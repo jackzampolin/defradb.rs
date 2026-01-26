@@ -1,4 +1,3 @@
-
 //! Core Keyring trait
 
 use crate::error::Result;

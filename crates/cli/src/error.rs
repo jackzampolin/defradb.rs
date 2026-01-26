@@ -1,4 +1,3 @@
-
 //! CLI error types
 
 use std::path::PathBuf;

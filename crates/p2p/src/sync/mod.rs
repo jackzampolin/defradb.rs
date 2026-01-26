@@ -1,4 +1,3 @@
-
 //! P2P synchronization module for DefraDB.
 //!
 //! This module provides block synchronization between DefraDB peers.

@@ -1,4 +1,3 @@
-
 //! BitswapStore adapter for DefraBlockstore.
 //!
 //! This module implements the `Store` trait from iroh-bitswap

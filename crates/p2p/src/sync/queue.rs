@@ -1,4 +1,3 @@
-
 //! Process queue for serializing concurrent sync operations.
 //!
 //! This matches Go's `processQueue` in `p2p.go` which prevents multiple

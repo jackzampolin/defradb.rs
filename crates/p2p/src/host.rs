@@ -1,4 +1,3 @@
-
 //! P2P Host implementation for DefraDB.
 //!
 //! This module provides the main P2P host that manages the libp2p swarm,

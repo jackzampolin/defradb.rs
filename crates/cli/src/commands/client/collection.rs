@@ -1,4 +1,3 @@
-
 //! Collection command implementation
 
 use clap::{Args, Subcommand};

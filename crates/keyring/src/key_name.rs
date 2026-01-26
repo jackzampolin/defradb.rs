@@ -1,4 +1,3 @@
-
 //! Validated key name type for keyring operations
 
 use std::fmt;
