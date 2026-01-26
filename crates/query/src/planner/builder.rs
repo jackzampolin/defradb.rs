@@ -832,6 +832,166 @@ impl Planner {
             }
         }
 
+        // Also handle relation-based aggregates (e.g., _count(books: {}))
+        // These need joins to fetch the related data for aggregation.
+        for requestable in &select.fields {
+            if let Requestable::Aggregate(agg) = requestable {
+                for target in &agg.targets {
+                    // Only handle relation-based aggregates (non-empty host_name)
+                    if target.host_name.is_empty() {
+                        continue;
+                    }
+
+                    let relation_field_name = &target.host_name;
+
+                    // Check if this relation is already being joined (via a Select)
+                    let already_joined = select.fields.iter().any(|f| {
+                        if let Requestable::Select(s) = f {
+                            s.field.name == *relation_field_name
+                        } else {
+                            false
+                        }
+                    });
+
+                    if already_joined {
+                        continue; // Join already exists, aggregate will use that data
+                    }
+
+                    // Find the relation field in the parent collection
+                    let relation_field =
+                        match parent_collection.field_by_name(relation_field_name) {
+                            Some(f) => f,
+                            None => continue, // Skip if not found (might be invalid)
+                        };
+
+                    // Verify it's a relation field
+                    if !relation_field.kind.is_relation() {
+                        continue;
+                    }
+
+                    // Get the target collection
+                    let target_collection_id = match relation_field.kind.relation_collection_id() {
+                        Some(id) => id,
+                        None => continue,
+                    };
+
+                    let target_collection = if target_collection_id.is_empty() {
+                        Arc::new(parent_collection.clone())
+                    } else {
+                        match self.get_collection(target_collection_id) {
+                            Some(c) => c,
+                            None => continue,
+                        }
+                    };
+
+                    // Build a minimal child mapping for the aggregate
+                    // For count, we just need to fetch the documents
+                    // For sum/avg, we need the specific field
+                    let mut child_mapping = DocumentMapping::new();
+                    child_mapping.add(0, "_docID");
+
+                    // If there's a field to aggregate, add it with render_key
+                    if let Some(ref field_name) = target.field_name {
+                        if let Some(idx) = target_collection
+                            .fields
+                            .iter()
+                            .position(|f| f.name == *field_name)
+                        {
+                            child_mapping.add(idx, field_name);
+                            child_mapping.add_render_key(idx, field_name);
+                        }
+                    }
+
+                    // Build scan mapping for the child
+                    let child_scan_mapping =
+                        self.build_scan_mapping_for_join(&target_collection, &child_mapping);
+
+                    // Get relation field index in parent collection
+                    let relation_field_index = parent_collection
+                        .fields
+                        .iter()
+                        .position(|f| f.name == *relation_field_name)
+                        .unwrap_or(0);
+
+                    // Set up child mapping in parent for TypeJoin
+                    mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
+
+                    // Add the relation field to mapping if not already present
+                    // This is needed so TypeJoinMany's output appears in the JSON
+                    if mapping.first_index_of_name(relation_field_name).is_none() {
+                        mapping.add(relation_field_index, relation_field_name);
+                    }
+                    // Add render_key for the relation field so the joined data appears
+                    // in the output for post-processing
+                    mapping.add_render_key(relation_field_index, relation_field_name);
+
+                    // Build child plan (simple scan with fetcher)
+                    let mut child_scan =
+                        ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
+                    if let Some(ref fetcher) = self.fetcher {
+                        child_scan = child_scan.with_fetcher(fetcher.clone());
+                    }
+                    let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+                    // Find the back-reference field
+                    let target_relation_field = target_collection.fields.iter().find(|f| {
+                        if !f.kind.is_relation() {
+                            return false;
+                        }
+                        if let Some(rel_id) = f.kind.relation_collection_id() {
+                            rel_id == parent_collection.version_id
+                                || rel_id == parent_collection.name
+                        } else {
+                            false
+                        }
+                    });
+
+                    let child_relation_index = target_relation_field
+                        .and_then(|f| {
+                            target_collection
+                                .fields
+                                .iter()
+                                .position(|tf| tf.name == f.name)
+                        })
+                        .unwrap_or(0);
+
+                    // Create join sides
+                    let parent_side = JoinSide::new(
+                        parent_collection.clone(),
+                        relation_field.clone(),
+                        relation_field_index,
+                    )?;
+
+                    let child_side = JoinSide::new(
+                        (*target_collection).clone(),
+                        target_relation_field
+                            .cloned()
+                            .unwrap_or_else(|| relation_field.clone()),
+                        child_relation_index,
+                    )?;
+
+                    // For aggregates, always use TypeJoinMany since we're aggregating an array
+                    // The aggregate field name becomes the key in the mapping
+                    let aggregate_key = agg.output_name();
+
+                    // Add the aggregate's output name to the mapping for later processing
+                    if mapping.first_index_of_name(aggregate_key).is_none() {
+                        let idx = mapping.next_index();
+                        mapping.add(idx, aggregate_key);
+                        // Note: render_key is already added in build_mapping_for_select
+                    }
+
+                    plan = Box::new(TypeJoinMany::new(
+                        plan,
+                        child_plan,
+                        parent_side,
+                        child_side,
+                        mapping.clone(),
+                    )?);
+                }
+            }
+        }
+
         Ok(plan)
     }
 
@@ -1351,10 +1511,14 @@ impl Planner {
                     mapping.add_render_key(index, nested_select.field.output_name());
                 }
                 Requestable::Aggregate(agg) => {
-                    return Err(QueryError::execution(format!(
-                        "aggregate '{:?}' not yet implemented",
-                        agg.aggregate_type
-                    )));
+                    // For relation-based aggregates (e.g., _count(books: {})),
+                    // the aggregate operates on related documents.
+                    // We add the aggregate name to the mapping for the result field.
+                    let index = mapping.next_index();
+                    let name = agg.aggregate_type.as_str();
+                    mapping.add(index, name);
+                    // Use alias if provided, otherwise use the aggregate name
+                    mapping.add_render_key(index, agg.output_name());
                 }
             }
         }

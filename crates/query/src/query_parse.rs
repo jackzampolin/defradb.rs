@@ -759,6 +759,7 @@ fn parse_int_value(
 }
 
 /// Parse order argument into OrderBy.
+/// Supports both single object `{field: ASC}` and array `[{field: ASC}, {other: DESC}]` formats.
 fn parse_order_value(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
@@ -779,7 +780,23 @@ fn parse_order_value(
                 order_by = order_by.with_condition(condition);
             }
         }
-        _ => return Err(QueryError::parse("order must be an object")),
+        Value::List(items) => {
+            // Array of order objects: [{rating: ASC}, {publisher: {yearOpened: DESC}}]
+            for item in items {
+                if let Value::Object(obj) = item {
+                    for (field_name, direction_val) in obj {
+                        let condition =
+                            parse_order_condition(field_name.clone(), direction_val, variables)?;
+                        order_by = order_by.with_condition(condition);
+                    }
+                } else {
+                    return Err(QueryError::parse(
+                        "each order item in array must be an object",
+                    ));
+                }
+            }
+        }
+        _ => return Err(QueryError::parse("order must be an object or array")),
     }
 
     Ok(order_by)
@@ -910,14 +927,16 @@ fn parse_group_by_value(
 /// Parse an aggregate field into an Aggregate.
 ///
 /// Handles aggregate functions like `_count`, `_sum(field: "age")`, etc.
+/// Also supports relation aggregates like `_count(books: {})`, `_sum(books: {field: score}, articles: {field: rating})`.
 fn parse_aggregate_field(
     field: &Field<'_, String>,
     agg_type: AggregateType,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Aggregate> {
     let mut target_field: Option<String> = None;
+    let mut relation_targets: Vec<AggregateTarget> = Vec::new();
 
-    // Parse arguments (e.g., `field: "age"` for _sum)
+    // Parse arguments (e.g., `field: "age"` for _sum, or `books: {}` for relation aggregates)
     for (arg_name, arg_value) in &field.arguments {
         match arg_name.as_str() {
             "field" => {
@@ -948,44 +967,113 @@ fn parse_aggregate_field(
                 });
             }
             _ => {
-                return Err(QueryError::parse(format!(
-                    "unknown argument '{}' on aggregate '{}'. Valid arguments are: field",
-                    arg_name,
-                    agg_type.as_str()
-                )));
+                // This might be a relation name argument like `books: {field: score}`
+                // Relation arguments take an object value with optional field, filter, limit, order
+                if let Value::Object(obj) = arg_value {
+                    let relation_name = arg_name.clone();
+                    let mut target = AggregateTarget::new(relation_name);
+
+                    // Parse the object to extract field, filter, limit, order
+                    for (key, val) in obj {
+                        match key.as_str() {
+                            "field" => {
+                                let field_name = match val {
+                                    Value::String(s) => s.clone(),
+                                    Value::Enum(s) => s.clone(),
+                                    _ => {
+                                        return Err(QueryError::parse(
+                                            "field in relation aggregate must be a string",
+                                        ))
+                                    }
+                                };
+                                target.field_name = Some(field_name);
+                            }
+                            "filter" => {
+                                // Parse filter condition
+                                let filter = parse_filter_value(val, variables)?;
+                                target.filter = Some(filter);
+                            }
+                            "limit" => {
+                                let limit_val = parse_int_value(val, variables)?;
+                                target.limit = Some(Limit::new(Some(limit_val as u64), 0));
+                            }
+                            "offset" => {
+                                // Offset is combined with limit
+                                let offset_val = parse_int_value(val, variables)?;
+                                if let Some(ref mut limit) = target.limit {
+                                    limit.offset = offset_val as u64;
+                                } else {
+                                    target.limit = Some(Limit::new(None, offset_val as u64));
+                                }
+                            }
+                            "order" => {
+                                let order = parse_order_value(val, variables)?;
+                                target.order = Some(order);
+                            }
+                            _ => {
+                                // Unknown key in relation aggregate - ignore for compatibility
+                            }
+                        }
+                    }
+
+                    relation_targets.push(target);
+                } else {
+                    return Err(QueryError::parse(format!(
+                        "unknown argument '{}' on aggregate '{}', expected an object value for relation aggregates",
+                        arg_name,
+                        agg_type.as_str()
+                    )));
+                }
             }
         }
     }
 
     // Create the appropriate aggregate
-    let aggregate = match agg_type {
-        AggregateType::Count => {
-            // _count can work without a field argument (counts all docs)
-            if let Some(field_name) = target_field {
-                Aggregate::count().with_target(AggregateTarget::with_field("", field_name))
-            } else {
-                Aggregate::count()
+    let aggregate = if !relation_targets.is_empty() {
+        // Relation aggregate mode
+        let mut agg = match agg_type {
+            AggregateType::Count => Aggregate::count(),
+            AggregateType::Sum => Aggregate::sum(AggregateTarget::new("")),
+            AggregateType::Average => Aggregate::avg(AggregateTarget::new("")),
+            AggregateType::Min => Aggregate::min(AggregateTarget::new("")),
+            AggregateType::Max => Aggregate::max(AggregateTarget::new("")),
+        };
+        // Add all relation targets
+        for target in relation_targets {
+            agg = agg.with_target(target);
+        }
+        agg
+    } else {
+        // Simple field aggregate mode
+        match agg_type {
+            AggregateType::Count => {
+                // _count can work without a field argument (counts all docs)
+                if let Some(field_name) = target_field {
+                    Aggregate::count().with_target(AggregateTarget::with_field("", field_name))
+                } else {
+                    Aggregate::count()
+                }
             }
-        }
-        AggregateType::Sum => {
-            let field_name = target_field
-                .ok_or_else(|| QueryError::parse("_sum requires a 'field' argument"))?;
-            Aggregate::sum(AggregateTarget::with_field("", field_name))
-        }
-        AggregateType::Average => {
-            let field_name = target_field
-                .ok_or_else(|| QueryError::parse("_avg requires a 'field' argument"))?;
-            Aggregate::avg(AggregateTarget::with_field("", field_name))
-        }
-        AggregateType::Min => {
-            let field_name = target_field
-                .ok_or_else(|| QueryError::parse("_min requires a 'field' argument"))?;
-            Aggregate::min(AggregateTarget::with_field("", field_name))
-        }
-        AggregateType::Max => {
-            let field_name = target_field
-                .ok_or_else(|| QueryError::parse("_max requires a 'field' argument"))?;
-            Aggregate::max(AggregateTarget::with_field("", field_name))
+            AggregateType::Sum => {
+                let field_name = target_field
+                    .ok_or_else(|| QueryError::parse("_sum requires a 'field' argument or relation targets"))?;
+                Aggregate::sum(AggregateTarget::with_field("", field_name))
+            }
+            AggregateType::Average => {
+                let field_name = target_field
+                    .ok_or_else(|| QueryError::parse("_avg requires a 'field' argument or relation targets"))?;
+                Aggregate::avg(AggregateTarget::with_field("", field_name))
+            }
+            AggregateType::Min => {
+                let field_name = target_field
+                    .ok_or_else(|| QueryError::parse("_min requires a 'field' argument or relation targets"))?;
+                Aggregate::min(AggregateTarget::with_field("", field_name))
+            }
+            AggregateType::Max => {
+                let field_name = target_field
+                    .ok_or_else(|| QueryError::parse("_max requires a 'field' argument or relation targets"))?;
+                Aggregate::max(AggregateTarget::with_field("", field_name))
+            }
         }
     };
 

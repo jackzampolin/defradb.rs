@@ -40,11 +40,18 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
     }
 
     // Validate aggregate target fields exist in schema
+    // Note: For relation-based aggregates (e.g., _sum(books: {field: score})),
+    // the field belongs to the related collection, not the current one.
+    // We skip validation here; it will be checked during execution.
     for requestable in &select.fields {
         if let Requestable::Aggregate(agg) = requestable {
             for target in &agg.targets {
                 if let Some(ref field_name) = target.field_name {
-                    if !field_exists(field_name) {
+                    // Only validate fields on the current collection (no host_name or empty)
+                    // Relation-based aggregates have a non-empty host_name
+                    let is_relation_aggregate = !target.host_name.is_empty()
+                        && collection.fields.iter().any(|f| f.name == target.host_name);
+                    if !is_relation_aggregate && !field_exists(field_name) {
                         return Err(QueryError::unknown_field(format!(
                             "aggregate target field '{}' not found in collection '{}'",
                             field_name, select.collection_name

@@ -351,8 +351,20 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|o| o.has_relation_order())
             .unwrap_or(false);
 
-        // Use Planner if there are nested selections, filter through relations, or order through relations
-        let needs_planner = has_nested || filter_has_relations || order_has_relations;
+        // Check if any aggregates reference relations (e.g., _count(books: {}))
+        // Relation-based aggregates have a non-empty host_name on their targets.
+        let aggregates_have_relations = select.fields.iter().any(|f| {
+            if let Requestable::Aggregate(agg) = f {
+                agg.targets.iter().any(|t| !t.host_name.is_empty())
+            } else {
+                false
+            }
+        });
+
+        // Use Planner if there are nested selections, filter through relations,
+        // order through relations, or aggregates on relations
+        let needs_planner =
+            has_nested || filter_has_relations || order_has_relations || aggregates_have_relations;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
@@ -439,7 +451,202 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         plan.close().await?;
 
+        // Post-process relation-based aggregates
+        // For aggregates like _count(books: {}), compute the value from joined data
+        let results = self.compute_relation_aggregates(results, select)?;
+
         Ok(JsonValue::Array(results))
+    }
+
+    /// Compute aggregate values from joined relation data.
+    ///
+    /// For each relation-based aggregate (e.g., _count(books: {})), this function:
+    /// 1. Finds the joined relation data (stored under the relation field name)
+    /// 2. Computes the aggregate (count, sum, avg, etc.)
+    /// 3. Stores the result under the aggregate's output name
+    fn compute_relation_aggregates(
+        &self,
+        mut results: Vec<JsonValue>,
+        select: &Select,
+    ) -> Result<Vec<JsonValue>> {
+        // Collect info about relation aggregates
+        let mut aggregates_info: Vec<(String, crate::mapper::AggregateType, Vec<(String, Option<String>)>)> =
+            Vec::new();
+
+        for requestable in &select.fields {
+            if let Requestable::Aggregate(agg) = requestable {
+                let mut relation_targets = Vec::new();
+                for target in &agg.targets {
+                    if !target.host_name.is_empty() {
+                        relation_targets
+                            .push((target.host_name.clone(), target.field_name.clone()));
+                    }
+                }
+                if !relation_targets.is_empty() {
+                    aggregates_info.push((
+                        agg.output_name().to_string(),
+                        agg.aggregate_type.clone(),
+                        relation_targets,
+                    ));
+                }
+            }
+        }
+
+        // If no relation aggregates, return as-is
+        if aggregates_info.is_empty() {
+            return Ok(results);
+        }
+
+        // Process each result
+        for result in &mut results {
+            if let JsonValue::Object(ref mut obj) = result {
+                for (output_name, agg_type, targets) in &aggregates_info {
+                    let mut total_value: f64 = 0.0;
+                    let mut total_count: i64 = 0;
+
+                    for (relation_name, field_name) in targets {
+                        // Get the joined relation data
+                        if let Some(relation_data) = obj.get(relation_name) {
+                            if let JsonValue::Array(items) = relation_data {
+                                match agg_type {
+                                    crate::mapper::AggregateType::Count => {
+                                        total_count += items.len() as i64;
+                                    }
+                                    crate::mapper::AggregateType::Sum
+                                    | crate::mapper::AggregateType::Average => {
+                                        if let Some(field) = field_name {
+                                            for item in items {
+                                                if let JsonValue::Object(item_obj) = item {
+                                                    if let Some(val) = item_obj.get(field) {
+                                                        if let Some(n) = val.as_f64() {
+                                                            total_value += n;
+                                                            total_count += 1;
+                                                        } else if let Some(n) = val.as_i64() {
+                                                            total_value += n as f64;
+                                                            total_count += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crate::mapper::AggregateType::Min => {
+                                        if let Some(field) = field_name {
+                                            for item in items {
+                                                if let JsonValue::Object(item_obj) = item {
+                                                    if let Some(val) = item_obj.get(field) {
+                                                        if let Some(n) = val.as_f64() {
+                                                            if total_count == 0
+                                                                || n < total_value
+                                                            {
+                                                                total_value = n;
+                                                            }
+                                                            total_count += 1;
+                                                        } else if let Some(n) = val.as_i64() {
+                                                            let n = n as f64;
+                                                            if total_count == 0
+                                                                || n < total_value
+                                                            {
+                                                                total_value = n;
+                                                            }
+                                                            total_count += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crate::mapper::AggregateType::Max => {
+                                        if let Some(field) = field_name {
+                                            for item in items {
+                                                if let JsonValue::Object(item_obj) = item {
+                                                    if let Some(val) = item_obj.get(field) {
+                                                        if let Some(n) = val.as_f64() {
+                                                            if total_count == 0
+                                                                || n > total_value
+                                                            {
+                                                                total_value = n;
+                                                            }
+                                                            total_count += 1;
+                                                        } else if let Some(n) = val.as_i64() {
+                                                            let n = n as f64;
+                                                            if total_count == 0
+                                                                || n > total_value
+                                                            {
+                                                                total_value = n;
+                                                            }
+                                                            total_count += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Remove the joined relation data (it was only for aggregation)
+                        // But only if the relation wasn't explicitly selected
+                        let relation_selected = select.fields.iter().any(|f| {
+                            if let Requestable::Select(s) = f {
+                                s.field.name == *relation_name
+                            } else {
+                                false
+                            }
+                        });
+                        if !relation_selected {
+                            obj.remove(relation_name);
+                        }
+                    }
+
+                    // Store the computed aggregate value
+                    let computed_value = match agg_type {
+                        crate::mapper::AggregateType::Count => {
+                            JsonValue::Number(total_count.into())
+                        }
+                        crate::mapper::AggregateType::Sum => {
+                            if total_value == total_value.floor() {
+                                JsonValue::Number((total_value as i64).into())
+                            } else {
+                                JsonValue::Number(
+                                    serde_json::Number::from_f64(total_value)
+                                        .unwrap_or_else(|| 0.into()),
+                                )
+                            }
+                        }
+                        crate::mapper::AggregateType::Average => {
+                            if total_count > 0 {
+                                let avg = total_value / total_count as f64;
+                                JsonValue::Number(
+                                    serde_json::Number::from_f64(avg).unwrap_or_else(|| 0.into()),
+                                )
+                            } else {
+                                JsonValue::Null
+                            }
+                        }
+                        crate::mapper::AggregateType::Min | crate::mapper::AggregateType::Max => {
+                            if total_count > 0 {
+                                if total_value == total_value.floor() {
+                                    JsonValue::Number((total_value as i64).into())
+                                } else {
+                                    JsonValue::Number(
+                                        serde_json::Number::from_f64(total_value)
+                                            .unwrap_or_else(|| 0.into()),
+                                    )
+                                }
+                            } else {
+                                JsonValue::Null
+                            }
+                        }
+                    };
+
+                    obj.insert(output_name.clone(), computed_value);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Execute a simple query without nested selections.
