@@ -239,9 +239,21 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(node)
             }
             MutationType::Upsert => {
-                let input = self.build_upsert_input(mutation)?;
-                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone())
-                    .with_input(input);
+                let mut node =
+                    UpsertNode::new(&mutation.collection_name, mutator, mapping.clone());
+
+                // Set create_input (from Go's 'create' argument)
+                if !mutation.create_input.is_empty() {
+                    let create_input =
+                        self.build_upsert_input_from_map(&mutation.create_input[0])?;
+                    node = node.with_create_input(create_input);
+                }
+
+                // Set update_input (from Go's 'update' argument)
+                if !mutation.update_input.is_empty() {
+                    let update_input = self.build_upsert_input_from_map(&mutation.update_input)?;
+                    node = node.with_update_input(update_input);
+                }
 
                 // Use resolved doc_ids (from filter) or original doc_ids
                 if let Some(ref doc_ids) = resolved_doc_ids {
@@ -438,12 +450,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(update_input)
     }
 
-    /// Build UpsertInput from mutation input.
-    fn build_upsert_input(&self, mutation: &Mutation) -> Result<UpsertInput> {
+    /// Build UpsertInput from a field-value map.
+    fn build_upsert_input_from_map(
+        &self,
+        input: &std::collections::HashMap<String, JsonValue>,
+    ) -> Result<UpsertInput> {
         let mut upsert_input = UpsertInput::new();
 
-        // Upsert uses update_input for the field values
-        for (field_name, value) in &mutation.update_input {
+        for (field_name, value) in input {
             upsert_input = upsert_input.with_field(field_name.clone(), value.clone());
         }
 

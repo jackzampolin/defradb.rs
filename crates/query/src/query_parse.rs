@@ -1115,15 +1115,28 @@ fn parse_field_to_mutation(
                 mutation.create_input = input;
             }
 
-            // UPDATE/UPSERT: input is patch object
-            (MutationType::Update | MutationType::Upsert, "input") => {
+            // UPDATE: input is patch object
+            (MutationType::Update, "input") => {
                 let input = parse_update_input(arg_value, variables)?;
                 mutation.update_input = input;
             }
 
-            // UPDATE/DELETE/UPSERT: docID or docIDs to target (Go uses singular docID)
+            // UPSERT: create is the document to create if no match (single object, not array)
+            (MutationType::Upsert, "create") => {
+                let input = parse_update_input(arg_value, variables)?;
+                // Store create input as single-element array for consistency
+                mutation.create_input = vec![input];
+            }
+
+            // UPSERT: update is the fields to update if match found
+            (MutationType::Upsert, "update") => {
+                let input = parse_update_input(arg_value, variables)?;
+                mutation.update_input = input;
+            }
+
+            // UPDATE/DELETE: docID or docIDs to target (Go uses singular docID)
             (
-                MutationType::Update | MutationType::Delete | MutationType::Upsert,
+                MutationType::Update | MutationType::Delete,
                 "docID" | "docIDs" | "_docIDs",
             ) => {
                 let doc_ids = parse_doc_ids_value(arg_value, variables)?;
@@ -1181,13 +1194,25 @@ fn parse_field_to_mutation(
             }
         }
         MutationType::Upsert => {
-            if mutation.update_input.is_empty() {
+            // Go DefraDB requires all three: filter, create, update
+            if mutation.filter.is_none() {
                 return Err(QueryError::parse(format!(
-                    "upsert_{} mutation requires 'input' argument with fields to set",
+                    "upsert_{} mutation requires 'filter' argument",
                     collection_name
                 )));
             }
-            // Note: docIDs/filter are optional for upsert - if not provided, creates a new document
+            if mutation.create_input.is_empty() {
+                return Err(QueryError::parse(format!(
+                    "upsert_{} mutation requires 'create' argument with document to create if no match",
+                    collection_name
+                )));
+            }
+            if mutation.update_input.is_empty() {
+                return Err(QueryError::parse(format!(
+                    "upsert_{} mutation requires 'update' argument with fields to update if match found",
+                    collection_name
+                )));
+            }
         }
     }
 
@@ -1505,12 +1530,18 @@ mod mutation_tests {
     }
 
     #[test]
-    fn test_parse_upsert_mutation_with_doc_ids() {
+    fn test_parse_upsert_mutation_go_style() {
+        // Go DefraDB upsert syntax: filter, create, update (all required)
         let query = r#"
             mutation {
-                upsert_Users(docIDs: ["bae-123"], input: {name: "Alice", age: 30}) {
+                upsert_Users(
+                    filter: {name: {_eq: "Bob"}},
+                    create: {name: "Bob", age: 40},
+                    update: {age: 40}
+                ) {
                     _docID
                     name
+                    age
                 }
             }
         "#;
@@ -1521,58 +1552,29 @@ mod mutation_tests {
         let m = &mutations[0];
         assert_eq!(m.mutation_type, MutationType::Upsert);
         assert_eq!(m.collection_name, "Users");
-        assert_eq!(m.doc_ids, Some(vec!["bae-123".to_string()]));
-        assert_eq!(
-            m.update_input.get("name"),
-            Some(&JsonValue::String("Alice".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_parse_upsert_mutation_with_filter() {
-        let query = r#"
-            mutation {
-                upsert_Users(filter: {name: {_eq: "Alice"}}, input: {age: 31}) {
-                    _docID
-                }
-            }
-        "#;
-
-        let mutations = parse_mutations(query).unwrap();
-        let m = &mutations[0];
-        assert_eq!(m.mutation_type, MutationType::Upsert);
         assert!(m.filter.is_some());
-        assert!(m.doc_ids.is_none());
-    }
-
-    #[test]
-    fn test_parse_upsert_mutation_create_new() {
-        // Upsert without docIDs/filter creates a new document
-        let query = r#"
-            mutation {
-                upsert_Users(input: {name: "NewUser", email: "new@example.com"}) {
-                    _docID
-                    name
-                }
-            }
-        "#;
-
-        let mutations = parse_mutations(query).unwrap();
-        let m = &mutations[0];
-        assert_eq!(m.mutation_type, MutationType::Upsert);
-        assert!(m.doc_ids.is_none());
-        assert!(m.filter.is_none());
+        // create_input is stored as a single-element vec
+        assert_eq!(m.create_input.len(), 1);
         assert_eq!(
-            m.update_input.get("name"),
-            Some(&JsonValue::String("NewUser".to_string()))
+            m.create_input[0].get("name"),
+            Some(&JsonValue::String("Bob".to_string()))
+        );
+        // update_input is the fields to update
+        assert_eq!(
+            m.update_input.get("age"),
+            Some(&JsonValue::Number(40.into()))
         );
     }
 
     #[test]
-    fn test_upsert_missing_input_error() {
+    fn test_upsert_missing_filter_error() {
+        // Go style requires filter
         let query = r#"
             mutation {
-                upsert_Users(docIDs: ["bae-123"]) {
+                upsert_Users(
+                    create: {name: "Bob", age: 40},
+                    update: {age: 40}
+                ) {
                     _docID
                 }
             }
@@ -1580,7 +1582,45 @@ mod mutation_tests {
 
         let result = parse_mutations(query);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires 'input'"));
+        assert!(result.unwrap_err().to_string().contains("filter"));
+    }
+
+    #[test]
+    fn test_upsert_missing_create_error() {
+        // Go style requires create
+        let query = r#"
+            mutation {
+                upsert_Users(
+                    filter: {name: {_eq: "Bob"}},
+                    update: {age: 40}
+                ) {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_mutations(query);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("create"));
+    }
+
+    #[test]
+    fn test_upsert_missing_update_error() {
+        // Go style requires update
+        let query = r#"
+            mutation {
+                upsert_Users(
+                    filter: {name: {_eq: "Bob"}},
+                    create: {name: "Bob", age: 40}
+                ) {
+                    _docID
+                }
+            }
+        "#;
+
+        let result = parse_mutations(query);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("update"));
     }
 }
 
