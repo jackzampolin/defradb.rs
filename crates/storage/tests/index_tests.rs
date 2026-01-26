@@ -1,4 +1,3 @@
-
 //! Additional tests for index functionality
 //!
 //! This module contains:

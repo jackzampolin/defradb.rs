@@ -1,4 +1,3 @@
-
 //! Null value encoding
 
 use super::{peek_type, EncodedType, ENCODED_NULL, ENCODED_NULL_DESC};

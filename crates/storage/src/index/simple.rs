@@ -1,4 +1,3 @@
-
 //! SimpleIndex implementation for non-unique indexes
 
 use async_trait::async_trait;

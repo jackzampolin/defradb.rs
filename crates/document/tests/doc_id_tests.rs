@@ -1,4 +1,3 @@
-
 //! Integration tests for DocID type
 
 use cid::Cid;

@@ -1,4 +1,3 @@
-
 //! Index iterator traits and types for scanning index entries
 //!
 //! This module provides the core abstractions for iterating over index entries:

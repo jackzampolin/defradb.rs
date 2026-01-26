@@ -1,4 +1,3 @@
-
 //! Document error types
 
 use thiserror::Error;

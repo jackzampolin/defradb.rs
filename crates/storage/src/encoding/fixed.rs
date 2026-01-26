@@ -1,4 +1,3 @@
-
 //! Fixed-width integer encoding (uint32/uint64)
 
 use crate::corekv::{Error, Result};

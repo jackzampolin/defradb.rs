@@ -1,4 +1,3 @@
-
 //! Integration tests for Document type
 
 use document::{Document, NormalValue, SDN_NAMESPACE_V0};

@@ -1,4 +1,3 @@
-
 //! Range iterator for index scanning with bounds
 //!
 //! Provides iteration over index entries within a range of field values.

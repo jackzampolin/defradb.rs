@@ -1,4 +1,3 @@
-
 //! Property-based tests for encoding module
 //!
 //! These tests verify critical properties of the order-preserving encoding:

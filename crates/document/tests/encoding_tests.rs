@@ -1,4 +1,3 @@
-
 //! Integration tests for encoding utilities
 
 use chrono::{TimeZone, Timelike, Utc};

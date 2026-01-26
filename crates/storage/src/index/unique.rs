@@ -1,4 +1,3 @@
-
 //! UniqueIndex implementation for unique indexes
 
 use async_trait::async_trait;

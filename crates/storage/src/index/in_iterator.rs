@@ -1,4 +1,3 @@
-
 //! IN operator iterator for multi-value index lookups
 //!
 //! Provides efficient iteration over multiple exact match values,

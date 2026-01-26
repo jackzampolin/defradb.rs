@@ -1,4 +1,3 @@
-
 //! Secondary index implementations for DefraDB
 //!
 //! This module provides the `CollectionIndex` trait and implementations
