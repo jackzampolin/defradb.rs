@@ -15,6 +15,7 @@ pub mod collections;
 pub mod documents;
 pub mod graphql;
 pub mod index;
+pub mod lens;
 pub mod nac;
 pub mod p2p;
 pub mod schema;

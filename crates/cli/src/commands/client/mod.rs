@@ -7,6 +7,7 @@ mod collection;
 mod document;
 pub mod http_client;
 mod index;
+mod lens;
 mod p2p;
 mod query;
 mod schema;
@@ -22,6 +23,7 @@ pub use backup::BackupArgs;
 pub use collection::CollectionArgs;
 pub use document::DocumentArgs;
 pub use index::IndexArgs;
+pub use lens::LensArgs;
 pub use p2p::P2pArgs;
 pub use query::QueryArgs;
 pub use schema::SchemaArgs;
@@ -95,6 +97,8 @@ pub enum ClientCommand {
     Document(DocumentArgs),
     /// Manage database indexes
     Index(IndexArgs),
+    /// Manage lens schema migrations
+    Lens(LensArgs),
     /// Manage P2P network
     P2p(P2pArgs),
     /// Execute a GraphQL query
@@ -130,6 +134,7 @@ impl ClientArgs {
             ClientCommand::Collection(args) => args.execute(&ctx).await,
             ClientCommand::Document(args) => args.execute(&ctx).await,
             ClientCommand::Index(args) => args.execute(&ctx).await,
+            ClientCommand::Lens(args) => args.execute(&ctx).await,
             ClientCommand::P2p(args) => args.execute(&ctx).await,
             ClientCommand::Query(args) => args.execute(&ctx).await,
             ClientCommand::Schema(args) => args.execute(&ctx).await,
