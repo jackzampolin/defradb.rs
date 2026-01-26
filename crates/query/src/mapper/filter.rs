@@ -693,20 +693,30 @@ impl Filter {
             let is_relation_filter = ops.keys().any(|k| FilterOp::parse(k).is_none());
 
             if is_relation_filter {
-                // This is a relation filter like {author: {verified: {_eq: true}}}
-                // The field_value should be a JSON object (the related document)
+                // This is a nested field filter like {Custom: {age: {_ge: null}}}
+                // or a relation filter like {author: {verified: {_eq: true}}}
+
+                // Handle null field value:
+                // - For JSON fields: null.path = null, so propagate null through nested access
+                // - Evaluate nested conditions with null values to handle cases like null >= null
                 if field_value.is_null() {
-                    // No related document - filter doesn't match
-                    return Ok(false);
-                }
+                    // Create empty object - all nested field accesses will return null
+                    let empty_obj = serde_json::Map::new();
+                    if !self.eval_relation_conditions(ops, &empty_obj)? {
+                        return Ok(false);
+                    }
+                } else {
+                    let related_obj = field_value.as_object().ok_or_else(|| {
+                        QueryError::invalid_filter(format!(
+                            "nested filter field '{}' is not an object",
+                            key
+                        ))
+                    })?;
 
-                let related_obj = field_value.as_object().ok_or_else(|| {
-                    QueryError::invalid_filter(format!("relation field '{}' is not an object", key))
-                })?;
-
-                // Recursively evaluate the nested conditions against the related object
-                if !self.eval_relation_conditions(ops, related_obj)? {
-                    return Ok(false);
+                    // Recursively evaluate the nested conditions against the related object
+                    if !self.eval_relation_conditions(ops, related_obj)? {
+                        return Ok(false);
+                    }
                 }
             } else {
                 // Standard operator conditions
@@ -898,13 +908,11 @@ impl Filter {
             }
             FilterOp::Any => {
                 // Return true if ANY element matches the nested condition
-                // Null field → no match
-                if actual.is_null() {
-                    return Ok(false);
-                }
-                let arr = actual
-                    .as_array()
-                    .ok_or_else(|| QueryError::invalid_filter("_any requires array field"))?;
+                // Null or non-array field → no match (matches Go DefraDB behavior for JSON fields)
+                let arr = match actual.as_array() {
+                    Some(a) => a,
+                    None => return Ok(false), // Non-array doesn't have any matching elements
+                };
                 // Empty array → no match (no elements to match)
                 if arr.is_empty() {
                     return Ok(false);
@@ -922,13 +930,11 @@ impl Filter {
             }
             FilterOp::All => {
                 // Return true if ALL elements match the nested condition
-                // Null field → no match
-                if actual.is_null() {
-                    return Ok(false);
-                }
-                let arr = actual
-                    .as_array()
-                    .ok_or_else(|| QueryError::invalid_filter("_all requires array field"))?;
+                // Non-array field → false (no elements, but not vacuous truth - matches Go behavior)
+                let arr = match actual.as_array() {
+                    Some(a) => a,
+                    None => return Ok(false), // Non-array fails _all
+                };
                 // Empty array → vacuous truth (all zero elements match)
                 if arr.is_empty() {
                     return Ok(true);
@@ -945,13 +951,11 @@ impl Filter {
             }
             FilterOp::None => {
                 // Return true if NO elements match the nested condition
-                // Null field → no match (treating as no array to check)
-                if actual.is_null() {
-                    return Ok(false);
-                }
-                let arr = actual
-                    .as_array()
-                    .ok_or_else(|| QueryError::invalid_filter("_none requires array field"))?;
+                // Non-array field → false (not an array, so _none doesn't apply - Go behavior)
+                let arr = match actual.as_array() {
+                    Some(a) => a,
+                    None => return Ok(false), // Non-array excluded from _none results
+                };
                 // Empty array → true (no elements match)
                 if arr.is_empty() {
                     return Ok(true);
@@ -998,6 +1002,14 @@ impl Filter {
             }
             (JsonValue::Array(a), JsonValue::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Self::values_equal(a, b))
+            }
+            (JsonValue::Object(a), JsonValue::Object(b)) => {
+                // Objects are equal if they have the same keys with equal values
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter()
+                    .all(|(key, val_a)| b.get(key).is_some_and(|val_b| Self::values_equal(val_a, val_b)))
             }
             _ => false,
         }
@@ -1056,11 +1068,39 @@ impl Filter {
                 }
             }
 
-            // Type mismatch
-            _ => Err(QueryError::TypeMismatch {
-                expected: "comparable types".to_string(),
-                actual: format!("{:?} vs {:?}", a, b),
+            // Type mismatch handling:
+            // - If filter value is a number but stored value isn't, return None (no match)
+            //   This is the "AllTypes" case where we have mixed-type JSON fields
+            // - If filter value is string, bool, object, or array, return an error
+            //   Go DefraDB only allows numeric comparisons with _gt/_ge/_lt/_le
+            (_, JsonValue::Number(_)) => {
+                // Filter value is number, but stored value type doesn't match
+                // Return no match instead of error
+                Ok(None)
+            }
+            // String filter values are NOT valid for comparison operators
+            (_, JsonValue::String(_)) => Err(QueryError::UnexpectedType {
+                property: "condition".to_string(),
+                actual: Self::go_type_name(b),
             }),
+            // Error case: filter value (b) is an invalid type for comparison
+            // Use Go-compatible error format: "unexpected type. Property: condition, Actual: <type>"
+            _ => Err(QueryError::UnexpectedType {
+                property: "condition".to_string(),
+                actual: Self::go_type_name(b),
+            }),
+        }
+    }
+
+    /// Get Go-compatible type name for a JSON value
+    fn go_type_name(value: &JsonValue) -> String {
+        match value {
+            JsonValue::Null => "nil".to_string(),
+            JsonValue::Bool(_) => "bool".to_string(),
+            JsonValue::Number(_) => "float64".to_string(),
+            JsonValue::String(_) => "string".to_string(),
+            JsonValue::Array(_) => "[]interface {}".to_string(),
+            JsonValue::Object(_) => "map[string]interface {}".to_string(),
         }
     }
 
@@ -1078,9 +1118,12 @@ impl Filter {
 
         let op_name = if case_insensitive { "_ilike" } else { "_like" };
 
-        let actual_str = actual.as_str().ok_or_else(|| {
-            QueryError::invalid_filter(format!("{} requires string field", op_name))
-        })?;
+        // Non-string fields don't match _like (return false, not error)
+        // This matches Go DefraDB behavior for JSON fields with mixed types
+        let actual_str = match actual.as_str() {
+            Some(s) => s,
+            None => return Ok(negate), // Non-string doesn't match, so _like=false, _nlike=true
+        };
         let pattern_str = pattern.as_str().ok_or_else(|| {
             QueryError::invalid_filter(format!("{} requires string pattern", op_name))
         })?;

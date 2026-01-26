@@ -214,6 +214,9 @@ pub fn json_to_normal_value_with_kind(
     // If we have schema information, use it for type coercion
     if let Some(kind) = field_kind {
         match kind {
+            // JSON fields: wrap ALL values as JSON (primitives, objects, arrays)
+            // This matches Go DefraDB behavior where JSON fields accept any value type
+            FieldKind::Scalar(ScalarKind::Json) => Ok(NormalValue::Json(value.clone())),
             // DateTime fields: parse RFC 3339 strings
             FieldKind::Scalar(ScalarKind::DateTime) => {
                 match value {
