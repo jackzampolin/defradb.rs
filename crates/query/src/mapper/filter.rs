@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -985,7 +986,16 @@ impl Filter {
                     false
                 }
             }
-            (JsonValue::String(a), JsonValue::String(b)) => a == b,
+            (JsonValue::String(a), JsonValue::String(b)) => {
+                // Try direct string comparison first
+                if a == b {
+                    return true;
+                }
+                // Try parsing as datetime values - stored values are in UTC format,
+                // filter values may have timezone offsets. Both represent the same time
+                // if they parse to the same UTC timestamp.
+                Self::datetimes_equal(a, b)
+            }
             (JsonValue::Array(a), JsonValue::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Self::values_equal(a, b))
             }
@@ -993,13 +1003,36 @@ impl Filter {
         }
     }
 
+    /// Try to compare two strings as datetime values.
+    /// Returns true if both can be parsed as RFC 3339 datetime strings and represent the same time.
+    fn datetimes_equal(a: &str, b: &str) -> bool {
+        let a_dt: Option<DateTime<Utc>> = a.parse().ok();
+        let b_dt: Option<DateTime<Utc>> = b.parse().ok();
+        match (a_dt, b_dt) {
+            (Some(a), Some(b)) => a == b,
+            _ => false, // If either isn't a valid datetime, they're not equal
+        }
+    }
+
     /// Compare two values for ordering.
-    /// Returns None for null comparisons (Go DefraDB behavior: null comparisons return false).
-    /// Supports int/float coercion (Go DefraDB uses numbers.TryUpcast).
+    /// Implements Go DefraDB semantics where null is treated as "smaller" than all other values:
+    /// - value > null → true (any non-null value is greater than null)
+    /// - null > null → false
+    /// - value >= null → true
+    /// - null >= null → true
+    /// - value < null → false (no value is less than null)
+    /// - null < null → false
+    /// - value <= null → false
+    /// - null <= null → true
     fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<Option<std::cmp::Ordering>> {
         match (a, b) {
-            // Null comparisons: Go DefraDB returns false for null vs anything in ordering comparisons
-            (JsonValue::Null, _) | (_, JsonValue::Null) => Ok(None),
+            // Go DefraDB treats null as smallest value
+            // null vs null → Equal
+            (JsonValue::Null, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Equal)),
+            // value vs null → Greater (any non-null value is greater than null)
+            (_, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Greater)),
+            // null vs value → Less (null is less than any non-null value)
+            (JsonValue::Null, _) => Ok(Some(std::cmp::Ordering::Less)),
 
             // Number comparisons: support int/float coercion (Go's numbers.TryUpcast behavior)
             (JsonValue::Number(a), JsonValue::Number(b)) => {
@@ -1012,8 +1045,16 @@ impl Filter {
                 Ok(a_val.partial_cmp(&b_val)) // Returns None for NaN, which becomes false
             }
 
-            // String comparisons
-            (JsonValue::String(a), JsonValue::String(b)) => Ok(Some(a.cmp(b))),
+            // String comparisons - try datetime parsing first, then fall back to lexicographic
+            (JsonValue::String(a), JsonValue::String(b)) => {
+                // Try parsing as datetime values for proper temporal comparison
+                let a_dt: Option<DateTime<Utc>> = a.parse().ok();
+                let b_dt: Option<DateTime<Utc>> = b.parse().ok();
+                match (a_dt, b_dt) {
+                    (Some(a_time), Some(b_time)) => Ok(Some(a_time.cmp(&b_time))),
+                    _ => Ok(Some(a.cmp(b))), // Fall back to lexicographic comparison
+                }
+            }
 
             // Type mismatch
             _ => Err(QueryError::TypeMismatch {
@@ -1687,7 +1728,7 @@ mod tests {
 
     #[test]
     fn test_null_field_gt_comparison_returns_false() {
-        // Go DefraDB behavior: null _gt 25 returns false (not error)
+        // Go DefraDB behavior: null _gt 25 returns false (null is "smaller" than any value)
         let filter =
             Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
         let mapping = make_mapping();
@@ -1700,6 +1741,88 @@ mod tests {
         let result = filter.matches(&fields, &mapping);
         assert!(result.is_ok(), "null _gt comparison should not error");
         assert!(!result.unwrap(), "null _gt 25 should return false");
+    }
+
+    #[test]
+    fn test_value_gt_null_returns_true() {
+        // Go DefraDB behavior: 25 _gt null returns true (any non-null value > null)
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "value _gt null should return true");
+    }
+
+    #[test]
+    fn test_value_ge_null_returns_true() {
+        // Go DefraDB behavior: any value >= null returns true
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ge": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "value _ge null should return true");
+    }
+
+    #[test]
+    fn test_null_ge_null_returns_true() {
+        // Go DefraDB behavior: null >= null returns true
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ge": null}))]));
+        let mapping = make_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+            Some(json!(true)),
+        ];
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "null _ge null should return true");
+    }
+
+    #[test]
+    fn test_value_lt_null_returns_false() {
+        // Go DefraDB behavior: value _lt null returns false (no value is less than null)
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lt": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(!result.unwrap(), "value _lt null should return false");
+    }
+
+    #[test]
+    fn test_null_le_null_returns_true() {
+        // Go DefraDB behavior: null <= null returns true
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_le": null}))]));
+        let mapping = make_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+            Some(json!(true)),
+        ];
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "null _le null should return true");
+    }
+
+    #[test]
+    fn test_value_le_null_returns_false() {
+        // Go DefraDB behavior: value _le null returns false (only null <= null)
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_le": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(!result.unwrap(), "value _le null should return false");
     }
 
     #[test]

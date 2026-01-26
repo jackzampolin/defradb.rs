@@ -59,6 +59,10 @@ impl CreateInput {
     pub fn to_document_with_schema(&self, collection: &CollectionVersion) -> Result<Document> {
         let mut doc = Document::new();
 
+        // Set collection on document for proper docID generation.
+        // Go DefraDB includes the collection_id in the docID hash, so we must too.
+        doc.set_collection(collection.clone());
+
         for (field_name, value) in &self.fields {
             // Look up the field in the schema to get its kind
             let field_kind = collection

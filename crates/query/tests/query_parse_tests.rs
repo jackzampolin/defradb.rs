@@ -34,12 +34,26 @@ fn test_parse_query_with_limit_offset() {
 
 #[test]
 fn test_parse_query_with_order() {
-    let query = "{ Users(order: {name: ASC, age: DESC}) { _docID name age } }";
+    // Go DefraDB only allows one field per order object
+    let query = "{ Users(order: {name: ASC}) { _docID name age } }";
     let selects = parse_query(query).unwrap();
 
     assert_eq!(selects.len(), 1);
     let order = selects[0].order_by.as_ref().unwrap();
-    assert_eq!(order.conditions.len(), 2);
+    assert_eq!(order.conditions.len(), 1);
+    assert_eq!(order.conditions[0].fields[0], "name");
+}
+
+#[test]
+fn test_parse_query_with_multiple_order_fields_returns_error() {
+    // Go DefraDB requires each order argument to only define one field
+    let query = "{ Users(order: {name: ASC, age: DESC}) { _docID name age } }";
+    let result = parse_query(query);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("each order argument can only define one field"));
 }
 
 #[test]
@@ -410,10 +424,11 @@ fn test_parse_invalid_order_direction_returns_error() {
     let query = "{ Users(order: {name: INVALID}) { name } }";
     let result = parse_query(query);
     assert!(result.is_err());
+    // Error format matches Go DefraDB
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("invalid order direction"));
+        .contains("Argument \"order\" has invalid value"));
 }
 
 #[test]
