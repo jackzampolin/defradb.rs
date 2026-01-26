@@ -343,20 +343,26 @@ pub fn generate_mutation_type(collections: &[&CollectionVersion]) -> GqlObjectTy
 
         // Create mutation
         mutation = mutation.with_field(GqlField::new(
-            format!("create_{}", type_name.to_lowercase()),
-            GqlType::named(type_name),
+            format!("create_{}", type_name),
+            GqlType::list(GqlType::named(type_name)),
         ));
 
         // Update mutation
         mutation = mutation.with_field(GqlField::new(
-            format!("update_{}", type_name.to_lowercase()),
-            GqlType::named(type_name),
+            format!("update_{}", type_name),
+            GqlType::list(GqlType::named(type_name)),
         ));
 
         // Delete mutation
         mutation = mutation.with_field(GqlField::new(
-            format!("delete_{}", type_name.to_lowercase()),
-            GqlType::named(type_name),
+            format!("delete_{}", type_name),
+            GqlType::list(GqlType::named(type_name)),
+        ));
+
+        // Upsert mutation (Go syntax: filter, create, update)
+        mutation = mutation.with_field(GqlField::new(
+            format!("upsert_{}", type_name),
+            GqlType::list(GqlType::named(type_name)),
         ));
     }
 
@@ -462,14 +468,17 @@ mod tests {
 
         assert_eq!(mutation.name, "Mutation");
 
-        let create = mutation.fields.iter().find(|f| f.name == "create_user");
+        let create = mutation.fields.iter().find(|f| f.name == "create_User");
         assert!(create.is_some());
 
-        let update = mutation.fields.iter().find(|f| f.name == "update_user");
+        let update = mutation.fields.iter().find(|f| f.name == "update_User");
         assert!(update.is_some());
 
-        let delete = mutation.fields.iter().find(|f| f.name == "delete_user");
+        let delete = mutation.fields.iter().find(|f| f.name == "delete_User");
         assert!(delete.is_some());
+
+        let upsert = mutation.fields.iter().find(|f| f.name == "upsert_User");
+        assert!(upsert.is_some());
     }
 
     #[test]
