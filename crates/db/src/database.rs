@@ -895,21 +895,70 @@ impl<S: Store> DB<S> {
         })?;
 
         // Apply JSON patch operations
+        // Go DefraDB embeds collection name in patch paths: /CollectionName/Fields/-
+        // We need to strip the collection name prefix to get paths relative to schema
+        let collection_prefix = format!("/{}/", collection_name);
+
         if let serde_json::Value::Array(ops) = patch_ops {
             for op in ops {
                 let operation = op.get("op").and_then(|v| v.as_str());
-                let path = op.get("path").and_then(|v| v.as_str());
+                let raw_path = op.get("path").and_then(|v| v.as_str());
                 let value = op.get("value");
 
-                match (operation, path) {
+                // Strip collection name prefix from path if present (Go compatibility)
+                let path = raw_path.map(|p| {
+                    if p.starts_with(&collection_prefix) {
+                        format!("/{}", &p[collection_prefix.len()..])
+                    } else {
+                        // Path doesn't have expected prefix - log for debugging
+                        tracing::debug!(
+                            path = %p,
+                            expected_prefix = %collection_prefix,
+                            "Patch path does not have collection prefix, using as-is"
+                        );
+                        p.to_string()
+                    }
+                });
+
+                match (operation, path.as_deref()) {
                     (Some("replace"), Some(path)) | (Some("add"), Some(path)) => {
-                        let value = value.ok_or_else(|| {
-                            Error::InvalidPatch(format!(
-                                "missing 'value' for operation at {}",
-                                path
-                            ))
-                        })?;
-                        Self::json_pointer_set(&mut schema_json, path, value.clone())?;
+                        let mut value = value
+                            .ok_or_else(|| {
+                                Error::InvalidPatch(format!(
+                                    "missing 'value' for operation at {}",
+                                    path
+                                ))
+                            })?
+                            .clone();
+
+                        // Go compatibility: auto-generate FieldID when adding new fields
+                        // If path ends with /Fields/- or /Fields/<n> and value has Name but no FieldID
+                        if path.contains("/Fields/") {
+                            if let serde_json::Value::Object(ref mut map) = value {
+                                if map.contains_key("Name") && !map.contains_key("FieldID") {
+                                    // Find max existing FieldID to avoid collisions with gaps
+                                    let max_field_id = schema_json
+                                        .get("Fields")
+                                        .and_then(|f| f.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|f| f.get("FieldID"))
+                                                .filter_map(|id| {
+                                                    id.as_str()
+                                                        .and_then(|s| s.parse::<u64>().ok())
+                                                        .or_else(|| id.as_u64())
+                                                })
+                                                .max()
+                                                .unwrap_or(0)
+                                        })
+                                        .unwrap_or(0);
+                                    let field_id = (max_field_id + 1).to_string();
+                                    map.insert("FieldID".to_string(), field_id.into());
+                                }
+                            }
+                        }
+
+                        Self::json_pointer_set(&mut schema_json, path, value)?;
                     }
                     (Some("remove"), Some(path)) => {
                         Self::json_pointer_remove(&mut schema_json, path)?;
@@ -986,13 +1035,18 @@ impl<S: Store> DB<S> {
                         return Ok(());
                     }
                     serde_json::Value::Array(arr) => {
-                        let idx: usize = segment.parse().map_err(|_| {
-                            Error::InvalidPatch(format!("invalid array index: {}", segment))
-                        })?;
-                        if idx >= arr.len() {
+                        // JSON Pointer uses "-" to mean "append to end of array"
+                        if *segment == "-" {
                             arr.push(value);
                         } else {
-                            arr[idx] = value;
+                            let idx: usize = segment.parse().map_err(|_| {
+                                Error::InvalidPatch(format!("invalid array index: {}", segment))
+                            })?;
+                            if idx >= arr.len() {
+                                arr.push(value);
+                            } else {
+                                arr[idx] = value;
+                            }
                         }
                         return Ok(());
                     }

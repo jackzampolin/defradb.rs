@@ -36,6 +36,47 @@ func NewClientWrapper(node *Node) *ClientWrapper {
 	}
 }
 
+// extractCollectionNameFromPatch extracts the collection name from a JSON patch path.
+// Patch format: [{"op": "add", "path": "/CollectionName/Fields/-", "value": {...}}]
+// All operations must target the same collection.
+func extractCollectionNameFromPatch(patch string) (string, error) {
+	var ops []struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(patch), &ops); err != nil {
+		return "", fmt.Errorf("failed to parse patch JSON: %w", err)
+	}
+	if len(ops) == 0 {
+		return "", fmt.Errorf("patch contains no operations")
+	}
+
+	var collectionName string
+	for i, op := range ops {
+		// Path format: /CollectionName/Fields/- or /CollectionName/Fields/0
+		path := op.Path
+		if len(path) == 0 || path[0] != '/' {
+			return "", fmt.Errorf("invalid patch path in operation %d: %s", i, path)
+		}
+
+		// Remove leading slash and extract first component
+		path = path[1:]
+		name := path
+		for j, c := range path {
+			if c == '/' {
+				name = path[:j]
+				break
+			}
+		}
+
+		if collectionName == "" {
+			collectionName = name
+		} else if collectionName != name {
+			return "", fmt.Errorf("patch contains operations for multiple collections (%s, %s); only single-collection patches are supported", collectionName, name)
+		}
+	}
+	return collectionName, nil
+}
+
 // ============================================================================
 // clients.Client interface
 // ============================================================================
@@ -208,9 +249,13 @@ func (c *ClientWrapper) PatchCollection(
 	patch string,
 	migration immutable.Option[lensmodel.Lens],
 ) error {
-	// For now, ignore migration - our FFI PatchCollection takes a collection name
-	// This needs to be updated when we properly support migrations
-	_, err := c.node.PatchCollection("", patch)
+	// Extract collection name from JSON patch path
+	// Patch format: [{"op": "add", "path": "/CollectionName/Fields/-", "value": {...}}]
+	collectionName, err := extractCollectionNameFromPatch(patch)
+	if err != nil {
+		return err
+	}
+	_, err = c.node.PatchCollection(collectionName, patch)
 	return err
 }
 
