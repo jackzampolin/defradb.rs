@@ -41,8 +41,9 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
 
         let database = Arc::new(database);
 
-        // Create auto-committing fetcher for non-transactional queries
-        let fetcher = db::AutoCommitFetcher::new(database.clone());
+        // Create lensed auto-committing fetcher for non-transactional queries
+        // This applies schema migrations during document fetch
+        let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
 
         // Create collection provider for on-demand schema resolution
         let collection_provider: Arc<dyn query::CollectionProvider> =

@@ -117,6 +117,9 @@ impl Collection {
         // Store document
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
 
+        // Store schema version for lens migration support
+        self.store_version(datastore, &doc_id).await?;
+
         // Update indexes
         index_manager
             .on_document_create(datastore, doc, &self.def)
@@ -694,6 +697,7 @@ impl Collection {
     /// Load the schema version for a document.
     async fn load_version(&self, datastore: &NamespaceView, doc_id: &DocID) -> Result<Option<String>> {
         let key = self.version_key(doc_id);
+
         match datastore.get(&key).await.map_err(Error::Storage)? {
             Some(bytes) => {
                 let version = String::from_utf8(bytes).map_err(|e| {

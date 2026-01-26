@@ -12,12 +12,12 @@ use datastore::BasicTxn;
 use events::Bus;
 use identity::{Identity, RawIdentity};
 use lens::{LensConfig, TransformId, TransformStore, WasmTransformStore};
-use schema::CollectionVersion;
+use schema::{CollectionSource, CollectionVersion};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::{IterOptions, Key, Store};
-use storage::keys::systemstore::CollectionNameKey;
+use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};
 
 /// Database options.
 #[derive(Clone, Default)]
@@ -329,10 +329,99 @@ impl<S: Store> DB<S> {
     ///
     /// The transform ID that was registered.
     pub async fn set_migration(&self, config: LensConfig) -> Result<TransformId> {
-        self.lens_store
+        let dest_version_id = config.destination_schema_version_id.clone();
+        let source_version_id = config.source_schema_version_id.clone();
+
+        // Register the transform in the lens store
+        let transform_id = self
+            .lens_store
             .add(config)
             .await
-            .map_err(|e| Error::Lens(e.to_string()))
+            .map_err(|e| Error::Lens(e.to_string()))?;
+
+        // Update the destination schema's previous_version.transform field
+        // This is needed so that collection_has_migrations() returns true
+        let txn = self.new_txn(false).await?;
+
+        // Prepare updated schema data outside the systemstore scope
+        let (collection_key, updated_data, collection_name) = {
+            let systemstore = txn.systemstore()?;
+
+            // Load the destination schema
+            let collection_key = CollectionKey::new(&dest_version_id);
+            let schema_data = systemstore
+                .get(&collection_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+
+            match schema_data {
+                Some(data) => {
+                    let mut schema: CollectionVersion =
+                        serde_json::from_slice(&data).map_err(|e| {
+                            Error::Serialization(format!(
+                                "failed to deserialize destination schema '{}': {}",
+                                dest_version_id, e
+                            ))
+                        })?;
+
+                    // Ensure previous_version exists and set transform
+                    let prev = schema
+                        .previous_version
+                        .get_or_insert_with(|| CollectionSource::new(&source_version_id));
+                    prev.transform = Some(transform_id.to_string());
+
+                    let collection_name = schema.name.clone();
+                    let updated_data = serde_json::to_vec(&schema).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize updated schema '{}': {}",
+                            dest_version_id, e
+                        ))
+                    })?;
+
+                    (collection_key, Some((updated_data, schema)), collection_name)
+                }
+                None => {
+                    // Destination schema doesn't exist yet (e.g., registering for P2P)
+                    // This is allowed per Go behavior - transforms can be registered
+                    // before schemas exist
+                    tracing::debug!(
+                        dest_version_id = %dest_version_id,
+                        "Destination schema not found, skipping schema update"
+                    );
+                    (collection_key, None, String::new())
+                }
+            }
+        };
+
+        // Write updated schema if we have one
+        if let Some((data, schema)) = updated_data {
+            {
+                let systemstore = txn.systemstore()?;
+                systemstore
+                    .set(&collection_key.bytes(), &data)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+            txn.commit().await?;
+
+            // Update in-memory cache if this is the active collection
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during set_migration");
+                Error::LockPoisoned("collection cache lock poisoned during set_migration".into())
+            })?;
+
+            // Check if this version is the active version for its collection
+            if let Some(cached) = cache.get(&collection_name) {
+                if cached.schema().version_id == dest_version_id {
+                    cache.insert(collection_name, Collection::new(schema));
+                }
+            }
+        } else {
+            // No schema update needed, just discard the transaction
+            let _ = txn.discard();
+        }
+
+        Ok(transform_id)
     }
 
     /// Check if a migration exists between two schema versions.
@@ -494,6 +583,11 @@ impl<S: Store> DB<S> {
     /// The collection is written to the store and added to the transaction's cache.
     /// The caller is responsible for committing or discarding the transaction.
     ///
+    /// Storage layout:
+    /// - `/collection/id/{version_id}` - Full collection JSON
+    /// - `/collection/name/{name}` - Maps name to version_id (string)
+    /// - `/collection/version/{collection_id}/{version_id}` - Version index
+    ///
     /// # Errors
     ///
     /// - `InvalidCollectionName` if the collection name is invalid
@@ -509,22 +603,40 @@ impl<S: Store> DB<S> {
         // Validate schema (includes policy validation for path traversal prevention)
         schema.validate()?;
         let name = collection_name.as_str().to_string();
+        let version_id = &schema.version_id;
+        let collection_id = &schema.collection_id;
 
         // Check if collection exists in txn cache or store
         if txn.get_collection(&name).await?.is_some() {
             return Err(Error::CollectionAlreadyExists(name));
         }
 
-        // Write schema to store (within txn)
-        let key = CollectionNameKey::new(&name);
+        let systemstore = txn.systemstore()?;
+
+        // 1. Store full schema at /collection/id/{version_id}
+        let collection_key = CollectionKey::new(version_id);
         let data = serde_json::to_vec(&schema).map_err(|e| {
             Error::Serialization(format!(
                 "failed to serialize schema for collection '{}': {}",
                 name, e
             ))
         })?;
-        txn.systemstore()?
-            .set(&key.bytes(), &data)
+        systemstore
+            .set(&collection_key.bytes(), &data)
+            .await
+            .map_err(Error::Storage)?;
+
+        // 2. Store name → version_id mapping at /collection/name/{name}
+        let name_key = CollectionNameKey::new(&name);
+        systemstore
+            .set(&name_key.bytes(), version_id.as_bytes())
+            .await
+            .map_err(Error::Storage)?;
+
+        // 3. Store version index at /collection/version/{collection_id}/{version_id}
+        let version_key = CollectionVersionKey::new(collection_id, version_id);
+        systemstore
+            .set(&version_key.bytes(), b"1")
             .await
             .map_err(Error::Storage)?;
 
@@ -900,8 +1012,9 @@ impl<S: Store> DB<S> {
 
     /// Patch a collection's schema using JSON patch operations.
     ///
-    /// This applies the given JSON patch to the collection's schema,
-    /// validates the result, and updates the collection.
+    /// This creates a new schema version with a new version_id (CID) and links
+    /// it to the previous version via `previous_version`. The old version is
+    /// marked as inactive.
     ///
     /// # Arguments
     ///
@@ -910,7 +1023,7 @@ impl<S: Store> DB<S> {
     ///
     /// # Returns
     ///
-    /// The updated collection version.
+    /// The updated collection version (with new version_id).
     ///
     /// # Errors
     ///
@@ -926,14 +1039,16 @@ impl<S: Store> DB<S> {
         let collection = self
             .get_collection(collection_name)?
             .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
-        let mut schema = collection.schema().clone();
+        let old_schema = collection.schema().clone();
+        let old_version_id = old_schema.version_id.clone();
+        let collection_id = old_schema.collection_id.clone();
 
         // Parse the patch
         let patch_ops: serde_json::Value =
             serde_json::from_str(patch).map_err(|e| Error::InvalidPatch(e.to_string()))?;
 
         // Apply the patch to the schema JSON
-        let mut schema_json = serde_json::to_value(&schema).map_err(|e| {
+        let mut schema_json = serde_json::to_value(&old_schema).map_err(|e| {
             Error::Serialization(format!("failed to serialize schema to JSON: {}", e))
         })?;
 
@@ -1021,28 +1136,92 @@ impl<S: Store> DB<S> {
         }
 
         // Deserialize back to CollectionVersion
-        schema = serde_json::from_value(schema_json)
+        let mut new_schema: CollectionVersion = serde_json::from_value(schema_json)
             .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
 
         // Validate the new schema
-        schema.validate()?;
+        new_schema.validate()?;
 
-        // Update the collection
+        // Generate new version_id from the new schema content (CID)
+        let new_version_id = Self::generate_schema_version_id(&new_schema);
+
+        // Update new schema with version info
+        new_schema.version_id = new_version_id.clone();
+        new_schema.previous_version = Some(CollectionSource::new(&old_version_id));
+        new_schema.is_active = true;
+
+        // Create old schema copy with is_active = false for storage
+        let mut old_schema_inactive = old_schema.clone();
+        old_schema_inactive.is_active = false;
+
+        tracing::info!(
+            collection = %collection_name,
+            old_version = %old_version_id,
+            new_version = %new_version_id,
+            field_count = new_schema.fields.len(),
+            "Creating new schema version"
+        );
+
+        // Begin transaction to store all version data
         let txn = self.new_txn(false).await?;
-        let key = CollectionNameKey::new(collection_name);
-        let data = serde_json::to_vec(&schema).map_err(|e| {
+
+        // Prepare serialized data before getting systemstore reference
+        let old_version_key = CollectionKey::new(&old_version_id);
+        let old_version_data = serde_json::to_vec(&old_schema_inactive).map_err(|e| {
             Error::Serialization(format!(
-                "failed to serialize patched schema for collection '{}': {}",
-                collection_name, e
+                "failed to serialize old schema version '{}': {}",
+                old_version_id, e
             ))
         })?;
-        txn.systemstore()?
-            .set(&key.bytes(), &data)
-            .await
-            .map_err(Error::Storage)?;
+        let new_version_key = CollectionKey::new(&new_version_id);
+        let new_version_data = serde_json::to_vec(&new_schema).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize new schema version '{}': {}",
+                new_version_id, e
+            ))
+        })?;
+        let name_key = CollectionNameKey::new(collection_name);
+        let version_index_key = CollectionVersionKey::new(&collection_id, &new_version_id);
+        let old_version_index_key = CollectionVersionKey::new(&collection_id, &old_version_id);
+
+        // Perform all writes in a scoped block so systemstore reference is dropped
+        {
+            let systemstore = txn.systemstore()?;
+
+            // 1. Store old version at /collection/id/{old_version_id} with is_active = false
+            systemstore
+                .set(&old_version_key.bytes(), &old_version_data)
+                .await
+                .map_err(Error::Storage)?;
+
+            // 2. Store new version at /collection/id/{new_version_id}
+            systemstore
+                .set(&new_version_key.bytes(), &new_version_data)
+                .await
+                .map_err(Error::Storage)?;
+
+            // 3. Update /collection/name/{name} to point to new version (as the version_id string)
+            systemstore
+                .set(&name_key.bytes(), new_version_id.as_bytes())
+                .await
+                .map_err(Error::Storage)?;
+
+            // 4. Add version index at /collection/version/{collection_id}/{new_version_id}
+            systemstore
+                .set(&version_index_key.bytes(), b"1")
+                .await
+                .map_err(Error::Storage)?;
+
+            // 5. Also ensure old version is in the version index (may already exist)
+            systemstore
+                .set(&old_version_index_key.bytes(), b"1")
+                .await
+                .map_err(Error::Storage)?;
+        } // systemstore reference dropped here
+
         txn.commit().await?;
 
-        // Update cache
+        // Update cache with new schema
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(
                 error = ?e,
@@ -1051,9 +1230,59 @@ impl<S: Store> DB<S> {
             );
             Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
         })?;
-        cache.insert(collection_name.to_string(), Collection::new(schema.clone()));
+        cache.insert(collection_name.to_string(), Collection::new(new_schema.clone()));
 
-        Ok(schema)
+        Ok(new_schema)
+    }
+
+    /// Generate a version ID (CID) from schema content.
+    ///
+    /// This generates a CID from the collection's fields using the same
+    /// algorithm as Go DefraDB for compatibility.
+    fn generate_schema_version_id(schema: &CollectionVersion) -> String {
+        use cid::Cid;
+        use sha2::{Digest, Sha256};
+
+        // Sort fields for deterministic ordering: _docID first, then alphabetically
+        let mut sorted_fields: Vec<&schema::FieldDescription> = schema
+            .fields
+            .iter()
+            .filter(|f| !f.is_secondary_relation() && !f.id.is_empty())
+            .collect();
+        sorted_fields.sort_by(|a, b| {
+            if a.name == "_docID" {
+                std::cmp::Ordering::Less
+            } else if b.name == "_docID" {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+
+        // Generate CIDs for each field with priority=1 (Go behavior)
+        let mut field_cids: Vec<Cid> = Vec::new();
+        for field in &sorted_fields {
+            if let Ok(cid) = schema::generate_field_cid_with_priority(field, 1) {
+                field_cids.push(cid);
+            }
+        }
+
+        // Generate collection CID with priority=1 for Go compatibility
+        match schema::generate_collection_cid_with_priority(&schema.name, &field_cids, 1) {
+            Ok(cid) => cid.to_string(),
+            Err(_) => {
+                // Fallback to simple hash if CID generation fails
+                let mut hasher = Sha256::new();
+                hasher.update(b"version:");
+                hasher.update(schema.name.as_bytes());
+                for field in &schema.fields {
+                    hasher.update(field.name.as_bytes());
+                    hasher.update(field.id.as_bytes());
+                }
+                let hash = hasher.finalize();
+                format!("v{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
+            }
+        }
     }
 
     /// Helper: Set a value at a JSON pointer path.

@@ -11,7 +11,7 @@ use datastore::{BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
-use storage::keys::systemstore::CollectionNameKey;
+use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
 /// Database transaction wrapper.
 ///
@@ -212,6 +212,10 @@ impl<S: Store> DbTxn<S> {
     ///
     /// Note: This method is structured to avoid holding `&mut self` across awaits,
     /// which allows futures using this method to be `Send`.
+    ///
+    /// Storage layout:
+    /// - `/collection/name/{name}` - Maps name to version_id (string)
+    /// - `/collection/id/{version_id}` - Full collection JSON
     pub async fn get_collection(&mut self, name: &str) -> Result<Option<&Collection>> {
         // Check cache first
         if self.collection_cache.contains(name) {
@@ -220,11 +224,46 @@ impl<S: Store> DbTxn<S> {
 
         // Cache miss: extract systemstore synchronously, then do async operation
         let systemstore = self.systemstore()?;
-        let key = CollectionNameKey::new(name);
+        let name_key = CollectionNameKey::new(name);
 
-        // Load from store (no &self held during this await)
+        // Step 1: Get version_id from name mapping
+        let maybe_version_id = systemstore
+            .get(&name_key.bytes())
+            .await
+            .map_err(Error::Storage)?;
+
+        let version_id = match maybe_version_id {
+            Some(data) => {
+                // Try to parse as version_id string first (new format)
+                match String::from_utf8(data.clone()) {
+                    Ok(vid) if !vid.starts_with('{') => vid, // Not JSON, it's a version_id
+                    _ => {
+                        // Fallback: Old format where full JSON is stored at name key
+                        // This handles backward compatibility during migration
+                        let schema: CollectionVersion =
+                            serde_json::from_slice(&data).map_err(|e| {
+                                tracing::error!(
+                                    error = ?e,
+                                    collection_name = %name,
+                                    "Failed to deserialize schema for collection"
+                                );
+                                Error::Serialization(format!(
+                                    "failed to deserialize schema for collection '{}': {}",
+                                    name, e
+                                ))
+                            })?;
+                        self.collection_cache.add(Collection::new(schema));
+                        return Ok(self.collection_cache.get(name));
+                    }
+                }
+            }
+            None => return Ok(None),
+        };
+
+        // Step 2: Get full collection from /collection/id/{version_id}
+        let collection_key = CollectionKey::new(&version_id);
         let maybe_data = systemstore
-            .get(&key.bytes())
+            .get(&collection_key.bytes())
             .await
             .map_err(Error::Storage)?;
 
@@ -234,6 +273,7 @@ impl<S: Store> DbTxn<S> {
                 tracing::error!(
                     error = ?e,
                     collection_name = %name,
+                    version_id = %version_id,
                     "Failed to deserialize schema for collection"
                 );
                 Error::Serialization(format!(
@@ -245,6 +285,12 @@ impl<S: Store> DbTxn<S> {
             return Ok(self.collection_cache.get(name));
         }
 
+        // version_id found but no collection data - inconsistent state
+        tracing::warn!(
+            collection_name = %name,
+            version_id = %version_id,
+            "Collection version_id found but definition missing"
+        );
         Ok(None)
     }
 
@@ -252,6 +298,10 @@ impl<S: Store> DbTxn<S> {
     ///
     /// This is called when listing collections or when we need to iterate
     /// over all collections. After calling this, `is_fully_populated()` returns true.
+    ///
+    /// Storage layout:
+    /// - `/collection/name/{name}` - Maps name to version_id (string)
+    /// - `/collection/id/{version_id}` - Full collection JSON
     pub async fn load_all_collections(&mut self) -> Result<()> {
         if self.collection_cache.is_fully_populated() {
             return Ok(());
@@ -267,6 +317,9 @@ impl<S: Store> DbTxn<S> {
             tracing::error!(error = ?e, "Failed to create iterator during collection load");
             Error::Storage(e)
         })?;
+
+        // Collect version_ids first (to avoid holding iterator across lookups)
+        let mut name_version_pairs: Vec<(String, String)> = Vec::new();
 
         while let Some(pair) = iter.next().await.map_err(|e| {
             tracing::error!(error = ?e, "Failed to iterate collections during load");
@@ -296,6 +349,17 @@ impl<S: Store> DbTxn<S> {
                 })?
                 .to_string();
 
+            // Check if value is a version_id string or full JSON (backward compat)
+            let value_str = String::from_utf8(pair.value.clone()).ok();
+            if let Some(ref s) = value_str {
+                if !s.starts_with('{') {
+                    // New format: value is version_id
+                    name_version_pairs.push((name, s.clone()));
+                    continue;
+                }
+            }
+
+            // Old format: value is full JSON
             let schema: CollectionVersion = serde_json::from_slice(&pair.value).map_err(|e| {
                 tracing::error!(
                     error = ?e,
@@ -317,6 +381,39 @@ impl<S: Store> DbTxn<S> {
             tracing::error!(error = ?e, "Failed to close iterator during collection load");
             Error::Storage(e)
         })?;
+
+        // Load collections from version_ids (new format)
+        for (name, version_id) in name_version_pairs {
+            let collection_key = CollectionKey::new(&version_id);
+            match systemstore.get(&collection_key.bytes()).await {
+                Ok(Some(data)) => {
+                    let schema: CollectionVersion =
+                        serde_json::from_slice(&data).map_err(|e| {
+                            tracing::error!(
+                                error = ?e,
+                                collection_name = %name,
+                                version_id = %version_id,
+                                "Failed to deserialize schema"
+                            );
+                            Error::Serialization(format!(
+                                "failed to deserialize schema for collection '{}': {}",
+                                name, e
+                            ))
+                        })?;
+                    collections.push(Collection::new(schema));
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        collection_name = %name,
+                        version_id = %version_id,
+                        "Collection version_id found but definition missing"
+                    );
+                }
+                Err(e) => {
+                    return Err(Error::Storage(e));
+                }
+            }
+        }
 
         self.collection_cache.populate(collections);
         Ok(())
