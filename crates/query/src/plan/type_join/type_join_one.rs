@@ -7,6 +7,7 @@ use tracing::warn;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::mapper::Filter;
 use crate::planner::{Doc, PlanNode};
 
 use super::{JoinDirection, JoinSide};
@@ -57,6 +58,22 @@ pub struct TypeJoinOne {
     /// For Primary joins: key is child's _docID
     /// For Inverted joins: key is child's FK field value
     child_cache: HashMap<String, Doc>,
+    /// Optional relation filter to apply during join.
+    /// This filter is evaluated against the child document and determines
+    /// whether the parent document should be included in results.
+    /// Example: `{author: {verified: {_eq: true}}}` means only include parents
+    /// where their related child (author) has verified=true.
+    relation_filter: Option<RelationFilter>,
+}
+
+/// A filter condition on a relation field.
+/// Contains the relation field name and the nested filter conditions.
+#[derive(Debug, Clone)]
+pub struct RelationFilter {
+    /// The name of the relation field (e.g., "author")
+    pub relation_field: String,
+    /// The nested filter conditions to apply to the child document
+    pub conditions: Filter,
 }
 
 impl std::fmt::Debug for TypeJoinOne {
@@ -105,7 +122,18 @@ impl TypeJoinOne {
             direction,
             initialized: false,
             child_cache: HashMap::new(),
+            relation_filter: None,
         }
+    }
+
+    /// Set a relation filter to apply during the join.
+    ///
+    /// When set, parent documents will only be included if their child
+    /// document passes this filter. This is used for queries like
+    /// `Book(filter: {author: {verified: {_eq: true}}})`.
+    pub fn with_relation_filter(mut self, filter: RelationFilter) -> Self {
+        self.relation_filter = Some(filter);
+        self
     }
 
     /// Returns the direction of this join.
@@ -247,6 +275,36 @@ impl TypeJoinOne {
 
         parent_doc.set(self.parent_side.relation_field_index(), child_value);
     }
+
+    /// Check if the child document passes the relation filter.
+    ///
+    /// Returns true if:
+    /// - There's no filter (always pass)
+    /// - There's a child document and it passes the filter conditions
+    ///
+    /// Returns false if:
+    /// - There's no child document (null relation can't pass any filter)
+    /// - The child document doesn't pass the filter conditions
+    fn check_relation_filter(
+        &self,
+        child_doc: &Option<Doc>,
+        rel_filter: &RelationFilter,
+    ) -> Result<bool> {
+        match child_doc {
+            None => {
+                // No child document - relation filter cannot pass
+                // This handles queries like `filter: {author: {verified: true}}`
+                // where if there's no author, the filter fails
+                Ok(false)
+            }
+            Some(doc) => {
+                // Evaluate the filter conditions against the child's scan mapping
+                // The child_plan's document_map is the scan mapping with all fields
+                let child_mapping = self.child_plan.document_map();
+                rel_filter.conditions.matches(doc.fields(), child_mapping)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -271,22 +329,32 @@ impl PlanNode for TypeJoinOne {
             ));
         }
 
-        if !self.parent_plan.next().await? {
-            return Ok(false);
+        loop {
+            if !self.parent_plan.next().await? {
+                return Ok(false);
+            }
+
+            let mut parent_doc = self.parent_plan.value().deep_clone();
+
+            // Extract FK and lookup child in cache (O(1) lookup)
+            let child_doc = self
+                .extract_fk(&parent_doc)
+                .and_then(|fk| self.find_child_doc(&fk));
+
+            // Apply relation filter if present
+            if let Some(ref rel_filter) = self.relation_filter {
+                if !self.check_relation_filter(&child_doc, rel_filter)? {
+                    // Filter didn't pass - skip this parent
+                    continue;
+                }
+            }
+
+            // Merge child into parent
+            self.merge_child(&mut parent_doc, child_doc);
+            self.current_doc = parent_doc;
+
+            return Ok(true);
         }
-
-        let mut parent_doc = self.parent_plan.value().deep_clone();
-
-        // Extract FK and lookup child in cache (O(1) lookup)
-        let child_doc = self
-            .extract_fk(&parent_doc)
-            .and_then(|fk| self.find_child_doc(&fk));
-
-        // Merge child into parent
-        self.merge_child(&mut parent_doc, child_doc);
-        self.current_doc = parent_doc;
-
-        Ok(true)
     }
 
     fn value(&self) -> &Doc {

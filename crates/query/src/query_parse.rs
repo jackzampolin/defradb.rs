@@ -768,47 +768,75 @@ fn parse_order_value(
     match value {
         Value::Object(obj) => {
             for (field_name, direction_val) in obj {
-                let direction = match direction_val {
-                    Value::Enum(s) | Value::String(s) => {
-                        OrderDirection::parse(s).ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "invalid order direction '{}', expected ASC or DESC",
-                                s
-                            ))
-                        })?
-                    }
-                    Value::Variable(name) => {
-                        let vars = variables.ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
-                                name
-                            ))
-                        })?;
-                        let json_val = vars.get(name).ok_or_else(|| {
-                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
-                        })?;
-                        let s = json_val.as_str().ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "Variable \"${}\" must be of type Ordering (ASC or DESC)",
-                                name
-                            ))
-                        })?;
-                        OrderDirection::parse(s).ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "invalid order direction '{}', expected ASC or DESC",
-                                s
-                            ))
-                        })?
-                    }
-                    _ => return Err(QueryError::parse("order direction must be ASC or DESC")),
-                };
-                order_by = order_by.with_condition(OrderCondition::new(field_name, direction));
+                let condition =
+                    parse_order_condition(field_name.clone(), direction_val, variables)?;
+                order_by = order_by.with_condition(condition);
             }
         }
         _ => return Err(QueryError::parse("order must be an object")),
     }
 
     Ok(order_by)
+}
+
+/// Parse a single order condition, handling nested relation ordering.
+/// Supports both simple `{field: ASC}` and nested `{relation: {field: DESC}}`.
+fn parse_order_condition(
+    field_name: String,
+    direction_val: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<OrderCondition> {
+    match direction_val {
+        Value::Enum(s) | Value::String(s) => {
+            let direction = OrderDirection::parse(s).ok_or_else(|| {
+                QueryError::parse(format!(
+                    "invalid order direction '{}', expected ASC or DESC",
+                    s
+                ))
+            })?;
+            Ok(OrderCondition::new(field_name, direction))
+        }
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            let s = json_val.as_str().ok_or_else(|| {
+                QueryError::parse(format!(
+                    "Variable \"${}\" must be of type Ordering (ASC or DESC)",
+                    name
+                ))
+            })?;
+            let direction = OrderDirection::parse(s).ok_or_else(|| {
+                QueryError::parse(format!(
+                    "invalid order direction '{}', expected ASC or DESC",
+                    s
+                ))
+            })?;
+            Ok(OrderCondition::new(field_name, direction))
+        }
+        Value::Object(nested_obj) => {
+            // Nested ordering: {relation: {field: ASC}}
+            // Recursively parse the nested object
+            if nested_obj.len() != 1 {
+                return Err(QueryError::parse(
+                    "nested order must have exactly one field",
+                ));
+            }
+            let (nested_field, nested_direction) = nested_obj.iter().next().unwrap();
+            let mut nested_condition =
+                parse_order_condition(nested_field.clone(), nested_direction, variables)?;
+            // Prepend the parent field to the path
+            nested_condition.fields.insert(0, field_name);
+            Ok(nested_condition)
+        }
+        _ => Err(QueryError::parse("order direction must be ASC or DESC")),
+    }
 }
 
 /// Parse groupBy argument into GroupBy.

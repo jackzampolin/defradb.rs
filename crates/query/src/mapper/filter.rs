@@ -76,9 +76,9 @@ impl FilterOp {
             "_eq" => Some(Self::Eq),
             "_neq" | "_ne" => Some(Self::Ne),
             "_gt" => Some(Self::Gt),
-            "_geq" | "_gte" => Some(Self::Gte),
+            "_geq" | "_gte" | "_ge" => Some(Self::Gte),
             "_lt" => Some(Self::Lt),
-            "_leq" | "_lte" => Some(Self::Lte),
+            "_leq" | "_lte" | "_le" => Some(Self::Lte),
             "_in" => Some(Self::In),
             "_nin" => Some(Self::Nin),
             "_like" => Some(Self::Like),
@@ -193,6 +193,233 @@ impl Filter {
         }
     }
 
+    /// Check if this filter contains relation filters (filters through nested objects).
+    ///
+    /// Relation filters are conditions like `{author: {verified: {_eq: true}}}` where
+    /// the first level field is a relation and the nested object contains field conditions
+    /// rather than operators.
+    pub fn has_relation_filters(&self) -> bool {
+        Self::check_for_relation_filters(&self.conditions)
+    }
+
+    /// Get the names of relation fields referenced in this filter.
+    ///
+    /// Returns field names that have nested object conditions (not operators),
+    /// indicating they are relation filters.
+    pub fn relation_field_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        Self::collect_relation_field_names(&self.conditions, &mut names);
+        names
+    }
+
+    fn collect_relation_field_names(conditions: &HashMap<String, JsonValue>, names: &mut Vec<String>) {
+        for (key, value) in conditions {
+            // Check logical operators recursively
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And | FilterOp::Or => {
+                        if let JsonValue::Array(arr) = value {
+                            for item in arr {
+                                if let JsonValue::Object(obj) = item {
+                                    let nested: HashMap<String, JsonValue> =
+                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                    Self::collect_relation_field_names(&nested, names);
+                                }
+                            }
+                        }
+                    }
+                    FilterOp::Not => {
+                        if let JsonValue::Object(obj) = value {
+                            let nested: HashMap<String, JsonValue> =
+                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            Self::collect_relation_field_names(&nested, names);
+                        }
+                    }
+                    _ => {}
+                }
+            } else if let JsonValue::Object(obj) = value {
+                // This is a field condition - check if it contains operators or nested fields
+                // If any key in the object is NOT an operator, it's a relation filter
+                let is_relation = obj.keys().any(|k| FilterOp::parse(k).is_none());
+                if is_relation && !names.contains(key) {
+                    names.push(key.clone());
+                }
+            }
+        }
+    }
+
+    fn check_for_relation_filters(conditions: &HashMap<String, JsonValue>) -> bool {
+        for (key, value) in conditions {
+            // Check logical operators recursively
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And | FilterOp::Or => {
+                        if let JsonValue::Array(arr) = value {
+                            for item in arr {
+                                if let JsonValue::Object(obj) = item {
+                                    let nested: HashMap<String, JsonValue> =
+                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                    if Self::check_for_relation_filters(&nested) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    FilterOp::Not => {
+                        if let JsonValue::Object(obj) = value {
+                            let nested: HashMap<String, JsonValue> =
+                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            if Self::check_for_relation_filters(&nested) {
+                                return true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else if let JsonValue::Object(obj) = value {
+                // This is a field condition - check if it contains operators or nested fields
+                // If any key in the object is NOT an operator, it's a relation filter
+                for nested_key in obj.keys() {
+                    if FilterOp::parse(nested_key).is_none() {
+                        // This is a nested field name, not an operator - it's a relation filter
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if this filter is "complex" - contains relation conditions inside logical operators.
+    ///
+    /// A filter is complex when `_and`, `_or`, or `_not` contains a mix of scalar and relation
+    /// conditions. Complex filters cannot be split and must be evaluated as a whole after
+    /// the join when the merged document is available.
+    ///
+    /// Examples:
+    /// - `{_and: [{rating: {_ge: 4.0}}, {author: {verified: {_eq: true}}}]}` → COMPLEX
+    /// - `{author: {verified: {_eq: true}}}` → NOT COMPLEX (relation at root, no logical wrapper)
+    /// - `{_and: [{rating: {_ge: 4.0}}, {age: {_gt: 25}}]}` → NOT COMPLEX (only scalars)
+    pub fn is_complex(&self) -> bool {
+        Self::check_for_complex_filters(&self.conditions)
+    }
+
+    fn check_for_complex_filters(conditions: &HashMap<String, JsonValue>) -> bool {
+        for (key, value) in conditions {
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And | FilterOp::Or => {
+                        if let JsonValue::Array(arr) = value {
+                            // Check if this logical block contains any relation filters
+                            for item in arr {
+                                if let JsonValue::Object(obj) = item {
+                                    let nested: HashMap<String, JsonValue> =
+                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                    // If any item in the logical block has a relation filter, it's complex
+                                    if Self::check_for_relation_filters(&nested) {
+                                        return true;
+                                    }
+                                    // Also check recursively for nested complex filters
+                                    if Self::check_for_complex_filters(&nested) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    FilterOp::Not => {
+                        if let JsonValue::Object(obj) = value {
+                            let nested: HashMap<String, JsonValue> =
+                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            if Self::check_for_relation_filters(&nested) {
+                                return true;
+                            }
+                            if Self::check_for_complex_filters(&nested) {
+                                return true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
+    /// Split this filter into scalar filters and relation filters.
+    ///
+    /// Returns (scalar_filter, relation_filter) where:
+    /// - scalar_filter contains conditions on direct fields (no nested relation conditions)
+    /// - relation_filter contains conditions that traverse relations
+    ///
+    /// This is used to apply scalar filters before TypeJoin and relation filters after.
+    pub fn split_by_relation(&self) -> (Option<Filter>, Option<Filter>) {
+        let mut scalar_conditions = HashMap::new();
+        let mut relation_conditions = HashMap::new();
+
+        for (key, value) in &self.conditions {
+            // Logical operators need special handling - we can't easily split them
+            // For now, if they contain relation filters, put the whole condition in relation_filter
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And | FilterOp::Or | FilterOp::Not => {
+                        // Check if this logical block contains relation filters
+                        let has_relation = match value {
+                            JsonValue::Array(arr) => arr.iter().any(|item| {
+                                if let JsonValue::Object(obj) = item {
+                                    let nested: HashMap<String, JsonValue> =
+                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                    Self::check_for_relation_filters(&nested)
+                                } else {
+                                    false
+                                }
+                            }),
+                            JsonValue::Object(obj) => {
+                                let nested: HashMap<String, JsonValue> =
+                                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                Self::check_for_relation_filters(&nested)
+                            }
+                            _ => false,
+                        };
+                        if has_relation {
+                            relation_conditions.insert(key.clone(), value.clone());
+                        } else {
+                            scalar_conditions.insert(key.clone(), value.clone());
+                        }
+                    }
+                    _ => {
+                        scalar_conditions.insert(key.clone(), value.clone());
+                    }
+                }
+            } else if let JsonValue::Object(obj) = value {
+                // Field condition - check if it's a relation filter
+                let is_relation = obj.keys().any(|k| FilterOp::parse(k).is_none());
+                if is_relation {
+                    relation_conditions.insert(key.clone(), value.clone());
+                } else {
+                    scalar_conditions.insert(key.clone(), value.clone());
+                }
+            } else {
+                scalar_conditions.insert(key.clone(), value.clone());
+            }
+        }
+
+        let scalar = if scalar_conditions.is_empty() {
+            None
+        } else {
+            Some(Filter::from_conditions(scalar_conditions))
+        };
+
+        let relation = if relation_conditions.is_empty() {
+            None
+        } else {
+            Some(Filter::from_conditions(relation_conditions))
+        };
+
+        (scalar, relation)
+    }
+
     /// Evaluate the filter against document fields
     pub fn matches(&self, fields: &[Option<JsonValue>], mapping: &DocumentMapping) -> Result<bool> {
         if self.conditions.is_empty() {
@@ -268,18 +495,141 @@ impl Filter {
                 .cloned()
                 .unwrap_or(JsonValue::Null);
 
-            // Value should be an object with operator keys
+            // Value should be an object with operator keys or nested field conditions
             let ops = value
                 .as_object()
                 .ok_or_else(|| QueryError::invalid_filter("field condition must be object"))?;
 
-            for (op_str, expected) in ops {
-                let op = FilterOp::parse(op_str).ok_or_else(|| {
-                    QueryError::invalid_filter(format!("unknown operator: {}", op_str))
+            // Check if this is a relation filter (nested field conditions) or operator conditions
+            let is_relation_filter = ops.keys().any(|k| FilterOp::parse(k).is_none());
+
+            if is_relation_filter {
+                // This is a relation filter like {author: {verified: {_eq: true}}}
+                // The field_value should be a JSON object (the related document)
+                if field_value.is_null() {
+                    // No related document - filter doesn't match
+                    return Ok(false);
+                }
+
+                let related_obj = field_value.as_object().ok_or_else(|| {
+                    QueryError::invalid_filter(format!(
+                        "relation field '{}' is not an object",
+                        key
+                    ))
                 })?;
 
-                if !self.eval_op(&field_value, op, expected)? {
+                // Recursively evaluate the nested conditions against the related object
+                if !self.eval_relation_conditions(ops, related_obj)? {
                     return Ok(false);
+                }
+            } else {
+                // Standard operator conditions
+                for (op_str, expected) in ops {
+                    let op = FilterOp::parse(op_str).ok_or_else(|| {
+                        QueryError::invalid_filter(format!("unknown operator: {}", op_str))
+                    })?;
+
+                    if !self.eval_op(&field_value, op, expected)? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Evaluate relation filter conditions against a JSON object.
+    ///
+    /// This handles nested conditions like `{verified: {_eq: true}}` where the
+    /// condition is evaluated against a related document's fields.
+    fn eval_relation_conditions(
+        &self,
+        conditions: &serde_json::Map<String, JsonValue>,
+        obj: &serde_json::Map<String, JsonValue>,
+    ) -> Result<bool> {
+        for (key, value) in conditions {
+            // Check for logical operators
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And => {
+                        let arr = value
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
+                        for item in arr {
+                            let sub_conds = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_and items must be objects")
+                            })?;
+                            if !self.eval_relation_conditions(sub_conds, obj)? {
+                                return Ok(false);
+                            }
+                        }
+                        continue;
+                    }
+                    FilterOp::Or => {
+                        let arr = value
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
+                        let mut any_match = false;
+                        for item in arr {
+                            let sub_conds = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_or items must be objects")
+                            })?;
+                            if self.eval_relation_conditions(sub_conds, obj)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                        if !any_match {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    FilterOp::Not => {
+                        let sub_conds = value.as_object().ok_or_else(|| {
+                            QueryError::invalid_filter("_not requires object")
+                        })?;
+                        if self.eval_relation_conditions(sub_conds, obj)? {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Field condition - get the field value from the object
+            let field_value = obj.get(key).cloned().unwrap_or(JsonValue::Null);
+
+            let ops = value
+                .as_object()
+                .ok_or_else(|| QueryError::invalid_filter("field condition must be object"))?;
+
+            // Check if this is another level of nesting
+            let is_nested = ops.keys().any(|k| FilterOp::parse(k).is_none());
+
+            if is_nested {
+                // Another level of relation nesting
+                if field_value.is_null() {
+                    return Ok(false);
+                }
+                let nested_obj = field_value.as_object().ok_or_else(|| {
+                    QueryError::invalid_filter(format!(
+                        "nested relation field '{}' is not an object",
+                        key
+                    ))
+                })?;
+                if !self.eval_relation_conditions(ops, nested_obj)? {
+                    return Ok(false);
+                }
+            } else {
+                // Operator conditions
+                for (op_str, expected) in ops {
+                    let op = FilterOp::parse(op_str).ok_or_else(|| {
+                        QueryError::invalid_filter(format!("unknown operator: {}", op_str))
+                    })?;
+                    if !self.eval_op(&field_value, op, expected)? {
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -506,6 +856,64 @@ impl Filter {
         };
 
         Ok(if negate { !matches } else { matches })
+    }
+
+    /// Extract the filter conditions for a specific relation field.
+    ///
+    /// For a filter like `{author: {verified: {_eq: true}}}`, calling
+    /// `extract_relation_filter("author")` returns a Filter with conditions
+    /// `{verified: {_eq: true}}`.
+    ///
+    /// Returns None if there's no filter condition for this relation field.
+    pub fn extract_relation_filter(&self, relation_field: &str) -> Option<Filter> {
+        // Check if this relation field has conditions at the top level
+        if let Some(value) = self.conditions.get(relation_field) {
+            if let Some(obj) = value.as_object() {
+                // Check if this is a nested filter (has non-operator keys)
+                let is_nested = obj.keys().any(|k| FilterOp::parse(k).is_none());
+                if is_nested {
+                    // Convert the nested object to a Filter
+                    let nested_conditions: HashMap<String, JsonValue> =
+                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    return Some(Filter::from_conditions(nested_conditions));
+                }
+            }
+        }
+
+        // Also check inside _and and _or blocks
+        for (key, value) in &self.conditions {
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And | FilterOp::Or => {
+                        if let Some(arr) = value.as_array() {
+                            for item in arr {
+                                if let Some(obj) = item.as_object() {
+                                    if let Some(rel_value) = obj.get(relation_field) {
+                                        if let Some(rel_obj) = rel_value.as_object() {
+                                            let is_nested =
+                                                rel_obj.keys().any(|k| FilterOp::parse(k).is_none());
+                                            if is_nested {
+                                                let nested_conditions: HashMap<String, JsonValue> =
+                                                    rel_obj
+                                                        .iter()
+                                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                                        .collect();
+                                                return Some(Filter::from_conditions(
+                                                    nested_conditions,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -1249,5 +1657,75 @@ mod tests {
         let mut fields = make_fields();
         fields[1] = Some(json!("")); // empty name
         assert!(filter.matches(&fields, &mapping).unwrap());
+    }
+
+    // Tests for is_complex()
+    #[test]
+    fn test_is_complex_simple_scalar() {
+        // Simple scalar filter is NOT complex
+        let filter = Filter::from_conditions(HashMap::from([(
+            "name".to_string(),
+            json!({"_eq": "Alice"}),
+        )]));
+        assert!(!filter.is_complex());
+    }
+
+    #[test]
+    fn test_is_complex_simple_relation_at_root() {
+        // Relation filter at root level (no logical wrapper) is NOT complex
+        let filter = Filter::from_conditions(HashMap::from([(
+            "author".to_string(),
+            json!({"verified": {"_eq": true}}),
+        )]));
+        assert!(!filter.is_complex());
+    }
+
+    #[test]
+    fn test_is_complex_and_with_only_scalars() {
+        // _and with only scalar conditions is NOT complex
+        let filter = Filter::from_conditions(HashMap::from([(
+            "_and".to_string(),
+            json!([
+                {"name": {"_eq": "Alice"}},
+                {"age": {"_gt": 25}}
+            ]),
+        )]));
+        assert!(!filter.is_complex());
+    }
+
+    #[test]
+    fn test_is_complex_and_with_relation() {
+        // _and containing a relation filter IS complex
+        let filter = Filter::from_conditions(HashMap::from([(
+            "_and".to_string(),
+            json!([
+                {"rating": {"_ge": 4.0}},
+                {"author": {"verified": {"_eq": true}}}
+            ]),
+        )]));
+        assert!(filter.is_complex());
+    }
+
+    #[test]
+    fn test_is_complex_or_with_relation() {
+        // _or containing a relation filter IS complex
+        let filter = Filter::from_conditions(HashMap::from([(
+            "_or".to_string(),
+            json!([
+                {"rating": {"_ge": 4.0}},
+                {"author": {"verified": {"_eq": true}}}
+            ]),
+        )]));
+        assert!(filter.is_complex());
+    }
+
+    #[test]
+    fn test_is_complex_not_with_relation() {
+        // _not containing a relation filter IS complex
+        let filter = Filter::from_conditions(HashMap::from([(
+            "_not".to_string(),
+            json!({"author": {"verified": {"_eq": true}}}),
+        )]));
+        assert!(filter.is_complex());
     }
 }
