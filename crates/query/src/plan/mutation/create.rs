@@ -59,6 +59,10 @@ impl CreateInput {
     pub fn to_document_with_schema(&self, collection: &CollectionVersion) -> Result<Document> {
         let mut doc = Document::new();
 
+        // Set collection on document for proper docID generation.
+        // Go DefraDB includes the collection_id in the docID hash, so we must too.
+        doc.set_collection(collection.clone());
+
         for (field_name, value) in &self.fields {
             // Look up the field in the schema to get its kind
             let field_kind = collection
@@ -210,6 +214,9 @@ pub fn json_to_normal_value_with_kind(
     // If we have schema information, use it for type coercion
     if let Some(kind) = field_kind {
         match kind {
+            // JSON fields: wrap ALL values as JSON (primitives, objects, arrays)
+            // This matches Go DefraDB behavior where JSON fields accept any value type
+            FieldKind::Scalar(ScalarKind::Json) => Ok(NormalValue::Json(value.clone())),
             // DateTime fields: parse RFC 3339 strings
             FieldKind::Scalar(ScalarKind::DateTime) => {
                 match value {

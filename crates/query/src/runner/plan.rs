@@ -150,6 +150,20 @@ pub(crate) fn build_mapping(
         }
     }
 
+    // Add ORDER BY fields if not already present (Go compatibility).
+    // Go DefraDB allows ordering by fields not in the SELECT clause.
+    if let Some(ref order_by) = select.order_by {
+        for condition in &order_by.conditions {
+            if let Some(field_name) = condition.fields.first() {
+                if mapping.first_index_of_name(field_name).is_none() {
+                    let index = mapping.next_index();
+                    mapping.add(index, field_name);
+                    // Don't add render_key - we don't want to output these fields
+                }
+            }
+        }
+    }
+
     // If no fields specified, add all from collection
     if mapping.next_index() == 0 {
         for (i, field) in collection.fields.iter().enumerate() {
@@ -201,8 +215,15 @@ pub(crate) fn build_plan(
         }
 
         // Add LimitNode
+        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
         if let Some(ref limit) = select.limit {
-            plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
+            let effective_limit = match limit.limit {
+                Some(0) => None,
+                other => other,
+            };
+            if effective_limit.is_some() || limit.offset > 0 {
+                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+            }
         }
     } else {
         // WITHOUT GROUP BY: OrderBy → Limit → [AllDocs if multiple aggs] → Aggregates
@@ -213,8 +234,15 @@ pub(crate) fn build_plan(
         }
 
         // Add LimitNode
+        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
         if let Some(ref limit) = select.limit {
-            plan = Box::new(LimitNode::new(plan, limit.limit, limit.offset));
+            let effective_limit = match limit.limit {
+                Some(0) => None,
+                other => other,
+            };
+            if effective_limit.is_some() || limit.offset > 0 {
+                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+            }
         }
 
         // Count aggregates to determine if we need AllDocsNode

@@ -768,6 +768,12 @@ fn parse_order_value(
 
     match value {
         Value::Object(obj) => {
+            // Go DefraDB requires each order argument to only define one field
+            if obj.len() > 1 {
+                return Err(QueryError::parse(
+                    "each order argument can only define one field",
+                ));
+            }
             for (field_name, direction_val) in obj {
                 let condition =
                     parse_order_condition(field_name.clone(), direction_val, variables)?;
@@ -806,9 +812,10 @@ fn parse_order_condition(
     match direction_val {
         Value::Enum(s) | Value::String(s) => {
             let direction = OrderDirection::parse(s).ok_or_else(|| {
+                // Match Go DefraDB error format
                 QueryError::parse(format!(
-                    "invalid order direction '{}', expected ASC or DESC",
-                    s
+                    "Argument \"order\" has invalid value {{{}: {}}}",
+                    field_name, s
                 ))
             })?;
             Ok(OrderCondition::new(field_name, direction))
@@ -830,9 +837,10 @@ fn parse_order_condition(
                 ))
             })?;
             let direction = OrderDirection::parse(s).ok_or_else(|| {
+                // Match Go DefraDB error format
                 QueryError::parse(format!(
-                    "invalid order direction '{}', expected ASC or DESC",
-                    s
+                    "Argument \"order\" has invalid value {{{}: {}}}",
+                    field_name, s
                 ))
             })?;
             Ok(OrderCondition::new(field_name, direction))
@@ -2057,10 +2065,11 @@ mod variable_tests {
         let variables = HashMap::from([("dir".to_string(), json!("INVALID"))]);
         let result = parse_request_with_variables(query, Some(&variables));
         assert!(result.is_err());
+        // Error format matches Go DefraDB
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("invalid order direction"));
+            .contains("Argument \"order\" has invalid value"));
     }
 
     // =========================================================================
