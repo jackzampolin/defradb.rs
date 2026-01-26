@@ -11,7 +11,8 @@ use tracing::{debug, warn};
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::{Requestable, Select};
+use crate::mapper::{Filter, Requestable, Select};
+use serde_json::Value as JsonValue;
 use crate::plan::{
     IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
     TypeJoinMany, TypeJoinOne,
@@ -208,11 +209,41 @@ impl Planner {
             .unwrap_or(false);
 
         // Split filter into scalar and relation parts (only useful for non-complex filters)
-        let (scalar_filter, _relation_filter) = select
+        // Note: JSON field nested access looks like relation filters structurally, but should
+        // be treated as scalar filters. We recombine them below based on schema info.
+        let (scalar_filter_raw, relation_filter) = select
             .filter
             .as_ref()
             .map(|f| f.split_by_relation())
             .unwrap_or((None, None));
+
+        // Move JSON field conditions from relation_filter back to scalar_filter.
+        // The split_by_relation function can't distinguish JSON nested access from relation
+        // traversal without schema info. Here we have the collection, so we can fix it.
+        let scalar_filter = {
+            let mut combined_conditions: HashMap<String, JsonValue> = scalar_filter_raw
+                .as_ref()
+                .map(|f| f.conditions().clone())
+                .unwrap_or_default();
+
+            if let Some(ref rel_filter) = relation_filter {
+                for (field_name, condition) in rel_filter.conditions() {
+                    // Check if this field is NOT a relation (could be JSON, etc.)
+                    if !collection
+                        .field_by_name(field_name)
+                        .is_some_and(|f| f.kind.is_relation())
+                    {
+                        combined_conditions.insert(field_name.clone(), condition.clone());
+                    }
+                }
+            }
+
+            if combined_conditions.is_empty() {
+                None
+            } else {
+                Some(Filter::from_conditions(combined_conditions))
+            }
+        };
 
         // 1. Choose between IndexScanNode and ScanNode based on index availability
         let mut plan: Box<dyn PlanNode> = if let Some(ref params) = index_scan {
