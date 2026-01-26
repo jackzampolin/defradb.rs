@@ -14,7 +14,9 @@ use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
 use crate::error::Result;
-use crate::router::{create_router_with_state, AppStateBuilder, P2POperations, SchemaOperations};
+use crate::router::{
+    create_router_with_state, AppStateBuilder, LensOperations, P2POperations, SchemaOperations,
+};
 
 /// Server configuration options.
 #[derive(Debug, Clone)]
@@ -42,6 +44,7 @@ pub struct Server {
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
+    lens: Option<Arc<dyn LensOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -54,6 +57,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            lens: None,
             event_bus: None,
         }
     }
@@ -66,6 +70,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            lens: None,
             event_bus: None,
         }
     }
@@ -78,6 +83,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            lens: None,
             event_bus: None,
         }
     }
@@ -90,6 +96,7 @@ impl Server {
             rest: None,
             p2p: None,
             schema: None,
+            lens: None,
             event_bus: None,
         }
     }
@@ -147,6 +154,22 @@ impl Server {
         self
     }
 
+    /// Set lens operations for schema migration endpoints.
+    ///
+    /// When lens operations are configured, the server enables:
+    /// - `POST /api/v0/lens/set` - Set a migration between schema versions
+    /// - `POST /api/v0/lens/reload` - Reload all lens modules
+    pub fn with_lens<L: LensOperations + 'static>(mut self, lens: L) -> Self {
+        self.lens = Some(Arc::new(lens));
+        self
+    }
+
+    /// Set lens operations from an Arc.
+    pub fn with_lens_arc(mut self, lens: Arc<dyn LensOperations>) -> Self {
+        self.lens = Some(lens);
+        self
+    }
+
     /// Set event bus for GraphQL subscriptions.
     ///
     /// When an event bus is configured, the server enables WebSocket
@@ -178,6 +201,9 @@ impl Server {
         }
         if let Some(ref schema) = self.schema {
             builder = builder.with_schema(Arc::clone(schema));
+        }
+        if let Some(ref lens) = self.lens {
+            builder = builder.with_lens(Arc::clone(lens));
         }
         if let Some(ref event_bus) = self.event_bus {
             builder = builder.with_event_bus(Arc::clone(event_bus));

@@ -713,6 +713,17 @@ impl Node {
             server = server.with_schema_arc(schema_adapter);
             info!("Schema HTTP endpoint enabled");
 
+            // Wire lens operations to HTTP server
+            match crate::lens_adapter::LensAdapter::new_arc() {
+                Ok(lens_adapter) => {
+                    server = server.with_lens_arc(lens_adapter);
+                    info!("Lens HTTP endpoint enabled");
+                }
+                Err(e) => {
+                    warn!("Failed to create lens adapter: {}", e);
+                }
+            }
+
             // Wire event bus to HTTP server for GraphQL subscriptions
             server = server.with_event_bus_arc(event_bus);
             info!("Subscription event bus enabled");
