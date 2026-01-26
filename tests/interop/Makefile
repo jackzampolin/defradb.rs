@@ -3,9 +3,9 @@
 # Path to Go DefraDB repo (sibling directory)
 DEFRA_GO_PATH ?= ../../../defradb
 
-# Build the Rust FFI library
+# Build the Rust CLI binary
 build-rust:
-	cd ../.. && cargo build --release -p ffi
+	cd ../.. && cargo build --release -p cli
 
 # Build the Go defra binary
 build-go:
