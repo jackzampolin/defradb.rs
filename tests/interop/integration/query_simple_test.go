@@ -1375,3 +1375,984 @@ func TestQuerySimpleWithOrderLimitAndOffset(t *testing.T) {
 
 	executeSimpleTestCase(t, test)
 }
+
+// ============================================================================
+// Group By Tests
+// Ported from: tests/integration/query/simple/with_group_test.go
+// ============================================================================
+
+func TestQuerySimpleWithGroupByNumber(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(groupBy: [Age]) {
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Age": int64(32),
+						},
+						{
+							"Age": int64(55),
+						},
+						{
+							"Age": int64(19),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// NOTE: The following tests require _group field selection which is not yet implemented in Rust:
+// - TestQuerySimpleWithGroupByNumberWithGroupString
+// - TestQuerySimpleWithGroupByString
+
+func TestQuerySimpleWithGroupByNumberOnUndefined(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob"
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(groupBy: [Age]) {
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Age": nil,
+						},
+						{
+							"Age": int64(32),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// NOTE: TestQuerySimpleWithGroupByNumberOnUndefinedWithChildren requires _group field selection (not yet implemented)
+
+// NOTE: The following tests require _count(_group: {}) syntax which is not yet implemented in Rust:
+// - TestQuerySimpleWithGroupByNumberWithoutRenderedGroupAndChildCount
+// - TestQuerySimpleWithGroupByNumberWithRenderedGroupAndChildCount
+
+// ============================================================================
+// Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/
+// ============================================================================
+
+func TestQuerySimpleWithFilterNeq(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_ne: "John"}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterGt(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_gt: 30}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterGe(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_ge: 32}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterLt(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_lt: 32}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterLe(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_le: 32}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterIn(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_in: ["John", "Carlo"]}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterNin(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nin: ["John", "Carlo"]}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterLike(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_like: "Jo%"}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterNlike(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "Jo%"}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterIlike(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_ilike: "jo%"}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFilterNilike(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nilike: "jo%"}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithCompoundAndFilter(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_and: [{Age: {_gt: 20}}, {Age: {_lt: 50}}]}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithCompoundOrFilter(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_or: [{Name: {_eq: "John"}}, {Age: {_gt: 50}}]}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithCompoundNotFilter(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_not: {Age: {_gt: 30}}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// String Order Tests
+// Ported from: tests/integration/query/simple/with_order_test.go
+// ============================================================================
+
+func TestQuerySimpleWithStringOrderAscending(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(order: {Name: ASC}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Alice",
+							"Age":  int64(19),
+						},
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithStringOrderDescending(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(order: {Name: DESC}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Alice",
+							"Age":  int64(19),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// NOTE: TestQuerySimpleWithMultipleOrderFields requires array ORDER BY syntax (not yet implemented)
+
+// ============================================================================
+// Boolean Field Filter Tests
+// ============================================================================
+
+func TestQuerySimpleWithBooleanFilter(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Verified": true
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Verified": false
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Verified": true
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Verified: {_eq: false}}) {
+						Name
+						Verified
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name":     "Bob",
+							"Verified": false,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Float Field Filter Tests
+// ============================================================================
+
+func TestQuerySimpleWithFloatFilter(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"HeightM": 1.91
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_gt: 1.80}}) {
+						Name
+						HeightM
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name":    "John",
+							"HeightM": 1.82,
+						},
+						{
+							"Name":    "Carlo",
+							"HeightM": 1.91,
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
