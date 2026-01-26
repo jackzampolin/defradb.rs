@@ -7,7 +7,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::collection_loader::get_collection_with_lazy_load;
+use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::txn::DbTxn;
 
 /// Document mutator that uses a database transaction.
@@ -83,8 +83,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
-        let (collection, datastore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore, index_manager) =
+            get_collection_with_index_manager(&self.txn, collection_name).await?;
 
         // Generate document ID if not present
         if doc.id().is_none() {
@@ -97,8 +97,9 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
 
+        // Use create_with_indexes to enforce unique constraints and maintain indexes
         collection
-            .create_with_datastore(&datastore, &doc)
+            .create_with_indexes(&datastore, &doc, &index_manager)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("create error: {}", e)))?;
 
@@ -110,11 +111,12 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<UpdateResult> {
-        let (collection, datastore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore, index_manager) =
+            get_collection_with_index_manager(&self.txn, collection_name).await?;
 
+        // Use update_with_indexes to maintain index consistency
         collection
-            .update_with_datastore(&datastore, &doc)
+            .update_with_indexes(&datastore, &doc, &index_manager)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("update error: {}", e)))?;
 
@@ -129,11 +131,12 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        let (collection, datastore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let (collection, datastore, index_manager) =
+            get_collection_with_index_manager(&self.txn, collection_name).await?;
 
+        // Use delete_with_indexes to maintain index consistency
         let existed = collection
-            .delete_with_datastore(&datastore, doc_id)
+            .delete_with_indexes(&datastore, doc_id, &index_manager)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 

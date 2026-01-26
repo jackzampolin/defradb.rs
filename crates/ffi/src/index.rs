@@ -4,21 +4,13 @@
 //! dropping, and querying indexes on collections via FFI.
 
 use std::ffi::c_char;
-use std::hash::{Hash, Hasher};
 
+use db::collection_short_id;
 use storage::corekv::Key;
 
 use crate::runtime::RUNTIME;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
-
-/// Derive a short u32 ID from a collection_id string.
-/// Uses a simple hash to ensure determinism and uniqueness.
-fn collection_short_id(collection_id: &str) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    collection_id.hash(&mut hasher);
-    hasher.finish() as u32
-}
 
 /// Create a new index on a collection.
 ///
