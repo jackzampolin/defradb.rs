@@ -904,12 +904,24 @@ impl Filter {
     }
 
     /// Compare two values for ordering.
-    /// Returns None for null comparisons (Go DefraDB behavior: null comparisons return false).
-    /// Supports int/float coercion (Go DefraDB uses numbers.TryUpcast).
+    /// Implements Go DefraDB semantics where null is treated as "smaller" than all other values:
+    /// - value > null → true (any non-null value is greater than null)
+    /// - null > null → false
+    /// - value >= null → true
+    /// - null >= null → true
+    /// - value < null → false (no value is less than null)
+    /// - null < null → false
+    /// - value <= null → false
+    /// - null <= null → true
     fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<Option<std::cmp::Ordering>> {
         match (a, b) {
-            // Null comparisons: Go DefraDB returns false for null vs anything in ordering comparisons
-            (JsonValue::Null, _) | (_, JsonValue::Null) => Ok(None),
+            // Go DefraDB treats null as smallest value
+            // null vs null → Equal
+            (JsonValue::Null, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Equal)),
+            // value vs null → Greater (any non-null value is greater than null)
+            (_, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Greater)),
+            // null vs value → Less (null is less than any non-null value)
+            (JsonValue::Null, _) => Ok(Some(std::cmp::Ordering::Less)),
 
             // Number comparisons: support int/float coercion (Go's numbers.TryUpcast behavior)
             (JsonValue::Number(a), JsonValue::Number(b)) => {
@@ -1578,7 +1590,7 @@ mod tests {
 
     #[test]
     fn test_null_field_gt_comparison_returns_false() {
-        // Go DefraDB behavior: null _gt 25 returns false (not error)
+        // Go DefraDB behavior: null _gt 25 returns false (null is "smaller" than any value)
         let filter =
             Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
         let mapping = make_mapping();
@@ -1591,6 +1603,88 @@ mod tests {
         let result = filter.matches(&fields, &mapping);
         assert!(result.is_ok(), "null _gt comparison should not error");
         assert!(!result.unwrap(), "null _gt 25 should return false");
+    }
+
+    #[test]
+    fn test_value_gt_null_returns_true() {
+        // Go DefraDB behavior: 25 _gt null returns true (any non-null value > null)
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "value _gt null should return true");
+    }
+
+    #[test]
+    fn test_value_ge_null_returns_true() {
+        // Go DefraDB behavior: any value >= null returns true
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ge": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "value _ge null should return true");
+    }
+
+    #[test]
+    fn test_null_ge_null_returns_true() {
+        // Go DefraDB behavior: null >= null returns true
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ge": null}))]));
+        let mapping = make_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+            Some(json!(true)),
+        ];
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "null _ge null should return true");
+    }
+
+    #[test]
+    fn test_value_lt_null_returns_false() {
+        // Go DefraDB behavior: value _lt null returns false (no value is less than null)
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lt": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(!result.unwrap(), "value _lt null should return false");
+    }
+
+    #[test]
+    fn test_null_le_null_returns_true() {
+        // Go DefraDB behavior: null <= null returns true
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_le": null}))]));
+        let mapping = make_mapping();
+        let fields = vec![
+            Some(json!("doc1")),
+            Some(json!("Alice")),
+            None, // age is null
+            Some(json!(true)),
+        ];
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "null _le null should return true");
+    }
+
+    #[test]
+    fn test_value_le_null_returns_false() {
+        // Go DefraDB behavior: value _le null returns false (only null <= null)
+        let filter =
+            Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_le": null}))]));
+        let mapping = make_mapping();
+        let fields = make_fields(); // age = 30
+        let result = filter.matches(&fields, &mapping);
+        assert!(result.is_ok());
+        assert!(!result.unwrap(), "value _le null should return false");
     }
 
     #[test]

@@ -1140,3 +1140,1876 @@ func TestQuerySimple_WithMultipleOrderFields_ReturnsError(t *testing.T) {
 
 	executeSimpleTestCase(t, test)
 }
+
+// ============================================================================
+// Integer Not Equals Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_ne_int_test.go
+// ============================================================================
+
+func TestQuerySimpleWithIntNotEqualsFilterBlock(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_ne: 21}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntNotEqualsNilFilterBlock(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Fred"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_ne: null}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+						{
+							"Name": "John",
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Integer Greater Than Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_gt_int_test.go
+// ============================================================================
+
+func TestQuerySimpleWithIntGreaterThanFilterBlock_ReturnOneAsOneMatches(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_gt: 20}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntGreaterThanFilterBlock_ReturnNoneAsNoMatch(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_gt: 40}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntGreaterThanFilterBlock_ReturnAllMultiMatches(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_gt: 20}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntGreaterThanFilterBlockWithNullFilterValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_gt: null}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Integer Less Than Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_lt_int_test.go
+// ============================================================================
+
+func TestQuerySimpleWithIntLessThanFilterBlockWithGreaterValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_lt: 22}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntLessThanFilterBlockWithNullValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_lt: null}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Integer Greater Than or Equal Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_ge_int_test.go
+// ============================================================================
+
+func TestQuerySimpleWithIntGEFilterBlockWithEqualValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_ge: 32}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntGEFilterBlockWithGreaterValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_ge: 31}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntGEFilterBlockWithNilValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_ge: null}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+						{
+							"Name": "Bob",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Integer Less Than or Equal Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_le_int_test.go
+// ============================================================================
+
+func TestQuerySimpleWithIntLEFilterBlockWithEqualValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_le: 21}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntLEFilterBlockWithGreaterValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_le: 22}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntLEFilterBlockWithNullValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_le: null}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// IN Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_in_test.go
+// ============================================================================
+
+func TestQuerySimpleWithIntInFilter(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_in: [19, 40, 55]}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+						{
+							"Name": "Alice",
+							"Age":  int64(19),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntInFilterOnFloat(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 21.0
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 21.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"HeightM": 21.2
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"HeightM": 21.3
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_in: [21, 21.2]}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+						{
+							"Name": "Carlo",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithIntInFilterWithNullValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Fred"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_in: [19, 40, 55, null]}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+						{
+							"Name": "Alice",
+							"Age":  int64(19),
+						},
+						{
+							"Name": "Fred",
+							"Age":  nil,
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// NOT IN Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_nin_test.go
+// ============================================================================
+
+func TestQuerySimpleWithNotInFilter(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Fred"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Age: {_nin: [19, 40, 55, null]}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+						{
+							"Name": "John",
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// NOT Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_not_test.go
+// ============================================================================
+
+func TestQuerySimple_WithNotEqualToXFilter_NoError(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_not: {Age: {_eq: 55}}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Alice",
+							"Age":  int64(19),
+						},
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithNotAndComparisonXFilter_NoError(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_not: {Age: {_gt: 20}}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Alice",
+							"Age":  int64(19),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithNotEqualToXorYFilter_NoError(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_not: {_or: [{Age: {_eq: 55}}, {Name: {_eq: "Alice"}}]}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithEmptyNotFilter_ReturnError(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_not: {}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithNotEqualToXAndNotYFilter_NoError(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Carlo",
+					"Age": 55
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Alice",
+					"Age": 19
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Frank",
+					"Age": 55
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_not: {Age: {_eq: 55}, _not: {Name: {_eq: "Carlo"}}}}) {
+						Name
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Carlo",
+							"Age":  int64(55),
+						},
+						{
+							"Name": "Bob",
+							"Age":  int64(32),
+						},
+						{
+							"Name": "Alice",
+							"Age":  int64(19),
+						},
+						{
+							"Name": "John",
+							"Age":  int64(21),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// String Not Equals Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_ne_string_test.go
+// ============================================================================
+
+func TestQuerySimpleWithStringNotEqualsFilterBlock(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_ne: "John"}}) {
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Age": int64(32),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithStringNotEqualsNilFilterBlock(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"Age": 21
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"Age": 32
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Age": 36
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_ne: null}}) {
+						Age
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Age": int64(32),
+						},
+						{
+							"Age": int64(21),
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Float Greater Than Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_gt_float_test.go
+// ============================================================================
+
+func TestQuerySimpleWithFloatGreaterThanFilterBlock_OneMatchingResult(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_gt: 2.0999999999999}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFloatGreaterThanFilterBlock_NoMatchingResult(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_gt: 40}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFloatGreaterThanFilterBlock_AllMatchingResult(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_gt: 1.8199999999999}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+						{
+							"Name": "John",
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFloatGreaterThanFilterBlockWithIntFilterValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_gt: 2}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFloatGreaterThanFilterBlockWithNullFilterValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob"
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_gt: null}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "John",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Float Less Than Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_lt_float_test.go
+// ============================================================================
+
+func TestQuerySimpleWithFloatLessThanFilterBlockWithGreaterValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_lt: 1.820000000001}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFloatLessThanFilterBlockWithGreaterIntValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_lt: 2}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Bob",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithFloatLessThanFilterBlockWithNullValue(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "John",
+					"HeightM": 2.1
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Bob",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {HeightM: {_lt: null}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+// ============================================================================
+// Not Like String Filter Tests
+// Ported from: tests/integration/query/simple/with_filter/with_nlike_string_test.go
+// ============================================================================
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockContainsString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "%Stormborn%"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Viserys I Targaryen, King of the Andals",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithNotCaseInsensitiveLikeString_ShouldMatchString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nilike: "%stormborn%"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Viserys I Targaryen, King of the Andals",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockAsPrefixString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "Viserys%"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithNotCaseInsensitiveLikeString_ShouldMatchPrefixString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nilike: "viserys%"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockAsSuffixString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "%Andals"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithNotCaseInsensitiveLikeString_ShouldMatchSuffixString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nilike: "%andals"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockExactString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "Daenerys Stormborn of House Targaryen, the First of Her Name"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Viserys I Targaryen, King of the Andals",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimple_WithNotCaseInsensitiveLikeString_MatchExactString(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nilike: "daenerys stormborn of house targaryen, the first of her name"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Viserys I Targaryen, King of the Andals",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockContainsStringMuplitpleResults(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "%Targaryen%"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockHasStartAndEnd(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "Daenerys%Name"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Viserys I Targaryen, King of the Andals",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockHasBoth(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_and: [{Name: {_nlike: "%Baratheon%"}}, {Name: {_nlike: "%Stormborn%"}}]}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Viserys I Targaryen, King of the Andals",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockHasEither(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {_or: [{Name: {_nlike: "%Baratheon%"}}, {Name: {_nlike: "%Stormborn%"}}]}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+						},
+						{
+							"Name": "Viserys I Targaryen, King of the Andals",
+						},
+					},
+				},
+				NonOrderedResults: true,
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
+
+func TestQuerySimpleWithNotLikeStringContainsFilterBlockPropNotSet(t *testing.T) {
+	test := testUtils.TestCase{
+		Actions: []any{
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+					"HeightM": 1.65
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"Name": "Viserys I Targaryen, King of the Andals",
+					"HeightM": 1.82
+				}`,
+			},
+			testUtils.CreateDoc{
+				Doc: `{
+					"HeightM": 1.92
+				}`,
+			},
+			testUtils.Request{
+				Request: `query {
+					Users(filter: {Name: {_nlike: "%King%"}}) {
+						Name
+					}
+				}`,
+				Results: map[string]any{
+					"Users": []map[string]any{
+						{
+							"Name": nil,
+						},
+						{
+							"Name": "Daenerys Stormborn of House Targaryen, the First of Her Name",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	executeSimpleTestCase(t, test)
+}
