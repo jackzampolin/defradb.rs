@@ -305,8 +305,9 @@ async fn test_host_with_custom_keypair() {
     let expected_peer_id = keypair.public().to_peer_id();
     let store = MockBitswapStore::new();
 
-    let (host, handle, _events, _replicators) =
-        P2PHost::with_keypair(keypair, store).expect("failed to create host");
+    let (host, handle, _events, _replicators) = P2PHost::with_keypair(keypair, store)
+        .await
+        .expect("failed to create host");
 
     assert_eq!(host.local_peer_id(), expected_peer_id);
 
@@ -1755,60 +1756,59 @@ async fn test_replicator_registry_multiple_collections() {
 }
 
 #[tokio::test]
-async fn test_bitswap_store_adapter_contains() {
+async fn test_bitswap_store_adapter_has() {
     use blockstore::{Blockstore, DefraBlockstore};
-    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use iroh_bitswap::Store;
+    use p2p::BitswapStoreAdapter;
     use std::str::FromStr;
     use storage::backends::MemoryStore;
 
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
-    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+    let adapter = BitswapStoreAdapter::new(blockstore.clone());
 
     let cid =
         cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
 
     // Initially should not contain the CID
-    let libipld_cid = libipld::Cid::try_from(cid.to_bytes().as_slice()).unwrap();
-    let contains = adapter.contains(&libipld_cid).await.unwrap();
-    assert!(!contains);
+    let has = adapter.has(&cid).await.unwrap();
+    assert!(!has);
 
     // Put a block
     let block_data = vec![1, 2, 3, 4, 5];
     blockstore.put(&cid, &block_data).await.unwrap();
 
     // Now should contain the CID
-    let contains = adapter.contains(&libipld_cid).await.unwrap();
-    assert!(contains);
+    let has = adapter.has(&cid).await.unwrap();
+    assert!(has);
 }
 
 #[tokio::test]
 async fn test_bitswap_store_adapter_get() {
     use blockstore::{Blockstore, DefraBlockstore};
-    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use iroh_bitswap::Store;
+    use p2p::BitswapStoreAdapter;
     use std::str::FromStr;
     use storage::backends::MemoryStore;
 
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
-    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+    let adapter = BitswapStoreAdapter::new(blockstore.clone());
 
     let cid =
         cid::Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
-    let libipld_cid = libipld::Cid::try_from(cid.to_bytes().as_slice()).unwrap();
 
-    // Initially should return None
-    let data = adapter.get(&libipld_cid).await.unwrap();
-    assert!(data.is_none());
+    // Initially should return error (block not found)
+    let result = adapter.get(&cid).await;
+    assert!(result.is_err());
 
     // Put a block
     let block_data = vec![1, 2, 3, 4, 5];
     blockstore.put(&cid, &block_data).await.unwrap();
 
     // Now should return the block data
-    let data = adapter.get(&libipld_cid).await.unwrap();
-    assert!(data.is_some());
-    assert_eq!(data.unwrap(), block_data);
+    let block = adapter.get(&cid).await.unwrap();
+    assert_eq!(block.data().as_ref(), &block_data);
 }
 
 // ============================================================================
@@ -1996,42 +1996,38 @@ async fn test_replication_handles_missing_block_in_store() {
 #[tokio::test]
 async fn test_bitswap_store_adapter_insert_and_retrieve_roundtrip() {
     use blockstore::{Blockstore, DefraBlockstore};
+    use iroh_bitswap::Store;
     use libipld::multihash::{Code, MultihashDigest};
-    use libipld::{Block, IpldCodec};
-    use p2p::{BitswapStore, BitswapStoreAdapter};
+    use libipld::IpldCodec;
+    use p2p::BitswapStoreAdapter;
     use storage::backends::MemoryStore;
 
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
-    let mut adapter = BitswapStoreAdapter::new(blockstore.clone());
+    let adapter = BitswapStoreAdapter::new(blockstore.clone());
 
     // Create block data
     let block_data = b"test block data for bitswap roundtrip";
 
     // Create a CID for this data (using raw codec and sha2-256)
     let multihash = Code::Sha2_256.digest(block_data);
-    let libipld_cid = libipld::Cid::new_v1(IpldCodec::Raw.into(), multihash);
-
-    // Create a Block for insertion
-    let block = Block::<libipld::DefaultParams>::new(libipld_cid, block_data.to_vec()).unwrap();
+    let cid = cid::Cid::new_v1(IpldCodec::Raw.into(), multihash);
 
     // Verify block is not present before insertion
-    assert!(!adapter.contains(&libipld_cid).await.unwrap());
+    assert!(!adapter.has(&cid).await.unwrap());
 
-    // Insert via BitswapStore trait (this is what Bitswap does when receiving blocks)
-    adapter.insert(&block).await.unwrap();
+    // Insert via the blockstore directly (in real use, blocks come via Bitswap network)
+    blockstore.put(&cid, block_data).await.unwrap();
 
-    // Verify block is now present
-    assert!(adapter.contains(&libipld_cid).await.unwrap());
+    // Verify block is now present via adapter
+    assert!(adapter.has(&cid).await.unwrap());
 
-    // Retrieve and verify data matches
-    let retrieved = adapter.get(&libipld_cid).await.unwrap();
-    assert!(retrieved.is_some());
-    assert_eq!(retrieved.unwrap(), block_data.to_vec());
+    // Retrieve via adapter and verify data matches
+    let retrieved = adapter.get(&cid).await.unwrap();
+    assert_eq!(retrieved.data().as_ref(), block_data);
 
-    // Also verify we can read via the underlying blockstore using cid crate's Cid
-    let cid_crate_cid = cid::Cid::try_from(libipld_cid.to_bytes().as_slice()).unwrap();
-    let from_blockstore = blockstore.get(&cid_crate_cid).await.unwrap();
+    // Also verify we can read via the underlying blockstore
+    let from_blockstore = blockstore.get(&cid).await.unwrap();
     assert!(from_blockstore.is_some());
     assert_eq!(from_blockstore.unwrap(), block_data.to_vec());
 }

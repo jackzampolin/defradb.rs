@@ -64,7 +64,8 @@ async fn test_codec_roundtrip_response() {
         .await
         .expect("read failed");
 
-    assert_eq!(decoded.metadata.message_id, original.metadata.message_id);
+    // PushLogReply uses flat fields (not nested metadata)
+    assert_eq!(decoded.message_id, original.message_id);
 }
 
 #[tokio::test]
