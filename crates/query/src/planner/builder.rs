@@ -1494,6 +1494,13 @@ impl Planner {
                     if field.name == "_docID" {
                         continue;
                     }
+                    // Handle _group specially - it's a virtual field for groupBy results
+                    if field.name == "_group" {
+                        let index = mapping.next_index();
+                        mapping.add(index, "_group");
+                        mapping.add_render_key(index, field.output_name());
+                        continue;
+                    }
                     // Validate field exists in schema
                     if collection.field_by_name(&field.name).is_none() {
                         return Err(QueryError::unknown_field(&field.name));

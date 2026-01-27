@@ -23,8 +23,9 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
     // Note: Nested selections (relations) are now supported via the Planner
 
     // Helper to check if a field exists in the collection schema
+    // Special fields: _docID (document ID), _group (groupBy results)
     let field_exists = |name: &str| -> bool {
-        name == "_docID" || collection.fields.iter().any(|f| f.name == name)
+        name == "_docID" || name == "_group" || collection.fields.iter().any(|f| f.name == name)
     };
 
     // Validate that all requested simple fields exist in schema
