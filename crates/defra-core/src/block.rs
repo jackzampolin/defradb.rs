@@ -308,8 +308,8 @@ pub struct LwwDeltaPayload {
     /// Priority for conflict resolution
     pub priority: u64,
 
-    /// Schema version identifier
-    #[serde(rename = "schemaVersionID")]
+    /// Collection version identifier
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// The value data (empty = deletion/tombstone)
@@ -336,8 +336,8 @@ pub struct CounterDeltaPayload {
     /// Nonce for idempotency
     pub nonce: i64,
 
-    /// Schema version identifier
-    #[serde(rename = "schemaVersionID")]
+    /// Collection version identifier
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// Increment/decrement value (encoded)
@@ -354,8 +354,8 @@ pub struct CompositeDeltaPayload {
     #[serde(rename = "docID", with = "serde_bytes")]
     pub doc_id: Vec<u8>,
 
-    /// Schema version identifier
-    #[serde(rename = "schemaVersionID")]
+    /// Collection version identifier
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// Priority
@@ -372,8 +372,8 @@ pub struct CompositeDeltaPayload {
 /// Note: CollectionDelta does NOT have a docID field (unlike other delta types).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionDeltaPayload {
-    /// Schema version identifier
-    #[serde(rename = "schemaVersionID")]
+    /// Collection version identifier
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// Priority

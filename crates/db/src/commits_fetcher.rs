@@ -167,7 +167,31 @@ impl<S: Store> CommitsFetcher<S> {
             }
         }
 
+        // Sort commits to match Go's ordering: regular fields first (by name), composite (_C) last
+        self.sort_commits_go_order(&mut commits);
+
         Ok(commits)
+    }
+
+    /// Sort commits to match Go DefraDB's ordering.
+    ///
+    /// Go stores field IDs as numeric short IDs in headstore keys, which gives
+    /// lexicographic order: "1" < "2" < "C" (composite comes after regular fields).
+    /// Rust uses field names, so we need to sort to match Go's behavior:
+    /// - Regular fields first, sorted by field name
+    /// - Composite field (_C) last
+    fn sort_commits_go_order(&self, commits: &mut Vec<Document>) {
+        commits.sort_by(|a, b| {
+            let field_a = a.get("fieldName").and_then(|v| v.as_str()).unwrap_or("");
+            let field_b = b.get("fieldName").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Composite (_C) should come last
+            match (field_a == "_C", field_b == "_C") {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => field_a.cmp(field_b), // Regular fields sorted by name
+            }
+        });
     }
 
     /// Traverse depth from a starting block
