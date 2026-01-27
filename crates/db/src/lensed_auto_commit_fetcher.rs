@@ -11,13 +11,17 @@ use document::Document;
 use lens::{
     build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
 };
+use query::fetcher::CommitsQueryOptions;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
+use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, trace};
 
 use crate::collection::Collection;
+use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::database::DB;
 use crate::schema_loader::get_collections_by_collection_id;
+use crate::txn::DbTxn;
 
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
@@ -396,5 +400,39 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         }
 
         Ok(processed_docs)
+    }
+
+    async fn get_commits(
+        &self,
+        options: &CommitsQueryOptions,
+    ) -> query::error::Result<Vec<Document>> {
+        // Create a read-only transaction for the commits fetcher
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        // Wrap in Arc<Mutex<Option>> for CommitsFetcher
+        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
+            std::sync::Arc::new(TokioMutex::new(Some(txn)));
+
+        // Convert query options to db options
+        let db_options = DbCommitsOptions {
+            doc_id: options.doc_id.clone(),
+            cid: options.cid.clone(),
+            depth: options.depth,
+            field_name: options.field_name.clone(),
+        };
+
+        let commits_fetcher = CommitsFetcher::new(txn_holder.clone());
+        let result = commits_fetcher.fetch_commits(&db_options).await.map_err(|e| {
+            query::error::QueryError::execution(format!("commits fetch error: {}", e))
+        });
+
+        // Clean up transaction
+        if let Some(txn) = txn_holder.lock().await.take() {
+            let _ = txn.discard();
+        }
+
+        result
     }
 }

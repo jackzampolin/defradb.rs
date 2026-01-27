@@ -388,32 +388,42 @@ fn parse_field_to_select(
                 }
             }
             "limit" => {
-                let limit_val = parse_int_value(arg_value, variables)?;
-                if limit_val < 0 {
-                    return Err(QueryError::parse("limit must be non-negative"));
+                // null means "no limit" (skip setting it)
+                if let Some(limit_val) = parse_optional_int_value(arg_value, variables)? {
+                    if limit_val < 0 {
+                        return Err(QueryError::parse("limit must be non-negative"));
+                    }
+                    select.limit = Some(Limit::new(
+                        Some(limit_val as u64),
+                        select.limit.as_ref().map(|l| l.offset).unwrap_or(0),
+                    ));
                 }
-                select.limit = Some(Limit::new(
-                    Some(limit_val as u64),
-                    select.limit.as_ref().map(|l| l.offset).unwrap_or(0),
-                ));
             }
             "offset" => {
-                let offset_val = parse_int_value(arg_value, variables)?;
-                if offset_val < 0 {
-                    return Err(QueryError::parse("offset must be non-negative"));
+                // null means "no offset" (skip setting it)
+                if let Some(offset_val) = parse_optional_int_value(arg_value, variables)? {
+                    if offset_val < 0 {
+                        return Err(QueryError::parse("offset must be non-negative"));
+                    }
+                    select.limit = Some(Limit::new(
+                        select.limit.as_ref().and_then(|l| l.limit),
+                        offset_val as u64,
+                    ));
                 }
-                select.limit = Some(Limit::new(
-                    select.limit.as_ref().and_then(|l| l.limit),
-                    offset_val as u64,
-                ));
             }
             "order" => {
-                let order_by = parse_order_value(arg_value, variables)?;
-                select.order_by = Some(order_by);
+                // null means "no ordering" (skip setting it)
+                if !matches!(arg_value, Value::Null) {
+                    let order_by = parse_order_value(arg_value, variables)?;
+                    select.order_by = Some(order_by);
+                }
             }
             "groupBy" => {
-                let group_by = parse_group_by_value(arg_value, variables)?;
-                select.group_by = Some(group_by);
+                // null means "no grouping" (skip setting it)
+                if !matches!(arg_value, Value::Null) {
+                    let group_by = parse_group_by_value(arg_value, variables)?;
+                    select.group_by = Some(group_by);
+                }
             }
             "docIDs" | "docID" => {
                 // Null docIDs is valid and means "no specific docIDs" (use filter or all)
@@ -423,17 +433,43 @@ fn parse_field_to_select(
                 }
             }
             "cid" => {
-                let cid_val = resolve_string_value(arg_value, variables, "cid")?;
-                select.cid = Some(cid_val);
+                // null means "no cid filter" (skip setting it)
+                if !matches!(arg_value, Value::Null) {
+                    let cid_val = resolve_string_value(arg_value, variables, "cid")?;
+                    select.cid = Some(cid_val);
+                }
             }
             "showDeleted" => {
                 let show_deleted = resolve_bool_value(arg_value, variables, "showDeleted")?;
                 select.show_deleted = show_deleted;
             }
+            "depth" => {
+                // depth is only valid for _commits queries
+                if collection_name == "_commits" {
+                    // null means "no limit" (None), not an error
+                    if let Some(depth_val) = parse_optional_int_value(arg_value, variables)? {
+                        if depth_val < 0 {
+                            return Err(QueryError::parse("depth must be non-negative"));
+                        }
+                        select.depth = Some(depth_val as u64);
+                    }
+                    // else depth remains None (unlimited)
+                } else {
+                    return Err(QueryError::parse(format!(
+                        "argument 'depth' is only valid for _commits queries, not '{}'",
+                        collection_name
+                    )));
+                }
+            }
             _ => {
+                let valid_args = if collection_name == "_commits" {
+                    "filter, limit, offset, order, groupBy, docIDs, docID, cid, showDeleted, depth"
+                } else {
+                    "filter, limit, offset, order, groupBy, docIDs, docID, cid, showDeleted"
+                };
                 return Err(QueryError::parse(format!(
-                    "unknown argument '{}' on collection '{}'. Valid arguments are: filter, limit, offset, order, groupBy, docIDs, docID, cid, showDeleted",
-                    arg_name, collection_name
+                    "unknown argument '{}' on collection '{}'. Valid arguments are: {}",
+                    arg_name, collection_name, valid_args
                 )));
             }
         }
@@ -765,6 +801,41 @@ fn parse_int_value(
             json_val.as_i64().ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" must be of type Int", name))
             })
+        }
+        _ => Err(QueryError::parse("expected integer value")),
+    }
+}
+
+/// Parse an optional integer value (returns None for null).
+/// This matches Go DefraDB's behavior where null is treated as "not provided".
+fn parse_optional_int_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Option<i64>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Int(n) => n
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| QueryError::parse("integer out of range")),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            if json_val.is_null() {
+                Ok(None)
+            } else {
+                json_val
+                    .as_i64()
+                    .map(Some)
+                    .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type Int", name)))
+            }
         }
         _ => Err(QueryError::parse("expected integer value")),
     }

@@ -355,6 +355,8 @@ pub struct Select {
     pub doc_ids: Option<Vec<String>>,
     /// CID filter (for versioned queries)
     pub cid: Option<String>,
+    /// Depth for commits queries (how deep to traverse the DAG)
+    pub depth: Option<u64>,
     /// Whether to include deleted documents
     pub show_deleted: bool,
     /// Whether this is an encrypted search
@@ -379,6 +381,7 @@ impl Select {
             group_by: None,
             doc_ids: None,
             cid: None,
+            depth: None,
             show_deleted: false,
             is_encrypted: false,
             selection_type: SelectionType::Object,

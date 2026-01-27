@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use document::Document;
+use query::fetcher::CommitsQueryOptions;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
 use storage::corekv::Store;
@@ -9,6 +10,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
 use crate::collection_loader::get_collection_with_lazy_load;
+use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::txn::DbTxn;
 
 /// Document fetcher that uses a database transaction.
@@ -153,5 +155,24 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .collect();
 
         Ok(matching_docs)
+    }
+
+    async fn get_commits(
+        &self,
+        options: &CommitsQueryOptions,
+    ) -> query::error::Result<Vec<Document>> {
+        // Convert query options to db options
+        let db_options = DbCommitsOptions {
+            doc_id: options.doc_id.clone(),
+            cid: options.cid.clone(),
+            depth: options.depth,
+            field_name: options.field_name.clone(),
+        };
+
+        let commits_fetcher = CommitsFetcher::new(self.txn.clone());
+        commits_fetcher
+            .fetch_commits(&db_options)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("commits fetch error: {}", e)))
     }
 }
