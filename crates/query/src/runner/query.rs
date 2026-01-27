@@ -6,12 +6,13 @@ use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::document::documents_to_plan_docs;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
+use crate::planner::index_selection::{filter_to_index_scan, select_best_index};
 use crate::planner::Planner;
 use crate::query_parse::{parse_query, ExplainType};
 use crate::txn::TransactionRegistry;
@@ -755,6 +756,37 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 );
             }
             result.into_docs()
+        } else if let Some(ref filter) = select.filter {
+            // Try to use an index if available
+            if fetcher.supports_index_queries() && !collection.indexes.is_empty() {
+                if let Some(best_index) = select_best_index(filter, &collection.indexes) {
+                    if let Some(params) = filter_to_index_scan(filter, best_index) {
+                        debug!(
+                            collection = %select.collection_name,
+                            index = %params.index_name,
+                            "Using index for query"
+                        );
+                        // Get doc IDs from index
+                        let doc_ids = fetcher
+                            .get_by_index_scan(&select.collection_name, &params)
+                            .await?;
+                        // Fetch the actual documents by ID
+                        let result = fetcher
+                            .get_by_ids(&select.collection_name, &doc_ids)
+                            .await?;
+                        result.into_docs()
+                    } else {
+                        // Filter doesn't translate to index scan, fallback to full scan
+                        fetcher.get_all(&select.collection_name).await?
+                    }
+                } else {
+                    // No suitable index found, fallback to full scan
+                    fetcher.get_all(&select.collection_name).await?
+                }
+            } else {
+                // Fetcher doesn't support index queries or no indexes, fallback to full scan
+                fetcher.get_all(&select.collection_name).await?
+            }
         } else {
             fetcher.get_all(&select.collection_name).await?
         };
