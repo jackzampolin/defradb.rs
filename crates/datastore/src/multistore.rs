@@ -1,3 +1,4 @@
+use async_lock::RwLock;
 /// Transaction-aware Multistore for the datastore layer.
 ///
 /// Unlike the storage layer's Multistore which provides store-level access,
@@ -7,7 +8,6 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use storage::corekv::{Error, IterOptions, Iterator, Reader, Result, Txn, Writer};
 use storage::namespace::Namespace;
-use tokio::sync::RwLock;
 
 /// Shared transaction wrapper allowing multiple namespace views.
 pub struct SharedTxn {
@@ -154,7 +154,8 @@ impl Clone for NamespaceView {
 }
 
 /// Implement Reader trait for NamespaceView to enable index operations.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for NamespaceView {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.txn.get(self.namespace, key).await
@@ -177,7 +178,8 @@ impl Reader for NamespaceView {
 ///
 /// The `&mut self` signature is required by the trait, but NamespaceView uses
 /// interior mutability (Arc<RwLock>) so actual mutation is handled internally.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespaceView {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.txn.set(self.namespace, key, value).await
@@ -268,7 +270,8 @@ struct NamespacedIterator {
     namespace: Namespace,
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Iterator for NamespacedIterator {
     async fn next(&mut self) -> Result<Option<storage::corekv::KvPair>> {
         match self.iter.next().await? {

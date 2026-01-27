@@ -8,10 +8,15 @@ license.workspace = true
 repository.workspace = true
 description = "DefraDB database and collection management"
 
+[features]
+default = ["p2p", "native"]
+p2p = ["dep:p2p", "dep:libp2p"]
+native = ["dep:tokio", "lens/wasmtime-runtime", "events/channel", "acp/native"]
+
 [dependencies]
 # Async runtime
 async-trait.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+async-lock.workspace = true
 futures.workspace = true
 
 # Serialization
@@ -39,8 +44,11 @@ rand = "0.8"
 # Encoding
 base64.workspace = true
 
-# P2P
-libp2p.workspace = true
+# P2P (optional)
+libp2p = { workspace = true, optional = true }
+
+# Native-only (optional)
+tokio = { workspace = true, features = ["sync"], optional = true }
 
 # Internal crates
 storage = { path = "../storage" }
@@ -52,11 +60,13 @@ blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
-acp = { path = "../acp" }
-p2p = { path = "../p2p" }
+acp = { path = "../acp", default-features = false }
 crdt = { path = "../crdt" }
-events = { path = "../events" }
-lens = { path = "../lens" }
+events = { path = "../events", default-features = false }
+lens = { path = "../lens", default-features = false }
+
+# P2P (optional)
+p2p = { path = "../p2p", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

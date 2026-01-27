@@ -175,7 +175,8 @@ impl<H> AcpMergeHandler<H> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<H> MergeHandler for AcpMergeHandler<H>
 where
     H: MergeHandler,
@@ -267,7 +268,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl MergeHandler for MockMergeHandler {
         type Error = MockError;
 

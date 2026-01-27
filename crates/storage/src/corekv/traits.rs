@@ -51,35 +51,7 @@ pub type AsyncTxnCallback =
 /// No Send bound required in single-threaded WASM environment.
 pub type AsyncTxnCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + 'static>;
 
-// Conditional marker traits for thread-safety bounds.
-// On native targets, these require Send + Sync.
-// On WASM (single-threaded), these are satisfied by all types.
-// Note: ?Sized allows these to work with trait objects (dyn Trait)
-#[cfg(not(target_arch = "wasm32"))]
-mod thread_bounds {
-    pub trait MaybeSend: Send {}
-    impl<T: Send + ?Sized> MaybeSend for T {}
-
-    pub trait MaybeSync: Sync {}
-    impl<T: Sync + ?Sized> MaybeSync for T {}
-
-    pub trait MaybeSendSync: Send + Sync {}
-    impl<T: Send + Sync + ?Sized> MaybeSendSync for T {}
-}
-
-#[cfg(target_arch = "wasm32")]
-mod thread_bounds {
-    pub trait MaybeSend {}
-    impl<T: ?Sized> MaybeSend for T {}
-
-    pub trait MaybeSync {}
-    impl<T: ?Sized> MaybeSync for T {}
-
-    pub trait MaybeSendSync {}
-    impl<T: ?Sized> MaybeSendSync for T {}
-}
-
-pub use thread_bounds::{MaybeSend, MaybeSendSync, MaybeSync};
+pub use defra_core::thread_bounds::{MaybeSend, MaybeSendSync, MaybeSync};
 
 /// Reader trait for read-only key-value operations.
 ///

@@ -286,7 +286,8 @@ impl UpdateNode {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PlanNode for UpdateNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;

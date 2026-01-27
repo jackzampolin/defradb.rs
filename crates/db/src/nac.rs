@@ -19,8 +19,12 @@
 use std::sync::Arc;
 
 use acp::nac::{NacStatus, NodeACP, NodePermission};
-use acp::{MemoryZanzibarStore, PersistentZanzibarStore, ZanzibarStore};
+use acp::{MemoryZanzibarStore, ZanzibarStore};
 use identity::Did;
+
+#[cfg(not(target_arch = "wasm32"))]
+use acp::PersistentZanzibarStore;
+#[cfg(not(target_arch = "wasm32"))]
 use storage::RedbStore;
 
 use crate::error::{Error, Result};
@@ -284,6 +288,7 @@ pub fn create_memory_nac_manager(config: NacConfig) -> NacManager<MemoryZanzibar
 /// Create a persistent NAC manager.
 ///
 /// The NAC data is stored in a separate directory (`local_node_acp/`) under the data path.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn create_persistent_nac_manager(
     data_path: &std::path::Path,
 ) -> Result<NacManager<PersistentZanzibarStore<RedbStore>>> {

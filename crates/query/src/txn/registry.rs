@@ -1,6 +1,7 @@
 //! Transaction registry trait and no-op implementation.
 
 use async_trait::async_trait;
+use storage::corekv::MaybeSendSync;
 
 use crate::error::TransactionError;
 
@@ -11,8 +12,9 @@ use super::result::GetTransactionResult;
 ///
 /// The database layer implements this to track transactions that can be
 /// used by the query executor.
-#[async_trait]
-pub trait TransactionRegistry: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait TransactionRegistry: MaybeSendSync {
     /// Begin a new transaction.
     ///
     /// Returns a handle that can be used with `get()`, `commit()`, and `rollback()`.
@@ -49,7 +51,8 @@ pub trait TransactionRegistry: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct NoOpTransactionRegistry;
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl TransactionRegistry for NoOpTransactionRegistry {
     async fn begin(
         &self,

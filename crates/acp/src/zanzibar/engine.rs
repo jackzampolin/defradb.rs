@@ -4,13 +4,13 @@
 //! Zanzibar permission expressions.
 
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
+use defra_core::thread_bounds::MaybeBoxFuture;
+
+use async_lock::RwLock;
 use identity::Did;
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
 
 use super::expression::RelationExpression;
 use super::lookup::PolicyLookupTable;
@@ -428,7 +428,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         expression: &'a RelationExpression,
         trail: NodeTrail,
         cache: Arc<CheckCache>,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> MaybeBoxFuture<'a, Result<bool>> {
         Box::pin(async move {
             // Check cache first (for ComputedUserset which may re-evaluate same relation)
             if let Some(cached) = cache.get(resource, object_id, relation, subject).await {
@@ -470,7 +470,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         expression: &'a RelationExpression,
         trail: NodeTrail,
         cache: Arc<CheckCache>,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> MaybeBoxFuture<'a, Result<bool>> {
         Box::pin(async move {
             match expression {
                 RelationExpression::This => {
@@ -701,7 +701,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         trail: NodeTrail,
         cache: Arc<CheckCache>,
         trace: &'a mut EvaluationTrace,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> MaybeBoxFuture<'a, Result<bool>> {
         Box::pin(async move {
             match expression {
                 RelationExpression::This => {

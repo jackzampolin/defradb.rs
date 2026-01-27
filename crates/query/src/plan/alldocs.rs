@@ -45,7 +45,8 @@ impl AllDocsNode {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PlanNode for AllDocsNode {
     async fn init(&mut self) -> Result<()> {
         self.docs.clear();

@@ -9,6 +9,7 @@ mod error;
 mod history;
 mod pipeline;
 mod store;
+#[cfg(feature = "wasmtime-runtime")]
 mod wasm;
 
 pub use config::{LensConfig, LensModule};
@@ -17,4 +18,5 @@ pub use error::{Error, Result};
 pub use history::{build_targeted_history, CollectionHistoryLink, TargetedHistoryLink};
 pub use pipeline::{Lens, LensInput};
 pub use store::{MemoryTransformStore, TransformId, TransformStore};
+#[cfg(feature = "wasmtime-runtime")]
 pub use wasm::WasmTransformStore;

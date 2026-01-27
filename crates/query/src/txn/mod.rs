@@ -150,7 +150,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl crate::QueryExecutor for MockExecutor {
         async fn execute(&self, _request: crate::QueryRequest) -> crate::QueryResponse {
             crate::QueryResponse::success(serde_json::json!({"mock": true}))
@@ -206,7 +207,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl crate::QueryExecutor for FailingCommitExecutor {
         async fn execute(&self, _request: crate::QueryRequest) -> crate::QueryResponse {
             crate::QueryResponse::success(serde_json::json!({"mock": true}))

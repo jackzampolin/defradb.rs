@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use identity::Did;
+use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
 use crate::identity::Identity;
@@ -15,8 +16,9 @@ use crate::permission::DocumentPermission;
 /// - Registration: Documents are registered with an owner when created with identity
 /// - Access checks: Verify if an identity has permission to perform an operation
 /// - Relationship management: Add/remove actor relationships for sharing
-#[async_trait]
-pub trait DocumentACP: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait DocumentACP: MaybeSendSync {
     /// Register a document with creator as owner.
     ///
     /// This is called when a document is created with an identity.

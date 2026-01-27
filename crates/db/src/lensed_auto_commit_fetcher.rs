@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
 use lens::{
@@ -16,7 +17,6 @@ use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
-use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, trace};
 
 use crate::collection::{collection_short_id, Collection};
@@ -231,7 +231,8 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
         let collection = self

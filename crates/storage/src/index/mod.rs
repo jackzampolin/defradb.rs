@@ -153,7 +153,11 @@ impl IndexType {
     }
 
     /// Scan all entries in the index.
-    pub async fn scan<R: Reader + MaybeSend>(&self, txn: &R, reverse: bool) -> Result<RangeIterator> {
+    pub async fn scan<R: Reader + MaybeSend>(
+        &self,
+        txn: &R,
+        reverse: bool,
+    ) -> Result<RangeIterator> {
         match self {
             IndexType::Simple(idx) => idx.scan(txn, reverse).await,
             IndexType::Unique(idx) => idx.scan(txn, reverse).await,

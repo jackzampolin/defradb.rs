@@ -3,6 +3,7 @@
 //! This module provides fetching of commit history from the headstore and blockstore.
 //! Commits are the CRDT blocks that make up document version history.
 
+use async_lock::Mutex as TokioMutex;
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta};
 use document::Document;
@@ -11,7 +12,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
-use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;

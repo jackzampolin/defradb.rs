@@ -31,9 +31,8 @@ impl WasmIndexedDbStore {
     ///
     /// * `db_name` - The name of the database to open/create
     pub async fn open(db_name: &str) -> Result<Self> {
-        let factory = Factory::new().map_err(|e| {
-            WasmError::Storage(format!("Failed to get IndexedDB factory: {:?}", e))
-        })?;
+        let factory = Factory::new()
+            .map_err(|e| WasmError::Storage(format!("Failed to get IndexedDB factory: {:?}", e)))?;
 
         let mut open_request = factory
             .open(db_name, Some(DB_VERSION))
@@ -287,9 +286,8 @@ impl WasmIndexedDbStore {
         // Close the database first
         self.close().await?;
 
-        let factory = Factory::new().map_err(|e| {
-            WasmError::Storage(format!("Failed to get IndexedDB factory: {:?}", e))
-        })?;
+        let factory = Factory::new()
+            .map_err(|e| WasmError::Storage(format!("Failed to get IndexedDB factory: {:?}", e)))?;
 
         factory
             .delete(&self.db_name)

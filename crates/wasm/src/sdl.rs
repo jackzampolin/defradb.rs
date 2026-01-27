@@ -61,7 +61,12 @@ fn parse_object_type(
     let version_id = generate_version_id(&name, &fields);
     let collection_id = generate_collection_id(&name);
 
-    Ok(CollectionVersion::new(name, version_id, collection_id, fields))
+    Ok(CollectionVersion::new(
+        name,
+        version_id,
+        collection_id,
+        fields,
+    ))
 }
 
 fn parse_field(
@@ -91,14 +96,10 @@ fn parse_field_type(
                     if let Type::NamedType(name) = inner.as_ref() {
                         parse_named_type(name, type_names, true)
                     } else {
-                        Err(WasmError::Schema(
-                            "Nested arrays not supported".to_string(),
-                        ))
+                        Err(WasmError::Schema("Nested arrays not supported".to_string()))
                     }
                 }
-                _ => Err(WasmError::Schema(
-                    "Nested arrays not supported".to_string(),
-                )),
+                _ => Err(WasmError::Schema("Nested arrays not supported".to_string())),
             }
         }
         Type::NonNullType(inner) => parse_field_type(inner, type_names),
@@ -126,7 +127,9 @@ fn parse_named_type(
         ("Boolean" | "Bool", false) => Ok(FieldKind::bool()),
         ("Boolean" | "Bool", true) => Ok(FieldKind::bool_array()),
         ("DateTime", false) => Ok(FieldKind::datetime()),
-        ("DateTime", true) => Err(WasmError::Schema("DateTime arrays not supported".to_string())),
+        ("DateTime", true) => Err(WasmError::Schema(
+            "DateTime arrays not supported".to_string(),
+        )),
         ("Blob", false) => Ok(FieldKind::blob()),
         ("Blob", true) => Err(WasmError::Schema("Blob arrays not supported".to_string())),
         ("JSON", false) => Ok(FieldKind::json()),

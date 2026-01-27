@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use datastore::NamespaceView;
 use document::Document;
@@ -30,7 +31,6 @@ use lens::{
 use query::runner::{DocFetcher, FetchByIdsResult};
 use schema::CollectionVersion;
 use storage::corekv::Store;
-use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
@@ -49,7 +49,7 @@ pub struct LensedDocFetcher<S: Store> {
     lens_store: Arc<dyn TransformStore>,
     /// Cache of collection version histories keyed by collection name.
     #[allow(dead_code)]
-    history_cache: tokio::sync::RwLock<HashMap<String, HashMap<String, TargetedHistoryLink>>>,
+    history_cache: async_lock::RwLock<HashMap<String, HashMap<String, TargetedHistoryLink>>>,
 }
 
 impl<S: Store> LensedDocFetcher<S> {
@@ -64,7 +64,7 @@ impl<S: Store> LensedDocFetcher<S> {
         Self {
             txn: Arc::new(TokioMutex::new(Some(txn))),
             lens_store,
-            history_cache: tokio::sync::RwLock::new(HashMap::new()),
+            history_cache: async_lock::RwLock::new(HashMap::new()),
         }
     }
 
@@ -445,7 +445,8 @@ impl<S: Store> LensedDocFetcher<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
         let (collection, datastore) =

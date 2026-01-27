@@ -24,7 +24,8 @@ fn convert_variables(variables: &Option<JsonValue>) -> Option<HashMap<String, Js
     })
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> {
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         // Convert variables from JSON to HashMap format for the parser

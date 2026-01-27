@@ -12,7 +12,7 @@ use schema::{FieldKind, IndexDescription};
 use tracing::trace;
 
 use super::iterator::{Bound, IndexEntry, IndexIterator};
-use crate::corekv::{MaybeSend, IterOptions, Iterator, Reader, Result};
+use crate::corekv::{IterOptions, Iterator, MaybeSend, Reader, Result};
 use crate::field_value::{decode_field_value, encode_field_value};
 use crate::keys::IndexDataStoreKey;
 

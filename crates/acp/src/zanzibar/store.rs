@@ -9,8 +9,9 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use storage::corekv::{IterOptions, Reader, Store, Writer};
+use storage::corekv::{IterOptions, MaybeSendSync, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
+#[cfg(not(target_arch = "wasm32"))]
 use storage::RedbStore;
 
 use super::types::{ObjectRef, Policy, Relationship, Subject};
@@ -54,8 +55,9 @@ impl StorePolicyOptions {
 /// - Policy storage and retrieval
 /// - Relationship tuple storage
 /// - Relationship queries (for permission evaluation)
-#[async_trait]
-pub trait ZanzibarStore: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait ZanzibarStore: MaybeSendSync {
     /// Store a policy.
     async fn store_policy(&self, policy: &Policy) -> Result<()>;
 
@@ -169,7 +171,8 @@ impl Default for MemoryZanzibarStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ZanzibarStore for MemoryZanzibarStore {
     async fn store_policy(&self, policy: &Policy) -> Result<()> {
         self.policies
@@ -342,6 +345,7 @@ impl<S: Store> PersistentZanzibarStore<S> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PersistentZanzibarStore<RedbStore> {
     /// Open a persistent store at the given path.
     pub fn open(path: &std::path::Path) -> Result<Self> {
@@ -376,8 +380,10 @@ impl<S: Store> PersistentZanzibarStore<S> {
     }
 }
 
-#[async_trait]
-impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
     async fn store_policy(&self, policy: &Policy) -> Result<()> {
         let mut txn = self
             .store

@@ -69,7 +69,8 @@ impl LocalDocumentACP {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocumentACP for LocalDocumentACP {
     async fn register_doc_object(
         &self,
@@ -352,7 +353,8 @@ impl Default for MemoryAcpStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl AcpStore for MemoryAcpStore {
     async fn put_tuple(&self, tuple: &RelationTuple) -> Result<()> {
         self.tuples

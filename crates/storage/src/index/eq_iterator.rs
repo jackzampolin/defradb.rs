@@ -8,7 +8,7 @@ use document::NormalValue;
 use schema::IndexDescription;
 
 use super::iterator::{IndexEntry, IndexIterator};
-use crate::corekv::{MaybeSend, IterOptions, Iterator, Reader, Result};
+use crate::corekv::{IterOptions, Iterator, MaybeSend, Reader, Result};
 use crate::keys::datastore::IndexedField;
 use crate::keys::IndexDataStoreKey;
 

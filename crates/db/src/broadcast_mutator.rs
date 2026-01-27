@@ -57,7 +57,8 @@ impl<S: Store, B: Blockstore + 'static> BroadcastMutator<S, B> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutator<S, B> {
     async fn create(
         &self,

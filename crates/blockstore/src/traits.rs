@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use cid::Cid;
+use storage::corekv::MaybeSendSync;
 
 use crate::Result;
 
@@ -37,8 +38,9 @@ use crate::Result;
 /// 4. `mark_as_merged()` - Remove from unmerged tracking
 ///
 /// In local mode (non-P2P), blocks are immediately considered merged.
-#[async_trait]
-pub trait Blockstore: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Blockstore: MaybeSendSync {
     /// Retrieve a block by its CID
     ///
     /// If `hash_on_read` is enabled, verifies that the retrieved data

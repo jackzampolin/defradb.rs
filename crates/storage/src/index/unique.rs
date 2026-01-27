@@ -9,7 +9,7 @@ use super::iterator::Bound;
 use super::range_iterator::RangeIterator;
 use super::validate_doc_id;
 use super::CollectionIndex;
-use crate::corekv::{MaybeSend, IterOptions, Reader, Result, Writer};
+use crate::corekv::{IterOptions, MaybeSend, Reader, Result, Writer};
 use crate::keys::datastore::IndexedField;
 use crate::keys::IndexDataStoreKey;
 
@@ -130,7 +130,11 @@ impl UniqueIndex {
     /// Scan all entries in the index.
     ///
     /// Returns an iterator over all index entries in order (or reverse order).
-    pub async fn scan<R: Reader + MaybeSend>(&self, txn: &R, reverse: bool) -> Result<RangeIterator> {
+    pub async fn scan<R: Reader + MaybeSend>(
+        &self,
+        txn: &R,
+        reverse: bool,
+    ) -> Result<RangeIterator> {
         RangeIterator::new_scan(txn, self.collection_short_id, &self.desc, true, reverse).await
     }
 

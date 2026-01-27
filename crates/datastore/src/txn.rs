@@ -259,6 +259,7 @@ impl BasicTxn {
                 "Spawning async discard callbacks in background"
             );
             for (i, callback) in self.discard_async_fns.into_iter().enumerate() {
+                #[cfg(not(target_arch = "wasm32"))]
                 tokio::spawn(async move {
                     let result = std::panic::AssertUnwindSafe(callback())
                         .catch_unwind()
@@ -272,6 +273,13 @@ impl BasicTxn {
                         );
                     }
                 });
+                // On wasm32, async callbacks cannot be spawned or awaited from
+                // a sync context. Since discard callbacks are fire-and-forget,
+                // we drop them. Use sync callbacks for critical cleanup on wasm32.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (callback, i);
+                }
             }
         }
 

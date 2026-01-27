@@ -1,6 +1,7 @@
 //! Transaction context trait.
 
 use std::sync::Arc;
+use storage::corekv::MaybeSendSync;
 
 use crate::mutator::DocMutator;
 use crate::runner::DocFetcher;
@@ -9,7 +10,7 @@ use crate::runner::DocFetcher;
 ///
 /// This is implemented by the database layer to provide transaction-scoped
 /// document fetching and mutation.
-pub trait TransactionContext: Send + Sync {
+pub trait TransactionContext: MaybeSendSync {
     /// Get the transaction ID.
     fn id(&self) -> &str;
 

@@ -160,8 +160,7 @@ pub fn generate_ed25519_keypair() -> std::result::Result<JsValue, JsValue> {
 }
 
 fn generate_ed25519_impl() -> Result<JsValue> {
-    let private_key =
-        generate_ed25519().map_err(|e| WasmError::Verification(e.to_string()))?;
+    let private_key = generate_ed25519().map_err(|e| WasmError::Verification(e.to_string()))?;
     let public_key = private_key.public_key();
 
     let result = serde_json::json!({
@@ -183,8 +182,7 @@ pub fn generate_secp256k1_keypair() -> std::result::Result<JsValue, JsValue> {
 }
 
 fn generate_secp256k1_impl() -> Result<JsValue> {
-    let private_key =
-        generate_secp256k1().map_err(|e| WasmError::Verification(e.to_string()))?;
+    let private_key = generate_secp256k1().map_err(|e| WasmError::Verification(e.to_string()))?;
     let public_key = private_key.public_key();
 
     let result = serde_json::json!({
