@@ -12,13 +12,13 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{Filter, Requestable, Select};
-use serde_json::Value as JsonValue;
 use crate::plan::{
     IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
     TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
+use serde_json::Value as JsonValue;
 
 /// Maximum allowed nesting depth for nested queries (0-indexed).
 /// A depth of 0 is the root query, depth 1 is the first nested level, etc.
@@ -858,11 +858,11 @@ impl Planner {
                     }
 
                     // Find the relation field in the parent collection
-                    let relation_field =
-                        match parent_collection.field_by_name(relation_field_name) {
-                            Some(f) => f,
-                            None => continue, // Skip if not found (might be invalid)
-                        };
+                    let relation_field = match parent_collection.field_by_name(relation_field_name)
+                    {
+                        Some(f) => f,
+                        None => continue, // Skip if not found (might be invalid)
+                    };
 
                     // Verify it's a relation field
                     if !relation_field.kind.is_relation() {

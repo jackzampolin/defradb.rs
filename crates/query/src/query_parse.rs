@@ -1061,23 +1061,27 @@ fn parse_aggregate_field(
                 }
             }
             AggregateType::Sum => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_sum requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_sum requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::sum(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Average => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_avg requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_avg requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::avg(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Min => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_min requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_min requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::min(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Max => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_max requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_max requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::max(AggregateTarget::with_field("", field_name))
             }
         }
@@ -1402,10 +1406,8 @@ fn parse_create_input(
                     let mut docs = Vec::new();
                     for item in items {
                         if let JsonValue::Object(obj) = item {
-                            let doc: HashMap<String, JsonValue> = obj
-                                .iter()
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect();
+                            let doc: HashMap<String, JsonValue> =
+                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             docs.push(doc);
                         } else {
                             return Err(QueryError::parse("CREATE input items must be objects"));
@@ -1622,7 +1624,11 @@ mod mutation_tests {
         "#;
 
         let result = parse_mutations(query);
-        assert!(result.is_ok(), "update without target should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "update without target should succeed: {:?}",
+            result
+        );
         let mutations = result.unwrap();
         assert_eq!(mutations.len(), 1);
         assert!(mutations[0].doc_ids.is_none());
@@ -1641,7 +1647,11 @@ mod mutation_tests {
         "#;
 
         let result = parse_mutations(query);
-        assert!(result.is_ok(), "delete without target should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "delete without target should succeed: {:?}",
+            result
+        );
         let mutations = result.unwrap();
         assert_eq!(mutations.len(), 1);
         assert!(mutations[0].doc_ids.is_none());

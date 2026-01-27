@@ -255,17 +255,13 @@ pub fn json_to_normal_value_with_kind(
                 }
             }
             // ScalarArray fields: handle empty arrays and nillable elements
-            FieldKind::ScalarArray(array_kind) => {
-                match value {
-                    JsonValue::Array(arr) => {
-                        json_array_to_normal_value_with_kind(arr, *array_kind)
-                    }
-                    _ => Err(QueryError::execution(format!(
-                        "Expected array, got: {:?}",
-                        value
-                    ))),
-                }
-            }
+            FieldKind::ScalarArray(array_kind) => match value {
+                JsonValue::Array(arr) => json_array_to_normal_value_with_kind(arr, *array_kind),
+                _ => Err(QueryError::execution(format!(
+                    "Expected array, got: {:?}",
+                    value
+                ))),
+            },
             // For other scalar types, fall through to default conversion
             _ => json_to_normal_value(value),
         }
@@ -326,9 +322,7 @@ fn json_array_to_normal_value_with_kind(
             let mut ints = Vec::with_capacity(arr.len());
             for (i, v) in arr.iter().enumerate() {
                 match v {
-                    JsonValue::Number(n) if n.as_i64().is_some() => {
-                        ints.push(n.as_i64().unwrap())
-                    }
+                    JsonValue::Number(n) if n.as_i64().is_some() => ints.push(n.as_i64().unwrap()),
                     JsonValue::Null => ints.push(0),
                     _ => {
                         return Err(QueryError::execution(format!(

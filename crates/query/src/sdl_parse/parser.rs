@@ -24,7 +24,9 @@ use super::directives::{
 use super::warnings::{DirectiveLocation, ParseOutput, ParseWarning};
 
 /// Convert a GraphQL schema Value to a serde_json Value
-fn graphql_schema_value_to_json(value: &graphql_parser::schema::Value<'_, String>) -> serde_json::Value {
+fn graphql_schema_value_to_json(
+    value: &graphql_parser::schema::Value<'_, String>,
+) -> serde_json::Value {
     match value {
         graphql_parser::schema::Value::String(s) => serde_json::Value::String(s.clone()),
         graphql_parser::schema::Value::Int(n) => {
@@ -38,7 +40,8 @@ fn graphql_schema_value_to_json(value: &graphql_parser::schema::Value<'_, String
         graphql_parser::schema::Value::Null => serde_json::Value::Null,
         graphql_parser::schema::Value::Enum(s) => serde_json::Value::String(s.clone()),
         graphql_parser::schema::Value::List(arr) => {
-            let items: Vec<serde_json::Value> = arr.iter().map(graphql_schema_value_to_json).collect();
+            let items: Vec<serde_json::Value> =
+                arr.iter().map(graphql_schema_value_to_json).collect();
             serde_json::Value::Array(items)
         }
         graphql_parser::schema::Value::Object(obj) => {
