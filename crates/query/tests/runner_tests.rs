@@ -4050,3 +4050,117 @@ async fn test_compound_filter_with_relation_condition() {
     );
     assert_eq!(books[0].get("name").unwrap(), "Painted House");
 }
+
+#[tokio::test]
+async fn test_order_by_relation_field_strips_ordering_only_fields() {
+    // Test: ORDER BY author.verified should work correctly, but the `verified` field
+    // should NOT appear in the output when not explicitly selected.
+    // Query: { Book(order: {author: {verified: ASC}}) { name author { name } } }
+
+    let fetcher = MockFetcher::new();
+
+    // Create Book collection - author is SECONDARY (looks up Author via reverse FK)
+    let book_collection = CollectionVersion::new(
+        "Book",
+        "v1",
+        "coll-book",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // author relation field - SECONDARY (is_primary = false)
+            FieldDescription::new("", "author", FieldKind::relation("Author", false))
+                .with_relation_name("published"),
+            // _authorID field for the relation ID - also SECONDARY
+            FieldDescription::new("", "_authorID", FieldKind::doc_id())
+                .with_relation_name("published"),
+        ],
+    );
+
+    // Create Author collection - published is PRIMARY
+    let author_collection = CollectionVersion::new(
+        "Author",
+        "v1",
+        "coll-author",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "verified", FieldKind::bool()),
+            // published relation field - PRIMARY
+            FieldDescription::new("4", "published", FieldKind::relation("Book", false))
+                .with_relation_name("published")
+                .as_primary(),
+            // _publishedID FK field - also PRIMARY
+            FieldDescription::new("5", "_publishedID", FieldKind::doc_id())
+                .with_relation_name("published")
+                .as_primary(),
+        ],
+    );
+
+    // Add Books
+    let mut book1 = Document::new();
+    book1.set("_docID", "book-1");
+    book1.set("name", "Book One");
+    fetcher.add_doc("Book", book1);
+
+    let mut book2 = Document::new();
+    book2.set("_docID", "book-2");
+    book2.set("name", "Book Two");
+    fetcher.add_doc("Book", book2);
+
+    // Add Authors with different verified status
+    let mut author1 = Document::new();
+    author1.set("_docID", "author-1");
+    author1.set("name", "Verified Author");
+    author1.set("verified", true);
+    author1.set("_publishedID", "book-1");
+    fetcher.add_doc("Author", author1);
+
+    let mut author2 = Document::new();
+    author2.set("_docID", "author-2");
+    author2.set("name", "Unverified Author");
+    author2.set("verified", false);
+    author2.set("_publishedID", "book-2");
+    fetcher.add_doc("Author", author2);
+
+    let runner = QueryRunner::new(fetcher, vec![book_collection, author_collection]);
+
+    // Order by author.verified ASC - should sort unverified (false) before verified (true)
+    // but the `verified` field should NOT appear in the output
+    let result = runner
+        .execute_query(r#"{ Book(order: {author: {verified: ASC}}) { name author { name } } }"#)
+        .await
+        .unwrap();
+
+    eprintln!("Result: {}", serde_json::to_string_pretty(&result).unwrap());
+
+    let books = result.get("Book").unwrap().as_array().unwrap();
+    assert_eq!(books.len(), 2);
+
+    // First book should be Book Two (author.verified = false, sorts first in ASC)
+    let first_book = &books[0];
+    assert_eq!(first_book.get("name").unwrap(), "Book Two");
+
+    // Second book should be Book One (author.verified = true)
+    let second_book = &books[1];
+    assert_eq!(second_book.get("name").unwrap(), "Book One");
+
+    // CRITICAL: The `verified` field should NOT appear in the author object
+    // because it was only added for ordering, not selected
+    let first_author = first_book.get("author").unwrap().as_object().unwrap();
+    assert!(
+        !first_author.contains_key("verified"),
+        "The 'verified' field should NOT appear in output when not selected. Found: {:?}",
+        first_author
+    );
+    assert!(
+        first_author.contains_key("name"),
+        "The 'name' field should appear (it was selected)"
+    );
+
+    let second_author = second_book.get("author").unwrap().as_object().unwrap();
+    assert!(
+        !second_author.contains_key("verified"),
+        "The 'verified' field should NOT appear in output when not selected. Found: {:?}",
+        second_author
+    );
+}

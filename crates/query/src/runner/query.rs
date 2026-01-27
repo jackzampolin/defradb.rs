@@ -490,6 +490,7 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
         let plan_result = planner.plan_with_index_info(select)?;
         let mut plan = plan_result.plan;
+        let ordering_only_fields = plan_result.ordering_only_fields;
 
         // Get the mapping from the plan
         let mapping = plan.document_map().clone();
@@ -502,7 +503,20 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
 
         while plan.next().await? {
             let doc = plan.value();
-            let json = self.doc_to_json(doc, &mapping)?;
+            let mut json = self.doc_to_json(doc, &mapping)?;
+
+            // Strip ordering-only fields from nested objects.
+            // These fields were added for ORDER BY but shouldn't appear in output.
+            for (relation_field, nested_field) in &ordering_only_fields {
+                if let Some(obj) = json.as_object_mut() {
+                    if let Some(relation_value) = obj.get_mut(relation_field) {
+                        if let Some(nested_obj) = relation_value.as_object_mut() {
+                            nested_obj.remove(nested_field);
+                        }
+                    }
+                }
+            }
+
             results.push(json);
         }
 
