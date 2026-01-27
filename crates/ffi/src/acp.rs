@@ -293,42 +293,105 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
 // DAC (Document Access Control) Functions
 // ============================================================================
 
-/// Add a DAC policy to the node.
+/// Add a DAC policy.
 ///
-/// Registers a policy document and returns its content-addressed ID.
-///
-/// Returns JSON with the policy ID:
+/// Accepts a policy definition in YAML or JSON format.
+/// Returns a JSON object with the policy ID:
 /// ```json
-/// { "PolicyID": "bafyreigh..." }
+/// { "PolicyID": "sha256_hash_of_policy" }
 /// ```
 ///
 /// # Safety
 ///
-/// All string parameters must be valid null-terminated UTF-8 strings.
+/// `policy` must be a valid null-terminated UTF-8 string containing
+/// the policy definition in YAML or JSON format.
 #[no_mangle]
 pub unsafe extern "C" fn add_dac_policy(
-    _node_ptr: usize,
+    node_ptr: usize,
     _identity_did: *const c_char,
-    _policy: *const c_char,
+    policy: *const c_char,
 ) -> FfiResult {
-    // DAC policies are not yet implemented in the Rust FFI
-    FfiResult::error("add_dac_policy is not yet implemented - see issue #179")
+    let policy_str = match c_str_to_string(policy) {
+        Some(s) => s,
+        None => return FfiResult::error("policy is null"),
+    };
+
+    if policy_str.trim().is_empty() {
+        return FfiResult::error("policy cannot be empty");
+    }
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let policy_id = state.policy_store.add_policy(&policy_str);
+            serde_json::json!({
+                "PolicyID": policy_id
+            })
+            .to_string()
+        })
+        .ok_or_else(|| "invalid node handle".to_string());
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
 }
 
 /// Get a DAC policy by ID.
 ///
-/// Returns JSON with the policy definition.
+/// Returns a JSON object with the policy content, or null if not found.
 ///
 /// # Safety
 ///
-/// All string parameters must be valid null-terminated UTF-8 strings.
+/// `policy_id` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn get_dac_policy(
-    _node_ptr: usize,
-    _policy_id: *const c_char,
+    node_ptr: usize,
+    policy_id: *const c_char,
 ) -> FfiResult {
-    // DAC policies are not yet implemented in the Rust FFI
-    FfiResult::error("get_dac_policy is not yet implemented - see issue #179")
+    let policy_id_str = match c_str_to_string(policy_id) {
+        Some(s) => s,
+        None => return FfiResult::error("policy_id is null"),
+    };
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            match state.policy_store.get_policy(&policy_id_str) {
+                Some(policy) => serde_json::json!({
+                    "id": policy_id_str,
+                    "policy": policy
+                })
+                .to_string(),
+                None => serde_json::json!(null).to_string(),
+            }
+        })
+        .ok_or_else(|| "invalid node handle".to_string());
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
+/// List all DAC policy IDs.
+///
+/// Returns a JSON array of policy IDs.
+///
+/// # Safety
+///
+/// No unsafe string parameters.
+#[no_mangle]
+pub extern "C" fn list_dac_policies(node_ptr: usize) -> FfiResult {
+    let result = NODES
+        .get(node_ptr, |state| {
+            let ids = state.policy_store.list_policies();
+            serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+        })
+        .ok_or_else(|| "invalid node handle".to_string());
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
 }
 
 /// Add a DAC actor relationship (share document access with target).
