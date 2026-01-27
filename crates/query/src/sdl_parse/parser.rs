@@ -2967,4 +2967,58 @@ mod tests {
             "Collection CID should match Go DefraDB"
         );
     }
+
+    #[test]
+    fn test_secondary_relation_is_primary_false() {
+        // This tests the exact schema from the failing FFI test
+        // TestQueryOneToOne_WithRelationIDFromSecondarySide
+        let sdl = r#"
+            type Book {
+                name: String
+                author: Author
+            }
+            type Author {
+                name: String
+                published: Book @primary
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+
+        let book = collections.iter().find(|c| c.name == "Book").unwrap();
+        let author_field = book.field_by_name("author").unwrap();
+
+        // Book.author should be SECONDARY (is_primary = false) because
+        // Author.published has @primary directive
+        assert!(
+            !author_field.is_primary,
+            "Book.author should be secondary (is_primary=false) because Author.published has @primary"
+        );
+
+        // Verify _authorID field exists on Book (created for all single-object relations)
+        let author_id_field = book.field_by_name("_authorID");
+        assert!(
+            author_id_field.is_some(),
+            "Book should have implicit _authorID field"
+        );
+
+        // _authorID should also be secondary (empty field_id)
+        let author_id_field = author_id_field.unwrap();
+        assert!(
+            author_id_field.id.is_empty(),
+            "_authorID should have empty field_id (secondary)"
+        );
+        assert!(
+            !author_id_field.is_primary,
+            "_authorID should be secondary (is_primary=false)"
+        );
+
+        // Verify Author.published is primary
+        let author = collections.iter().find(|c| c.name == "Author").unwrap();
+        let published_field = author.field_by_name("published").unwrap();
+        assert!(
+            published_field.is_primary,
+            "Author.published should be primary (has @primary directive)"
+        );
+    }
 }

@@ -251,22 +251,67 @@ impl TypeJoinOne {
     }
 
     /// Merge child document into parent at the relation field index.
+    ///
+    /// For inverted joins (secondary side), this also populates the parent's
+    /// `_relID` field with the child's `_docID`, matching Go DefraDB's behavior.
     fn merge_child(&self, parent_doc: &mut Doc, child_doc: Option<Doc>) {
         // Get child mapping. Falls back to child plan's mapping if not explicitly
         // set in parent mapping - this happens for simple queries where child
         // mapping was not pre-configured during planning.
-        let child_value = match child_doc {
+        let (child_value, child_doc_id) = match &child_doc {
             Some(doc) => {
                 let child_mapping = self
                     .document_mapping
                     .child_at(self.parent_side.relation_field_index())
                     .unwrap_or(self.child_plan.document_map());
-                child_mapping.render_doc_to_json(&doc)
+                let rendered = child_mapping.render_doc_to_json(doc);
+                let doc_id = doc.doc_id().map(String::from);
+                (rendered, doc_id)
             }
-            None => JsonValue::Null,
+            None => (JsonValue::Null, None),
         };
 
+        // Set the relation object field (e.g., `author: {...}`)
         parent_doc.set(self.parent_side.relation_field_index(), child_value);
+
+        // For inverted joins, also set the parent's _relID field (e.g., `_authorID`)
+        // with the child's _docID. This matches Go DefraDB's behavior where the
+        // secondary side's relation ID is dynamically populated at query time.
+        if matches!(self.direction, JoinDirection::Inverted) {
+            let rel_id_field_name = schema::CollectionVersion::relation_id_field_name(
+                &self.parent_side.relation_field().name,
+            );
+            tracing::debug!(
+                direction = ?self.direction,
+                relation_field_name = %self.parent_side.relation_field().name,
+                rel_id_field_name = %rel_id_field_name,
+                child_doc_id = ?child_doc_id,
+                parent_doc_id = ?parent_doc.doc_id(),
+                "TypeJoinOne: merge_child for inverted join"
+            );
+            if let Some(doc_id) = child_doc_id {
+                // Find the _relID field index in the parent's scan mapping
+                if let Some(idx) = self
+                    .parent_plan
+                    .document_map()
+                    .first_index_of_name(&rel_id_field_name)
+                {
+                    tracing::debug!(
+                        rel_id_field_name = %rel_id_field_name,
+                        idx = idx,
+                        doc_id = %doc_id,
+                        "TypeJoinOne: Setting _relID field"
+                    );
+                    parent_doc.set(idx, JsonValue::String(doc_id));
+                } else {
+                    tracing::warn!(
+                        rel_id_field_name = %rel_id_field_name,
+                        parent_doc_map_fields = ?self.parent_plan.document_map(),
+                        "TypeJoinOne: _relID field index not found in parent's document_map"
+                    );
+                }
+            }
+        }
     }
 
     /// Check if the child document passes the relation filter.

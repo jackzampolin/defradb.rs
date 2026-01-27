@@ -867,6 +867,147 @@ impl Planner {
             }
         }
 
+        // Handle secondary relation ID fields (e.g., `_authorID` for a secondary `author` relation).
+        // When a secondary relation ID field is selected but the relation object is not,
+        // we need to add a TypeJoin to compute the ID by doing a reverse lookup.
+        for requestable in &select.fields {
+            if let Requestable::Field(field) = requestable {
+                // Check if this is a relation ID field (pattern: `_{relationName}ID`)
+                let field_name = &field.name;
+                if !field_name.starts_with('_') || !field_name.ends_with("ID") {
+                    continue;
+                }
+
+                // Extract the relation name from the field name (e.g., "author" from "_authorID")
+                let relation_name = &field_name[1..field_name.len() - 2];
+                if relation_name.is_empty() {
+                    continue;
+                }
+
+                // Find the relation field in the parent collection
+                let relation_field = match parent_collection.field_by_name(relation_name) {
+                    Some(f) => f,
+                    None => continue, // Not a valid relation name
+                };
+
+                // Check if it's a relation field and NOT primary (secondary relation)
+                if !relation_field.kind.is_relation() || relation_field.is_primary {
+                    continue; // Only handle secondary relations
+                }
+
+                // Check if this relation is already being joined (via a Select)
+                let already_joined = select.fields.iter().any(|f| {
+                    if let Requestable::Select(s) = f {
+                        s.field.name == relation_name
+                    } else {
+                        false
+                    }
+                });
+
+                if already_joined {
+                    continue; // Join already exists, _relID will be populated by merge_child
+                }
+
+                // Get the target collection
+                let target_collection_id = match relation_field.kind.relation_collection_id() {
+                    Some(id) => id,
+                    None => continue,
+                };
+
+                let target_collection = if target_collection_id.is_empty() {
+                    Arc::new(parent_collection.clone())
+                } else {
+                    match self.get_collection(target_collection_id) {
+                        Some(c) => c,
+                        None => continue,
+                    }
+                };
+
+                // Find the target relation field (the other side of the relation)
+                let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
+                    target_collection.field_by_relation(
+                        rel_name,
+                        &parent_collection.name,
+                        relation_name,
+                    )
+                } else {
+                    None
+                };
+
+                // Build a minimal child mapping (just _docID for the reverse lookup)
+                let mut child_mapping = DocumentMapping::new();
+                child_mapping.add(0, "_docID");
+
+                // Build scan mapping for the child
+                let child_scan_mapping =
+                    self.build_scan_mapping_for_join(&target_collection, &child_mapping);
+
+                // Get relation field index in parent mapping
+                let relation_field_index = parent_collection
+                    .fields
+                    .iter()
+                    .position(|f| f.name == relation_name)
+                    .unwrap_or(0);
+
+                // Set up child mapping in parent for TypeJoin
+                mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
+
+                // Build child plan (simple scan with fetcher)
+                let mut child_scan =
+                    ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
+                if let Some(ref fetcher) = self.fetcher {
+                    child_scan = child_scan.with_fetcher(fetcher.clone());
+                }
+                let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+                // Get child relation field index
+                let child_relation_index = target_relation_field
+                    .and_then(|f| {
+                        target_collection
+                            .fields
+                            .iter()
+                            .position(|tf| tf.name == f.name)
+                    })
+                    .unwrap_or(0);
+
+                // Create join sides
+                let parent_side = JoinSide::new(
+                    parent_collection.clone(),
+                    relation_field.clone(),
+                    relation_field_index,
+                )?;
+
+                let child_side = JoinSide::new(
+                    (*target_collection).clone(),
+                    target_relation_field
+                        .cloned()
+                        .unwrap_or_else(|| relation_field.clone()),
+                    child_relation_index,
+                )?;
+
+                // Create TypeJoinOne for the secondary relation ID lookup
+                // This join will populate the _relID field via merge_child
+                plan = Box::new(TypeJoinOne::new(
+                    plan,
+                    child_plan,
+                    parent_side,
+                    child_side,
+                    mapping.clone(),
+                ));
+
+                debug!(
+                    parent_collection = %parent_collection.name,
+                    target_collection = %target_collection.name,
+                    relation_id_field = %field_name,
+                    relation_field = %relation_name,
+                    relation_field_is_primary = %relation_field.is_primary,
+                    target_relation_field_name = ?target_relation_field.as_ref().map(|f| &f.name),
+                    target_relation_field_is_primary = ?target_relation_field.as_ref().map(|f| f.is_primary),
+                    "Added TypeJoinOne for secondary relation ID field"
+                );
+            }
+        }
+
         // Also handle relation-based aggregates (e.g., _count(books: {}))
         // These need joins to fetch the related data for aggregation.
         for requestable in &select.fields {
@@ -2221,5 +2362,103 @@ mod tests {
             "Error should mention select list or collection: {}",
             err_msg
         );
+    }
+
+    // === Secondary Relation ID Field Tests ===
+
+    /// Book collection - secondary side of Book-Author relation
+    /// author: Author (NO @primary - secondary side, doesn't store FK)
+    fn make_book_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "Book",
+            "v1",
+            "coll-book",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                // Secondary relation to Author (no @primary)
+                FieldDescription::new("3", "author", FieldKind::relation("Author", false))
+                    .with_relation_name("book_author"),
+                // Auto-generated _authorID field (added by add_relation_id_fields)
+                // Even though this is secondary, the _authorID field exists for querying
+                FieldDescription::new("4", "_authorID", FieldKind::doc_id())
+                    .with_relation_name("book_author"),
+            ],
+        )
+    }
+
+    /// Author collection - primary side of Book-Author relation
+    /// published: Book @primary (stores the FK _publishedID)
+    fn make_author_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "Author",
+            "v1",
+            "coll-author",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                // Primary relation to Book (@primary - stores FK)
+                FieldDescription::new("3", "published", FieldKind::relation("Book", false))
+                    .with_relation_name("book_author")
+                    .as_primary(),
+                // Auto-generated _publishedID field (primary side stores FK)
+                FieldDescription::new("4", "_publishedID", FieldKind::doc_id())
+                    .with_relation_name("book_author")
+                    .as_primary(),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_secondary_relation_id_field_detection() {
+        // Verify the string slicing for extracting relation name from _authorID
+        let field_name = "_authorID";
+        assert!(field_name.starts_with('_'));
+        assert!(field_name.ends_with("ID"));
+
+        // Extract relation name
+        let relation_name = &field_name[1..field_name.len() - 2];
+        assert_eq!(relation_name, "author");
+
+        // Verify Book collection has author field
+        let book = make_book_collection();
+        let author_field = book.field_by_name("author");
+        assert!(author_field.is_some(), "Book should have 'author' field");
+
+        let author_field = author_field.unwrap();
+        assert!(author_field.kind.is_relation(), "'author' should be a relation field");
+        assert!(!author_field.is_primary, "'author' on Book should NOT be primary (secondary side)");
+
+        // Verify Author collection has published field
+        let author = make_author_collection();
+        let published_field = author.field_by_name("published");
+        assert!(published_field.is_some(), "Author should have 'published' field");
+
+        let published_field = published_field.unwrap();
+        assert!(published_field.kind.is_relation(), "'published' should be a relation field");
+        assert!(published_field.is_primary, "'published' on Author SHOULD be primary (primary side)");
+    }
+
+    #[tokio::test]
+    async fn test_plan_secondary_relation_id_field() {
+        // Test that selecting _authorID on Book (secondary side) creates a TypeJoin
+        let planner = Planner::new(vec![make_book_collection(), make_author_collection()]);
+
+        // Query: Book { name _authorID }
+        let select = Select::new("Book")
+            .with_field(Field::new("name"))
+            .with_field(Field::new("_authorID"));
+
+        let result = planner.plan(&select);
+        assert!(result.is_ok(), "Planning should succeed: {:?}", result.err());
+
+        let plan = result.unwrap();
+        // The plan should have a TypeJoinOne node somewhere in the tree
+        // since we need to do a reverse lookup for _authorID
+
+        // For now, just verify the plan was created
+        // A more thorough test would execute the plan with test data
+        assert!(plan.kind() == "selectNode" || plan.kind() == "typeJoinOne",
+            "Plan should be selectNode or typeJoinOne, got: {}", plan.kind());
     }
 }

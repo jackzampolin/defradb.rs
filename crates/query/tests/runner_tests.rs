@@ -3829,3 +3829,100 @@ async fn test_multi_level_relation_filter() {
         "Author should be John Grisham"
     );
 }
+
+// =============================================================================
+// Secondary Relation ID Field Tests
+// =============================================================================
+
+/// Test querying a secondary relation ID field without the relation object.
+/// This matches the failing FFI test: TestQueryOneToOne_WithRelationIDFromSecondarySide
+///
+/// Schema:
+/// - Book { name, author } where author is SECONDARY (no @primary)
+/// - Author { name, published @primary } where published is PRIMARY
+///
+/// When querying `Book { name _authorID }`, the `_authorID` should be populated
+/// by doing a reverse lookup: find Author where _publishedID = Book._docID
+#[tokio::test]
+async fn test_secondary_relation_id_field_without_relation_object() {
+    let fetcher = MockFetcher::new();
+
+    // Create Book collection - author is SECONDARY (no FK stored in Book)
+    // The _authorID field exists in the schema but is NOT primary
+    let book_collection = CollectionVersion::new(
+        "Book",
+        "v1",
+        "coll-book",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // author relation field - SECONDARY (is_primary = false)
+            FieldDescription::new("", "author", FieldKind::relation("Author", false))
+                .with_relation_name("published"),
+            // _authorID field for the relation ID - also SECONDARY
+            FieldDescription::new("", "_authorID", FieldKind::doc_id())
+                .with_relation_name("published"),
+        ],
+    );
+
+    // Create Author collection - published is PRIMARY (has FK)
+    let author_collection = CollectionVersion::new(
+        "Author",
+        "v1",
+        "coll-author",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // published relation field - PRIMARY (is_primary = true)
+            FieldDescription::new("3", "published", FieldKind::relation("Book", false))
+                .with_relation_name("published")
+                .as_primary(),
+            // _publishedID FK field - also PRIMARY
+            FieldDescription::new("4", "_publishedID", FieldKind::doc_id())
+                .with_relation_name("published")
+                .as_primary(),
+        ],
+    );
+
+    // Add Book document
+    let mut book = Document::new();
+    book.set("_docID", "book-1");
+    book.set("name", "Painted House");
+    fetcher.add_doc("Book", book);
+
+    // Add Author document with FK pointing to the book
+    let mut author = Document::new();
+    author.set("_docID", "author-1");
+    author.set("name", "John Grisham");
+    author.set("_publishedID", "book-1"); // FK points to book-1
+    fetcher.add_doc("Author", author);
+
+    let runner = QueryRunner::new(fetcher, vec![book_collection, author_collection]);
+
+    // Query only the relation ID field, not the relation object
+    let result = runner
+        .execute_query("{ Book { name _authorID } }")
+        .await
+        .unwrap();
+
+    eprintln!("Result: {}", serde_json::to_string_pretty(&result).unwrap());
+
+    let books = result.get("Book").unwrap().as_array().unwrap();
+    assert_eq!(books.len(), 1);
+
+    let book = &books[0];
+    assert_eq!(book.get("name").unwrap(), "Painted House");
+
+    // _authorID should be populated with the Author's _docID
+    // This requires a reverse lookup: find Author where _publishedID = Book._docID
+    let author_id = book.get("_authorID");
+    assert!(
+        author_id.is_some(),
+        "_authorID field should be present in result"
+    );
+    assert_eq!(
+        author_id.unwrap(),
+        "author-1",
+        "_authorID should be the Author's _docID from reverse lookup"
+    );
+}

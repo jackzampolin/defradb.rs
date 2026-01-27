@@ -398,10 +398,30 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 .await;
         }
 
+        // Check if any secondary relation ID fields are selected (e.g., `_authorID` for a secondary `author` relation).
+        // These require a TypeJoin to compute the ID via reverse lookup.
+        let has_secondary_relation_id = select.fields.iter().any(|f| {
+            if let Requestable::Field(field) = f {
+                let field_name = &field.name;
+                // Check pattern: _<relationName>ID
+                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3 {
+                    let relation_name = &field_name[1..field_name.len() - 2];
+                    if let Some(relation_field) = collection.field_by_name(relation_name) {
+                        // Only secondary relations need a join to compute the ID
+                        return relation_field.kind.is_relation() && !relation_field.is_primary;
+                    }
+                }
+            }
+            false
+        });
+
         // Use Planner if there are nested selections, filter through relations,
-        // order through relations, or aggregates on relations
-        let needs_planner =
-            has_nested || filter_has_relations || order_has_relations || aggregates_have_relations;
+        // order through relations, aggregates on relations, or secondary relation ID fields
+        let needs_planner = has_nested
+            || filter_has_relations
+            || order_has_relations
+            || aggregates_have_relations
+            || has_secondary_relation_id;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
