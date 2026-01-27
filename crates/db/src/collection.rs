@@ -644,9 +644,7 @@ impl Collection {
 
         // Store schema version - preserve document's version if set, otherwise use collection's
         let version_key = self.version_key(&doc_id);
-        let version = doc
-            .schema_version_id()
-            .unwrap_or(&self.def.version_id);
+        let version = doc.schema_version_id().unwrap_or(&self.def.version_id);
         datastore
             .set(&version_key, version.as_bytes())
             .await
@@ -695,7 +693,11 @@ impl Collection {
     }
 
     /// Load the schema version for a document.
-    async fn load_version(&self, datastore: &NamespaceView, doc_id: &DocID) -> Result<Option<String>> {
+    async fn load_version(
+        &self,
+        datastore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<Option<String>> {
         let key = self.version_key(doc_id);
 
         match datastore.get(&key).await.map_err(Error::Storage)? {

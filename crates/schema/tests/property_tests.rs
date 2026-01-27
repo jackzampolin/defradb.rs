@@ -407,7 +407,7 @@ proptest! {
     #[test]
     fn id_field_naming_consistent(field_name in "[a-z]{1,20}") {
         let id_name = CollectionVersion::relation_id_field_name(&field_name);
-        prop_assert_eq!(id_name, format!("{}_id", field_name));
+        prop_assert_eq!(id_name, format!("_{}ID", field_name));
     }
 
     /// Property: Non-array relation fields always get _id fields
@@ -431,7 +431,7 @@ proptest! {
         })
         .unwrap();
 
-        let expected_id_name = format!("{}_id", field_name);
+        let expected_id_name = format!("_{}ID", field_name);
         let id_field = coll.field_by_name(&expected_id_name);
         prop_assert!(id_field.is_some(), "Expected _id field for non-array relation");
     }
@@ -452,7 +452,7 @@ proptest! {
 
         coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
-        let expected_id_name = format!("{}_id", field_name);
+        let expected_id_name = format!("_{}ID", field_name);
         let id_field = coll.field_by_name(&expected_id_name);
         prop_assert!(id_field.is_none(), "Array relations should NOT get _id fields");
     }
@@ -477,7 +477,7 @@ proptest! {
 
         coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
-        let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
+        let id_field = coll.field_by_name(&format!("_{}ID", field_name)).unwrap();
         prop_assert_eq!(id_field.is_primary, is_primary, "is_primary should be inherited");
     }
 
@@ -493,7 +493,7 @@ proptest! {
 
         coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
-        let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
+        let id_field = coll.field_by_name(&format!("_{}ID", field_name)).unwrap();
         prop_assert_eq!(id_field.crdt_type, CType::LwwRegister);
     }
 
@@ -543,7 +543,7 @@ proptest! {
 
         coll.add_relation_id_fields(|| "gen-999".to_string()).unwrap();
 
-        let id_field = coll.field_by_name(&format!("{}_id", field_name)).unwrap();
+        let id_field = coll.field_by_name(&format!("_{}ID", field_name)).unwrap();
         prop_assert_eq!(
             id_field.relation_name.clone(),
             Some(relation_name),

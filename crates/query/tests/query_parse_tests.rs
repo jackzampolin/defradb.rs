@@ -550,3 +550,67 @@ fn test_parse_bare_query_without_explain() {
         _ => panic!("Expected query"),
     }
 }
+
+#[test]
+fn test_parse_top_level_aggregate() {
+    use query::mapper::Requestable;
+
+    let query = "{ _avg(Users: {field: Age}) }";
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(selects.len(), 1);
+    assert_eq!(
+        selects[0].collection_name, "Users",
+        "Collection name should be extracted from aggregate target"
+    );
+    assert_eq!(selects[0].fields.len(), 1);
+
+    // The field should be an aggregate
+    match &selects[0].fields[0] {
+        Requestable::Aggregate(agg) => {
+            assert_eq!(agg.aggregate_type, query::mapper::AggregateType::Average);
+            assert_eq!(agg.targets.len(), 1);
+            assert_eq!(agg.targets[0].host_name, "Users");
+            assert_eq!(agg.targets[0].field_name, Some("Age".to_string()));
+        }
+        _ => panic!("Expected aggregate"),
+    }
+}
+
+#[test]
+fn test_parse_top_level_count() {
+    use query::mapper::Requestable;
+
+    let query = "{ _count(Users: {}) }";
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(selects.len(), 1);
+    assert_eq!(selects[0].collection_name, "Users");
+
+    match &selects[0].fields[0] {
+        Requestable::Aggregate(agg) => {
+            assert_eq!(agg.aggregate_type, query::mapper::AggregateType::Count);
+            assert_eq!(agg.targets.len(), 1);
+            assert_eq!(agg.targets[0].host_name, "Users");
+        }
+        _ => panic!("Expected aggregate"),
+    }
+}
+
+#[test]
+fn test_parse_top_level_aggregate_with_alias() {
+    use query::mapper::Requestable;
+
+    let query = "{ average: _avg(Users: {field: Age}) }";
+    let selects = parse_query(query).unwrap();
+
+    assert_eq!(selects.len(), 1);
+    assert_eq!(selects[0].collection_name, "Users");
+
+    match &selects[0].fields[0] {
+        Requestable::Aggregate(agg) => {
+            assert_eq!(agg.alias, Some("average".to_string()));
+        }
+        _ => panic!("Expected aggregate"),
+    }
+}

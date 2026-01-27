@@ -133,7 +133,7 @@ fn make_posts_collection() -> CollectionVersion {
                 .with_relation_name("author_posts")
                 .as_primary(),
             // Auto-generated FK field
-            FieldDescription::new("4", "author_id", FieldKind::doc_id())
+            FieldDescription::new("4", "_authorID", FieldKind::doc_id())
                 .with_relation_name("author_posts")
                 .as_primary(),
         ],
@@ -156,7 +156,7 @@ fn make_posts_mapping() -> DocumentMapping {
     m.add(0, "_docID");
     m.add(1, "title");
     m.add(2, "author");
-    m.add(3, "author_id");
+    m.add(3, "_authorID");
     m.add_render_key(0, "_docID");
     m.add_render_key(1, "title");
     m
@@ -188,7 +188,7 @@ fn make_post_docs() -> Vec<Doc> {
             Some(json!("post-1")),
             Some(json!("Alice's First Post")),
             None,                  // author object (filled by join)
-            Some(json!("user-1")), // author_id FK
+            Some(json!("user-1")), // _authorID FK
         ]),
         Doc::with_fields(vec![
             Some(json!("post-2")),
@@ -212,7 +212,7 @@ fn test_join_side_new() {
 
     let side = JoinSide::new(posts, relation_field, 2).unwrap();
 
-    // Should find the author_id field at index 3
+    // Should find the _authorID field at index 3
     assert_eq!(side.relation_id_field_index(), Some(3));
 }
 
@@ -230,7 +230,7 @@ fn test_join_side_array_no_fk_index() {
 #[tokio::test]
 async fn test_type_join_one_primary_side() {
     // Query: Posts { author { name } }
-    // Post.author is the primary side (has author_id FK)
+    // Post.author is the primary side (has _authorID FK)
 
     let posts_collection = make_posts_collection();
     let users_collection = make_users_collection();
@@ -561,7 +561,7 @@ fn make_books_collection() -> CollectionVersion {
                 .with_relation_name("author_book")
                 .as_primary(),
             // Auto-generated FK field
-            FieldDescription::new("4", "author_id", FieldKind::doc_id())
+            FieldDescription::new("4", "_authorID", FieldKind::doc_id())
                 .with_relation_name("author_book")
                 .as_primary(),
         ],
@@ -584,7 +584,7 @@ fn make_books_mapping() -> DocumentMapping {
     m.add(0, "_docID");
     m.add(1, "title");
     m.add(2, "author");
-    m.add(3, "author_id");
+    m.add(3, "_authorID");
     m.add_render_key(0, "_docID");
     m.add_render_key(1, "title");
     m
@@ -594,7 +594,7 @@ fn make_books_mapping() -> DocumentMapping {
 async fn test_type_join_one_inverted_secondary_side() {
     // Query: Authors { book { title } }
     // Author.book is the SECONDARY side (no FK - inverted join)
-    // Book has author_id FK pointing to Author
+    // Book has _authorID FK pointing to Author
 
     let authors_collection = make_authors_collection();
     let books_collection = make_books_collection();
@@ -624,7 +624,7 @@ async fn test_type_join_one_inverted_secondary_side() {
             Some(json!("book-1")),
             Some(json!("Harry Potter")),
             None,                    // author object
-            Some(json!("author-1")), // author_id FK
+            Some(json!("author-1")), // _authorID FK
         ]),
         Doc::with_fields(vec![
             Some(json!("book-2")),
@@ -818,7 +818,7 @@ fn make_employees_collection() -> CollectionVersion {
                 .with_relation_name("employee_manager")
                 .as_primary(),
             // FK field for manager
-            FieldDescription::new("4", "manager_id", FieldKind::doc_id())
+            FieldDescription::new("4", "_managerID", FieldKind::doc_id())
                 .with_relation_name("employee_manager")
                 .as_primary(),
         ],
@@ -830,7 +830,7 @@ fn make_employees_mapping() -> DocumentMapping {
     m.add(0, "_docID");
     m.add(1, "name");
     m.add(2, "manager");
-    m.add(3, "manager_id");
+    m.add(3, "_managerID");
     m.add_render_key(0, "_docID");
     m.add_render_key(1, "name");
     m.add_render_key(2, "manager");
@@ -1465,11 +1465,11 @@ fn test_join_side_missing_fk_error() {
         vec![
             FieldDescription::new("1", "_docID", FieldKind::doc_id()),
             FieldDescription::new("2", "title", FieldKind::string()),
-            // Non-array relation field, but NO author_id FK field!
+            // Non-array relation field, but NO _authorID FK field!
             FieldDescription::new("3", "author", FieldKind::relation("users", false))
                 .with_relation_name("author_posts")
                 .as_primary(),
-            // Missing: author_id field
+            // Missing: _authorID field
         ],
     );
 
@@ -1493,7 +1493,7 @@ fn test_join_side_missing_fk_error() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("missing its FK field"));
-    assert!(err.contains("author_id"));
+    assert!(err.contains("_authorID"));
 }
 
 #[test]
@@ -1529,7 +1529,7 @@ fn test_join_direction_enum() {
     // Verify direction is Primary with correct FK index
     match &join.direction() {
         JoinDirection::Primary { parent_fk_index } => {
-            assert_eq!(*parent_fk_index, 3); // author_id is at index 3
+            assert_eq!(*parent_fk_index, 3); // _authorID is at index 3
         }
         JoinDirection::Inverted => {
             panic!("Expected Primary direction, got Inverted");

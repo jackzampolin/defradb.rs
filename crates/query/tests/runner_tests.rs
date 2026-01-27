@@ -692,6 +692,65 @@ async fn test_group_by_with_count() {
     assert_eq!(bob["_count"].as_i64(), Some(1));
 }
 
+// Test _group field with nested selection
+#[tokio::test]
+async fn test_group_by_with_group_field() {
+    let fetcher = MockFetcher::new();
+
+    let mut doc1 = Document::new();
+    doc1.set("name", "Alice");
+    doc1.set("age", 30i64);
+    doc1.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc1);
+
+    let mut doc2 = Document::new();
+    doc2.set("name", "Bob");
+    doc2.set("age", 25i64);
+    doc2.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc2);
+
+    let mut doc3 = Document::new();
+    doc3.set("name", "Alice");
+    doc3.set("age", 35i64);
+    doc3.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc3);
+
+    let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+    let result = runner
+        .execute_query("{ Users(groupBy: [name]) { name _group { age } } }")
+        .await
+        .unwrap();
+
+    let users = result["Users"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "Should have 2 groups");
+
+    // Find Alice's group
+    let alice = users
+        .iter()
+        .find(|u| u["name"].as_str() == Some("Alice"))
+        .unwrap();
+    let alice_group = alice["_group"].as_array().unwrap();
+    assert_eq!(alice_group.len(), 2, "Alice's group should have 2 docs");
+
+    // Verify the ages in Alice's group
+    let ages: Vec<i64> = alice_group
+        .iter()
+        .map(|g| g["age"].as_i64().unwrap())
+        .collect();
+    assert!(ages.contains(&30), "Alice's group should have age 30");
+    assert!(ages.contains(&35), "Alice's group should have age 35");
+
+    // Find Bob's group
+    let bob = users
+        .iter()
+        .find(|u| u["name"].as_str() == Some("Bob"))
+        .unwrap();
+    let bob_group = bob["_group"].as_array().unwrap();
+    assert_eq!(bob_group.len(), 1, "Bob's group should have 1 doc");
+    assert_eq!(bob_group[0]["age"].as_i64(), Some(25));
+}
+
 // =============================================================================
 // Alias Tests
 // =============================================================================
@@ -3768,5 +3827,340 @@ async fn test_multi_level_relation_filter() {
         author.get("name").unwrap().as_str().unwrap(),
         "John Grisham",
         "Author should be John Grisham"
+    );
+}
+
+// =============================================================================
+// Secondary Relation ID Field Tests
+// =============================================================================
+
+/// Test querying a secondary relation ID field without the relation object.
+/// This matches the failing FFI test: TestQueryOneToOne_WithRelationIDFromSecondarySide
+///
+/// Schema:
+/// - Book { name, author } where author is SECONDARY (no @primary)
+/// - Author { name, published @primary } where published is PRIMARY
+///
+/// When querying `Book { name _authorID }`, the `_authorID` should be populated
+/// by doing a reverse lookup: find Author where _publishedID = Book._docID
+#[tokio::test]
+async fn test_secondary_relation_id_field_without_relation_object() {
+    let fetcher = MockFetcher::new();
+
+    // Create Book collection - author is SECONDARY (no FK stored in Book)
+    // The _authorID field exists in the schema but is NOT primary
+    let book_collection = CollectionVersion::new(
+        "Book",
+        "v1",
+        "coll-book",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // author relation field - SECONDARY (is_primary = false)
+            FieldDescription::new("", "author", FieldKind::relation("Author", false))
+                .with_relation_name("published"),
+            // _authorID field for the relation ID - also SECONDARY
+            FieldDescription::new("", "_authorID", FieldKind::doc_id())
+                .with_relation_name("published"),
+        ],
+    );
+
+    // Create Author collection - published is PRIMARY (has FK)
+    let author_collection = CollectionVersion::new(
+        "Author",
+        "v1",
+        "coll-author",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // published relation field - PRIMARY (is_primary = true)
+            FieldDescription::new("3", "published", FieldKind::relation("Book", false))
+                .with_relation_name("published")
+                .as_primary(),
+            // _publishedID FK field - also PRIMARY
+            FieldDescription::new("4", "_publishedID", FieldKind::doc_id())
+                .with_relation_name("published")
+                .as_primary(),
+        ],
+    );
+
+    // Add Book document
+    let mut book = Document::new();
+    book.set("_docID", "book-1");
+    book.set("name", "Painted House");
+    fetcher.add_doc("Book", book);
+
+    // Add Author document with FK pointing to the book
+    let mut author = Document::new();
+    author.set("_docID", "author-1");
+    author.set("name", "John Grisham");
+    author.set("_publishedID", "book-1"); // FK points to book-1
+    fetcher.add_doc("Author", author);
+
+    let runner = QueryRunner::new(fetcher, vec![book_collection, author_collection]);
+
+    // Query only the relation ID field, not the relation object
+    let result = runner
+        .execute_query("{ Book { name _authorID } }")
+        .await
+        .unwrap();
+
+    eprintln!("Result: {}", serde_json::to_string_pretty(&result).unwrap());
+
+    let books = result.get("Book").unwrap().as_array().unwrap();
+    assert_eq!(books.len(), 1);
+
+    let book = &books[0];
+    assert_eq!(book.get("name").unwrap(), "Painted House");
+
+    // _authorID should be populated with the Author's _docID
+    // This requires a reverse lookup: find Author where _publishedID = Book._docID
+    let author_id = book.get("_authorID");
+    assert!(
+        author_id.is_some(),
+        "_authorID field should be present in result"
+    );
+    assert_eq!(
+        author_id.unwrap(),
+        "author-1",
+        "_authorID should be the Author's _docID from reverse lookup"
+    );
+}
+
+/// Test compound filter with both scalar and relation conditions.
+/// This matches the failing FFI test: TestQueryOneToOneWithCompoundAndFilterThatIncludesRelation
+///
+/// Schema:
+/// - Book { name, rating, author } where author is SECONDARY
+/// - Author { name, age, verified, published @primary }
+///
+/// Query: Book(filter: {_and: [{rating: {_geq: 4.0}}, {author: {verified: {_eq: true}}}]}) { name rating }
+/// Expected: Only books where rating >= 4.0 AND author.verified == true
+#[tokio::test]
+async fn test_compound_filter_with_relation_condition() {
+    let fetcher = MockFetcher::new();
+
+    // Create Book collection - author is SECONDARY
+    let book_collection = CollectionVersion::new(
+        "Book",
+        "v1",
+        "coll-book",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "rating", FieldKind::float64()),
+            // author relation field - SECONDARY (is_primary = false)
+            FieldDescription::new("", "author", FieldKind::relation("Author", false))
+                .with_relation_name("published"),
+            // _authorID field for the relation ID - also SECONDARY
+            FieldDescription::new("", "_authorID", FieldKind::doc_id())
+                .with_relation_name("published"),
+        ],
+    );
+
+    // Create Author collection - published is PRIMARY
+    let author_collection = CollectionVersion::new(
+        "Author",
+        "v1",
+        "coll-author",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "age", FieldKind::int()),
+            FieldDescription::new("4", "verified", FieldKind::bool()),
+            // published relation field - PRIMARY
+            FieldDescription::new("5", "published", FieldKind::relation("Book", false))
+                .with_relation_name("published")
+                .as_primary(),
+            // _publishedID FK field - also PRIMARY
+            FieldDescription::new("6", "_publishedID", FieldKind::doc_id())
+                .with_relation_name("published")
+                .as_primary(),
+        ],
+    );
+
+    // Add Books
+    let mut book1 = Document::new();
+    book1.set("_docID", "book-1");
+    book1.set("name", "Painted House");
+    book1.set("rating", 4.9f64);
+    fetcher.add_doc("Book", book1);
+
+    let mut book2 = Document::new();
+    book2.set("_docID", "book-2");
+    book2.set("name", "Some Book");
+    book2.set("rating", 4.0f64);
+    fetcher.add_doc("Book", book2);
+
+    let mut book3 = Document::new();
+    book3.set("_docID", "book-3");
+    book3.set("name", "Low Rated Book");
+    book3.set("rating", 3.0f64);
+    fetcher.add_doc("Book", book3);
+
+    // Add Authors with verified status
+    let mut author1 = Document::new();
+    author1.set("_docID", "author-1");
+    author1.set("name", "John Grisham");
+    author1.set("age", 65i64);
+    author1.set("verified", true);
+    author1.set("_publishedID", "book-1"); // FK points to Painted House
+    fetcher.add_doc("Author", author1);
+
+    let mut author2 = Document::new();
+    author2.set("_docID", "author-2");
+    author2.set("name", "Some Writer");
+    author2.set("age", 45i64);
+    author2.set("verified", false); // NOT verified
+    author2.set("_publishedID", "book-2"); // FK points to Some Book
+    fetcher.add_doc("Author", author2);
+
+    let mut author3 = Document::new();
+    author3.set("_docID", "author-3");
+    author3.set("name", "Another Writer");
+    author3.set("age", 30i64);
+    author3.set("verified", true); // verified but low rated book
+    author3.set("_publishedID", "book-3"); // FK points to Low Rated Book
+    fetcher.add_doc("Author", author3);
+
+    let runner = QueryRunner::new(fetcher, vec![book_collection, author_collection]);
+
+    // Compound filter: rating >= 4.0 AND author.verified == true
+    let result = runner
+        .execute_query(
+            r#"{ Book(filter: {_and: [{rating: {_ge: 4.0}}, {author: {verified: {_eq: true}}}]}) { name rating } }"#,
+        )
+        .await
+        .unwrap();
+
+    eprintln!("Result: {}", serde_json::to_string_pretty(&result).unwrap());
+
+    let books = result.get("Book").unwrap().as_array().unwrap();
+
+    // Expected: Only "Painted House" because:
+    // - rating 4.9 >= 4.0 ✓
+    // - author (John Grisham) verified = true ✓
+    //
+    // "Some Book" is excluded because author.verified = false
+    // "Low Rated Book" is excluded because rating 3.0 < 4.0
+    assert_eq!(
+        books.len(),
+        1,
+        "Should return 1 book matching both conditions"
+    );
+    assert_eq!(books[0].get("name").unwrap(), "Painted House");
+}
+
+#[tokio::test]
+async fn test_order_by_relation_field_strips_ordering_only_fields() {
+    // Test: ORDER BY author.verified should work correctly, but the `verified` field
+    // should NOT appear in the output when not explicitly selected.
+    // Query: { Book(order: {author: {verified: ASC}}) { name author { name } } }
+
+    let fetcher = MockFetcher::new();
+
+    // Create Book collection - author is SECONDARY (looks up Author via reverse FK)
+    let book_collection = CollectionVersion::new(
+        "Book",
+        "v1",
+        "coll-book",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // author relation field - SECONDARY (is_primary = false)
+            FieldDescription::new("", "author", FieldKind::relation("Author", false))
+                .with_relation_name("published"),
+            // _authorID field for the relation ID - also SECONDARY
+            FieldDescription::new("", "_authorID", FieldKind::doc_id())
+                .with_relation_name("published"),
+        ],
+    );
+
+    // Create Author collection - published is PRIMARY
+    let author_collection = CollectionVersion::new(
+        "Author",
+        "v1",
+        "coll-author",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "verified", FieldKind::bool()),
+            // published relation field - PRIMARY
+            FieldDescription::new("4", "published", FieldKind::relation("Book", false))
+                .with_relation_name("published")
+                .as_primary(),
+            // _publishedID FK field - also PRIMARY
+            FieldDescription::new("5", "_publishedID", FieldKind::doc_id())
+                .with_relation_name("published")
+                .as_primary(),
+        ],
+    );
+
+    // Add Books
+    let mut book1 = Document::new();
+    book1.set("_docID", "book-1");
+    book1.set("name", "Book One");
+    fetcher.add_doc("Book", book1);
+
+    let mut book2 = Document::new();
+    book2.set("_docID", "book-2");
+    book2.set("name", "Book Two");
+    fetcher.add_doc("Book", book2);
+
+    // Add Authors with different verified status
+    let mut author1 = Document::new();
+    author1.set("_docID", "author-1");
+    author1.set("name", "Verified Author");
+    author1.set("verified", true);
+    author1.set("_publishedID", "book-1");
+    fetcher.add_doc("Author", author1);
+
+    let mut author2 = Document::new();
+    author2.set("_docID", "author-2");
+    author2.set("name", "Unverified Author");
+    author2.set("verified", false);
+    author2.set("_publishedID", "book-2");
+    fetcher.add_doc("Author", author2);
+
+    let runner = QueryRunner::new(fetcher, vec![book_collection, author_collection]);
+
+    // Order by author.verified ASC - should sort unverified (false) before verified (true)
+    // but the `verified` field should NOT appear in the output
+    let result = runner
+        .execute_query(r#"{ Book(order: {author: {verified: ASC}}) { name author { name } } }"#)
+        .await
+        .unwrap();
+
+    eprintln!("Result: {}", serde_json::to_string_pretty(&result).unwrap());
+
+    let books = result.get("Book").unwrap().as_array().unwrap();
+    assert_eq!(books.len(), 2);
+
+    // First book should be Book Two (author.verified = false, sorts first in ASC)
+    let first_book = &books[0];
+    assert_eq!(first_book.get("name").unwrap(), "Book Two");
+
+    // Second book should be Book One (author.verified = true)
+    let second_book = &books[1];
+    assert_eq!(second_book.get("name").unwrap(), "Book One");
+
+    // CRITICAL: The `verified` field should NOT appear in the author object
+    // because it was only added for ordering, not selected
+    let first_author = first_book.get("author").unwrap().as_object().unwrap();
+    assert!(
+        !first_author.contains_key("verified"),
+        "The 'verified' field should NOT appear in output when not selected. Found: {:?}",
+        first_author
+    );
+    assert!(
+        first_author.contains_key("name"),
+        "The 'name' field should appear (it was selected)"
+    );
+
+    let second_author = second_book.get("author").unwrap().as_object().unwrap();
+    assert!(
+        !second_author.contains_key("verified"),
+        "The 'verified' field should NOT appear in output when not selected. Found: {:?}",
+        second_author
     );
 }

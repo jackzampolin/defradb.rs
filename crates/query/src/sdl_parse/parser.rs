@@ -1102,12 +1102,12 @@ impl<'a> SdlParser<'a> {
                 field = field.with_relation_name(relation_name.clone());
 
                 // For single-object relations (not arrays), Go automatically creates an
-                // implicit {field}_id field to store the foreign key.
+                // implicit _{field}ID field to store the foreign key.
                 // The FK field has the SAME is_primary status as the main relation field:
                 // - If main field is PRIMARY, FK field is also PRIMARY (non-empty FieldID)
                 // - If main field is SECONDARY, FK field is also SECONDARY (empty FieldID)
                 if creates_fk_field {
-                    let id_field_name = format!("{}_id", parsed_field.name);
+                    let id_field_name = format!("_{}ID", parsed_field.name);
                     let id_field_kind = FieldKind::doc_id();
                     let id_field_crdt = CType::LwwRegister;
 
@@ -3044,6 +3044,60 @@ mod tests {
         assert_eq!(
             users.collection_id, GO_EXPECTED_CID,
             "Collection CID should match Go DefraDB"
+        );
+    }
+
+    #[test]
+    fn test_secondary_relation_is_primary_false() {
+        // This tests the exact schema from the failing FFI test
+        // TestQueryOneToOne_WithRelationIDFromSecondarySide
+        let sdl = r#"
+            type Book {
+                name: String
+                author: Author
+            }
+            type Author {
+                name: String
+                published: Book @primary
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+
+        let book = collections.iter().find(|c| c.name == "Book").unwrap();
+        let author_field = book.field_by_name("author").unwrap();
+
+        // Book.author should be SECONDARY (is_primary = false) because
+        // Author.published has @primary directive
+        assert!(
+            !author_field.is_primary,
+            "Book.author should be secondary (is_primary=false) because Author.published has @primary"
+        );
+
+        // Verify _authorID field exists on Book (created for all single-object relations)
+        let author_id_field = book.field_by_name("_authorID");
+        assert!(
+            author_id_field.is_some(),
+            "Book should have implicit _authorID field"
+        );
+
+        // _authorID should also be secondary (empty field_id)
+        let author_id_field = author_id_field.unwrap();
+        assert!(
+            author_id_field.id.is_empty(),
+            "_authorID should have empty field_id (secondary)"
+        );
+        assert!(
+            !author_id_field.is_primary,
+            "_authorID should be secondary (is_primary=false)"
+        );
+
+        // Verify Author.published is primary
+        let author = collections.iter().find(|c| c.name == "Author").unwrap();
+        let published_field = author.field_by_name("published").unwrap();
+        assert!(
+            published_field.is_primary,
+            "Author.published should be primary (has @primary directive)"
         );
     }
 }

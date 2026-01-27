@@ -98,8 +98,14 @@ fn parse_selection_to_selects<'a>(
 ) -> Result<()> {
     match selection {
         Selection::Field(field) => {
-            let select = parse_field_to_select(field, variables, fragments, visiting)?;
-            selects.push(select);
+            // Check if this is a top-level aggregate (e.g., _avg(Users: {field: Age}))
+            if let Some(agg_type) = AggregateType::parse(&field.name) {
+                let select = parse_top_level_aggregate(field, agg_type, variables)?;
+                selects.push(select);
+            } else {
+                let select = parse_field_to_select(field, variables, fragments, visiting)?;
+                selects.push(select);
+            }
         }
         Selection::FragmentSpread(spread) => {
             // Check for circular fragment reference
@@ -1036,19 +1042,13 @@ fn parse_aggregate_field(
 
     // Create the appropriate aggregate
     let aggregate = if !relation_targets.is_empty() {
-        // Relation aggregate mode
-        let mut agg = match agg_type {
-            AggregateType::Count => Aggregate::count(),
-            AggregateType::Sum => Aggregate::sum(AggregateTarget::new("")),
-            AggregateType::Average => Aggregate::avg(AggregateTarget::new("")),
-            AggregateType::Min => Aggregate::min(AggregateTarget::new("")),
-            AggregateType::Max => Aggregate::max(AggregateTarget::new("")),
-        };
-        // Add all relation targets
-        for target in relation_targets {
-            agg = agg.with_target(target);
+        // Relation aggregate mode - create aggregate with targets directly (no empty initial target)
+        Aggregate {
+            aggregate_type: agg_type,
+            targets: relation_targets,
+            filter: None,
+            alias: None,
         }
-        agg
     } else {
         // Simple field aggregate mode
         match agg_type {
@@ -1088,6 +1088,56 @@ fn parse_aggregate_field(
     };
 
     Ok(aggregate)
+}
+
+/// Parse a top-level aggregate query (e.g., `{ _avg(Users: {field: Age}) }`).
+///
+/// Top-level aggregates are different from nested aggregates in that:
+/// - The aggregate function name is the top-level field
+/// - Arguments are collection names with their aggregate configuration
+/// - The result is wrapped in a Select with the collection as the target
+fn parse_top_level_aggregate(
+    field: &Field<'_, String>,
+    agg_type: AggregateType,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Select> {
+    let mut aggregate = parse_aggregate_field(field, agg_type, variables)?;
+
+    // Set alias if provided
+    if let Some(ref a) = field.alias {
+        aggregate = aggregate.with_alias(a.clone());
+    }
+
+    // Get the collection name from the first target
+    let collection_name = aggregate
+        .targets
+        .first()
+        .map(|t| t.host_name.clone())
+        .unwrap_or_else(|| String::new());
+
+    // Create a Select that wraps this aggregate
+    // The field name should be the aggregate name (e.g., "_avg") so the response
+    // key is correct (e.g., {"_avg": 29} not {"Users": 29})
+    let mut select = Select::new(&collection_name);
+    let agg_name = agg_type.as_str();
+    if let Some(ref a) = field.alias {
+        // If aliased, use alias as the output name: { average: _avg(...) } -> {"average": ...}
+        select.field = SelectField::with_alias(agg_name, a.clone());
+    } else {
+        // Otherwise use the aggregate name: { _avg(...) } -> {"_avg": ...}
+        select.field = SelectField::new(agg_name);
+    }
+
+    // Add to document mapping
+    let index = select.document_mapping.next_index();
+    select.document_mapping.add(index, agg_name);
+    select
+        .document_mapping
+        .add_render_key(index, aggregate.output_name());
+
+    select.fields.push(Requestable::Aggregate(aggregate));
+
+    Ok(select)
 }
 
 /// Parse docIDs argument into vector of strings.

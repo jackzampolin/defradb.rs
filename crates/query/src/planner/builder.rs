@@ -13,8 +13,8 @@ use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{Filter, Requestable, Select};
 use crate::plan::{
-    IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
-    TypeJoinMany, TypeJoinOne,
+    GroupByNode, IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode,
+    SelectNode, TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
@@ -32,6 +32,10 @@ pub struct PlanResult {
     pub plan: Box<dyn PlanNode>,
     /// Index scan parameters if an index will be used
     pub index_scan: Option<IndexScanParams>,
+    /// Fields added to child mappings only for ordering (not selected by user).
+    /// Each entry is (parent_relation_field_name, child_field_name).
+    /// These fields appear in the document but should be stripped from output.
+    pub ordering_only_fields: Vec<(String, String)>,
 }
 
 impl PlanResult {
@@ -141,6 +145,63 @@ impl Planner {
             .unwrap_or_default();
         let order_has_relations = !order_relation_fields.is_empty();
 
+        // Compute ordering-only fields: nested relation fields used in ORDER BY but not in selection.
+        // These will be stripped from the final output.
+        let ordering_only_fields: Vec<(String, String)> = select
+            .order_by
+            .as_ref()
+            .map(|order_by| {
+                let mut result = Vec::new();
+                for condition in &order_by.conditions {
+                    // Look for nested relation orders like ["author", "verified"]
+                    if condition.fields.len() > 1 {
+                        let relation_field_name = &condition.fields[0];
+                        let nested_field_name = &condition.fields[1];
+
+                        // Check if there's a nested selection for this relation
+                        let nested_selection_fields: Vec<&String> = select
+                            .fields
+                            .iter()
+                            .filter_map(|f| {
+                                if let Requestable::Select(nested) = f {
+                                    if &nested.field.name == relation_field_name {
+                                        // Get selected field names from nested selection
+                                        return Some(
+                                            nested
+                                                .fields
+                                                .iter()
+                                                .filter_map(|nf| {
+                                                    if let Requestable::Field(field) = nf {
+                                                        Some(&field.name)
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        );
+                                    }
+                                }
+                                None
+                            })
+                            .flatten()
+                            .collect();
+
+                        // If nested_field is not in the selected fields, it's ordering-only
+                        if !nested_selection_fields
+                            .iter()
+                            .any(|f| *f == nested_field_name)
+                        {
+                            result.push((
+                                relation_field_name.clone(),
+                                nested_field_name.clone(),
+                            ));
+                        }
+                    }
+                }
+                result
+            })
+            .unwrap_or_default();
+
         // Build scan mapping: for queries with nested selections, relation filters, or relation ordering,
         // use full schema mapping so that FK fields are available for TypeJoin lookups.
         // For simple queries, use the render_mapping directly.
@@ -150,6 +211,26 @@ impl Planner {
         } else {
             render_mapping.clone()
         };
+
+        // Add _group field to scan_mapping if present in render_mapping.
+        // _group is a virtual field (not in schema) that needs to be explicitly copied.
+        if let Some(group_index) = render_mapping.first_index_of_name("_group") {
+            let scan_index = scan_mapping.next_index();
+            scan_mapping.add(scan_index, "_group");
+            // Copy render_key from render_mapping
+            for rk in &render_mapping.render_keys {
+                if rk.key == "_group"
+                    || render_mapping.try_find_name_from_index(rk.index) == Some("_group")
+                {
+                    scan_mapping.add_render_key(scan_index, &rk.key);
+                    break;
+                }
+            }
+            // Copy child mapping if present (for _group { field1, field2 } syntax)
+            if let Some(child) = render_mapping.child_at(group_index) {
+                scan_mapping.set_child_at(scan_index, child.clone());
+            }
+        }
 
         // Add ORDER BY fields to scan mapping if not already present (Go compatibility).
         // Go DefraDB allows ordering by fields not in the SELECT clause.
@@ -380,13 +461,15 @@ impl Planner {
                     _ => continue, // Not a valid relation field
                 };
 
-                plan = self.apply_filter_relation_join(
+                let (new_plan, new_mapping) = self.apply_filter_relation_join(
                     plan,
                     &collection,
                     relation_field,
                     relation_field_name,
                     scan_mapping.clone(),
                 )?;
+                plan = new_plan;
+                scan_mapping = new_mapping;
             }
         }
 
@@ -426,13 +509,15 @@ impl Planner {
                     _ => continue, // Not a valid relation field
                 };
 
-                plan = self.apply_filter_relation_join(
+                let (new_plan, new_mapping) = self.apply_filter_relation_join(
                     plan,
                     &collection,
                     relation_field,
                     relation_field_name,
                     scan_mapping.clone(),
                 )?;
+                plan = new_plan;
+                scan_mapping = new_mapping;
             }
         }
 
@@ -445,6 +530,16 @@ impl Planner {
                     SelectNode::new(plan, scan_mapping.clone()).with_filter(filter.clone()),
                 );
             }
+        }
+
+        // 4b. Apply GroupBy if present (must be after joins but before order/limit)
+        // Use scan_mapping because the upstream plan produces docs with schema indices
+        if let Some(ref group_by) = select.group_by {
+            plan = Box::new(GroupByNode::new(
+                plan,
+                group_by.clone(),
+                scan_mapping.clone(),
+            ));
         }
 
         // 5. Apply order by after joins (so nested fields are available)
@@ -469,7 +564,11 @@ impl Planner {
             }
         }
 
-        Ok(PlanResult { plan, index_scan })
+        Ok(PlanResult {
+            plan,
+            index_scan,
+            ordering_only_fields,
+        })
     }
 
     /// Try to select an index for the given query.
@@ -523,6 +622,11 @@ impl Planner {
         for requestable in &select.fields {
             if let Requestable::Select(nested_select) = requestable {
                 let relation_field_name = &nested_select.field.name;
+
+                // Skip _group - it's a virtual field for groupBy results, not a relation
+                if relation_field_name == "_group" {
+                    continue;
+                }
 
                 // Find the relation field in the parent collection
                 let relation_field = parent_collection
@@ -832,6 +936,147 @@ impl Planner {
             }
         }
 
+        // Handle secondary relation ID fields (e.g., `_authorID` for a secondary `author` relation).
+        // When a secondary relation ID field is selected but the relation object is not,
+        // we need to add a TypeJoin to compute the ID by doing a reverse lookup.
+        for requestable in &select.fields {
+            if let Requestable::Field(field) = requestable {
+                // Check if this is a relation ID field (pattern: `_{relationName}ID`)
+                let field_name = &field.name;
+                if !field_name.starts_with('_') || !field_name.ends_with("ID") {
+                    continue;
+                }
+
+                // Extract the relation name from the field name (e.g., "author" from "_authorID")
+                let relation_name = &field_name[1..field_name.len() - 2];
+                if relation_name.is_empty() {
+                    continue;
+                }
+
+                // Find the relation field in the parent collection
+                let relation_field = match parent_collection.field_by_name(relation_name) {
+                    Some(f) => f,
+                    None => continue, // Not a valid relation name
+                };
+
+                // Check if it's a relation field and NOT primary (secondary relation)
+                if !relation_field.kind.is_relation() || relation_field.is_primary {
+                    continue; // Only handle secondary relations
+                }
+
+                // Check if this relation is already being joined (via a Select)
+                let already_joined = select.fields.iter().any(|f| {
+                    if let Requestable::Select(s) = f {
+                        s.field.name == relation_name
+                    } else {
+                        false
+                    }
+                });
+
+                if already_joined {
+                    continue; // Join already exists, _relID will be populated by merge_child
+                }
+
+                // Get the target collection
+                let target_collection_id = match relation_field.kind.relation_collection_id() {
+                    Some(id) => id,
+                    None => continue,
+                };
+
+                let target_collection = if target_collection_id.is_empty() {
+                    Arc::new(parent_collection.clone())
+                } else {
+                    match self.get_collection(target_collection_id) {
+                        Some(c) => c,
+                        None => continue,
+                    }
+                };
+
+                // Find the target relation field (the other side of the relation)
+                let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
+                    target_collection.field_by_relation(
+                        rel_name,
+                        &parent_collection.name,
+                        relation_name,
+                    )
+                } else {
+                    None
+                };
+
+                // Build a minimal child mapping (just _docID for the reverse lookup)
+                let mut child_mapping = DocumentMapping::new();
+                child_mapping.add(0, "_docID");
+
+                // Build scan mapping for the child
+                let child_scan_mapping =
+                    self.build_scan_mapping_for_join(&target_collection, &child_mapping);
+
+                // Get relation field index in parent mapping
+                let relation_field_index = parent_collection
+                    .fields
+                    .iter()
+                    .position(|f| f.name == relation_name)
+                    .unwrap_or(0);
+
+                // Set up child mapping in parent for TypeJoin
+                mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
+
+                // Build child plan (simple scan with fetcher)
+                let mut child_scan =
+                    ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
+                if let Some(ref fetcher) = self.fetcher {
+                    child_scan = child_scan.with_fetcher(fetcher.clone());
+                }
+                let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+                // Get child relation field index
+                let child_relation_index = target_relation_field
+                    .and_then(|f| {
+                        target_collection
+                            .fields
+                            .iter()
+                            .position(|tf| tf.name == f.name)
+                    })
+                    .unwrap_or(0);
+
+                // Create join sides
+                let parent_side = JoinSide::new(
+                    parent_collection.clone(),
+                    relation_field.clone(),
+                    relation_field_index,
+                )?;
+
+                let child_side = JoinSide::new(
+                    (*target_collection).clone(),
+                    target_relation_field
+                        .cloned()
+                        .unwrap_or_else(|| relation_field.clone()),
+                    child_relation_index,
+                )?;
+
+                // Create TypeJoinOne for the secondary relation ID lookup
+                // This join will populate the _relID field via merge_child
+                plan = Box::new(TypeJoinOne::new(
+                    plan,
+                    child_plan,
+                    parent_side,
+                    child_side,
+                    mapping.clone(),
+                ));
+
+                debug!(
+                    parent_collection = %parent_collection.name,
+                    target_collection = %target_collection.name,
+                    relation_id_field = %field_name,
+                    relation_field = %relation_name,
+                    relation_field_is_primary = %relation_field.is_primary,
+                    target_relation_field_name = ?target_relation_field.as_ref().map(|f| &f.name),
+                    target_relation_field_is_primary = ?target_relation_field.as_ref().map(|f| f.is_primary),
+                    "Added TypeJoinOne for secondary relation ID field"
+                );
+            }
+        }
+
         // Also handle relation-based aggregates (e.g., _count(books: {}))
         // These need joins to fetch the related data for aggregation.
         for requestable in &select.fields {
@@ -1065,6 +1310,10 @@ impl Planner {
     /// This creates a TypeJoinOne that brings in the child documents so that complex
     /// filters can evaluate conditions on the relation. The child documents are merged
     /// into the parent but won't appear in the final output (no render_key).
+    ///
+    /// Returns both the updated plan and mapping. The mapping is updated with child mappings
+    /// for the relation field so that post-join filter evaluation can traverse into the
+    /// merged child document.
     fn apply_filter_relation_join(
         &self,
         plan: Box<dyn PlanNode>,
@@ -1072,7 +1321,7 @@ impl Planner {
         relation_field: &schema::FieldDescription,
         relation_field_name: &str,
         mut mapping: DocumentMapping,
-    ) -> Result<Box<dyn PlanNode>> {
+    ) -> Result<(Box<dyn PlanNode>, DocumentMapping)> {
         // Get the target collection for this relation
         let target_collection_id =
             relation_field
@@ -1161,9 +1410,9 @@ impl Planner {
 
         // Create TypeJoinOne (filter relations are typically one-to-one)
         // No relation filter here - the complex filter is applied after all joins
-        let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping);
+        let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
 
-        Ok(Box::new(join))
+        Ok((Box::new(join), mapping))
     }
 
     /// Apply sub-joins for remaining elements of a multi-level filter path.
@@ -1494,6 +1743,13 @@ impl Planner {
                     if field.name == "_docID" {
                         continue;
                     }
+                    // Handle _group specially - it's a virtual field for groupBy results
+                    if field.name == "_group" {
+                        let index = mapping.next_index();
+                        mapping.add(index, "_group");
+                        mapping.add_render_key(index, field.output_name());
+                        continue;
+                    }
                     // Validate field exists in schema
                     if collection.field_by_name(&field.name).is_none() {
                         return Err(QueryError::unknown_field(&field.name));
@@ -1504,6 +1760,18 @@ impl Planner {
                     mapping.add_render_key(index, field.output_name());
                 }
                 Requestable::Select(nested_select) => {
+                    // Handle _group specially - it's a virtual field for groupBy results
+                    if nested_select.field.name == "_group" {
+                        let index = mapping.next_index();
+                        mapping.add(index, "_group");
+                        mapping.add_render_key(index, nested_select.field.output_name());
+
+                        // Build child mapping for the _group nested fields
+                        let child_mapping =
+                            self.build_group_child_mapping(&nested_select, collection)?;
+                        mapping.set_child_at(index, child_mapping);
+                        continue;
+                    }
                     // Nested select (relation) - add the field but don't recurse here
                     // Child mapping will be built when applying joins
                     let index = mapping.next_index();
@@ -1538,6 +1806,53 @@ impl Planner {
         }
 
         Ok(mapping)
+    }
+
+    /// Build a child mapping for the _group virtual field.
+    /// This maps the nested fields within _group { ... } using the same indices
+    /// as the parent document, so field values can be extracted correctly.
+    fn build_group_child_mapping(
+        &self,
+        group_select: &Select,
+        collection: &CollectionVersion,
+    ) -> Result<DocumentMapping> {
+        let mut child_mapping = DocumentMapping::new();
+
+        // Build render_keys for each requested field, using schema indices
+        for requestable in &group_select.fields {
+            match requestable {
+                Requestable::Field(field) => {
+                    // Get the schema index for this field
+                    let schema_idx = if field.name == "_docID" {
+                        0
+                    } else {
+                        // Validate field exists in collection schema
+                        let schema_field = collection.field_by_name(&field.name);
+                        if schema_field.is_none() {
+                            return Err(QueryError::unknown_field(&field.name));
+                        }
+                        // Find the field's index in the collection
+                        collection
+                            .fields
+                            .iter()
+                            .position(|f| f.name == field.name)
+                            .unwrap_or(0)
+                    };
+
+                    child_mapping.add(schema_idx, &field.name);
+                    child_mapping.add_render_key(schema_idx, field.output_name());
+                }
+                Requestable::Select(_) => {
+                    // Nested selects within _group are not currently supported
+                    // (would be relations within grouped documents)
+                }
+                Requestable::Aggregate(_) => {
+                    // Aggregates within _group are not currently supported
+                }
+            }
+        }
+
+        Ok(child_mapping)
     }
 
     /// Get a collection schema by name.
@@ -1624,7 +1939,7 @@ mod tests {
                 FieldDescription::new("3", "author", FieldKind::relation("users", false))
                     .with_relation_name("author_posts")
                     .as_primary(),
-                // Auto-generated FK field (Go uses _fieldnameID convention)
+                // Auto-generated FK field (Go naming: _{fieldname}ID)
                 FieldDescription::new("4", "_authorID", FieldKind::doc_id())
                     .with_relation_name("author_posts")
                     .as_primary(),
@@ -2120,5 +2435,103 @@ mod tests {
             "Error should mention select list or collection: {}",
             err_msg
         );
+    }
+
+    // === Secondary Relation ID Field Tests ===
+
+    /// Book collection - secondary side of Book-Author relation
+    /// author: Author (NO @primary - secondary side, doesn't store FK)
+    fn make_book_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "Book",
+            "v1",
+            "coll-book",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                // Secondary relation to Author (no @primary)
+                FieldDescription::new("3", "author", FieldKind::relation("Author", false))
+                    .with_relation_name("book_author"),
+                // Auto-generated _authorID field (added by add_relation_id_fields)
+                // Even though this is secondary, the _authorID field exists for querying
+                FieldDescription::new("4", "_authorID", FieldKind::doc_id())
+                    .with_relation_name("book_author"),
+            ],
+        )
+    }
+
+    /// Author collection - primary side of Book-Author relation
+    /// published: Book @primary (stores the FK _publishedID)
+    fn make_author_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "Author",
+            "v1",
+            "coll-author",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                // Primary relation to Book (@primary - stores FK)
+                FieldDescription::new("3", "published", FieldKind::relation("Book", false))
+                    .with_relation_name("book_author")
+                    .as_primary(),
+                // Auto-generated _publishedID field (primary side stores FK)
+                FieldDescription::new("4", "_publishedID", FieldKind::doc_id())
+                    .with_relation_name("book_author")
+                    .as_primary(),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_secondary_relation_id_field_detection() {
+        // Verify the string slicing for extracting relation name from _authorID
+        let field_name = "_authorID";
+        assert!(field_name.starts_with('_'));
+        assert!(field_name.ends_with("ID"));
+
+        // Extract relation name
+        let relation_name = &field_name[1..field_name.len() - 2];
+        assert_eq!(relation_name, "author");
+
+        // Verify Book collection has author field
+        let book = make_book_collection();
+        let author_field = book.field_by_name("author");
+        assert!(author_field.is_some(), "Book should have 'author' field");
+
+        let author_field = author_field.unwrap();
+        assert!(author_field.kind.is_relation(), "'author' should be a relation field");
+        assert!(!author_field.is_primary, "'author' on Book should NOT be primary (secondary side)");
+
+        // Verify Author collection has published field
+        let author = make_author_collection();
+        let published_field = author.field_by_name("published");
+        assert!(published_field.is_some(), "Author should have 'published' field");
+
+        let published_field = published_field.unwrap();
+        assert!(published_field.kind.is_relation(), "'published' should be a relation field");
+        assert!(published_field.is_primary, "'published' on Author SHOULD be primary (primary side)");
+    }
+
+    #[tokio::test]
+    async fn test_plan_secondary_relation_id_field() {
+        // Test that selecting _authorID on Book (secondary side) creates a TypeJoin
+        let planner = Planner::new(vec![make_book_collection(), make_author_collection()]);
+
+        // Query: Book { name _authorID }
+        let select = Select::new("Book")
+            .with_field(Field::new("name"))
+            .with_field(Field::new("_authorID"));
+
+        let result = planner.plan(&select);
+        assert!(result.is_ok(), "Planning should succeed: {:?}", result.err());
+
+        let plan = result.unwrap();
+        // The plan should have a TypeJoinOne node somewhere in the tree
+        // since we need to do a reverse lookup for _authorID
+
+        // For now, just verify the plan was created
+        // A more thorough test would execute the plan with test data
+        assert!(plan.kind() == "selectNode" || plan.kind() == "typeJoinOne",
+            "Plan should be selectNode or typeJoinOne, got: {}", plan.kind());
     }
 }

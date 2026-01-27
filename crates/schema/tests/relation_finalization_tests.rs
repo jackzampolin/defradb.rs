@@ -63,10 +63,16 @@ mod one_to_one {
         let author_field = books.field_by_name("author").unwrap();
         assert!(author_field.is_primary, "author should be primary");
 
-        let author_id = books.field_by_name("author_id").unwrap();
-        assert!(author_id.is_primary, "author_id should also be primary");
-        assert_eq!(author_id.relation_name, Some("book_author".to_string()));
-        assert_eq!(author_id.crdt_type, CType::LwwRegister);
+        let author_id_field = books.field_by_name("_authorID").unwrap();
+        assert!(
+            author_id_field.is_primary,
+            "_authorID should also be primary"
+        );
+        assert_eq!(
+            author_id_field.relation_name,
+            Some("book_author".to_string())
+        );
+        assert_eq!(author_id_field.crdt_type, CType::LwwRegister);
 
         // Secondary side assertions
         let published_field = authors.field_by_name("published").unwrap();
@@ -75,12 +81,15 @@ mod one_to_one {
             "published should NOT be primary"
         );
 
-        let published_id = authors.field_by_name("published_id").unwrap();
+        let published_id_field = authors.field_by_name("_publishedID").unwrap();
         assert!(
-            !published_id.is_primary,
-            "published_id should NOT be primary"
+            !published_id_field.is_primary,
+            "_publishedID should NOT be primary"
         );
-        assert_eq!(published_id.relation_name, Some("book_author".to_string()));
+        assert_eq!(
+            published_id_field.relation_name,
+            Some("book_author".to_string())
+        );
     }
 
     /// One-to-one with auto-generated relation name (no explicit @relation)
@@ -114,12 +123,12 @@ mod one_to_one {
         assert!(collections
             .get("books")
             .unwrap()
-            .field_by_name("author_id")
+            .field_by_name("_authorID")
             .is_some());
         assert!(collections
             .get("authors")
             .unwrap()
-            .field_by_name("book_id")
+            .field_by_name("_bookID")
             .is_some());
     }
 
@@ -144,7 +153,7 @@ mod one_to_one {
         let books = collections.get("books").unwrap();
 
         // Should still get _id field even without other side
-        assert!(books.field_by_name("author_id").is_some());
+        assert!(books.field_by_name("_authorID").is_some());
     }
 }
 
@@ -190,14 +199,14 @@ mod one_to_many {
 
         // Array side should NOT have _id field or be primary
         assert!(
-            authors.field_by_name("posts_id").is_none(),
+            authors.field_by_name("_postsID").is_none(),
             "Array side should not have _id"
         );
         assert!(!authors.field_by_name("posts").unwrap().is_primary);
 
         // Non-array side should have _id field and auto-set to primary
         assert!(
-            posts.field_by_name("author_id").is_some(),
+            posts.field_by_name("_authorID").is_some(),
             "Non-array side should have _id"
         );
         assert!(posts.field_by_name("author").unwrap().is_primary);
@@ -263,7 +272,7 @@ mod one_to_many {
         let posts = collections.get("posts").unwrap();
 
         // Non-array side should still get _id field
-        assert!(posts.field_by_name("author_id").is_some());
+        assert!(posts.field_by_name("_authorID").is_some());
     }
 }
 
@@ -299,16 +308,16 @@ mod self_referential {
         let nodes = collections.get("nodes").unwrap();
 
         // Parent should get _id field
-        let parent_id = nodes.field_by_name("parent_id");
-        assert!(parent_id.is_some(), "parent should get _id field");
+        let parent_id_field = nodes.field_by_name("_parentID");
+        assert!(parent_id_field.is_some(), "parent should get _id field");
         assert_eq!(
-            parent_id.unwrap().relation_name,
+            parent_id_field.unwrap().relation_name,
             Some("node_tree".to_string())
         );
 
         // Children should NOT get _id field
         assert!(
-            nodes.field_by_name("children_id").is_none(),
+            nodes.field_by_name("_childrenID").is_none(),
             "children should not get _id field"
         );
     }
@@ -335,7 +344,7 @@ mod self_referential {
         let nodes = collections.get("nodes").unwrap();
 
         // next should get _id field
-        assert!(nodes.field_by_name("next_id").is_some());
+        assert!(nodes.field_by_name("_nextID").is_some());
         assert!(nodes.field_by_name("next").unwrap().is_primary);
     }
 
@@ -362,9 +371,9 @@ mod self_referential {
         let employees = collections.get("employees").unwrap();
 
         // manager (non-array) gets _id
-        assert!(employees.field_by_name("manager_id").is_some());
+        assert!(employees.field_by_name("_managerID").is_some());
         // reports (array) does NOT get _id
-        assert!(employees.field_by_name("reports_id").is_none());
+        assert!(employees.field_by_name("_reportsID").is_none());
     }
 
     /// Self-referential one-to-one: Person has spouse (both sides non-array)
@@ -393,7 +402,7 @@ mod self_referential {
 
         // spouse should get _id field
         assert!(
-            persons.field_by_name("spouse_id").is_some(),
+            persons.field_by_name("_spouseID").is_some(),
             "spouse should get _id field"
         );
 
@@ -431,7 +440,7 @@ mod self_referential {
 
         // successor should get _id field
         assert!(
-            leaders.field_by_name("successor_id").is_some(),
+            leaders.field_by_name("_successorID").is_some(),
             "successor should get _id field"
         );
 
@@ -484,15 +493,21 @@ mod multiple_relations {
         let posts = collections.get("posts").unwrap();
 
         // Both should get separate _id fields
-        let author_id = posts.field_by_name("author_id").unwrap();
-        let reviewer_id = posts.field_by_name("reviewer_id").unwrap();
+        let author_id_field = posts.field_by_name("_authorID").unwrap();
+        let reviewer_id_field = posts.field_by_name("_reviewerID").unwrap();
 
-        assert_eq!(author_id.relation_name, Some("post_author".to_string()));
-        assert_eq!(reviewer_id.relation_name, Some("post_reviewer".to_string()));
+        assert_eq!(
+            author_id_field.relation_name,
+            Some("post_author".to_string())
+        );
+        assert_eq!(
+            reviewer_id_field.relation_name,
+            Some("post_reviewer".to_string())
+        );
 
         // Each should be primary independently
-        assert!(author_id.is_primary);
-        assert!(reviewer_id.is_primary);
+        assert!(author_id_field.is_primary);
+        assert!(reviewer_id_field.is_primary);
     }
 
     /// Multiple relations between different collection pairs
@@ -537,19 +552,19 @@ mod multiple_relations {
         let posts = collections.get("posts").unwrap();
 
         // Both relations should get _id fields
-        assert!(posts.field_by_name("author_id").is_some());
-        assert!(posts.field_by_name("category_id").is_some());
+        assert!(posts.field_by_name("_authorID").is_some());
+        assert!(posts.field_by_name("_categoryID").is_some());
 
         // Array sides should NOT get _id fields
         assert!(collections
             .get("users")
             .unwrap()
-            .field_by_name("posts_id")
+            .field_by_name("_postsID")
             .is_none());
         assert!(collections
             .get("categories")
             .unwrap()
-            .field_by_name("posts_id")
+            .field_by_name("_postsID")
             .is_none());
     }
 }
@@ -593,12 +608,12 @@ mod circular {
         assert!(collections
             .get("books")
             .unwrap()
-            .field_by_name("author_id")
+            .field_by_name("_authorID")
             .is_some());
         assert!(collections
             .get("authors")
             .unwrap()
-            .field_by_name("favorite_book_id")
+            .field_by_name("_favorite_bookID")
             .is_some());
     }
 }
@@ -639,12 +654,12 @@ mod field_ordering {
 
         // Find positions
         let author_pos = field_names.iter().position(|&n| n == "author").unwrap();
-        let author_id_pos = field_names.iter().position(|&n| n == "author_id").unwrap();
+        let author_id_pos = field_names.iter().position(|&n| n == "_authorID").unwrap();
         let content_pos = field_names.iter().position(|&n| n == "content").unwrap();
         let category_pos = field_names.iter().position(|&n| n == "category").unwrap();
         let category_id_pos = field_names
             .iter()
-            .position(|&n| n == "category_id")
+            .position(|&n| n == "_categoryID")
             .unwrap();
         let tags_pos = field_names.iter().position(|&n| n == "tags").unwrap();
 
@@ -652,20 +667,20 @@ mod field_ordering {
         assert_eq!(
             author_id_pos,
             author_pos + 1,
-            "author_id should follow author"
+            "_authorID should follow author"
         );
         assert!(
             content_pos > author_id_pos,
-            "content should come after author_id"
+            "content should come after _authorID"
         );
         assert_eq!(
             category_id_pos,
             category_pos + 1,
-            "category_id should follow category"
+            "_categoryID should follow category"
         );
         assert!(
             tags_pos > category_id_pos,
-            "tags should come after category_id"
+            "tags should come after _categoryID"
         );
     }
 }
@@ -717,12 +732,12 @@ mod go_compatibility {
         assert!(books.field_by_name("author").unwrap().is_primary);
 
         // Go behavior: non-array side gets _id field
-        let author_id = books.field_by_name("author_id").unwrap();
-        assert_eq!(author_id.kind, FieldKind::doc_id());
-        assert_eq!(author_id.crdt_type, CType::LwwRegister);
+        let author_id_field = books.field_by_name("_authorID").unwrap();
+        assert_eq!(author_id_field.kind, FieldKind::doc_id());
+        assert_eq!(author_id_field.crdt_type, CType::LwwRegister);
 
         // Go behavior: array side does NOT get _id field
-        assert!(authors.field_by_name("published_id").is_none());
+        assert!(authors.field_by_name("_publishedID").is_none());
     }
 
     /// Match Go's finalizeRelations behavior for one-to-one with explicit @primary
@@ -766,8 +781,8 @@ mod go_compatibility {
         assert!(!books.field_by_name("author").unwrap().is_primary);
 
         // Go behavior: both sides get _id fields in one-to-one
-        assert!(authors.field_by_name("published_id").is_some());
-        assert!(books.field_by_name("author_id").is_some());
+        assert!(authors.field_by_name("_publishedID").is_some());
+        assert!(books.field_by_name("_authorID").is_some());
     }
 }
 
@@ -829,12 +844,12 @@ mod many_to_many {
 
         // Junction table (enrollments) should have _id fields for both relations
         assert!(
-            enrollments.field_by_name("student_id").is_some(),
-            "enrollment should have student_id"
+            enrollments.field_by_name("_studentID").is_some(),
+            "enrollment should have _studentID"
         );
         assert!(
-            enrollments.field_by_name("course_id").is_some(),
-            "enrollment should have course_id"
+            enrollments.field_by_name("_courseID").is_some(),
+            "enrollment should have _courseID"
         );
 
         // Both non-array fields on junction table should be primary
@@ -850,12 +865,12 @@ mod many_to_many {
 
         // Array sides should NOT have _id fields
         assert!(
-            students.field_by_name("enrollments_id").is_none(),
-            "students should not have enrollments_id"
+            students.field_by_name("_enrollmentsID").is_none(),
+            "students should not have _enrollmentsID"
         );
         assert!(
-            courses.field_by_name("enrollments_id").is_none(),
-            "courses should not have enrollments_id"
+            courses.field_by_name("_enrollmentsID").is_none(),
+            "courses should not have _enrollmentsID"
         );
     }
 
@@ -906,8 +921,8 @@ mod many_to_many {
         let post_tags = collections.get("post_tags").unwrap();
 
         // Junction table should have _id fields for both foreign keys
-        assert!(post_tags.field_by_name("post_id").is_some());
-        assert!(post_tags.field_by_name("tag_id").is_some());
+        assert!(post_tags.field_by_name("_postID").is_some());
+        assert!(post_tags.field_by_name("_tagID").is_some());
 
         // Both should be primary (other sides are arrays)
         assert!(post_tags.field_by_name("post").unwrap().is_primary);
@@ -916,12 +931,12 @@ mod many_to_many {
         // Verify _id fields are positioned correctly (after their relation fields)
         let field_names: Vec<&str> = post_tags.fields.iter().map(|f| f.name.as_str()).collect();
         let post_pos = field_names.iter().position(|&n| n == "post").unwrap();
-        let post_id_pos = field_names.iter().position(|&n| n == "post_id").unwrap();
+        let post_id_pos = field_names.iter().position(|&n| n == "_postID").unwrap();
         let tag_pos = field_names.iter().position(|&n| n == "tag").unwrap();
-        let tag_id_pos = field_names.iter().position(|&n| n == "tag_id").unwrap();
+        let tag_id_pos = field_names.iter().position(|&n| n == "_tagID").unwrap();
 
-        assert_eq!(post_id_pos, post_pos + 1, "post_id should follow post");
-        assert_eq!(tag_id_pos, tag_pos + 1, "tag_id should follow tag");
+        assert_eq!(post_id_pos, post_pos + 1, "_postID should follow post");
+        assert_eq!(tag_id_pos, tag_pos + 1, "_tagID should follow tag");
     }
 
     /// Self-referential many-to-many: Users following Users via Follows junction
@@ -967,12 +982,12 @@ mod many_to_many {
 
         // Junction table should have _id fields for both foreign keys
         assert!(
-            follows.field_by_name("follower_id").is_some(),
-            "follows should have follower_id"
+            follows.field_by_name("_followerID").is_some(),
+            "follows should have _followerID"
         );
         assert!(
-            follows.field_by_name("followee_id").is_some(),
-            "follows should have followee_id"
+            follows.field_by_name("_followeeID").is_some(),
+            "follows should have _followeeID"
         );
 
         // Both junction fields should be primary
@@ -980,8 +995,8 @@ mod many_to_many {
         assert!(follows.field_by_name("followee").unwrap().is_primary);
 
         // Array sides on users should NOT have _id fields
-        assert!(users.field_by_name("following_id").is_none());
-        assert!(users.field_by_name("followers_id").is_none());
+        assert!(users.field_by_name("_followingID").is_none());
+        assert!(users.field_by_name("_followersID").is_none());
     }
 }
 

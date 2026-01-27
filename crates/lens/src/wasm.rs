@@ -213,64 +213,74 @@ impl TransformStore for WasmTransformStore {
 
             // Add the lens::next import - this is called by WASM to get input document offset
             linker
-                .func_wrap("lens", "next", |mut caller: wasmtime::Caller<'_, HostState>| -> i32 {
-                    // Check if input already consumed
-                    if caller.data().input_consumed {
-                        return 0; // No more input
-                    }
+                .func_wrap(
+                    "lens",
+                    "next",
+                    |mut caller: wasmtime::Caller<'_, HostState>| -> i32 {
+                        // Check if input already consumed
+                        if caller.data().input_consumed {
+                            return 0; // No more input
+                        }
 
-                    // Get memory
-                    let memory = match caller.get_export("memory") {
-                        Some(wasmtime::Extern::Memory(mem)) => mem,
-                        _ => return 0,
-                    };
+                        // Get memory
+                        let memory = match caller.get_export("memory") {
+                            Some(wasmtime::Extern::Memory(mem)) => mem,
+                            _ => return 0,
+                        };
 
-                    // Get alloc function to allocate in WASM's allocator
-                    let alloc = match caller.get_export("alloc") {
-                        Some(wasmtime::Extern::Func(f)) => f,
-                        _ => return 0,
-                    };
+                        // Get alloc function to allocate in WASM's allocator
+                        let alloc = match caller.get_export("alloc") {
+                            Some(wasmtime::Extern::Func(f)) => f,
+                            _ => return 0,
+                        };
 
-                    // Serialize document to JSON
-                    let json = match serde_json::to_vec(&caller.data().input_doc) {
-                        Ok(j) => j,
-                        Err(_) => return 0,
-                    };
-
-                    // Format: [type_id: i8][len: u32 LE][data: bytes]
-                    // type_id: 1 = JSON
-                    let header_size = 5i32; // 1 byte type + 4 bytes len
-                    let total_size = header_size + json.len() as i32;
-
-                    // Allocate memory using WASM's allocator
-                    let offset = match alloc.typed::<i32, i32>(&caller) {
-                        Ok(typed_alloc) => match typed_alloc.call(&mut caller, total_size) {
-                            Ok(o) => o,
+                        // Serialize document to JSON
+                        let json = match serde_json::to_vec(&caller.data().input_doc) {
+                            Ok(j) => j,
                             Err(_) => return 0,
-                        },
-                        Err(_) => return 0,
-                    };
+                        };
 
-                    // Write type ID (1 = JSON)
-                    if memory.write(&mut caller, offset as usize, &[1u8]).is_err() {
-                        return 0;
-                    }
+                        // Format: [type_id: i8][len: u32 LE][data: bytes]
+                        // type_id: 1 = JSON
+                        let header_size = 5i32; // 1 byte type + 4 bytes len
+                        let total_size = header_size + json.len() as i32;
 
-                    // Write length as u32 LE
-                    let len_bytes = (json.len() as u32).to_le_bytes();
-                    if memory.write(&mut caller, (offset + 1) as usize, &len_bytes).is_err() {
-                        return 0;
-                    }
+                        // Allocate memory using WASM's allocator
+                        let offset = match alloc.typed::<i32, i32>(&caller) {
+                            Ok(typed_alloc) => match typed_alloc.call(&mut caller, total_size) {
+                                Ok(o) => o,
+                                Err(_) => return 0,
+                            },
+                            Err(_) => return 0,
+                        };
 
-                    // Write JSON data
-                    if memory.write(&mut caller, (offset + header_size) as usize, &json).is_err() {
-                        return 0;
-                    }
+                        // Write type ID (1 = JSON)
+                        if memory.write(&mut caller, offset as usize, &[1u8]).is_err() {
+                            return 0;
+                        }
 
-                    // Mark input as consumed
-                    caller.data_mut().input_consumed = true;
-                    offset
-                })
+                        // Write length as u32 LE
+                        let len_bytes = (json.len() as u32).to_le_bytes();
+                        if memory
+                            .write(&mut caller, (offset + 1) as usize, &len_bytes)
+                            .is_err()
+                        {
+                            return 0;
+                        }
+
+                        // Write JSON data
+                        if memory
+                            .write(&mut caller, (offset + header_size) as usize, &json)
+                            .is_err()
+                        {
+                            return 0;
+                        }
+
+                        // Mark input as consumed
+                        caller.data_mut().input_consumed = true;
+                        offset
+                    },
+                )
                 .map_err(|e| Error::WasmExecution(format!("failed to define lens::next: {}", e)))?;
 
             let instance = linker
@@ -298,53 +308,63 @@ impl TransformStore for WasmTransformStore {
 
             // Add the lens::next import for inverse too
             linker
-                .func_wrap("lens", "next", |mut caller: wasmtime::Caller<'_, HostState>| -> i32 {
-                    if caller.data().input_consumed {
-                        return 0;
-                    }
+                .func_wrap(
+                    "lens",
+                    "next",
+                    |mut caller: wasmtime::Caller<'_, HostState>| -> i32 {
+                        if caller.data().input_consumed {
+                            return 0;
+                        }
 
-                    let memory = match caller.get_export("memory") {
-                        Some(wasmtime::Extern::Memory(mem)) => mem,
-                        _ => return 0,
-                    };
+                        let memory = match caller.get_export("memory") {
+                            Some(wasmtime::Extern::Memory(mem)) => mem,
+                            _ => return 0,
+                        };
 
-                    let alloc = match caller.get_export("alloc") {
-                        Some(wasmtime::Extern::Func(f)) => f,
-                        _ => return 0,
-                    };
+                        let alloc = match caller.get_export("alloc") {
+                            Some(wasmtime::Extern::Func(f)) => f,
+                            _ => return 0,
+                        };
 
-                    let json = match serde_json::to_vec(&caller.data().input_doc) {
-                        Ok(j) => j,
-                        Err(_) => return 0,
-                    };
-
-                    let header_size = 5i32;
-                    let total_size = header_size + json.len() as i32;
-
-                    let offset = match alloc.typed::<i32, i32>(&caller) {
-                        Ok(typed_alloc) => match typed_alloc.call(&mut caller, total_size) {
-                            Ok(o) => o,
+                        let json = match serde_json::to_vec(&caller.data().input_doc) {
+                            Ok(j) => j,
                             Err(_) => return 0,
-                        },
-                        Err(_) => return 0,
-                    };
+                        };
 
-                    if memory.write(&mut caller, offset as usize, &[1u8]).is_err() {
-                        return 0;
-                    }
+                        let header_size = 5i32;
+                        let total_size = header_size + json.len() as i32;
 
-                    let len_bytes = (json.len() as u32).to_le_bytes();
-                    if memory.write(&mut caller, (offset + 1) as usize, &len_bytes).is_err() {
-                        return 0;
-                    }
+                        let offset = match alloc.typed::<i32, i32>(&caller) {
+                            Ok(typed_alloc) => match typed_alloc.call(&mut caller, total_size) {
+                                Ok(o) => o,
+                                Err(_) => return 0,
+                            },
+                            Err(_) => return 0,
+                        };
 
-                    if memory.write(&mut caller, (offset + header_size) as usize, &json).is_err() {
-                        return 0;
-                    }
+                        if memory.write(&mut caller, offset as usize, &[1u8]).is_err() {
+                            return 0;
+                        }
 
-                    caller.data_mut().input_consumed = true;
-                    offset
-                })
+                        let len_bytes = (json.len() as u32).to_le_bytes();
+                        if memory
+                            .write(&mut caller, (offset + 1) as usize, &len_bytes)
+                            .is_err()
+                        {
+                            return 0;
+                        }
+
+                        if memory
+                            .write(&mut caller, (offset + header_size) as usize, &json)
+                            .is_err()
+                        {
+                            return 0;
+                        }
+
+                        caller.data_mut().input_consumed = true;
+                        offset
+                    },
+                )
                 .map_err(|e| Error::WasmExecution(format!("failed to define lens::next: {}", e)))?;
 
             let instance = linker
@@ -444,13 +464,21 @@ fn execute_transform_with_host(
         // Error type - read error message
         let mut len_buf = [0u8; 4];
         memory
-            .read(store.as_context(), (result_offset + 1) as usize, &mut len_buf)
+            .read(
+                store.as_context(),
+                (result_offset + 1) as usize,
+                &mut len_buf,
+            )
             .map_err(|e| Error::WasmExecution(format!("read error len failed: {}", e)))?;
         let len = u32::from_le_bytes(len_buf) as usize;
 
         let mut error_bytes = vec![0u8; len];
         memory
-            .read(store.as_context(), (result_offset + 5) as usize, &mut error_bytes)
+            .read(
+                store.as_context(),
+                (result_offset + 5) as usize,
+                &mut error_bytes,
+            )
             .map_err(|e| Error::WasmExecution(format!("read error failed: {}", e)))?;
 
         let error_str = String::from_utf8_lossy(&error_bytes);
@@ -463,19 +491,30 @@ fn execute_transform_with_host(
     }
 
     if type_id != 1 {
-        return Err(Error::WasmExecution(format!("unexpected type_id: {}", type_id)));
+        return Err(Error::WasmExecution(format!(
+            "unexpected type_id: {}",
+            type_id
+        )));
     }
 
     // Read JSON data
     let mut len_buf = [0u8; 4];
     memory
-        .read(store.as_context(), (result_offset + 1) as usize, &mut len_buf)
+        .read(
+            store.as_context(),
+            (result_offset + 1) as usize,
+            &mut len_buf,
+        )
         .map_err(|e| Error::WasmExecution(format!("read len failed: {}", e)))?;
     let len = u32::from_le_bytes(len_buf) as usize;
 
     let mut result_bytes = vec![0u8; len];
     memory
-        .read(store.as_context(), (result_offset + 5) as usize, &mut result_bytes)
+        .read(
+            store.as_context(),
+            (result_offset + 5) as usize,
+            &mut result_bytes,
+        )
         .map_err(|e| Error::WasmExecution(format!("read data failed: {}", e)))?;
 
     serde_json::from_slice(&result_bytes).map_err(|e| Error::WasmExecution(e.to_string()))
@@ -509,14 +548,17 @@ fn execute_inverse_with_host(
                 .call(store.as_context_mut(), total_size)
                 .map_err(|e| Error::WasmExecution(format!("alloc for params failed: {}", e)))?;
 
-            memory.write(store.as_context_mut(), offset as usize, &[1u8])
+            memory
+                .write(store.as_context_mut(), offset as usize, &[1u8])
                 .map_err(|e| Error::WasmExecution(format!("write type_id failed: {}", e)))?;
 
             let len_bytes = (param_json.len() as u32).to_le_bytes();
-            memory.write(store.as_context_mut(), (offset + 1) as usize, &len_bytes)
+            memory
+                .write(store.as_context_mut(), (offset + 1) as usize, &len_bytes)
                 .map_err(|e| Error::WasmExecution(format!("write len failed: {}", e)))?;
 
-            memory.write(store.as_context_mut(), (offset + 5) as usize, &param_json)
+            memory
+                .write(store.as_context_mut(), (offset + 5) as usize, &param_json)
                 .map_err(|e| Error::WasmExecution(format!("write data failed: {}", e)))?;
 
             let _ = set_param
@@ -548,13 +590,21 @@ fn execute_inverse_with_host(
     if type_id < 0 {
         let mut len_buf = [0u8; 4];
         memory
-            .read(store.as_context(), (result_offset + 1) as usize, &mut len_buf)
+            .read(
+                store.as_context(),
+                (result_offset + 1) as usize,
+                &mut len_buf,
+            )
             .map_err(|e| Error::WasmExecution(format!("read error len failed: {}", e)))?;
         let len = u32::from_le_bytes(len_buf) as usize;
 
         let mut error_bytes = vec![0u8; len];
         memory
-            .read(store.as_context(), (result_offset + 5) as usize, &mut error_bytes)
+            .read(
+                store.as_context(),
+                (result_offset + 5) as usize,
+                &mut error_bytes,
+            )
             .map_err(|e| Error::WasmExecution(format!("read error failed: {}", e)))?;
 
         let error_str = String::from_utf8_lossy(&error_bytes);
@@ -566,18 +616,29 @@ fn execute_inverse_with_host(
     }
 
     if type_id != 1 {
-        return Err(Error::WasmExecution(format!("unexpected type_id: {}", type_id)));
+        return Err(Error::WasmExecution(format!(
+            "unexpected type_id: {}",
+            type_id
+        )));
     }
 
     let mut len_buf = [0u8; 4];
     memory
-        .read(store.as_context(), (result_offset + 1) as usize, &mut len_buf)
+        .read(
+            store.as_context(),
+            (result_offset + 1) as usize,
+            &mut len_buf,
+        )
         .map_err(|e| Error::WasmExecution(format!("read len failed: {}", e)))?;
     let len = u32::from_le_bytes(len_buf) as usize;
 
     let mut result_bytes = vec![0u8; len];
     memory
-        .read(store.as_context(), (result_offset + 5) as usize, &mut result_bytes)
+        .read(
+            store.as_context(),
+            (result_offset + 5) as usize,
+            &mut result_bytes,
+        )
         .map_err(|e| Error::WasmExecution(format!("read data failed: {}", e)))?;
 
     serde_json::from_slice(&result_bytes).map_err(|e| Error::WasmExecution(e.to_string()))

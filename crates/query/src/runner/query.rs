@@ -4,6 +4,7 @@ use acp::Identity;
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -149,7 +150,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Fetch documents
         let fetcher = self.fetcher.as_ref();
         let docs = if let Some(ref doc_ids) = select.doc_ids {
-            let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            // Deduplicate doc_ids while preserving order (Go compatibility)
+            let mut seen = HashSet::new();
+            let unique_ids: Vec<String> = doc_ids
+                .iter()
+                .filter(|id| seen.insert((*id).clone()))
+                .cloned()
+                .collect();
+            let result = fetcher
+                .get_by_ids(&select.collection_name, &unique_ids)
+                .await?;
             result.into_docs()
         } else {
             fetcher.get_all(&select.collection_name).await?
@@ -351,20 +361,67 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|o| o.has_relation_order())
             .unwrap_or(false);
 
+        // Check if this is a top-level aggregate query (e.g., { _avg(Users: {field: Age}) })
+        // Top-level aggregates have: only aggregate fields, and all targets have host_name == collection_name
+        let is_top_level_aggregate = !select.fields.is_empty()
+            && select
+                .fields
+                .iter()
+                .all(|f| matches!(f, Requestable::Aggregate(_)))
+            && select.fields.iter().all(|f| {
+                if let Requestable::Aggregate(agg) = f {
+                    agg.targets
+                        .iter()
+                        .all(|t| t.host_name == select.collection_name)
+                } else {
+                    true
+                }
+            });
+
         // Check if any aggregates reference relations (e.g., _count(books: {}))
-        // Relation-based aggregates have a non-empty host_name on their targets.
+        // Relation-based aggregates have a non-empty host_name that differs from collection_name.
+        // Exclude top-level aggregates where host_name == collection_name.
         let aggregates_have_relations = select.fields.iter().any(|f| {
             if let Requestable::Aggregate(agg) = f {
-                agg.targets.iter().any(|t| !t.host_name.is_empty())
+                agg.targets
+                    .iter()
+                    .any(|t| !t.host_name.is_empty() && t.host_name != select.collection_name)
             } else {
                 false
             }
         });
 
+        // Handle top-level aggregates specially - return single value, not array
+        if is_top_level_aggregate {
+            return self
+                .execute_top_level_aggregate(select, fetcher, &collection)
+                .await;
+        }
+
+        // Check if any secondary relation ID fields are selected (e.g., `_authorID` for a secondary `author` relation).
+        // These require a TypeJoin to compute the ID via reverse lookup.
+        let has_secondary_relation_id = select.fields.iter().any(|f| {
+            if let Requestable::Field(field) = f {
+                let field_name = &field.name;
+                // Check pattern: _<relationName>ID
+                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3 {
+                    let relation_name = &field_name[1..field_name.len() - 2];
+                    if let Some(relation_field) = collection.field_by_name(relation_name) {
+                        // Only secondary relations need a join to compute the ID
+                        return relation_field.kind.is_relation() && !relation_field.is_primary;
+                    }
+                }
+            }
+            false
+        });
+
         // Use Planner if there are nested selections, filter through relations,
-        // order through relations, or aggregates on relations
-        let needs_planner =
-            has_nested || filter_has_relations || order_has_relations || aggregates_have_relations;
+        // order through relations, aggregates on relations, or secondary relation ID fields
+        let needs_planner = has_nested
+            || filter_has_relations
+            || order_has_relations
+            || aggregates_have_relations
+            || has_secondary_relation_id;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
@@ -433,6 +490,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
         let plan_result = planner.plan_with_index_info(select)?;
         let mut plan = plan_result.plan;
+        let ordering_only_fields = plan_result.ordering_only_fields;
 
         // Get the mapping from the plan
         let mapping = plan.document_map().clone();
@@ -445,7 +503,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         while plan.next().await? {
             let doc = plan.value();
-            let json = self.doc_to_json(doc, &mapping)?;
+            let mut json = self.doc_to_json(doc, &mapping)?;
+
+            // Strip ordering-only fields from nested objects.
+            // These fields were added for ORDER BY but shouldn't appear in output.
+            for (relation_field, nested_field) in &ordering_only_fields {
+                if let Some(obj) = json.as_object_mut() {
+                    if let Some(relation_value) = obj.get_mut(relation_field) {
+                        if let Some(nested_obj) = relation_value.as_object_mut() {
+                            nested_obj.remove(nested_field);
+                        }
+                    }
+                }
+            }
+
             results.push(json);
         }
 
@@ -656,13 +727,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
-            let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            // Deduplicate doc_ids while preserving order (Go compatibility)
+            let mut seen = HashSet::new();
+            let unique_ids: Vec<String> = doc_ids
+                .iter()
+                .filter(|id| seen.insert((*id).clone()))
+                .cloned()
+                .collect();
+            let result = fetcher
+                .get_by_ids(&select.collection_name, &unique_ids)
+                .await?;
             let missing = result.missing_ids();
             if !missing.is_empty() {
                 warn!(
                     collection = %select.collection_name,
                     missing_ids = ?missing,
-                    requested_count = doc_ids.len(),
+                    requested_count = unique_ids.len(),
                     found_count = result.docs().len(),
                     "Some requested documents were not found"
                 );
@@ -714,5 +794,167 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         plan.close().await?;
 
         Ok(JsonValue::Array(results))
+    }
+
+    /// Execute a top-level aggregate query (e.g., `{ _avg(Users: {field: Age}) }`).
+    ///
+    /// Top-level aggregates compute a single value over all documents in a collection.
+    /// Unlike regular collection queries that return an array, top-level aggregates
+    /// return a single value (the computed aggregate).
+    ///
+    /// Returns 0 for empty collections (Go DefraDB semantics).
+    async fn execute_top_level_aggregate(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+        collection: &Arc<CollectionVersion>,
+    ) -> Result<JsonValue> {
+        // Fetch all documents from the collection
+        let docs = fetcher.get_all(&select.collection_name).await?;
+
+        // Build document mapping for field access
+        let mapping = plan::build_mapping(select, collection)?;
+
+        // Convert storage documents to values for aggregation
+        let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
+
+        // For each aggregate in the select, compute its value
+        // For top-level aggregates, we return a single object with aggregate results
+        let mut result = serde_json::Map::new();
+
+        for requestable in &select.fields {
+            if let Requestable::Aggregate(agg) = requestable {
+                let output_name = agg.output_name().to_string();
+
+                // Get the target info
+                let target = agg.targets.first();
+                let field_name = target.and_then(|t| t.field_name.as_ref());
+                let target_filter = target.and_then(|t| t.filter.as_ref());
+
+                // Find field index in mapping
+                let field_index = field_name.and_then(|name| mapping.first_index_of_name(name));
+
+                // Apply filter if present
+                let filtered_docs: Vec<&crate::planner::Doc> = if let Some(filter) = target_filter {
+                    plan_docs
+                        .iter()
+                        .filter(|doc| {
+                            // Convert Doc to fields Vec for filter evaluation
+                            let fields: Vec<Option<JsonValue>> = (0..mapping.next_index())
+                                .map(|i| doc.get(i).cloned())
+                                .collect();
+                            filter.matches(&fields, &mapping).unwrap_or(false)
+                        })
+                        .collect()
+                } else {
+                    plan_docs.iter().collect()
+                };
+
+                // Compute the aggregate value
+                let value = match agg.aggregate_type {
+                    crate::mapper::AggregateType::Count => {
+                        // Count documents (optionally filtered)
+                        let count = filtered_docs.len() as i64;
+                        JsonValue::Number(count.into())
+                    }
+                    crate::mapper::AggregateType::Sum => {
+                        if let Some(idx) = field_index {
+                            let sum: f64 = filtered_docs
+                                .iter()
+                                .filter_map(|doc| doc.get(idx))
+                                .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                                .sum();
+                            if sum == sum.floor() {
+                                JsonValue::Number((sum as i64).into())
+                            } else {
+                                JsonValue::Number(
+                                    serde_json::Number::from_f64(sum).unwrap_or_else(|| 0.into()),
+                                )
+                            }
+                        } else {
+                            JsonValue::Number(0.into())
+                        }
+                    }
+                    crate::mapper::AggregateType::Average => {
+                        if let Some(idx) = field_index {
+                            let values: Vec<f64> = filtered_docs
+                                .iter()
+                                .filter_map(|doc| doc.get(idx))
+                                .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                                .collect();
+                            if values.is_empty() {
+                                // Go DefraDB returns 0 for AVG of empty set
+                                JsonValue::Number(0.into())
+                            } else {
+                                let avg = values.iter().sum::<f64>() / values.len() as f64;
+                                JsonValue::Number(
+                                    serde_json::Number::from_f64(avg).unwrap_or_else(|| 0.into()),
+                                )
+                            }
+                        } else {
+                            JsonValue::Number(0.into())
+                        }
+                    }
+                    crate::mapper::AggregateType::Min => {
+                        if let Some(idx) = field_index {
+                            let min: Option<f64> = filtered_docs
+                                .iter()
+                                .filter_map(|doc| doc.get(idx))
+                                .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                                .min_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                            match min {
+                                Some(v) if v == v.floor() => JsonValue::Number((v as i64).into()),
+                                Some(v) => JsonValue::Number(
+                                    serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()),
+                                ),
+                                None => JsonValue::Null,
+                            }
+                        } else {
+                            JsonValue::Null
+                        }
+                    }
+                    crate::mapper::AggregateType::Max => {
+                        if let Some(idx) = field_index {
+                            let max: Option<f64> = filtered_docs
+                                .iter()
+                                .filter_map(|doc| doc.get(idx))
+                                .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                                .max_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                            match max {
+                                Some(v) if v == v.floor() => JsonValue::Number((v as i64).into()),
+                                Some(v) => JsonValue::Number(
+                                    serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()),
+                                ),
+                                None => JsonValue::Null,
+                            }
+                        } else {
+                            JsonValue::Null
+                        }
+                    }
+                };
+
+                result.insert(output_name, value);
+            }
+        }
+
+        // Return the result object directly (not wrapped in an array)
+        // The caller will insert this into the response with the aggregate name as key
+        // But for top-level aggregates, we need the caller to extract the value
+        // Actually, looking at execute_query_internal, it inserts result with select.field.output_name()
+        // For { _avg(...) }, output_name is "_avg", and we're returning {"_avg": value}
+        // So we'd get {"_avg": {"_avg": value}} which is wrong.
+        // We need to return just the value.
+
+        // For top-level aggregates, return the single aggregate value
+        // (assumes single aggregate in top-level query)
+        if let Some((_, value)) = result.into_iter().next() {
+            Ok(value)
+        } else {
+            Ok(JsonValue::Null)
+        }
     }
 }

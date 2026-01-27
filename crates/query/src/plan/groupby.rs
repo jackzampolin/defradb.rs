@@ -127,6 +127,47 @@ impl GroupByNode {
             }
         }
     }
+
+    /// Build a JSON array of documents for the _group field
+    fn build_group_array(&self, docs: &[Doc], group_index: usize) -> JsonValue {
+        // Get the child mapping for _group to determine which fields to render
+        let child_mapping = self.document_mapping.child_at(group_index);
+
+        let mut array = Vec::with_capacity(docs.len());
+        for doc in docs {
+            let mut obj = serde_json::Map::new();
+
+            if let Some(mapping) = child_mapping {
+                // Use the child mapping's render_keys to determine output fields
+                for render_key in &mapping.render_keys {
+                    // Skip _group itself to avoid infinite recursion
+                    if render_key.key == "_group" {
+                        continue;
+                    }
+                    let value = doc
+                        .get(render_key.index)
+                        .cloned()
+                        .unwrap_or(JsonValue::Null);
+                    obj.insert(render_key.key.clone(), value);
+                }
+            } else {
+                // Fallback: use parent's render_keys if no child mapping
+                for render_key in &self.document_mapping.render_keys {
+                    if render_key.key == "_group" {
+                        continue;
+                    }
+                    let value = doc
+                        .get(render_key.index)
+                        .cloned()
+                        .unwrap_or(JsonValue::Null);
+                    obj.insert(render_key.key.clone(), value);
+                }
+            }
+
+            array.push(JsonValue::Object(obj));
+        }
+        JsonValue::Array(array)
+    }
 }
 
 #[async_trait]
@@ -172,6 +213,14 @@ impl PlanNode for GroupByNode {
 
         // Return the representative document for the current group
         self.current_doc = self.groups[self.position].1.representative.deep_clone();
+
+        // Populate _group field if it's in the mapping
+        if let Some(group_index) = self.document_mapping.first_index_of_name("_group") {
+            let group_docs = &self.groups[self.position].1.docs;
+            let group_array = self.build_group_array(group_docs, group_index);
+            self.current_doc.set(group_index, group_array);
+        }
+
         self.position += 1;
         Ok(true)
     }
@@ -390,6 +439,67 @@ mod tests {
 
         // Should have 2 groups: Engineering and null
         assert_eq!(node.groups().len(), 2);
+
+        node.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_group_by_populates_group_field() {
+        let collection = make_test_collection();
+        let docs = make_test_docs();
+
+        // Create mapping with _group field and child mapping
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "name");
+        mapping.add(2, "department");
+        mapping.add(3, "age");
+        mapping.add(4, "_group"); // _group field at index 4
+
+        // Add render keys for output
+        mapping.add_render_key(2, "department");
+        mapping.add_render_key(4, "_group");
+
+        // Create child mapping for _group contents
+        let mut group_child_mapping = DocumentMapping::new();
+        group_child_mapping.add(0, "_docID");
+        group_child_mapping.add(1, "name");
+        group_child_mapping.add(2, "department");
+        group_child_mapping.add(3, "age");
+        // _group should render name and age
+        group_child_mapping.add_render_key(1, "name");
+        group_child_mapping.add_render_key(3, "age");
+
+        mapping.set_child_at(4, group_child_mapping);
+
+        let scan = ScanNode::new(collection, mapping.clone()).with_docs(docs);
+        let group_by = GroupBy::new(vec!["department".to_string()]);
+        let mut node = GroupByNode::new(Box::new(scan), group_by, mapping);
+
+        node.init().await.unwrap();
+
+        // Get first group
+        assert!(node.next().await.unwrap());
+        let doc = node.value();
+
+        // _group field should be populated with an array
+        let group_value = doc.get(4);
+        assert!(group_value.is_some(), "_group field should be populated");
+        let group_array = group_value.unwrap();
+        assert!(group_array.is_array(), "_group should be an array");
+
+        let arr = group_array.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "Engineering group should have 2 docs");
+
+        // Each object should have name and age fields (from child mapping render_keys)
+        for obj in arr {
+            assert!(obj.is_object(), "Each _group element should be an object");
+            let map = obj.as_object().unwrap();
+            assert!(map.contains_key("name"), "Should have name field");
+            assert!(map.contains_key("age"), "Should have age field");
+            // Should NOT have _group (would cause recursion)
+            assert!(!map.contains_key("_group"), "Should not have nested _group");
+        }
 
         node.close().await.unwrap();
     }

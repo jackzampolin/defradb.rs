@@ -59,15 +59,18 @@ pub(crate) async fn load_collection_from_systemstore(
     // Step 2: Get full schema from /collection/id/{version_id}
     let collection_key = CollectionKey::new(&version_id);
 
-    match systemstore.get(&collection_key.bytes()).await.map_err(|e| {
-        error!(
-            error = ?e,
-            collection_name = %name,
-            version_id = %version_id,
-            "Storage error while loading collection definition"
-        );
-        query::error::QueryError::execution(format!("storage error: {}", e))
-    })? {
+    match systemstore
+        .get(&collection_key.bytes())
+        .await
+        .map_err(|e| {
+            error!(
+                error = ?e,
+                collection_name = %name,
+                version_id = %version_id,
+                "Storage error while loading collection definition"
+            );
+            query::error::QueryError::execution(format!("storage error: {}", e))
+        })? {
         Some(data) => {
             let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
                 error!(

@@ -16,7 +16,8 @@ use tokio::time::timeout;
 /// Helper to create and start a P2P host, returning the handle and event receiver.
 async fn create_and_start_host() -> (P2PHostHandle, tokio::sync::mpsc::Receiver<HostEvent>) {
     let store = MockBitswapStore::new();
-    let (host, handle, events, _replicators) = P2PHost::new(store).await.expect("failed to create host");
+    let (host, handle, events, _replicators) =
+        P2PHost::new(store).await.expect("failed to create host");
 
     // Spawn the host event loop
     tokio::spawn(host.run());

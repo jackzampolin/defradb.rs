@@ -10,7 +10,7 @@ impl CollectionVersion {
     /// Generate the `_id` field name for a relation field
     ///
     /// Go DefraDB uses `_{fieldname}ID` as the convention for storing the foreign key
-    /// in non-array relation fields. For example, a field `published` gets `_publishedID`.
+    /// in non-array relation fields. For example, a field `author` gets `_authorID`.
     pub fn relation_id_field_name(field_name: &str) -> String {
         // Go DefraDB uses: underscore + fieldname + uppercase "ID"
         format!("_{}ID", field_name)
@@ -25,7 +25,7 @@ impl CollectionVersion {
     /// Add `_id` fields for all non-array relation fields that don't already have one
     ///
     /// This matches Go's behavior in `fieldsFromAST()` and `finalizeRelations()`.
-    /// For a relation field `author: User`, this generates an `author_id: ID` field
+    /// For a relation field `author: User`, this generates an `_authorID: ID` field
     /// with the same relation_name and is_primary status.
     ///
     /// The `next_field_id` function is called to generate unique field IDs.
