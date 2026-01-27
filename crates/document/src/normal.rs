@@ -3,7 +3,7 @@
 //! NormalValue represents all possible field values in a type-safe enum.
 //! This avoids runtime type assertions and provides compile-time guarantees.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 /// Normalized value type representing all possible field values.
@@ -30,7 +30,7 @@ pub enum NormalValue {
     /// Binary data
     Bytes(Vec<u8>),
     /// Timestamp with timezone
-    Time(DateTime<Utc>),
+    Time(DateTime<FixedOffset>),
     /// Nested document
     Document(Box<crate::Document>),
     /// JSON value (for schemaless fields)
@@ -50,7 +50,7 @@ pub enum NormalValue {
     /// Nillable bytes
     NillableBytes(Option<Vec<u8>>),
     /// Nillable timestamp
-    NillableTime(Option<DateTime<Utc>>),
+    NillableTime(Option<DateTime<FixedOffset>>),
     /// Nillable document
     NillableDocument(Option<Box<crate::Document>>),
 
@@ -68,7 +68,7 @@ pub enum NormalValue {
     /// Array of byte arrays
     BytesArray(Vec<Vec<u8>>),
     /// Array of timestamps
-    TimeArray(Vec<DateTime<Utc>>),
+    TimeArray(Vec<DateTime<FixedOffset>>),
     /// Array of documents
     DocumentArray(Vec<crate::Document>),
     /// Array of JSON values
@@ -88,7 +88,7 @@ pub enum NormalValue {
     /// Nillable array of bytes
     NillableBytesArray(Option<Vec<Vec<u8>>>),
     /// Nillable array of timestamps
-    NillableTimeArray(Option<Vec<DateTime<Utc>>>),
+    NillableTimeArray(Option<Vec<DateTime<FixedOffset>>>),
     /// Nillable array of documents
     NillableDocumentArray(Option<Vec<crate::Document>>),
 
@@ -106,7 +106,7 @@ pub enum NormalValue {
     /// Array of nillable bytes
     NillableBytesElementArray(Vec<Option<Vec<u8>>>),
     /// Array of nillable timestamps
-    NillableTimeElementArray(Vec<Option<DateTime<Utc>>>),
+    NillableTimeElementArray(Vec<Option<DateTime<FixedOffset>>>),
     /// Array of nillable documents
     NillableDocumentElementArray(Vec<Option<crate::Document>>),
 }
@@ -265,7 +265,7 @@ impl NormalValue {
     }
 
     /// Get as DateTime if this is a Time variant.
-    pub fn as_time(&self) -> Option<&DateTime<Utc>> {
+    pub fn as_time(&self) -> Option<&DateTime<FixedOffset>> {
         match self {
             NormalValue::Time(v) => Some(v),
             NormalValue::NillableTime(Some(v)) => Some(v),
@@ -341,8 +341,8 @@ impl From<Vec<u8>> for NormalValue {
     }
 }
 
-impl From<DateTime<Utc>> for NormalValue {
-    fn from(v: DateTime<Utc>) -> Self {
+impl From<DateTime<FixedOffset>> for NormalValue {
+    fn from(v: DateTime<FixedOffset>) -> Self {
         NormalValue::Time(v)
     }
 }

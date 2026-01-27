@@ -293,6 +293,44 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
 // DAC (Document Access Control) Functions
 // ============================================================================
 
+/// Add a DAC policy to the node.
+///
+/// Registers a policy document and returns its content-addressed ID.
+///
+/// Returns JSON with the policy ID:
+/// ```json
+/// { "PolicyID": "bafyreigh..." }
+/// ```
+///
+/// # Safety
+///
+/// All string parameters must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn add_dac_policy(
+    _node_ptr: usize,
+    _identity_did: *const c_char,
+    _policy: *const c_char,
+) -> FfiResult {
+    // DAC policies are not yet implemented in the Rust FFI
+    FfiResult::error("add_dac_policy is not yet implemented - see issue #179")
+}
+
+/// Get a DAC policy by ID.
+///
+/// Returns JSON with the policy definition.
+///
+/// # Safety
+///
+/// All string parameters must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn get_dac_policy(
+    _node_ptr: usize,
+    _policy_id: *const c_char,
+) -> FfiResult {
+    // DAC policies are not yet implemented in the Rust FFI
+    FfiResult::error("get_dac_policy is not yet implemented - see issue #179")
+}
+
 /// Add a DAC actor relationship (share document access with target).
 ///
 /// The requestor must be the document owner. Relation can be:
