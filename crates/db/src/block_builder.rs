@@ -187,6 +187,7 @@ struct FieldHeadInfo {
     /// The CID of the existing head (if any)
     cid: Option<Cid>,
     /// The priority of the existing head (0 if none)
+    #[allow(dead_code)] // May be used for priority-based conflict resolution
     priority: u64,
     /// The full key (for deletion when replacing)
     key: Option<Vec<u8>>,
