@@ -3,13 +3,14 @@
 use async_trait::async_trait;
 use document::Document;
 use query::fetcher::CommitsQueryOptions;
+use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
 use storage::corekv::Store;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
-use crate::collection_loader::get_collection_with_lazy_load;
+use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::txn::DbTxn;
 
@@ -174,5 +175,79 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .fetch_commits(&db_options)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("commits fetch error: {}", e)))
+    }
+
+    async fn get_by_index_scan(
+        &self,
+        collection_name: &str,
+        params: &IndexScanParams,
+    ) -> query::error::Result<Vec<String>> {
+        use storage::index::IndexIterator;
+
+        let (_collection, datastore, index_manager) =
+            get_collection_with_index_manager(&self.txn, collection_name).await?;
+
+        // Get the index
+        let index = index_manager.get_index(&params.index_name).ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "index '{}' not found on collection '{}'",
+                params.index_name, collection_name
+            ))
+        })?;
+
+        // Execute the appropriate scan based on scan type
+        let doc_ids = match &params.scan_type {
+            IndexScanType::ExactMatch { values } => {
+                let mut iter = index
+                    .get(&datastore, values)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                let entries = iter.collect_all().await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index iteration error: {}", e))
+                })?;
+                entries.into_iter().map(|e| e.doc_id).collect()
+            }
+            IndexScanType::InScan { values } => {
+                // For IN operator, we need to collect results for each value
+                let mut all_doc_ids = Vec::new();
+                for value in values {
+                    let mut iter = index
+                        .get(&datastore, &[value.clone()])
+                        .await
+                        .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                    let entries = iter.collect_all().await.map_err(|e| {
+                        query::error::QueryError::execution(format!("index iteration error: {}", e))
+                    })?;
+                    all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                }
+                all_doc_ids
+            }
+            IndexScanType::PrefixScan { prefix_values, reverse } => {
+                let mut iter = index
+                    .scan_prefix(&datastore, prefix_values, *reverse)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                let entries = iter.collect_all().await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index iteration error: {}", e))
+                })?;
+                entries.into_iter().map(|e| e.doc_id).collect()
+            }
+            IndexScanType::RangeScan { prefix_values, lower, upper, reverse } => {
+                let mut iter = index
+                    .scan_range(&datastore, prefix_values, lower.clone(), upper.clone(), *reverse)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                let entries = iter.collect_all().await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index iteration error: {}", e))
+                })?;
+                entries.into_iter().map(|e| e.doc_id).collect()
+            }
+        };
+
+        Ok(doc_ids)
+    }
+
+    fn supports_index_queries(&self) -> bool {
+        true
     }
 }

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::Result;
+use crate::planner::index_selection::IndexScanParams;
 
 /// Result of fetching documents by ID, including information about missing documents.
 #[derive(Debug, Clone)]
@@ -120,6 +121,42 @@ pub trait DocFetcher: Send + Sync {
         Err(crate::error::QueryError::execution(
             "_commits queries are not supported by this fetcher".to_string(),
         ))
+    }
+
+    /// Get documents using an index scan.
+    ///
+    /// This method uses a secondary index to efficiently fetch documents matching
+    /// the index scan parameters. It returns the document IDs found via the index,
+    /// and optionally the full documents if the fetcher supports it.
+    ///
+    /// # Arguments
+    ///
+    /// * `collection_name` - The collection to query
+    /// * `params` - Index scan parameters specifying the index and scan type
+    ///
+    /// # Returns
+    ///
+    /// A list of document IDs matching the index scan. The caller can then
+    /// use `get_by_ids` to fetch the full documents.
+    ///
+    /// Default implementation returns an error - implementations that support
+    /// index queries should override this.
+    async fn get_by_index_scan(
+        &self,
+        collection_name: &str,
+        params: &IndexScanParams,
+    ) -> Result<Vec<String>> {
+        let _ = (collection_name, params);
+        Err(crate::error::QueryError::execution(
+            "Index-based queries are not supported by this fetcher".to_string(),
+        ))
+    }
+
+    /// Check if this fetcher supports index-based queries.
+    ///
+    /// Returns true if `get_by_index_scan` is implemented and functional.
+    fn supports_index_queries(&self) -> bool {
+        false
     }
 }
 
