@@ -263,8 +263,15 @@ impl PlanNode for UpdateNode {
                     // Apply update input
                     self.input.apply_to(&mut doc)?;
 
-                    // Persist update
-                    let result = self.mutator.update(&self.collection_name, doc).await?;
+                    // Collect the modified field names for block creation
+                    let modified_fields: std::collections::HashSet<String> =
+                        self.input.fields.keys().cloned().collect();
+
+                    // Persist update with modified field tracking
+                    let result = self
+                        .mutator
+                        .update(&self.collection_name, doc, modified_fields)
+                        .await?;
 
                     // Convert to plan Doc
                     let plan_doc = self.update_result_to_doc(&result)?;

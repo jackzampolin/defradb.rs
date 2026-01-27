@@ -284,6 +284,9 @@ async fn get_max_priority(headstore: &NamespaceView, doc_id: &str) -> Result<u64
 /// * `headstore` - Transaction headstore view
 /// * `doc` - The document to build blocks from
 /// * `schema_version_id` - The schema version ID for CRDT deltas
+/// * `modified_fields` - Optional set of field names that were modified.
+///   If Some, only these fields will have new blocks created.
+///   If None (for create operations), all fields get new blocks.
 ///
 /// # Returns
 ///
@@ -293,6 +296,7 @@ pub async fn write_document_blocks(
     headstore: &NamespaceView,
     doc: &Document,
     schema_version_id: &str,
+    modified_fields: Option<&std::collections::HashSet<String>>,
 ) -> Result<BlockResult, String> {
     let doc_id = doc
         .id()
@@ -309,72 +313,86 @@ pub async fn write_document_blocks(
     let max_priority = get_max_priority(headstore, &doc_id_str).await?;
     let priority: u64 = max_priority + 1;
 
-    // Create an LWW block for each field
+    // Create LWW blocks for each field
+    // For updates with modified_fields, only create blocks for changed fields.
+    // For unchanged fields, use their existing head CID in the composite links.
     for (field_name, field_value) in doc.values() {
         // Skip internal fields like _docID
         if field_name.starts_with('_') {
             continue;
         }
 
-        // Get existing head for this field (if any) to build proper DAG links
-        let field_head = get_field_head(headstore, &doc_id_str, field_name).await?;
-        let heads: Vec<Cid> = field_head.cid.into_iter().collect();
-
-        // Encode the field value as CBOR
-        let value_bytes = encode_value_as_cbor(field_value.value())?;
-
-        // Create LWW delta payload
-        let lww_payload = LwwDeltaPayload {
-            doc_id: doc_id_bytes.clone(),
-            field_name: field_name.clone(),
-            priority,
-            schema_version_id: schema_version_id.to_string(),
-            data: value_bytes,
+        // Check if this field should have a new block created
+        let should_create_block = match modified_fields {
+            None => true, // Create operation: all fields get new blocks
+            Some(fields) => fields.contains(field_name), // Update: only modified fields
         };
 
-        // Create the field block with heads linking to previous version
-        let field_block = Block::new(CrdtDelta::Lww(lww_payload), heads, vec![]);
+        // Get existing head for this field (if any)
+        let field_head = get_field_head(headstore, &doc_id_str, field_name).await?;
 
-        // Serialize and generate CID
-        let field_block_bytes = field_block
-            .to_dag_cbor()
-            .map_err(|e| format!("Failed to encode field block: {}", e))?;
-        let field_cid = field_block
-            .generate_cid()
-            .map_err(|e| format!("Failed to generate field CID: {}", e))?;
+        if should_create_block {
+            // Create new LWW block for this field
+            let heads: Vec<Cid> = field_head.cid.into_iter().collect();
 
-        // Store the field block in blockstore
-        blockstore
-            .set(&field_cid.to_bytes(), &field_block_bytes)
-            .await
-            .map_err(|e| format!("Failed to store field block: {}", e))?;
+            // Encode the field value as CBOR
+            let value_bytes = encode_value_as_cbor(field_value.value())?;
 
-        // Delete old head entry if it exists (replace, not accumulate)
-        if let Some(old_key) = field_head.key {
-            headstore
-                .delete(&old_key)
+            // Create LWW delta payload
+            let lww_payload = LwwDeltaPayload {
+                doc_id: doc_id_bytes.clone(),
+                field_name: field_name.clone(),
+                priority,
+                schema_version_id: schema_version_id.to_string(),
+                data: value_bytes,
+            };
+
+            // Create the field block with heads linking to previous version
+            let field_block = Block::new(CrdtDelta::Lww(lww_payload), heads, vec![]);
+
+            // Serialize and generate CID
+            let field_block_bytes = field_block
+                .to_dag_cbor()
+                .map_err(|e| format!("Failed to encode field block: {}", e))?;
+            let field_cid = field_block
+                .generate_cid()
+                .map_err(|e| format!("Failed to generate field CID: {}", e))?;
+
+            // Store the field block in blockstore
+            blockstore
+                .set(&field_cid.to_bytes(), &field_block_bytes)
                 .await
-                .map_err(|e| format!("Failed to delete old field head: {}", e))?;
+                .map_err(|e| format!("Failed to store field block: {}", e))?;
+
+            // Delete old head entry if it exists (replace, not accumulate)
+            if let Some(old_key) = field_head.key {
+                headstore
+                    .delete(&old_key)
+                    .await
+                    .map_err(|e| format!("Failed to delete old field head: {}", e))?;
+            }
+
+            // Write new head CID to headstore: /d/{doc_id}/{field_name}/{cid} → priority
+            let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
+            let priority_bytes = encode_priority_varint(priority);
+            headstore
+                .set(&head_key.bytes(), &priority_bytes)
+                .await
+                .map_err(|e| format!("Failed to write field head: {}", e))?;
+
+            tracing::debug!(
+                field_name = %field_name,
+                cid = %field_cid,
+                has_prev_head = field_head.cid.is_some(),
+                "Stored LWW field block and head"
+            );
+
+            // Add link to composite - only new blocks get linked
+            field_links.push(DAGLink::new(field_name.clone(), field_cid));
+            field_cids.push(field_cid);
         }
-
-        // Write new head CID to headstore: /d/{doc_id}/{field_name}/{cid} → priority
-        let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
-        let priority_bytes = encode_priority_varint(priority);
-        headstore
-            .set(&head_key.bytes(), &priority_bytes)
-            .await
-            .map_err(|e| format!("Failed to write field head: {}", e))?;
-
-        tracing::debug!(
-            field_name = %field_name,
-            cid = %field_cid,
-            has_prev_head = field_head.cid.is_some(),
-            "Stored LWW field block and head"
-        );
-
-        // Add link to composite
-        field_links.push(DAGLink::new(field_name.clone(), field_cid));
-        field_cids.push(field_cid);
+        // Note: Unchanged fields are NOT added to composite links.
+        // Go only includes newly created field blocks in the composite's links array.
     }
 
     // Get existing composite head (if any) to build proper DAG links

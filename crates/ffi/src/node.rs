@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::runtime::RUNTIME;
-use crate::state::{NodeState, NODES};
+use crate::state::{NodeState, PolicyStore, NODES};
 use crate::types::{FfiResult, NewNodeResult, NodeInitOptions};
 
 /// Create a new DefraDB node.
@@ -74,13 +74,19 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
+        // Create policy store for DAC policies
+        let policy_store = Arc::new(PolicyStore::new());
+
         // Create node state
+        // P2P is disabled by default in FFI - use new_node_with_p2p for P2P-enabled nodes
         let state = NodeState {
             database,
             query_runner: runner,
             nac_manager,
             document_acp,
             event_bus,
+            policy_store,
+            p2p: None,
         };
 
         // Register and get handle

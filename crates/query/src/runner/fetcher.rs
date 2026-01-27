@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 
 use crate::error::{QueryError, Result};
 use crate::fetcher::{DocFetcher, FetchByIdsResult};
+use crate::planner::index_selection::IndexScanParams;
 
 /// Wrapper to convert a `&dyn DocFetcher` reference into an owned `DocFetcher`.
 ///
@@ -118,5 +119,25 @@ impl DocFetcher for FetcherWrapper {
                     collection_name, field_name, value, e
                 ))
             })
+    }
+
+    async fn get_by_index_scan(
+        &self,
+        collection_name: &str,
+        params: &IndexScanParams,
+    ) -> Result<Vec<String>> {
+        self.get_fetcher()
+            .get_by_index_scan(collection_name, params)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (index scan on '{}'): {}",
+                    collection_name, params.index_name, e
+                ))
+            })
+    }
+
+    fn supports_index_queries(&self) -> bool {
+        self.get_fetcher().supports_index_queries()
     }
 }

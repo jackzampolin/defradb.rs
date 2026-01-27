@@ -118,17 +118,28 @@ pub unsafe extern "C" fn create_index(
             let mut updated_schema = collection.schema().clone();
             updated_schema.indexes.push(index_desc.clone());
 
-            // Save the updated schema
-            let schema_key =
-                storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+            // Save the updated schema at /collection/id/{version_id}
+            let collection_key =
+                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
             let schema_data = serde_json::to_vec(&updated_schema)
                 .map_err(|e| format!("failed to serialize schema: {}", e))?;
 
-            txn.systemstore()
-                .map_err(|e| format!("failed to get systemstore: {}", e))?
-                .set(&schema_key.bytes(), &schema_data)
+            let systemstore = txn
+                .systemstore()
+                .map_err(|e| format!("failed to get systemstore: {}", e))?;
+
+            systemstore
+                .set(&collection_key.bytes(), &schema_data)
                 .await
                 .map_err(|e| format!("failed to save schema: {}", e))?;
+
+            // Update the name → version_id mapping at /collection/name/{name}
+            let name_key =
+                storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+            systemstore
+                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+                .await
+                .map_err(|e| format!("failed to save name mapping: {}", e))?;
 
             // Bulk index existing documents
             let documents = collection
@@ -258,17 +269,28 @@ pub unsafe extern "C" fn drop_index(
                 .indexes
                 .retain(|idx| idx.name != index_name_str);
 
-            // Save the updated schema
-            let schema_key =
-                storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+            // Save the updated schema at /collection/id/{version_id}
+            let collection_key =
+                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
             let schema_data = serde_json::to_vec(&updated_schema)
                 .map_err(|e| format!("failed to serialize schema: {}", e))?;
 
-            txn.systemstore()
-                .map_err(|e| format!("failed to get systemstore: {}", e))?
-                .set(&schema_key.bytes(), &schema_data)
+            let systemstore = txn
+                .systemstore()
+                .map_err(|e| format!("failed to get systemstore: {}", e))?;
+
+            systemstore
+                .set(&collection_key.bytes(), &schema_data)
                 .await
                 .map_err(|e| format!("failed to save schema: {}", e))?;
+
+            // Update the name → version_id mapping at /collection/name/{name}
+            let name_key =
+                storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+            systemstore
+                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+                .await
+                .map_err(|e| format!("failed to save name mapping: {}", e))?;
         }
 
         // Commit the transaction (datastore reference is now dropped)

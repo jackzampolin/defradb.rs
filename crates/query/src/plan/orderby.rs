@@ -160,6 +160,7 @@ impl OrderByNode {
     ///
     /// Handles both simple field paths (["age"]) and nested relation paths (["author", "age"]).
     /// For nested paths, traverses the JSON object hierarchy to find the target value.
+    /// Also supports ordering by aliased fields (via render_keys).
     fn get_field_value_static<'a>(
         doc: &'a Doc,
         fields: &[String],
@@ -170,7 +171,12 @@ impl OrderByNode {
         }
 
         let field_name = &fields[0];
-        let index = mapping.first_index_of_name(field_name)?;
+        // For ORDER BY with aliases (_alias directive), we need to look up by render_key first
+        // because the alias name maps to the actual field index via render_keys.
+        // Only fall back to indexes_by_name for regular field names.
+        let by_render_key = mapping.try_find_index_from_render_key(field_name);
+        let by_name = mapping.first_index_of_name(field_name);
+        let index = by_render_key.or(by_name)?;
         let value = doc.get(index)?;
 
         // If there are more path segments, traverse the nested object
@@ -214,16 +220,21 @@ impl PlanNode for OrderByNode {
         // Validate that the first field of all ORDER BY paths exists in the document mapping.
         // For nested paths like ["author", "age"], we only validate "author" exists here;
         // the nested field traversal handles further validation during comparison.
+        // Also supports aliased fields via render_keys.
         for condition in &self.order_by.conditions {
             if !condition.fields.is_empty() {
                 let first_field = &condition.fields[0];
-                if self
+                let exists = self
                     .document_mapping
                     .first_index_of_name(first_field)
-                    .is_none()
-                {
+                    .is_some()
+                    || self
+                        .document_mapping
+                        .try_find_index_from_render_key(first_field)
+                        .is_some();
+                if !exists {
                     return Err(QueryError::execution(format!(
-                        "ORDER BY field '{}' does not exist in the document schema",
+                        "field or alias not found. Name: {}",
                         first_field
                     )));
                 }

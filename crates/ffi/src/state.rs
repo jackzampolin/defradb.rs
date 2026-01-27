@@ -4,12 +4,95 @@
 //! Go code receives opaque usize handles that map to actual node state.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
 use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 use storage::MemoryStore;
+
+use p2p::P2PHostHandle;
+
+/// In-memory policy store for DAC policies.
+///
+/// Stores policy YAML indexed by content-addressed ID (SHA256 hash).
+#[derive(Default)]
+pub struct PolicyStore {
+    policies: RwLock<HashMap<String, String>>,
+}
+
+impl PolicyStore {
+    /// Create a new empty policy store.
+    pub fn new() -> Self {
+        Self {
+            policies: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Add a policy and return its content-addressed ID.
+    ///
+    /// The ID is a SHA256 hash of the policy content (hex-encoded).
+    pub fn add_policy(&self, policy: &str) -> String {
+        // Compute content-addressed ID (SHA256 hash)
+        let mut hasher = Sha256::new();
+        hasher.update(policy.as_bytes());
+        let hash = hasher.finalize();
+        let policy_id = hex::encode(hash);
+
+        // Store the policy
+        self.policies.write().insert(policy_id.clone(), policy.to_string());
+
+        policy_id
+    }
+
+    /// Get a policy by ID.
+    pub fn get_policy(&self, id: &str) -> Option<String> {
+        self.policies.read().get(id).cloned()
+    }
+
+    /// List all policy IDs.
+    pub fn list_policies(&self) -> Vec<String> {
+        self.policies.read().keys().cloned().collect()
+    }
+}
+
+/// P2P state for FFI nodes.
+///
+/// This wraps the P2P host handle and tracks P2P-specific state like
+/// subscribed collections.
+pub struct P2PState {
+    /// Handle to communicate with the P2P host.
+    pub handle: P2PHostHandle,
+    /// Collections subscribed for P2P replication.
+    pub collections: RwLock<HashSet<String>>,
+}
+
+impl P2PState {
+    /// Create new P2P state with the given host handle.
+    pub fn new(handle: P2PHostHandle) -> Self {
+        Self {
+            handle,
+            collections: RwLock::new(HashSet::new()),
+        }
+    }
+
+    /// Add a collection to P2P.
+    pub fn add_collection(&self, name: &str) {
+        self.collections.write().insert(name.to_string());
+    }
+
+    /// Remove a collection from P2P.
+    pub fn remove_collection(&self, name: &str) -> bool {
+        self.collections.write().remove(name)
+    }
+
+    /// Get all P2P collections.
+    pub fn get_collections(&self) -> Vec<String> {
+        self.collections.read().iter().cloned().collect()
+    }
+}
 
 /// Type alias for the database type used in FFI.
 pub type FfiDatabase = db::DB<MemoryStore>;
@@ -35,6 +118,10 @@ pub struct NodeState {
     pub document_acp: Arc<dyn acp::DocumentACP>,
     /// The event bus for subscriptions.
     pub event_bus: Arc<dyn events::Bus>,
+    /// The policy store for DAC policies.
+    pub policy_store: Arc<PolicyStore>,
+    /// P2P state (optional - not all nodes have P2P enabled).
+    pub p2p: Option<Arc<P2PState>>,
 }
 
 /// State held for each FFI subscription.

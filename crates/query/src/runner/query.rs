@@ -6,12 +6,13 @@ use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::document::documents_to_plan_docs;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
+use crate::planner::index_selection::{filter_to_index_scan, select_best_index};
 use crate::planner::Planner;
 use crate::query_parse::{parse_query, ExplainType};
 use crate::txn::TransactionRegistry;
@@ -144,67 +145,119 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
-        // Build document mapping and plan
-        let mapping = plan::build_mapping(select, &collection)?;
-
-        // Fetch documents
         let fetcher = self.fetcher.as_ref();
-        let docs = if let Some(ref doc_ids) = select.doc_ids {
-            // Deduplicate doc_ids while preserving order (Go compatibility)
-            let mut seen = HashSet::new();
-            let unique_ids: Vec<String> = doc_ids
-                .iter()
-                .filter(|id| seen.insert((*id).clone()))
-                .cloned()
-                .collect();
-            let result = fetcher
-                .get_by_ids(&select.collection_name, &unique_ids)
-                .await?;
-            result.into_docs()
+
+        // Check if we can use an index (only when not fetching by specific doc_ids)
+        let can_use_index = select.doc_ids.is_none()
+            && select.filter.is_some()
+            && !collection.indexes.is_empty()
+            && fetcher.supports_index_queries()
+            && select
+                .filter
+                .as_ref()
+                .map(|f| select_best_index(f, &collection.indexes).is_some())
+                .unwrap_or(false);
+
+        if can_use_index {
+            // Use Planner path for index-based queries (shows indexScanNode in explain)
+            let fetcher_arc = FetcherWrapper::new(fetcher);
+            let collections_map = self.collections_map().await?;
+            let collections: Vec<CollectionVersion> =
+                collections_map.values().map(|c| (**c).clone()).collect();
+
+            let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            let plan_result = planner.plan_with_index_info(select)?;
+            let mut plan = plan_result.plan;
+
+            // Wrap with permission filter if needed
+            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                plan = Box::new(PermissionFilterNode::new(
+                    plan,
+                    acp.clone(),
+                    Identity::from(caller_identity),
+                    &policy.id,
+                    &policy.resource_name,
+                ));
+            }
+
+            // Execute the plan and count iterations
+            plan.init().await?;
+            plan.start().await?;
+
+            let mut iterations: u64 = 0;
+            let mut result_count = 0;
+            let mut doc_count = 0;
+
+            while plan.next().await? {
+                iterations += 1;
+                result_count += 1;
+                doc_count += 1;
+            }
+
+            plan.close().await?;
+
+            let explanation = plan.explain();
+            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+
+            Ok((explanation, result_count, iterations))
         } else {
-            fetcher.get_all(&select.collection_name).await?
-        };
+            // Standard path: fetch all docs and build scan-based plan
+            let mapping = plan::build_mapping(select, &collection)?;
 
-        // Convert to plan docs
-        let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
-        let doc_count = plan_docs.len();
+            let docs = if let Some(ref doc_ids) = select.doc_ids {
+                // Deduplicate doc_ids while preserving order (Go compatibility)
+                let mut seen = HashSet::new();
+                let unique_ids: Vec<String> = doc_ids
+                    .iter()
+                    .filter(|id| seen.insert((*id).clone()))
+                    .cloned()
+                    .collect();
+                let result = fetcher
+                    .get_by_ids(&select.collection_name, &unique_ids)
+                    .await?;
+                result.into_docs()
+            } else {
+                fetcher.get_all(&select.collection_name).await?
+            };
 
-        // Build the plan
-        let mut plan = plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection)?;
+            // Convert to plan docs
+            let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
+            let doc_count = plan_docs.len();
 
-        // Wrap with permission filter if needed
-        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-            plan = Box::new(PermissionFilterNode::new(
-                plan,
-                acp.clone(),
-                Identity::from(caller_identity),
-                &policy.id,
-                &policy.resource_name,
-            ));
+            // Build the plan
+            let mut plan =
+                plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection)?;
+
+            // Wrap with permission filter if needed
+            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                plan = Box::new(PermissionFilterNode::new(
+                    plan,
+                    acp.clone(),
+                    Identity::from(caller_identity),
+                    &policy.id,
+                    &policy.resource_name,
+                ));
+            }
+
+            // Execute the plan and count iterations
+            plan.init().await?;
+            plan.start().await?;
+
+            let mut iterations: u64 = 0;
+            let mut result_count = 0;
+
+            while plan.next().await? {
+                iterations += 1;
+                result_count += 1;
+            }
+
+            plan.close().await?;
+
+            let explanation = plan.explain();
+            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+
+            Ok((explanation, result_count, iterations))
         }
-
-        // Execute the plan and count iterations
-        plan.init().await?;
-        plan.start().await?;
-
-        let mut iterations: u64 = 0;
-        let mut result_count = 0;
-
-        while plan.next().await? {
-            iterations += 1;
-            result_count += 1;
-        }
-
-        plan.close().await?;
-
-        // Get the execution explain from the plan (Go format: { "nodeKind": { ... } })
-        let explanation = plan.explain();
-
-        // Go adds iterations to each node during execute explain
-        // For now, we add it to the outermost node
-        let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
-
-        Ok((explanation, result_count, iterations))
     }
 
     /// Add execution metrics to the explain output (Go format).
@@ -755,6 +808,37 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 );
             }
             result.into_docs()
+        } else if let Some(ref filter) = select.filter {
+            // Try to use an index if available
+            if fetcher.supports_index_queries() && !collection.indexes.is_empty() {
+                if let Some(best_index) = select_best_index(filter, &collection.indexes) {
+                    if let Some(params) = filter_to_index_scan(filter, best_index) {
+                        debug!(
+                            collection = %select.collection_name,
+                            index = %params.index_name,
+                            "Using index for query"
+                        );
+                        // Get doc IDs from index
+                        let doc_ids = fetcher
+                            .get_by_index_scan(&select.collection_name, &params)
+                            .await?;
+                        // Fetch the actual documents by ID
+                        let result = fetcher
+                            .get_by_ids(&select.collection_name, &doc_ids)
+                            .await?;
+                        result.into_docs()
+                    } else {
+                        // Filter doesn't translate to index scan, fallback to full scan
+                        fetcher.get_all(&select.collection_name).await?
+                    }
+                } else {
+                    // No suitable index found, fallback to full scan
+                    fetcher.get_all(&select.collection_name).await?
+                }
+            } else {
+                // Fetcher doesn't support index queries or no indexes, fallback to full scan
+                fetcher.get_all(&select.collection_name).await?
+            }
         } else {
             fetcher.get_all(&select.collection_name).await?
         };
@@ -995,12 +1079,57 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             });
         }
 
+        // Apply groupBy if present - this changes how we process commits
+        // Each entry is (representative_commit, all_commits_in_group)
+        let grouped: Option<Vec<(document::Document, Vec<document::Document>)>> =
+            if let Some(ref group_by) = select.group_by {
+                if !group_by.fields.is_empty() {
+                    let mut groups: Vec<(String, document::Document, Vec<document::Document>)> =
+                        Vec::new();
+                    let mut group_map: std::collections::HashMap<String, usize> =
+                        std::collections::HashMap::new();
+
+                    for commit in commits.drain(..) {
+                        let key = Self::generate_commit_group_key(&commit, &group_by.fields);
+                        if let Some(&idx) = group_map.get(&key) {
+                            groups[idx].2.push(commit);
+                        } else {
+                            let idx = groups.len();
+                            group_map.insert(key.clone(), idx);
+                            groups.push((key, commit.clone(), vec![commit]));
+                        }
+                    }
+
+                    Some(
+                        groups
+                            .into_iter()
+                            .map(|(_, rep, docs)| (rep, docs))
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        // Get the list of commits to process (either grouped representatives or all commits)
+        let mut work_items: Vec<(document::Document, Option<Vec<document::Document>>)> =
+            if let Some(grouped) = grouped {
+                grouped
+                    .into_iter()
+                    .map(|(rep, all)| (rep, Some(all)))
+                    .collect()
+            } else {
+                commits.into_iter().map(|c| (c, None)).collect()
+            };
+
         // Apply ordering if present
         if let Some(ref order_by) = select.order_by {
             for condition in order_by.conditions.iter().rev() {
                 if let Some(field_name) = condition.fields.first() {
                     let desc = matches!(condition.direction, OrderDirection::Desc);
-                    commits.sort_by(|a, b| {
+                    work_items.sort_by(|(a, _), (b, _)| {
                         let val_a = a.get(field_name);
                         let val_b = b.get(field_name);
                         let cmp = Self::compare_json_values(val_a, val_b);
@@ -1017,19 +1146,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Apply limit and offset if present
         if let Some(ref limit_spec) = select.limit {
             let offset = limit_spec.offset as usize;
-            if offset > 0 && offset < commits.len() {
-                commits = commits.split_off(offset);
-            } else if offset >= commits.len() {
-                commits.clear();
+            if offset > 0 && offset < work_items.len() {
+                work_items = work_items.split_off(offset);
+            } else if offset >= work_items.len() {
+                work_items.clear();
             }
             if let Some(limit) = limit_spec.limit {
-                commits.truncate(limit as usize);
+                work_items.truncate(limit as usize);
             }
         }
 
         // Build results
         let mut results = Vec::new();
-        for commit in &commits {
+        for (commit, group_docs) in &work_items {
             let mut obj = serde_json::Map::new();
 
             // Map requested fields from the commit document
@@ -1094,12 +1223,45 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         obj.insert(output_name.to_string(), JsonValue::Number(count.into()));
                     }
                     Requestable::Select(nested) => {
-                        // Handle nested selects (e.g., links { cid })
                         let field_name = &nested.field.name;
                         let output_name = nested.field.output_name();
 
-                        if let Some(value) = commit.get(field_name) {
-                            // Convert NormalValue to JSON first
+                        // Handle _group special field for grouped results
+                        if field_name == "_group" {
+                            if let Some(docs) = group_docs {
+                                // Build array of group documents with requested fields
+                                let group_array: Vec<JsonValue> = docs
+                                    .iter()
+                                    .map(|doc: &document::Document| {
+                                        let mut nested_obj = serde_json::Map::new();
+                                        for nested_field in &nested.fields {
+                                            if let Requestable::Field(nf) = nested_field {
+                                                let nf_name = &nf.name;
+                                                let nf_output = nf.output_name();
+                                                if let Some(val) = doc.get(nf_name) {
+                                                    let json_val =
+                                                        crate::json_convert::normal_value_to_json(
+                                                            val,
+                                                        )
+                                                        .unwrap_or(JsonValue::Null);
+                                                    nested_obj
+                                                        .insert(nf_output.to_string(), json_val);
+                                                } else {
+                                                    nested_obj
+                                                        .insert(nf_output.to_string(), JsonValue::Null);
+                                                }
+                                            }
+                                        }
+                                        JsonValue::Object(nested_obj)
+                                    })
+                                    .collect();
+                                obj.insert(output_name.to_string(), JsonValue::Array(group_array));
+                            } else {
+                                // Not grouped, _group is empty
+                                obj.insert(output_name.to_string(), JsonValue::Array(vec![]));
+                            }
+                        } else if let Some(value) = commit.get(field_name) {
+                            // Handle nested selects (e.g., links { cid })
                             if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
                                 if let Some(arr) = json_val.as_array() {
                                     let nested_results: Vec<JsonValue> = arr
@@ -1147,6 +1309,54 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(JsonValue::Array(results))
+    }
+
+    /// Generate a group key from commit field values.
+    /// Format matches Go DefraDB: `{index}_{value}_` for each field.
+    fn generate_commit_group_key(commit: &document::Document, fields: &[String]) -> String {
+        let mut key = String::new();
+        for (i, field_name) in fields.iter().enumerate() {
+            key.push_str(&format!("{}_", i));
+            if let Some(value) = commit.get(field_name) {
+                if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
+                    key.push_str(&Self::json_value_to_key(&json_val));
+                } else {
+                    key.push_str("null");
+                }
+            } else {
+                key.push_str("null");
+            }
+            key.push('_');
+        }
+        key
+    }
+
+    /// Convert a JSON value to a string for use in group key.
+    fn json_value_to_key(value: &JsonValue) -> String {
+        match value {
+            JsonValue::Null => "null".to_string(),
+            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Number(n) => n.to_string(),
+            JsonValue::String(s) => s.clone(),
+            JsonValue::Array(arr) => {
+                format!(
+                    "[{}]",
+                    arr.iter()
+                        .map(Self::json_value_to_key)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            JsonValue::Object(obj) => {
+                format!(
+                    "{{{}}}",
+                    obj.iter()
+                        .map(|(k, v)| format!("{}:{}", k, Self::json_value_to_key(v)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+        }
     }
 
     /// Build a DocumentMapping for commit fields.
