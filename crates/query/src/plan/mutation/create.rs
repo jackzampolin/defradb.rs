@@ -697,15 +697,15 @@ pub fn normal_value_to_json(value: &document::NormalValue) -> JsonValue {
         // DateTime handling - convert to RFC 3339 string with Z suffix for UTC (matching Go DefraDB)
         // Go's time.RFC3339 format uses "Z" for UTC, not "+00:00"
         NormalValue::Time(t) => {
-            JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
         }
         NormalValue::NillableTime(Some(t)) => {
-            JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
         }
         NormalValue::NillableTime(None) => JsonValue::Null,
         NormalValue::TimeArray(arr) => JsonValue::Array(
             arr.iter()
-                .map(|t| JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+                .map(|t| JsonValue::String(t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)))
                 .collect(),
         ),
         // Arrays with nillable elements - preserve null values

@@ -179,7 +179,7 @@ fn test_time_to_json_rfc3339_format() {
     // Timestamp without fractional seconds
     let t = Utc.with_ymd_and_hms(2025, 1, 14, 12, 30, 45).unwrap();
     let mut doc = document::Document::new();
-    doc.set("timestamp", NormalValue::Time(t));
+    doc.set("timestamp", NormalValue::Time(t.fixed_offset()));
 
     let map = doc.to_map().unwrap();
     let s = map.get("timestamp").unwrap().as_str().unwrap();
@@ -200,7 +200,7 @@ fn test_time_to_json_with_nanoseconds() {
         .with_nanosecond(123456789)
         .unwrap();
     let mut doc = document::Document::new();
-    doc.set("timestamp", NormalValue::Time(t));
+    doc.set("timestamp", NormalValue::Time(t.fixed_offset()));
 
     let map = doc.to_map().unwrap();
     let s = map.get("timestamp").unwrap().as_str().unwrap();

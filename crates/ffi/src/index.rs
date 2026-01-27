@@ -134,8 +134,7 @@ pub unsafe extern "C" fn create_index(
                 .map_err(|e| format!("failed to save schema: {}", e))?;
 
             // Update the name → version_id mapping at /collection/name/{name}
-            let name_key =
-                storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+            let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
             systemstore
                 .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
                 .await
@@ -285,8 +284,7 @@ pub unsafe extern "C" fn drop_index(
                 .map_err(|e| format!("failed to save schema: {}", e))?;
 
             // Update the name → version_id mapping at /collection/name/{name}
-            let name_key =
-                storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+            let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
             systemstore
                 .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
                 .await

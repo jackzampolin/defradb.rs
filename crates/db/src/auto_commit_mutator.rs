@@ -121,9 +121,14 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let schema_version_id = collection.collection_id();
 
                     // For create operations, all fields are new - pass None for modified_fields
-                    if let Err(e) =
-                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id, None)
-                            .await
+                    if let Err(e) = write_document_blocks(
+                        &blockstore,
+                        &headstore,
+                        &doc,
+                        schema_version_id,
+                        None,
+                    )
+                    .await
                     {
                         warn!(
                             collection = %collection_name,
@@ -244,9 +249,14 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
-                    if let Err(e) =
-                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id, Some(&modified_fields))
-                            .await
+                    if let Err(e) = write_document_blocks(
+                        &blockstore,
+                        &headstore,
+                        &doc,
+                        schema_version_id,
+                        Some(&modified_fields),
+                    )
+                    .await
                     {
                         warn!(
                             collection = %collection_name,

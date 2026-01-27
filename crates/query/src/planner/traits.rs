@@ -162,6 +162,16 @@ pub trait PlanNode: Send + Sync {
         None
     }
 
+    /// Whether this node (or an ancestor) is a GroupBy source.
+    ///
+    /// Used by aggregate nodes to detect that they're in a GroupBy context,
+    /// even when the GroupByNode has no groups (empty collection).
+    /// Without this, aggregates would fall through to non-grouped mode
+    /// and yield a synthetic result instead of returning empty.
+    fn is_grouped_source(&self) -> bool {
+        false
+    }
+
     /// Generate an explanation of this node for EXPLAIN queries.
     ///
     /// Returns a JSON object in Go DefraDB format where the node kind is the key:

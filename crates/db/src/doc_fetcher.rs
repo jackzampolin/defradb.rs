@@ -99,9 +99,16 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         let mut missing_ids = Vec::new();
 
         for id_str in doc_ids {
-            let doc_id = document::DocID::from_string(id_str).map_err(|e| {
-                query::error::QueryError::execution(format!("invalid doc ID '{}': {}", id_str, e))
-            })?;
+            // Go DefraDB treats invalid doc IDs as "not found" rather than errors.
+            // This matches behavior where querying for a non-existent ID returns empty results.
+            let doc_id = match document::DocID::from_string(id_str) {
+                Ok(id) => id,
+                Err(_) => {
+                    // Invalid doc ID format - treat as not found
+                    missing_ids.push(id_str.clone());
+                    continue;
+                }
+            };
 
             match collection
                 .get_with_datastore(&datastore, &doc_id)
@@ -198,10 +205,9 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         // Execute the appropriate scan based on scan type
         let doc_ids = match &params.scan_type {
             IndexScanType::ExactMatch { values } => {
-                let mut iter = index
-                    .get(&datastore, values)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                let mut iter = index.get(&datastore, values).await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index error: {}", e))
+                })?;
                 let entries = iter.collect_all().await.map_err(|e| {
                     query::error::QueryError::execution(format!("index iteration error: {}", e))
                 })?;
@@ -211,10 +217,9 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 // For IN operator, we need to collect results for each value
                 let mut all_doc_ids = Vec::new();
                 for value in values {
-                    let mut iter = index
-                        .get(&datastore, &[value.clone()])
-                        .await
-                        .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                    let mut iter = index.get(&datastore, &[value.clone()]).await.map_err(|e| {
+                        query::error::QueryError::execution(format!("index error: {}", e))
+                    })?;
                     let entries = iter.collect_all().await.map_err(|e| {
                         query::error::QueryError::execution(format!("index iteration error: {}", e))
                     })?;
@@ -222,21 +227,39 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 }
                 all_doc_ids
             }
-            IndexScanType::PrefixScan { prefix_values, reverse } => {
+            IndexScanType::PrefixScan {
+                prefix_values,
+                reverse,
+            } => {
                 let mut iter = index
                     .scan_prefix(&datastore, prefix_values, *reverse)
                     .await
-                    .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!("index error: {}", e))
+                    })?;
                 let entries = iter.collect_all().await.map_err(|e| {
                     query::error::QueryError::execution(format!("index iteration error: {}", e))
                 })?;
                 entries.into_iter().map(|e| e.doc_id).collect()
             }
-            IndexScanType::RangeScan { prefix_values, lower, upper, reverse } => {
+            IndexScanType::RangeScan {
+                prefix_values,
+                lower,
+                upper,
+                reverse,
+            } => {
                 let mut iter = index
-                    .scan_range(&datastore, prefix_values, lower.clone(), upper.clone(), *reverse)
+                    .scan_range(
+                        &datastore,
+                        prefix_values,
+                        lower.clone(),
+                        upper.clone(),
+                        *reverse,
+                    )
                     .await
-                    .map_err(|e| query::error::QueryError::execution(format!("index error: {}", e)))?;
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!("index error: {}", e))
+                    })?;
                 let entries = iter.collect_all().await.map_err(|e| {
                     query::error::QueryError::execution(format!("index iteration error: {}", e))
                 })?;

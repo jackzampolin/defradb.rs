@@ -42,7 +42,9 @@ impl PolicyStore {
         let policy_id = hex::encode(hash);
 
         // Store the policy
-        self.policies.write().insert(policy_id.clone(), policy.to_string());
+        self.policies
+            .write()
+            .insert(policy_id.clone(), policy.to_string());
 
         policy_id
     }

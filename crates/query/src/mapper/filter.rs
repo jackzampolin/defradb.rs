@@ -628,6 +628,10 @@ impl Filter {
             if let Some(op) = FilterOp::parse(key) {
                 match op {
                     FilterOp::And => {
+                        // Null _and is a no-op (matches all)
+                        if value.is_null() {
+                            continue;
+                        }
                         let arr = value
                             .as_array()
                             .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
@@ -642,6 +646,10 @@ impl Filter {
                         continue;
                     }
                     FilterOp::Or => {
+                        // Null _or is a no-op (matches all)
+                        if value.is_null() {
+                            continue;
+                        }
                         let arr = value
                             .as_array()
                             .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
@@ -661,6 +669,10 @@ impl Filter {
                         continue;
                     }
                     FilterOp::Not => {
+                        // Null _not is a no-op (matches all)
+                        if value.is_null() {
+                            continue;
+                        }
                         let sub_conditions: HashMap<String, JsonValue> =
                             serde_json::from_value(value.clone())
                                 .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
@@ -673,6 +685,29 @@ impl Filter {
                 }
             }
 
+            // Handle _alias filter: filter by aliased field names (render keys)
+            // Example: filter: {_alias: {myAge: {_gt: 20}}} where myAge is an alias for Age
+            // Also supports logical operators: {_alias: {_and: [{myAge: {_gt: 20}}]}}
+            if key == "_alias" {
+                // Null or non-object _alias filters out all documents (Go compatibility)
+                if value.is_null() {
+                    return Ok(false);
+                }
+                let alias_conditions: HashMap<String, JsonValue> =
+                    match serde_json::from_value(value.clone()) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            // Non-object _alias (e.g., integer) filters everything out
+                            return Ok(false);
+                        }
+                    };
+
+                if !self.eval_alias_conditions(&alias_conditions, fields, mapping)? {
+                    return Ok(false);
+                }
+                continue;
+            }
+
             // Field condition
             let field_index = mapping
                 .first_index_of_name(key)
@@ -683,6 +718,14 @@ impl Filter {
                 .and_then(|v| v.as_ref())
                 .cloned()
                 .unwrap_or(JsonValue::Null);
+
+            // Handle null field conditions: {Name: null} is equivalent to {Name: {_eq: null}}
+            if value.is_null() {
+                if !Self::values_equal(&field_value, &JsonValue::Null) {
+                    return Ok(false);
+                }
+                continue;
+            }
 
             // Value should be an object with operator keys or nested field conditions
             let ops = value
@@ -1064,15 +1107,10 @@ impl Filter {
     }
 
     /// Compare two values for ordering.
-    /// Implements Go DefraDB semantics where null is treated as "smaller" than all other values:
-    /// - value > null → true (any non-null value is greater than null)
-    /// - null > null → false
-    /// - value >= null → true
-    /// - null >= null → true
-    /// - value < null → false (no value is less than null)
-    /// - null < null → false
-    /// - value <= null → false
-    /// - null <= null → true
+    /// Implements Go DefraDB semantics:
+    /// - null vs null → Equal (null == null)
+    /// - null vs non-null → None (null document values are excluded from comparisons)
+    /// - non-null vs null → Greater (filter value is null, any non-null value is greater)
     fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<Option<std::cmp::Ordering>> {
         match (a, b) {
             // Go DefraDB treats null as smallest value
@@ -1080,8 +1118,8 @@ impl Filter {
             (JsonValue::Null, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Equal)),
             // value vs null → Greater (any non-null value is greater than null)
             (_, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Greater)),
-            // null vs value → Less (null is less than any non-null value)
-            (JsonValue::Null, _) => Ok(Some(std::cmp::Ordering::Less)),
+            // null vs non-null → incomparable (Go DefraDB excludes null documents from comparisons)
+            (JsonValue::Null, _) => Ok(None),
 
             // Number comparisons: support int/float coercion (Go's numbers.TryUpcast behavior)
             (JsonValue::Number(a), JsonValue::Number(b)) => {
@@ -1234,6 +1272,81 @@ impl Filter {
         Ok(if negate { !matches } else { matches })
     }
 
+    /// Evaluate the filter's conditions directly against a scalar JSON value.
+    ///
+    /// Used for inline array aggregate filters where each array element is tested
+    /// against operator conditions like `{_gt: 0}` or `{_and: [{_gt: -2}, {_lt: 2}]}`.
+    ///
+    /// Null values don't match comparison filters (they are excluded from aggregation).
+    pub fn matches_scalar_value(&self, value: &JsonValue) -> Result<bool> {
+        if self.conditions.is_empty() {
+            return Ok(true);
+        }
+        // Null scalar values don't pass comparison filters in inline array context
+        if value.is_null() {
+            return Ok(false);
+        }
+        for (key, expected) in &self.conditions {
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And => {
+                        let arr = expected
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
+                        for item in arr {
+                            let sub: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            let f = Filter::from_conditions(sub);
+                            if !f.matches_scalar_value(value)? {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    FilterOp::Or => {
+                        let arr = expected
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
+                        let mut any_match = false;
+                        for item in arr {
+                            let sub: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            let f = Filter::from_conditions(sub);
+                            if f.matches_scalar_value(value)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                        if !any_match {
+                            return Ok(false);
+                        }
+                    }
+                    FilterOp::Not => {
+                        let sub: HashMap<String, JsonValue> =
+                            serde_json::from_value(expected.clone())
+                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                        let f = Filter::from_conditions(sub);
+                        if f.matches_scalar_value(value)? {
+                            return Ok(false);
+                        }
+                    }
+                    _ => {
+                        if !self.eval_op(value, op, expected)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                return Err(QueryError::invalid_filter(format!(
+                    "unknown operator in scalar filter: {}",
+                    key
+                )));
+            }
+        }
+        Ok(true)
+    }
+
     /// Evaluate a filter condition against a single JSON value (used by array element operators).
     ///
     /// For example, when evaluating `{_gt: 70}` against `85`, this method checks if 85 > 70.
@@ -1313,6 +1426,96 @@ impl Filter {
         }
 
         None
+    }
+
+    /// Evaluate alias-based filter conditions.
+    /// Alias filters allow filtering by render key names instead of field names.
+    /// Supports logical operators (_and, _or, _not) within the alias block.
+    fn eval_alias_conditions(
+        &self,
+        conditions: &HashMap<String, JsonValue>,
+        fields: &[Option<JsonValue>],
+        mapping: &DocumentMapping,
+    ) -> Result<bool> {
+        for (key, value) in conditions {
+            // Check for logical operators within alias block
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And => {
+                        let arr = value.as_array().ok_or_else(|| {
+                            QueryError::invalid_filter("_and requires array in _alias")
+                        })?;
+                        for item in arr {
+                            let sub_conditions: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            if !self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                                return Ok(false);
+                            }
+                        }
+                        continue;
+                    }
+                    FilterOp::Or => {
+                        let arr = value.as_array().ok_or_else(|| {
+                            QueryError::invalid_filter("_or requires array in _alias")
+                        })?;
+                        let mut any_match = false;
+                        for item in arr {
+                            let sub_conditions: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            if self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                        if !any_match {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    FilterOp::Not => {
+                        let sub_conditions: HashMap<String, JsonValue> =
+                            serde_json::from_value(value.clone())
+                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                        if self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    _ => {} // Non-logical ops are handled as alias field conditions below
+                }
+            }
+
+            // Look up by render_key (alias) instead of field name
+            let field_index = mapping
+                .try_find_index_from_render_key(key)
+                .ok_or_else(|| QueryError::unknown_field(format!("alias '{}' not found", key)))?;
+
+            let field_value = fields
+                .get(field_index)
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+
+            let ops = value.as_object().ok_or_else(|| {
+                QueryError::invalid_filter("alias field condition must be object")
+            })?;
+
+            for (op_key, op_value) in ops {
+                if let Some(op) = FilterOp::parse(op_key) {
+                    if !self.eval_op(&field_value, op, op_value)? {
+                        return Ok(false);
+                    }
+                } else {
+                    return Err(QueryError::invalid_filter(format!(
+                        "unknown operator '{}' in _alias filter",
+                        op_key
+                    )));
+                }
+            }
+        }
+        Ok(true)
     }
 }
 

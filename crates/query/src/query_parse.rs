@@ -440,8 +440,11 @@ fn parse_field_to_select(
                 }
             }
             "showDeleted" => {
-                let show_deleted = resolve_bool_value(arg_value, variables, "showDeleted")?;
-                select.show_deleted = show_deleted;
+                // null means "don't show deleted" (false) - skip setting it
+                if !matches!(arg_value, Value::Null) {
+                    let show_deleted = resolve_bool_value(arg_value, variables, "showDeleted")?;
+                    select.show_deleted = show_deleted;
+                }
             }
             "depth" => {
                 // depth is only valid for _commits queries
@@ -831,10 +834,9 @@ fn parse_optional_int_value(
             if json_val.is_null() {
                 Ok(None)
             } else {
-                json_val
-                    .as_i64()
-                    .map(Some)
-                    .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type Int", name)))
+                json_val.as_i64().map(Some).ok_or_else(|| {
+                    QueryError::parse(format!("Variable \"${}\" must be of type Int", name))
+                })
             }
         }
         _ => Err(QueryError::parse("expected integer value")),
@@ -858,9 +860,11 @@ fn parse_order_value(
                 ));
             }
             for (field_name, direction_val) in obj {
-                let condition =
-                    parse_order_condition(field_name.clone(), direction_val, variables)?;
-                order_by = order_by.with_condition(condition);
+                if let Some(condition) =
+                    parse_order_condition(field_name.clone(), direction_val, variables)?
+                {
+                    order_by = order_by.with_condition(condition);
+                }
             }
         }
         Value::List(items) => {
@@ -868,9 +872,11 @@ fn parse_order_value(
             for item in items {
                 if let Value::Object(obj) = item {
                     for (field_name, direction_val) in obj {
-                        let condition =
-                            parse_order_condition(field_name.clone(), direction_val, variables)?;
-                        order_by = order_by.with_condition(condition);
+                        if let Some(condition) =
+                            parse_order_condition(field_name.clone(), direction_val, variables)?
+                        {
+                            order_by = order_by.with_condition(condition);
+                        }
                     }
                 } else {
                     return Err(QueryError::parse(
@@ -887,12 +893,15 @@ fn parse_order_value(
 
 /// Parse a single order condition, handling nested relation ordering.
 /// Supports both simple `{field: ASC}` and nested `{relation: {field: DESC}}`.
+/// Returns None for null values (order field is ignored).
 fn parse_order_condition(
     field_name: String,
     direction_val: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
-) -> Result<OrderCondition> {
+) -> Result<Option<OrderCondition>> {
     match direction_val {
+        // Null order direction means skip this field (Go compatibility)
+        Value::Null => Ok(None),
         Value::Enum(s) | Value::String(s) => {
             let direction = OrderDirection::parse(s).ok_or_else(|| {
                 // Match Go DefraDB error format
@@ -901,7 +910,7 @@ fn parse_order_condition(
                     field_name, s
                 ))
             })?;
-            Ok(OrderCondition::new(field_name, direction))
+            Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
@@ -926,10 +935,14 @@ fn parse_order_condition(
                     field_name, s
                 ))
             })?;
-            Ok(OrderCondition::new(field_name, direction))
+            Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Object(nested_obj) => {
             // Nested ordering: {relation: {field: ASC}} or {_alias: {aliasName: ASC}}
+            // Empty nested order is a no-op (Go compatibility)
+            if nested_obj.is_empty() {
+                return Ok(None);
+            }
             // Recursively parse the nested object
             if nested_obj.len() != 1 {
                 return Err(QueryError::parse(
@@ -937,16 +950,22 @@ fn parse_order_condition(
                 ));
             }
             let (nested_field, nested_direction) = nested_obj.iter().next().unwrap();
-            let mut nested_condition =
+            let nested_condition =
                 parse_order_condition(nested_field.clone(), nested_direction, variables)?;
-            // Handle _alias directive: don't prepend "_alias", just use the nested field name.
-            // This allows ordering by aliased fields like: order: {_alias: {MyAge: ASC}}
-            // where MyAge is an alias for the Age field.
-            if field_name != "_alias" {
-                // For regular nested ordering (relations), prepend the parent field to the path
-                nested_condition.fields.insert(0, field_name);
+            // If nested condition is None (null value), propagate the None
+            match nested_condition {
+                Some(mut cond) => {
+                    // Handle _alias directive: don't prepend "_alias", just use the nested field name.
+                    // This allows ordering by aliased fields like: order: {_alias: {MyAge: ASC}}
+                    // where MyAge is an alias for the Age field.
+                    if field_name != "_alias" {
+                        // For regular nested ordering (relations), prepend the parent field to the path
+                        cond.fields.insert(0, field_name);
+                    }
+                    Ok(Some(cond))
+                }
+                None => Ok(None),
             }
-            Ok(nested_condition)
         }
         _ => Err(QueryError::parse("order direction must be ASC or DESC")),
     }
@@ -1095,7 +1114,25 @@ fn parse_aggregate_field(
                                 }
                             }
                             "order" => {
-                                let order = parse_order_value(val, variables)?;
+                                // For inline array aggregates, order can be a bare
+                                // direction enum (e.g., `order: ASC`) rather than
+                                // the structured `order: {field: ASC}` used by queries.
+                                let order = match val {
+                                    Value::Enum(s) | Value::String(s) => {
+                                        let direction =
+                                            OrderDirection::parse(s).ok_or_else(|| {
+                                                QueryError::parse(format!(
+                                                    "invalid order direction: {}",
+                                                    s
+                                                ))
+                                            })?;
+                                        OrderBy::new().with_condition(OrderCondition::new(
+                                            "",
+                                            direction,
+                                        ))
+                                    }
+                                    _ => parse_order_value(val, variables)?,
+                                };
                                 target.order = Some(order);
                             }
                             _ => {
@@ -1366,19 +1403,29 @@ fn parse_field_to_mutation(
         MutationType::Upsert => Mutation::upsert(&collection_name),
     };
 
+    // Track if input argument was present (even if null)
+    let mut has_input_arg = false;
+
     // Parse arguments based on mutation type
     for (arg_name, arg_value) in &field.arguments {
         match (mutation_type, arg_name.as_str()) {
-            // CREATE: input is array of documents
+            // CREATE: input is array of documents (null means empty operation)
             (MutationType::Create, "input") => {
-                let input = parse_create_input(arg_value, variables)?;
-                mutation.create_input = input;
+                has_input_arg = true;
+                if !matches!(arg_value, Value::Null) {
+                    let input = parse_create_input(arg_value, variables)?;
+                    mutation.create_input = input;
+                }
+                // null input is valid - leaves create_input empty for empty result
             }
 
-            // UPDATE: input is patch object
+            // UPDATE: input is patch object (null means empty operation)
             (MutationType::Update, "input") => {
-                let input = parse_update_input(arg_value, variables)?;
-                mutation.update_input = input;
+                has_input_arg = true;
+                if !matches!(arg_value, Value::Null) {
+                    let input = parse_update_input(arg_value, variables)?;
+                    mutation.update_input = input;
+                }
             }
 
             // UPSERT: create is the document to create if no match (single object, not array)
@@ -1427,7 +1474,7 @@ fn parse_field_to_mutation(
     // Validate mutation has required arguments
     match mutation_type {
         MutationType::Create => {
-            if mutation.create_input.is_empty() {
+            if mutation.create_input.is_empty() && !has_input_arg {
                 return Err(QueryError::parse(format!(
                     "create_{} mutation requires 'input' argument with array of documents",
                     collection_name
@@ -1435,7 +1482,7 @@ fn parse_field_to_mutation(
             }
         }
         MutationType::Update => {
-            if mutation.update_input.is_empty() {
+            if mutation.update_input.is_empty() && !has_input_arg {
                 return Err(QueryError::parse(format!(
                     "update_{} mutation requires 'input' argument with fields to update",
                     collection_name
@@ -1559,13 +1606,14 @@ fn parse_create_input(
 }
 
 /// Parse UPDATE mutation input (patch object).
+/// Non-object input (e.g., array "patch") is treated as empty/no-op (Go compatibility).
 fn parse_update_input(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<HashMap<String, JsonValue>> {
     match value {
         Value::Object(obj) => parse_document_input(obj, variables),
-        _ => Err(QueryError::parse("UPDATE input must be an object")),
+        _ => Ok(HashMap::new()),
     }
 }
 

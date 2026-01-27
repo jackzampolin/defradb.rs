@@ -421,7 +421,9 @@ impl IndexManager {
                 if $arr.is_empty() {
                     vec![NormalValue::Null]
                 } else {
-                    $arr.iter().map(|v| NormalValue::$variant(v.clone())).collect()
+                    $arr.iter()
+                        .map(|v| NormalValue::$variant(v.clone()))
+                        .collect()
                 }
             };
         }
@@ -434,7 +436,9 @@ impl IndexManager {
                         if arr.is_empty() {
                             vec![NormalValue::Null]
                         } else {
-                            arr.iter().map(|v| NormalValue::$variant(v.clone())).collect()
+                            arr.iter()
+                                .map(|v| NormalValue::$variant(v.clone()))
+                                .collect()
                         }
                     }
                     None => vec![NormalValue::Null],

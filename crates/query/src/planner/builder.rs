@@ -13,8 +13,9 @@ use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupByNode, IndexScanNode, JoinSide, LimitNode, MaxNode,
-    MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode, SumNode, TypeJoinMany, TypeJoinOne,
+    AllDocsNode, AverageNode, CountNode, GroupByNode, IndexScanNode, InnerAggregateDef, JoinSide,
+    LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode, SumNode,
+    TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
@@ -191,10 +192,7 @@ impl Planner {
                             .iter()
                             .any(|f| *f == nested_field_name)
                         {
-                            result.push((
-                                relation_field_name.clone(),
-                                nested_field_name.clone(),
-                            ));
+                            result.push((relation_field_name.clone(), nested_field_name.clone()));
                         }
                     }
                 }
@@ -276,6 +274,25 @@ impl Planner {
                                 // to avoid conflicts with other allocated indices
                                 let new_index = scan_mapping.next_index();
                                 scan_mapping.add(new_index, field_name);
+                            }
+                        }
+                    }
+
+                    // For inline array aggregates (e.g., _count(favouriteIntegers: {})),
+                    // the host_name refers to an inline array field, not a relation.
+                    // We need to render the field data so compute_relation_aggregates()
+                    // can operate on it after plan execution.
+                    if !target.host_name.is_empty() && target.host_name != "_group" {
+                        let host_name = &target.host_name;
+                        if let Some(field_desc) = collection.field_by_name(host_name) {
+                            if !field_desc.kind.is_relation() {
+                                // It's an inline array field — ensure it's in scan_mapping.
+                                // Use next_index() to avoid conflicting with existing indices.
+                                if scan_mapping.first_index_of_name(host_name).is_none() {
+                                    let idx = scan_mapping.next_index();
+                                    scan_mapping.add(idx, host_name);
+                                    scan_mapping.add_render_key(idx, host_name);
+                                }
                             }
                         }
                     }
@@ -575,11 +592,64 @@ impl Planner {
             // 4b. Apply GroupBy
             // Use scan_mapping because the upstream plan produces docs with schema indices
             if let Some(ref group_by) = select.group_by {
-                plan = Box::new(GroupByNode::new(
-                    plan,
-                    group_by.clone(),
-                    scan_mapping.clone(),
-                ));
+                let mut group_node = GroupByNode::new(plan, group_by.clone(), scan_mapping.clone())
+                    .with_collection_name(select.collection_name.clone());
+
+                // Extract _group child's limit/filter/order from the nested Select
+                // Also extract inner aggregate definitions for nested group rendering
+                for field in &select.fields {
+                    if let Requestable::Select(nested) = field {
+                        if nested.field.name == "_group" {
+                            if let Some(ref limit) = nested.limit {
+                                group_node = group_node.with_group_limit(limit.clone());
+                            }
+                            if let Some(ref filter) = nested.filter {
+                                group_node = group_node.with_group_filter(filter.clone());
+                            }
+                            if let Some(ref order) = nested.order_by {
+                                group_node = group_node.with_group_order(order.clone());
+                            }
+
+                            // Extract inner groupBy fields from the nested _group
+                            if let Some(ref inner_group_by) = nested.group_by {
+                                group_node = group_node
+                                    .with_inner_group_by_fields(inner_group_by.fields.clone());
+                            }
+
+                            // Extract inner aggregate definitions from the nested _group
+                            let mut inner_aggs = Vec::new();
+                            for inner_field in &nested.fields {
+                                if let Requestable::Aggregate(inner_agg) = inner_field {
+                                    // Get the target field index from the scan mapping
+                                    let field_index = if !inner_agg.targets.is_empty() {
+                                        if let Some(ref field_name) =
+                                            inner_agg.targets[0].field_name
+                                        {
+                                            scan_mapping
+                                                .first_index_of_name(field_name)
+                                                .unwrap_or(0)
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    };
+                                    inner_aggs.push(InnerAggregateDef {
+                                        aggregate_type: inner_agg.aggregate_type,
+                                        output_key: inner_agg.output_name().to_string(),
+                                        field_index,
+                                    });
+                                }
+                            }
+                            if !inner_aggs.is_empty() {
+                                group_node = group_node.with_inner_aggregates(inner_aggs);
+                            }
+
+                            break;
+                        }
+                    }
+                }
+                plan = Box::new(group_node);
             }
 
             // 5. Add aggregate nodes (after grouping)
@@ -652,6 +722,10 @@ impl Planner {
     }
 
     /// Add aggregate nodes to the plan based on the select's aggregate fields.
+    ///
+    /// Only adds plan nodes for group-by and field-only aggregates. Relation
+    /// and inline-array aggregates (targets with non-empty host_name) are
+    /// handled by compute_relation_aggregates() in the runner instead.
     fn add_aggregate_nodes(
         &self,
         mut plan: Box<dyn PlanNode>,
@@ -660,53 +734,163 @@ impl Planner {
     ) -> Result<Box<dyn PlanNode>> {
         for field in &select.fields {
             if let Requestable::Aggregate(agg) = field {
-                // Get the index where the aggregate result should be stored
-                // Use the aggregate type name for lookup (that's how it's registered in mapping)
-                let agg_type_name = agg.aggregate_type.as_str();
-                let agg_index = mapping.first_index_of_name(agg_type_name).ok_or_else(|| {
-                    QueryError::internal(format!(
-                        "aggregate '{}' not found in document mapping - this is a bug",
-                        agg_type_name
-                    ))
-                })?;
+                // Skip relation and inline-array aggregates — they are computed
+                // in compute_relation_aggregates() after plan execution.
+                let is_host_aggregate = agg.targets.iter().any(|t| {
+                    !t.host_name.is_empty() && t.host_name != "_group"
+                });
+                if is_host_aggregate {
+                    continue;
+                }
 
-                // For aggregates that operate on a field, get the field index
+                // Get the index where the aggregate result should be stored.
+                // Use the output name (alias if set, otherwise type name) to look up the
+                // correct render_key index. This handles aliased aggregates correctly
+                // (e.g., C1: _count(...) and C2: _count(...) get different indices).
+                let agg_index = mapping
+                    .try_find_index_from_render_key(agg.output_name())
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "aggregate '{}' not found in document mapping render keys - this is a bug",
+                            agg.output_name()
+                        ))
+                    })?;
+
+                // For aggregates that operate on a field, get the field index.
+                // Also detect child aggregate targets: when host_name="_group" and
+                // the target field is an aggregate name computed by the inner group.
+                let mut is_child_aggregate = false;
+                let mut child_field_name = String::new();
                 let field_index = if !agg.targets.is_empty() && agg.targets[0].field_name.is_some()
                 {
                     let target_field = agg.targets[0].field_name.as_ref().unwrap();
-                    mapping.first_index_of_name(target_field).ok_or_else(|| {
-                        QueryError::execution(format!(
-                            "aggregate target field '{}' not found in mapping",
-                            target_field
-                        ))
-                    })?
+                    // Check if this is a child aggregate (inner aggregate within _group).
+                    // When host_name is "_group" and target is an aggregate type name,
+                    // it's always a child aggregate - even if the same name exists in
+                    // the parent mapping (e.g., _max(_group: {field: _max})).
+                    let is_aggregate_name = matches!(
+                        target_field.as_str(),
+                        "_count" | "_sum" | "_avg" | "_min" | "_max"
+                    );
+                    if agg.targets[0].host_name == "_group"
+                        && (is_aggregate_name
+                            || mapping.first_index_of_name(target_field).is_none())
+                    {
+                        is_child_aggregate = true;
+                        child_field_name = target_field.clone();
+                        0 // placeholder - not used in child aggregate mode
+                    } else {
+                        mapping.first_index_of_name(target_field).ok_or_else(|| {
+                            QueryError::execution(format!(
+                                "aggregate target field '{}' not found in mapping",
+                                target_field
+                            ))
+                        })?
+                    }
                 } else {
                     0 // Not used for count
                 };
 
+                // Extract filter and limit from aggregate target (if any)
+                let target_filter = if !agg.targets.is_empty() {
+                    agg.targets[0].filter.clone()
+                } else {
+                    None
+                };
+                let target_limit = if !agg.targets.is_empty() {
+                    agg.targets[0].limit.clone()
+                } else {
+                    None
+                };
+
+                // Get the _group field index for child aggregate mode
+                let group_field_index = if is_child_aggregate {
+                    mapping.first_index_of_name("_group").unwrap_or(0)
+                } else {
+                    0
+                };
+
                 match agg.aggregate_type {
                     AggregateType::Count => {
-                        plan = Box::new(CountNode::new(plan, mapping.clone(), agg_index));
+                        let mut node = CountNode::new(plan, mapping.clone(), agg_index);
+                        if is_child_aggregate {
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
+                        }
+                        if let Some(filter) = target_filter {
+                            node = node.with_filter(filter);
+                        }
+                        if let Some(limit) = target_limit {
+                            node = node.with_limit(limit);
+                        }
+                        plan = Box::new(node);
                     }
                     AggregateType::Sum => {
-                        plan =
-                            Box::new(SumNode::new(plan, mapping.clone(), field_index, agg_index));
+                        let mut node = SumNode::new(plan, mapping.clone(), field_index, agg_index);
+                        if is_child_aggregate {
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
+                        }
+                        if let Some(filter) = target_filter {
+                            node = node.with_filter(filter);
+                        }
+                        if let Some(limit) = target_limit {
+                            node = node.with_limit(limit);
+                        }
+                        plan = Box::new(node);
                     }
                     AggregateType::Average => {
-                        plan = Box::new(AverageNode::new(
-                            plan,
-                            mapping.clone(),
-                            field_index,
-                            agg_index,
-                        ));
+                        let mut node =
+                            AverageNode::new(plan, mapping.clone(), field_index, agg_index);
+                        if is_child_aggregate {
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
+                        }
+                        if let Some(filter) = target_filter {
+                            node = node.with_filter(filter);
+                        }
+                        if let Some(limit) = target_limit {
+                            node = node.with_limit(limit);
+                        }
+                        plan = Box::new(node);
                     }
                     AggregateType::Min => {
-                        plan =
-                            Box::new(MinNode::new(plan, mapping.clone(), field_index, agg_index));
+                        let mut node = MinNode::new(plan, mapping.clone(), field_index, agg_index);
+                        if is_child_aggregate {
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
+                        }
+                        if let Some(filter) = target_filter {
+                            node = node.with_filter(filter);
+                        }
+                        if let Some(limit) = target_limit {
+                            node = node.with_limit(limit);
+                        }
+                        plan = Box::new(node);
                     }
                     AggregateType::Max => {
-                        plan =
-                            Box::new(MaxNode::new(plan, mapping.clone(), field_index, agg_index));
+                        let mut node = MaxNode::new(plan, mapping.clone(), field_index, agg_index);
+                        if is_child_aggregate {
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
+                        }
+                        if let Some(filter) = target_filter {
+                            node = node.with_filter(filter);
+                        }
+                        if let Some(limit) = target_limit {
+                            node = node.with_limit(limit);
+                        }
+                        plan = Box::new(node);
                     }
                 }
             }
@@ -1220,19 +1404,21 @@ impl Planner {
             }
         }
 
-        // Also handle relation-based aggregates (e.g., _count(books: {}))
-        // These need joins to fetch the related data for aggregation.
+        // Also handle relation-based and inline-array aggregates.
+        // Relation aggregates (e.g., _count(books: {})) need joins to fetch data.
+        // Inline array aggregates (e.g., _count(favouriteIntegers: {})) need the
+        // array field added to the render mapping so the data appears in output.
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
                 for target in &agg.targets {
-                    // Only handle relation-based aggregates (non-empty host_name)
+                    // Only handle aggregates with a named target (non-empty host_name)
                     if target.host_name.is_empty() {
                         continue;
                     }
 
                     let relation_field_name = &target.host_name;
 
-                    // Check if this relation is already being joined (via a Select)
+                    // Check if this field is already being selected
                     let already_joined = select.fields.iter().any(|f| {
                         if let Requestable::Select(s) = f {
                             s.field.name == *relation_field_name
@@ -1242,17 +1428,18 @@ impl Planner {
                     });
 
                     if already_joined {
-                        continue; // Join already exists, aggregate will use that data
+                        continue; // Data already available, aggregate will use it
                     }
 
-                    // Find the relation field in the parent collection
+                    // Find the field in the parent collection
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
                     {
                         Some(f) => f,
                         None => continue, // Skip if not found (might be invalid)
                     };
 
-                    // Verify it's a relation field
+                    // Inline array fields are handled by scan_mapping setup
+                    // in build_plan() — no join needed.
                     if !relation_field.kind.is_relation() {
                         continue;
                     }
@@ -1986,6 +2173,14 @@ impl Planner {
         for requestable in &group_select.fields {
             match requestable {
                 Requestable::Field(field) => {
+                    // Handle __typename for GraphQL introspection
+                    if field.name == "__typename" {
+                        child_mapping.set_type_name(&collection.name);
+                        let index = child_mapping.first_index_of_name("__typename").unwrap();
+                        child_mapping.add_render_key(index, field.output_name());
+                        continue;
+                    }
+
                     // Get the schema index for this field
                     let schema_idx = if field.name == "_docID" {
                         0
@@ -2006,9 +2201,17 @@ impl Planner {
                     child_mapping.add(schema_idx, &field.name);
                     child_mapping.add_render_key(schema_idx, field.output_name());
                 }
-                Requestable::Select(_) => {
-                    // Nested selects within _group are not currently supported
-                    // (would be relations within grouped documents)
+                Requestable::Select(nested_select) => {
+                    if nested_select.field.name == "_group" {
+                        // Nested _group within _group: recursively build child mapping
+                        let index = child_mapping.next_index();
+                        child_mapping.add(index, "_group");
+                        child_mapping.add_render_key(index, nested_select.field.output_name());
+
+                        let inner_child_mapping =
+                            self.build_group_child_mapping(nested_select, collection)?;
+                        child_mapping.set_child_at(index, inner_child_mapping);
+                    }
                 }
                 Requestable::Aggregate(_) => {
                     // Aggregates within _group are not currently supported
@@ -2663,17 +2866,32 @@ mod tests {
         assert!(author_field.is_some(), "Book should have 'author' field");
 
         let author_field = author_field.unwrap();
-        assert!(author_field.kind.is_relation(), "'author' should be a relation field");
-        assert!(!author_field.is_primary, "'author' on Book should NOT be primary (secondary side)");
+        assert!(
+            author_field.kind.is_relation(),
+            "'author' should be a relation field"
+        );
+        assert!(
+            !author_field.is_primary,
+            "'author' on Book should NOT be primary (secondary side)"
+        );
 
         // Verify Author collection has published field
         let author = make_author_collection();
         let published_field = author.field_by_name("published");
-        assert!(published_field.is_some(), "Author should have 'published' field");
+        assert!(
+            published_field.is_some(),
+            "Author should have 'published' field"
+        );
 
         let published_field = published_field.unwrap();
-        assert!(published_field.kind.is_relation(), "'published' should be a relation field");
-        assert!(published_field.is_primary, "'published' on Author SHOULD be primary (primary side)");
+        assert!(
+            published_field.kind.is_relation(),
+            "'published' should be a relation field"
+        );
+        assert!(
+            published_field.is_primary,
+            "'published' on Author SHOULD be primary (primary side)"
+        );
     }
 
     #[tokio::test]
@@ -2687,7 +2905,11 @@ mod tests {
             .with_field(Field::new("_authorID"));
 
         let result = planner.plan(&select);
-        assert!(result.is_ok(), "Planning should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Planning should succeed: {:?}",
+            result.err()
+        );
 
         let plan = result.unwrap();
         // The plan should have a TypeJoinOne node somewhere in the tree
@@ -2695,7 +2917,10 @@ mod tests {
 
         // For now, just verify the plan was created
         // A more thorough test would execute the plan with test data
-        assert!(plan.kind() == "selectNode" || plan.kind() == "typeJoinOne",
-            "Plan should be selectNode or typeJoinOne, got: {}", plan.kind());
+        assert!(
+            plan.kind() == "selectNode" || plan.kind() == "typeJoinOne",
+            "Plan should be selectNode or typeJoinOne, got: {}",
+            plan.kind()
+        );
     }
 }

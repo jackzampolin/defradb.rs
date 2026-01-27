@@ -103,7 +103,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<serde_json::Value> {
             Ok(serde_json::Value::String(base64_encode(b)))
         }
         NormalValue::Time(t) => Ok(serde_json::Value::String(
-            t.to_rfc3339_opts(SecondsFormat::Secs, true),
+            t.to_rfc3339_opts(SecondsFormat::Nanos, true),
         )),
         NormalValue::Json(v) => Ok(v.clone()),
         NormalValue::IntArray(arr) => Ok(serde_json::Value::Array(
@@ -165,6 +165,11 @@ fn float64_to_json(f: f64) -> Result<serde_json::Value> {
     if !f.is_finite() {
         return Err(Error::NonFiniteFloat(format!("{}", f)));
     }
+    // Match Go's json.Marshal behavior: float64 values that are whole numbers
+    // are serialized without a decimal point (e.g., float64(21.0) → "21").
+    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+        return Ok(serde_json::Value::Number(serde_json::Number::from(f as i64)));
+    }
     serde_json::Number::from_f64(f)
         .map(serde_json::Value::Number)
         .ok_or_else(|| Error::NonFiniteFloat(format!("{}", f)))
@@ -188,7 +193,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::String(s) => Ok(ciborium::Value::Text(s.clone())),
         NormalValue::Bytes(b) => Ok(ciborium::Value::Bytes(b.clone())),
         NormalValue::Time(t) => Ok(ciborium::Value::Text(
-            t.to_rfc3339_opts(SecondsFormat::Secs, true),
+            t.to_rfc3339_opts(SecondsFormat::Nanos, true),
         )),
         NormalValue::Json(v) => json_to_cbor_value(v),
         NormalValue::IntArray(arr) => Ok(ciborium::Value::Array(
@@ -239,7 +244,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
             .map(|b| ciborium::Value::Bytes(b.clone()))
             .unwrap_or(ciborium::Value::Null)),
         NormalValue::NillableTime(opt) => Ok(opt
-            .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+            .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
             .unwrap_or(ciborium::Value::Null)),
         // Document value - propagate errors instead of silently converting to null
         NormalValue::Document(doc) => {
@@ -263,7 +268,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         )),
         NormalValue::TimeArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
-                .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+                .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
                 .collect(),
         )),
         NormalValue::DocumentArray(arr) => {
@@ -335,7 +340,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
                 ciborium::Value::Array(
                     arr.iter()
                         .map(|t| {
-                            ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true))
+                            ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true))
                         })
                         .collect(),
                 )
@@ -395,7 +400,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::NillableTimeElementArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
                 .map(|opt| {
-                    opt.map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+                    opt.map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
                         .unwrap_or(ciborium::Value::Null)
                 })
                 .collect(),
@@ -438,13 +443,14 @@ fn json_to_cbor_value(value: &serde_json::Value) -> Result<ciborium::Value> {
         serde_json::Value::Null => Ok(ciborium::Value::Null),
         serde_json::Value::Bool(b) => Ok(ciborium::Value::Bool(*b)),
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(ciborium::Value::Integer(i.into()))
-            } else if let Some(f) = n.as_f64() {
-                Ok(ciborium::Value::Float(f))
-            } else {
-                Err(Error::JsonNumberOutOfRange(n.to_string()))
-            }
+            // Go's JSON type stores ALL numbers as float64 (via GetFloat64()).
+            // CBOR canonical encoding with ShortestFloat16 then encodes them
+            // as the smallest float representation. We must match this to
+            // produce identical CBOR bytes and thus identical docIDs.
+            let f = n
+                .as_f64()
+                .ok_or_else(|| Error::JsonNumberOutOfRange(n.to_string()))?;
+            Ok(ciborium::Value::Float(f))
         }
         serde_json::Value::String(s) => Ok(ciborium::Value::Text(s.clone())),
         serde_json::Value::Array(arr) => {
@@ -455,8 +461,13 @@ fn json_to_cbor_value(value: &serde_json::Value) -> Result<ciborium::Value> {
             Ok(ciborium::Value::Array(result))
         }
         serde_json::Value::Object(obj) => {
+            // Sort keys using canonical CBOR ordering for Go compatibility
+            let mut keys: Vec<&String> = obj.keys().collect();
+            keys.sort_by(|a, b| canonical_cbor_key_order(&a.as_str(), &b.as_str()));
+
             let mut entries = Vec::with_capacity(obj.len());
-            for (k, v) in obj {
+            for k in keys {
+                let v = obj.get(k).unwrap();
                 entries.push((ciborium::Value::Text(k.clone()), json_to_cbor_value(v)?));
             }
             Ok(ciborium::Value::Map(entries))

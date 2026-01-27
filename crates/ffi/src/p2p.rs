@@ -286,9 +286,7 @@ pub unsafe extern "C" fn p2p_connect(node_ptr: usize, addr: *const c_char) -> Ff
                             None
                         }
                     })
-                    .ok_or_else(|| {
-                        format!("multiaddr '{}' does not contain peer ID", addr_str)
-                    })?;
+                    .ok_or_else(|| format!("multiaddr '{}' does not contain peer ID", addr_str))?;
 
                 // Remove the p2p component to get the transport address
                 let transport_addr: libp2p::Multiaddr = full_addr
@@ -373,9 +371,7 @@ pub unsafe extern "C" fn p2p_set_replicator(
                             None
                         }
                     })
-                    .ok_or_else(|| {
-                        format!("multiaddr '{}' does not contain peer ID", addr_str)
-                    })?;
+                    .ok_or_else(|| format!("multiaddr '{}' does not contain peer ID", addr_str))?;
 
                 // Set the replicator
                 p2p.handle

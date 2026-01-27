@@ -462,7 +462,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             if let Requestable::Field(field) = f {
                 let field_name = &field.name;
                 // Check pattern: _<relationName>ID
-                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3 {
+                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3
+                {
                     let relation_name = &field_name[1..field_name.len() - 2];
                     if let Some(relation_field) = collection.field_by_name(relation_name) {
                         // Only secondary relations need a join to compute the ID
@@ -598,22 +599,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mut results: Vec<JsonValue>,
         select: &Select,
     ) -> Result<Vec<JsonValue>> {
-        // Collect info about relation aggregates
-        let mut aggregates_info: Vec<(
-            String,
-            crate::mapper::AggregateType,
-            Vec<(String, Option<String>)>,
-        )> = Vec::new();
+        use crate::mapper::AggregateType;
+
+        // Collect info about relation aggregates with full target references
+        let mut aggregates_info: Vec<(String, AggregateType, Vec<&crate::mapper::AggregateTarget>)> =
+            Vec::new();
 
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
                 let mut relation_targets = Vec::new();
                 for target in &agg.targets {
                     // Skip _group targets - they're handled by GroupByNode and aggregate nodes
-                    // The _group virtual field is populated by GroupByNode, not by relation joins
                     if !target.host_name.is_empty() && target.host_name != "_group" {
-                        relation_targets
-                            .push((target.host_name.clone(), target.field_name.clone()));
+                        relation_targets.push(target);
                     }
                 }
                 if !relation_targets.is_empty() {
@@ -626,9 +624,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        // If no relation aggregates, return as-is
         if aggregates_info.is_empty() {
             return Ok(results);
+        }
+
+        // Collect which relation fields are explicitly selected (for cleanup later)
+        let selected_relations: std::collections::HashSet<String> = select
+            .fields
+            .iter()
+            .filter_map(|f| {
+                if let Requestable::Select(s) = f {
+                    Some(s.field.name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Collect all relation names used by aggregates (for deferred cleanup)
+        let mut aggregate_relation_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (_, _, targets) in &aggregates_info {
+            for target in targets {
+                aggregate_relation_names.insert(target.host_name.clone());
+            }
         }
 
         // Process each result
@@ -638,101 +657,132 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     let mut total_value: f64 = 0.0;
                     let mut total_count: i64 = 0;
 
-                    for (relation_name, field_name) in targets {
-                        // Get the joined relation data
+                    for target in targets {
+                        let relation_name = &target.host_name;
+                        let field_name = target.field_name.as_deref();
+
                         if let Some(relation_data) = obj.get(relation_name) {
                             if let JsonValue::Array(items) = relation_data {
+                                // Step 1: Apply filter to array elements
+                                let filtered_items: Vec<&JsonValue> =
+                                    if let Some(ref filter) = target.filter {
+                                        items
+                                            .iter()
+                                            .filter(|item| {
+                                                let val = match field_name {
+                                                    Some(f) => item
+                                                        .as_object()
+                                                        .and_then(|o| o.get(f))
+                                                        .unwrap_or(&JsonValue::Null),
+                                                    None => *item,
+                                                };
+                                                filter.matches_scalar_value(val).unwrap_or(false)
+                                            })
+                                            .collect()
+                                    } else {
+                                        items.iter().collect()
+                                    };
+
+                                // Step 2: Apply order (sort array elements before limit/offset)
+                                let mut ordered_items = filtered_items;
+                                if let Some(ref order) = target.order {
+                                    if let Some(condition) = order.conditions.first() {
+                                        let desc = matches!(
+                                            condition.direction,
+                                            crate::mapper::OrderDirection::Desc
+                                        );
+                                        ordered_items.sort_by(|a, b| {
+                                            let a_val = match field_name {
+                                                Some(f) => a
+                                                    .as_object()
+                                                    .and_then(|o| o.get(f))
+                                                    .unwrap_or(&JsonValue::Null),
+                                                None => *a,
+                                            };
+                                            let b_val = match field_name {
+                                                Some(f) => b
+                                                    .as_object()
+                                                    .and_then(|o| o.get(f))
+                                                    .unwrap_or(&JsonValue::Null),
+                                                None => *b,
+                                            };
+                                            let a_f = a_val.as_f64().unwrap_or(0.0);
+                                            let b_f = b_val.as_f64().unwrap_or(0.0);
+                                            if desc {
+                                                b_f.partial_cmp(&a_f)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            } else {
+                                                a_f.partial_cmp(&b_f)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            }
+                                        });
+                                    }
+                                }
+
+                                // Step 3: Apply limit/offset
+                                let final_items: Vec<&JsonValue> =
+                                    if let Some(ref limit) = target.limit {
+                                        let offset = limit.offset as usize;
+                                        let sliced = if offset < ordered_items.len() {
+                                            &ordered_items[offset..]
+                                        } else {
+                                            &[][..]
+                                        };
+                                        match limit.limit {
+                                            Some(l) => {
+                                                sliced.iter().take(l as usize).copied().collect()
+                                            }
+                                            None => sliced.to_vec(),
+                                        }
+                                    } else {
+                                        ordered_items
+                                    };
+
+                                // Step 4: Compute aggregate over final items
                                 match agg_type {
-                                    crate::mapper::AggregateType::Count => {
-                                        total_count += items.len() as i64;
+                                    AggregateType::Count => {
+                                        total_count += final_items.len() as i64;
                                     }
-                                    crate::mapper::AggregateType::Sum
-                                    | crate::mapper::AggregateType::Average => {
-                                        if let Some(field) = field_name {
-                                            for item in items {
-                                                if let JsonValue::Object(item_obj) = item {
-                                                    if let Some(val) = item_obj.get(field) {
-                                                        if let Some(n) = val.as_f64() {
-                                                            total_value += n;
-                                                            total_count += 1;
-                                                        } else if let Some(n) = val.as_i64() {
-                                                            total_value += n as f64;
-                                                            total_count += 1;
-                                                        }
-                                                    }
-                                                }
+                                    AggregateType::Sum | AggregateType::Average => {
+                                        for item in &final_items {
+                                            if let Some(n) = extract_numeric(item, field_name) {
+                                                total_value += n;
+                                                total_count += 1;
                                             }
                                         }
                                     }
-                                    crate::mapper::AggregateType::Min => {
-                                        if let Some(field) = field_name {
-                                            for item in items {
-                                                if let JsonValue::Object(item_obj) = item {
-                                                    if let Some(val) = item_obj.get(field) {
-                                                        if let Some(n) = val.as_f64() {
-                                                            if total_count == 0 || n < total_value {
-                                                                total_value = n;
-                                                            }
-                                                            total_count += 1;
-                                                        } else if let Some(n) = val.as_i64() {
-                                                            let n = n as f64;
-                                                            if total_count == 0 || n < total_value {
-                                                                total_value = n;
-                                                            }
-                                                            total_count += 1;
-                                                        }
-                                                    }
+                                    AggregateType::Min => {
+                                        for item in &final_items {
+                                            if let Some(n) = extract_numeric(item, field_name) {
+                                                if total_count == 0 || n < total_value {
+                                                    total_value = n;
                                                 }
+                                                total_count += 1;
                                             }
                                         }
                                     }
-                                    crate::mapper::AggregateType::Max => {
-                                        if let Some(field) = field_name {
-                                            for item in items {
-                                                if let JsonValue::Object(item_obj) = item {
-                                                    if let Some(val) = item_obj.get(field) {
-                                                        if let Some(n) = val.as_f64() {
-                                                            if total_count == 0 || n > total_value {
-                                                                total_value = n;
-                                                            }
-                                                            total_count += 1;
-                                                        } else if let Some(n) = val.as_i64() {
-                                                            let n = n as f64;
-                                                            if total_count == 0 || n > total_value {
-                                                                total_value = n;
-                                                            }
-                                                            total_count += 1;
-                                                        }
-                                                    }
+                                    AggregateType::Max => {
+                                        for item in &final_items {
+                                            if let Some(n) = extract_numeric(item, field_name) {
+                                                if total_count == 0 || n > total_value {
+                                                    total_value = n;
                                                 }
+                                                total_count += 1;
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-
-                        // Remove the joined relation data (it was only for aggregation)
-                        // But only if the relation wasn't explicitly selected
-                        let relation_selected = select.fields.iter().any(|f| {
-                            if let Requestable::Select(s) = f {
-                                s.field.name == *relation_name
-                            } else {
-                                false
-                            }
-                        });
-                        if !relation_selected {
-                            obj.remove(relation_name);
-                        }
                     }
 
                     // Store the computed aggregate value
                     let computed_value = match agg_type {
-                        crate::mapper::AggregateType::Count => {
-                            JsonValue::Number(total_count.into())
-                        }
-                        crate::mapper::AggregateType::Sum => {
-                            if total_value == total_value.floor() {
+                        AggregateType::Count => JsonValue::Number(total_count.into()),
+                        AggregateType::Sum => {
+                            if total_value == total_value.floor()
+                                && total_value.abs() < i64::MAX as f64
+                            {
                                 JsonValue::Number((total_value as i64).into())
                             } else {
                                 JsonValue::Number(
@@ -741,19 +791,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 )
                             }
                         }
-                        crate::mapper::AggregateType::Average => {
+                        AggregateType::Average => {
                             if total_count > 0 {
                                 let avg = total_value / total_count as f64;
-                                JsonValue::Number(
-                                    serde_json::Number::from_f64(avg).unwrap_or_else(|| 0.into()),
-                                )
+                                if avg == avg.floor() && avg.abs() < i64::MAX as f64 {
+                                    JsonValue::Number((avg as i64).into())
+                                } else {
+                                    JsonValue::Number(
+                                        serde_json::Number::from_f64(avg)
+                                            .unwrap_or_else(|| 0.into()),
+                                    )
+                                }
                             } else {
-                                JsonValue::Null
+                                // Go DefraDB returns 0 for average of empty/null arrays
+                                JsonValue::Number(0.into())
                             }
                         }
-                        crate::mapper::AggregateType::Min | crate::mapper::AggregateType::Max => {
+                        AggregateType::Min | AggregateType::Max => {
                             if total_count > 0 {
-                                if total_value == total_value.floor() {
+                                if total_value == total_value.floor()
+                                    && total_value.abs() < i64::MAX as f64
+                                {
                                     JsonValue::Number((total_value as i64).into())
                                 } else {
                                     JsonValue::Number(
@@ -769,6 +827,55 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                     obj.insert(output_name.clone(), computed_value);
                 }
+
+                // Deferred cleanup: remove relation data only used for aggregation
+                for relation_name in &aggregate_relation_names {
+                    if !selected_relations.contains(relation_name) {
+                        obj.remove(relation_name);
+                    }
+                }
+            }
+        }
+
+        // Apply post-aggregate ordering if needed
+        // When order references aggregate aliases (e.g., order: {_alias: {total: DESC}}),
+        // the OrderByNode can't sort during plan execution since values don't exist yet.
+        if let Some(ref order_by) = select.order_by {
+            let aggregate_output_names: std::collections::HashSet<&str> = aggregates_info
+                .iter()
+                .map(|(name, _, _)| name.as_str())
+                .collect();
+
+            let needs_post_sort = order_by.conditions.iter().any(|c| {
+                c.fields.len() == 1 && aggregate_output_names.contains(c.fields[0].as_str())
+            });
+
+            if needs_post_sort {
+                results.sort_by(|a, b| {
+                    for condition in &order_by.conditions {
+                        if condition.fields.len() != 1 {
+                            continue;
+                        }
+                        let field = &condition.fields[0];
+                        let a_val = a.as_object().and_then(|o| o.get(field));
+                        let b_val = b.as_object().and_then(|o| o.get(field));
+                        let a_f = a_val.and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let b_f = b_val.and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let ord = a_f.partial_cmp(&b_f).unwrap_or(std::cmp::Ordering::Equal);
+                        let ord = if matches!(
+                            condition.direction,
+                            crate::mapper::OrderDirection::Desc
+                        ) {
+                            ord.reverse()
+                        } else {
+                            ord
+                        };
+                        if ord != std::cmp::Ordering::Equal {
+                            return ord;
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
             }
         }
 
@@ -1247,8 +1354,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                     nested_obj
                                                         .insert(nf_output.to_string(), json_val);
                                                 } else {
-                                                    nested_obj
-                                                        .insert(nf_output.to_string(), JsonValue::Null);
+                                                    nested_obj.insert(
+                                                        nf_output.to_string(),
+                                                        JsonValue::Null,
+                                                    );
                                                 }
                                             }
                                         }
@@ -1393,9 +1502,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         field_names
             .iter()
             .map(|name| {
-                commit.get(*name).and_then(|v| {
-                    crate::json_convert::normal_value_to_json(v).ok()
-                })
+                commit
+                    .get(*name)
+                    .and_then(|v| crate::json_convert::normal_value_to_json(v).ok())
             })
             .collect()
     }
@@ -1429,4 +1538,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
     }
+}
+
+/// Extract a numeric value from a JSON item for aggregate computation.
+///
+/// Handles two cases:
+/// - Inline array items: raw values like `JsonValue::Number(5)` — field_name is None
+/// - Relation items: objects like `{"score": 5}` — field_name specifies which key
+fn extract_numeric(item: &JsonValue, field_name: Option<&str>) -> Option<f64> {
+    let val = match field_name {
+        Some(field) => {
+            // Relation aggregate: extract field from object
+            item.as_object()?.get(field)?
+        }
+        None => {
+            // Inline array aggregate: item is the value itself
+            item
+        }
+    };
+    val.as_f64().or_else(|| val.as_i64().map(|n| n as f64))
 }

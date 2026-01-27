@@ -344,10 +344,7 @@ pub unsafe extern "C" fn add_dac_policy(
 ///
 /// `policy_id` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn get_dac_policy(
-    node_ptr: usize,
-    policy_id: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn get_dac_policy(node_ptr: usize, policy_id: *const c_char) -> FfiResult {
     let policy_id_str = match c_str_to_string(policy_id) {
         Some(s) => s,
         None => return FfiResult::error("policy_id is null"),

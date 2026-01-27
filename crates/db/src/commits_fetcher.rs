@@ -41,10 +41,7 @@ impl<S: Store> CommitsFetcher<S> {
     }
 
     /// Fetch all commits matching the given options
-    pub async fn fetch_commits(
-        &self,
-        options: &CommitsQueryOptions,
-    ) -> Result<Vec<Document>> {
+    pub async fn fetch_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
         let mut guard = self.txn.lock().await;
         let txn = guard.as_mut().ok_or(Error::TxnNotActive)?;
 
@@ -72,9 +69,7 @@ impl<S: Store> CommitsFetcher<S> {
             // If the string looks like a CIDv1 (starts with known multibase prefix
             // for CIDv1), treat it as "not found" rather than "invalid".
             if Self::looks_like_cidv1(cid_str) {
-                Error::Serialization(
-                    "cid either does not exist or belong to document".to_string(),
-                )
+                Error::Serialization("cid either does not exist or belong to document".to_string())
             } else {
                 Error::Serialization(format!("invalid cid: {}", e))
             }
@@ -271,10 +266,7 @@ impl<S: Store> CommitsFetcher<S> {
         };
 
         let opts = IterOptions::new().with_prefix(prefix);
-        let mut iter = headstore
-            .iterator(opts)
-            .await
-            .map_err(Error::Storage)?;
+        let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
 
         let mut cids = Vec::new();
 
@@ -304,9 +296,7 @@ impl<S: Store> CommitsFetcher<S> {
             .await
             .map_err(Error::Storage)?
             .ok_or_else(|| {
-                Error::Serialization(
-                    "cid either does not exist or belong to document".to_string(),
-                )
+                Error::Serialization("cid either does not exist or belong to document".to_string())
             })?;
 
         Block::from_dag_cbor(&data)
@@ -396,7 +386,8 @@ impl<S: Store> CommitsFetcher<S> {
         // signature - null for now (handle signature blocks separately)
         map.insert("signature".to_string(), JsonValue::Null);
 
-        Document::from_map(map).map_err(|e| Error::Serialization(format!("Failed to create document: {}", e)))
+        Document::from_map(map)
+            .map_err(|e| Error::Serialization(format!("Failed to create document: {}", e)))
     }
 
     /// Get field name from delta
@@ -405,7 +396,7 @@ impl<S: Store> CommitsFetcher<S> {
             CrdtDelta::Lww(d) => Some(d.field_name.clone()),
             CrdtDelta::Counter(d) => Some(d.field_name.clone()),
             CrdtDelta::Composite(_) => Some("_C".to_string()), // Composite field marker
-            CrdtDelta::Collection(_) => None,                   // Collection commits have no field
+            CrdtDelta::Collection(_) => None,                  // Collection commits have no field
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
         }
@@ -494,8 +485,8 @@ mod tests {
 
 #[cfg(test)]
 mod additional_tests {
-    use std::str::FromStr;
     use cid::Cid;
+    use std::str::FromStr;
 
     #[test]
     fn test_invalid_cid_parsing() {
@@ -544,8 +535,12 @@ mod additional_tests {
         ));
 
         // Should NOT be recognized as CIDv1-like
-        assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1("fhbnjfahfhfhanfhga"));
+        assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1(
+            "fhbnjfahfhfhanfhga"
+        ));
         assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1("short"));
-        assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1("randomtext"));
+        assert!(!CommitsFetcher::<MemoryStore>::looks_like_cidv1(
+            "randomtext"
+        ));
     }
 }

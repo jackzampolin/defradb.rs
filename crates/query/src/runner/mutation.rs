@@ -217,6 +217,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
                 let mut node =
                     UpdateNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone())
+                        .with_collection(collection.clone())
                         .with_input(input);
 
                 // Use resolved doc_ids (from filter) or original doc_ids
@@ -226,12 +227,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     node = node.with_doc_ids(doc_ids.clone());
                 }
 
-                // Pass through filter for node-level resolution when no doc_ids resolved
-                if mutation.filter.is_some()
-                    && resolved_doc_ids.is_none()
-                    && mutation.doc_ids.is_none()
-                {
-                    node = node.with_filter(mutation.filter.clone().unwrap());
+                // Always pass filter: for node-level resolution when no doc_ids,
+                // and for re-filtering results after update (Go compatibility)
+                if let Some(ref filter) = mutation.filter {
+                    node = node.with_filter(filter.clone());
                 }
 
                 Box::new(node)
