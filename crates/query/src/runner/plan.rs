@@ -147,6 +147,17 @@ pub(crate) fn build_mapping(
                         // Don't add render_key - we don't want to output these fields
                     }
                 }
+                // Also add fields referenced by the aggregate target's filter
+                // This is needed for top-level aggregates like _count(Users: {filter: {Age: {_gt: 26}}})
+                if let Some(ref filter) = target.filter {
+                    for field_name in filter.referenced_fields() {
+                        if mapping.first_index_of_name(&field_name).is_none() {
+                            let index = mapping.next_index();
+                            mapping.add(index, &field_name);
+                            // Don't add render_key - we don't want to output these fields
+                        }
+                    }
+                }
             }
         }
     }
