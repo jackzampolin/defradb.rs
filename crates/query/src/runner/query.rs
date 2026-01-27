@@ -4,6 +4,7 @@ use acp::Identity;
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -149,7 +150,14 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         // Fetch documents
         let fetcher = self.fetcher.as_ref();
         let docs = if let Some(ref doc_ids) = select.doc_ids {
-            let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            // Deduplicate doc_ids while preserving order (Go compatibility)
+            let mut seen = HashSet::new();
+            let unique_ids: Vec<String> = doc_ids
+                .iter()
+                .filter(|id| seen.insert((*id).clone()))
+                .cloned()
+                .collect();
+            let result = fetcher.get_by_ids(&select.collection_name, &unique_ids).await?;
             result.into_docs()
         } else {
             fetcher.get_all(&select.collection_name).await?
@@ -685,13 +693,20 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         // Fetch documents from storage
         let docs = if let Some(ref doc_ids) = select.doc_ids {
-            let result = fetcher.get_by_ids(&select.collection_name, doc_ids).await?;
+            // Deduplicate doc_ids while preserving order (Go compatibility)
+            let mut seen = HashSet::new();
+            let unique_ids: Vec<String> = doc_ids
+                .iter()
+                .filter(|id| seen.insert((*id).clone()))
+                .cloned()
+                .collect();
+            let result = fetcher.get_by_ids(&select.collection_name, &unique_ids).await?;
             let missing = result.missing_ids();
             if !missing.is_empty() {
                 warn!(
                     collection = %select.collection_name,
                     missing_ids = ?missing,
-                    requested_count = doc_ids.len(),
+                    requested_count = unique_ids.len(),
                     found_count = result.docs().len(),
                     "Some requested documents were not found"
                 );
