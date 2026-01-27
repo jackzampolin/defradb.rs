@@ -12,14 +12,17 @@ use lens::{
     build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
 };
 use query::fetcher::CommitsQueryOptions;
+use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
+use storage::index::IndexIterator;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, trace};
 
-use crate::collection::Collection;
+use crate::collection::{collection_short_id, Collection};
 use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::database::DB;
+use crate::index_manager::IndexManager;
 use crate::schema_loader::get_collections_by_collection_id;
 use crate::txn::DbTxn;
 
@@ -434,5 +437,111 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         }
 
         result
+    }
+
+    async fn get_by_index_scan(
+        &self,
+        collection_name: &str,
+        params: &IndexScanParams,
+    ) -> query::error::Result<Vec<String>> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Create read-only transaction
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get datastore: {}", e))
+        })?;
+
+        // Create an IndexManager from the collection schema
+        let short_id = collection_short_id(collection.collection_id());
+        let index_manager =
+            IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
+
+        // Get the index
+        let index = index_manager.get_index(&params.index_name).ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "index '{}' not found on collection '{}'",
+                params.index_name, collection_name
+            ))
+        })?;
+
+        // Execute the appropriate scan based on scan type
+        let doc_ids = match &params.scan_type {
+            IndexScanType::ExactMatch { values } => {
+                let mut iter = index.get(&datastore, values).await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index error: {}", e))
+                })?;
+                let entries = iter.collect_all().await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index iteration error: {}", e))
+                })?;
+                entries.into_iter().map(|e| e.doc_id).collect()
+            }
+            IndexScanType::InScan { values } => {
+                // For IN operator, we need to collect results for each value
+                let mut all_doc_ids = Vec::new();
+                for value in values {
+                    let mut iter = index.get(&datastore, &[value.clone()]).await.map_err(|e| {
+                        query::error::QueryError::execution(format!("index error: {}", e))
+                    })?;
+                    let entries = iter.collect_all().await.map_err(|e| {
+                        query::error::QueryError::execution(format!("index iteration error: {}", e))
+                    })?;
+                    all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                }
+                all_doc_ids
+            }
+            IndexScanType::PrefixScan {
+                prefix_values,
+                reverse,
+            } => {
+                let mut iter = index
+                    .scan_prefix(&datastore, prefix_values, *reverse)
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!("index error: {}", e))
+                    })?;
+                let entries = iter.collect_all().await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index iteration error: {}", e))
+                })?;
+                entries.into_iter().map(|e| e.doc_id).collect()
+            }
+            IndexScanType::RangeScan {
+                prefix_values,
+                lower,
+                upper,
+                reverse,
+            } => {
+                let mut iter = index
+                    .scan_range(&datastore, prefix_values, lower.clone(), upper.clone(), *reverse)
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!("index error: {}", e))
+                    })?;
+                let entries = iter.collect_all().await.map_err(|e| {
+                    query::error::QueryError::execution(format!("index iteration error: {}", e))
+                })?;
+                entries.into_iter().map(|e| e.doc_id).collect()
+            }
+        };
+
+        let _ = txn.discard();
+
+        Ok(doc_ids)
+    }
+
+    fn supports_index_queries(&self) -> bool {
+        true
     }
 }

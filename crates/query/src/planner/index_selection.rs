@@ -51,6 +51,9 @@ pub struct FieldCondition {
     pub op: FilterOp,
     /// The value(s) to match
     pub value: ConditionValue,
+    /// Array operator wrapper (if this is an array field condition)
+    /// e.g., for `numbers: {_any: {_eq: 30}}`, this would be Some(Any)
+    pub array_op: Option<FilterOp>,
 }
 
 /// Value in a filter condition.
@@ -71,6 +74,17 @@ impl FieldCondition {
 
         for (op_str, value) in ops {
             if let Some(op) = FilterOp::parse(op_str) {
+                // Handle array element operators (_any, _all, _none)
+                // These wrap inner conditions: {_any: {_eq: 30}}
+                if op.is_array_element_op() {
+                    if let Some(inner_ops) = value.as_object() {
+                        // Parse the inner conditions with the array operator wrapper
+                        let inner_conditions = Self::parse_inner(field_name, inner_ops, Some(op));
+                        conditions.extend(inner_conditions);
+                    }
+                    continue;
+                }
+
                 let condition_value = match op {
                     FilterOp::In | FilterOp::Nin => {
                         if let Some(arr) = value.as_array() {
@@ -120,6 +134,55 @@ impl FieldCondition {
                     field_name: field_name.to_string(),
                     op,
                     value: condition_value,
+                    array_op: None,
+                });
+            }
+        }
+
+        conditions
+    }
+
+    /// Parse inner conditions with an array operator wrapper.
+    fn parse_inner(
+        field_name: &str,
+        ops: &serde_json::Map<String, JsonValue>,
+        array_op: Option<FilterOp>,
+    ) -> Vec<Self> {
+        let mut conditions = Vec::new();
+
+        for (op_str, value) in ops {
+            if let Some(op) = FilterOp::parse(op_str) {
+                let condition_value = match op {
+                    FilterOp::In | FilterOp::Nin => {
+                        if let Some(arr) = value.as_array() {
+                            ConditionValue::Multiple(
+                                arr.iter().filter_map(json_to_normal_value).collect(),
+                            )
+                        } else {
+                            continue;
+                        }
+                    }
+                    FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
+                        if let Some(s) = value.as_str() {
+                            ConditionValue::Pattern(s.to_string())
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => {
+                        if let Some(nv) = json_to_normal_value(value) {
+                            ConditionValue::Single(nv)
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+
+                conditions.push(FieldCondition {
+                    field_name: field_name.to_string(),
+                    op,
+                    value: condition_value,
+                    array_op,
                 });
             }
         }
@@ -185,6 +248,13 @@ fn extract_conditions_recursive(
 ///
 /// Returns true if the filter contains conditions on the first field(s)
 /// of the index that can be efficiently evaluated using the index.
+///
+/// # Array Field Support
+///
+/// For array fields with multi-value indexing:
+/// - `_any` with `_eq`, `_gt`, `_gte`, `_lt`, `_lte`, `_in` - CAN use index
+/// - `_all` with `_eq` - CAN use index (but may need post-filtering)
+/// - `_none` - CANNOT use index efficiently (requires full scan)
 pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
     if filter.is_empty() || index.fields.is_empty() {
         return false;
@@ -204,7 +274,7 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
         }
 
         // Check if the operator is index-compatible
-        matches!(
+        let base_op_compatible = matches!(
             cond.op,
             FilterOp::Eq
                 | FilterOp::Gt
@@ -212,13 +282,38 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
                 | FilterOp::Lt
                 | FilterOp::Lte
                 | FilterOp::In
-        )
+        );
+
+        // For array operators, check if the combination is index-friendly
+        match cond.array_op {
+            Some(FilterOp::Any) => {
+                // _any with comparison ops can use index
+                base_op_compatible
+            }
+            Some(FilterOp::All) => {
+                // _all with _eq can use index (with post-filtering)
+                matches!(cond.op, FilterOp::Eq | FilterOp::In)
+            }
+            Some(FilterOp::None) => {
+                // _none cannot efficiently use index (requires full scan)
+                false
+            }
+            Some(_) => false,
+            None => base_op_compatible,
+        }
     })
 }
 
 /// Convert a filter to index scan parameters.
 ///
 /// Returns None if the filter cannot use the index efficiently.
+///
+/// # Array Field Support
+///
+/// For array fields with `_any`, `_all` operators, the scan type is determined
+/// by the inner operator. For example:
+/// - `{numbers: {_any: {_eq: 30}}}` → ExactMatch{values: [30]}
+/// - `{tags: {_any: {_in: ["red", "blue"]}}}` → InScan{values: ["red", "blue"]}
 pub fn filter_to_index_scan(filter: &Filter, index: &IndexDescription) -> Option<IndexScanParams> {
     if !can_use_index(filter, index) {
         return None;
@@ -238,6 +333,7 @@ pub fn filter_to_index_scan(filter: &Filter, index: &IndexDescription) -> Option
     }
 
     // Analyze conditions to determine scan type
+    // For array operators, we look at the inner operator
     let mut has_eq = false;
     let mut eq_value = None;
     let mut has_in = false;
@@ -246,6 +342,11 @@ pub fn filter_to_index_scan(filter: &Filter, index: &IndexDescription) -> Option
     let mut upper_bound = Bound::Unbounded;
 
     for cond in first_field_conditions {
+        // Skip _none operators (they don't use index)
+        if cond.array_op == Some(FilterOp::None) {
+            continue;
+        }
+
         match cond.op {
             FilterOp::Eq => {
                 if let ConditionValue::Single(v) = &cond.value {
@@ -349,11 +450,12 @@ fn score_index_for_filter(filter: &Filter, index: &IndexDescription) -> Option<u
             // Earlier fields in index are more valuable
             score += 10 - i as u32;
 
-            // Exact match is most valuable
-            if conditions
-                .iter()
-                .any(|c| c.field_name == field.name && c.op == FilterOp::Eq)
-            {
+            // Exact match is most valuable (including through _any/_all)
+            if conditions.iter().any(|c| {
+                c.field_name == field.name
+                    && c.op == FilterOp::Eq
+                    && c.array_op != Some(FilterOp::None)
+            }) {
                 score += 5;
             }
         } else {
@@ -675,5 +777,82 @@ mod tests {
 
         let like_cond = conditions.iter().find(|c| c.op == FilterOp::Like).unwrap();
         assert!(matches!(like_cond.value, ConditionValue::Pattern(_)));
+    }
+
+    #[test]
+    fn test_can_use_index_array_any() {
+        // Filter: {numbers: {_any: {_eq: 30}}}
+        let filter = make_filter(HashMap::from([(
+            "numbers".to_string(),
+            json!({"_any": {"_eq": 30}}),
+        )]));
+        let index = single_field_index("numbers");
+
+        assert!(can_use_index(&filter, &index));
+    }
+
+    #[test]
+    fn test_can_use_index_array_all() {
+        // Filter: {numbers: {_all: {_eq: 30}}}
+        let filter = make_filter(HashMap::from([(
+            "numbers".to_string(),
+            json!({"_all": {"_eq": 30}}),
+        )]));
+        let index = single_field_index("numbers");
+
+        assert!(can_use_index(&filter, &index));
+    }
+
+    #[test]
+    fn test_cannot_use_index_array_none() {
+        // Filter: {numbers: {_none: {_eq: 30}}} - _none cannot use index
+        let filter = make_filter(HashMap::from([(
+            "numbers".to_string(),
+            json!({"_none": {"_eq": 30}}),
+        )]));
+        let index = single_field_index("numbers");
+
+        assert!(!can_use_index(&filter, &index));
+    }
+
+    #[test]
+    fn test_filter_to_scan_array_any() {
+        let filter = make_filter(HashMap::from([(
+            "numbers".to_string(),
+            json!({"_any": {"_eq": 30}}),
+        )]));
+        let index = single_field_index("numbers");
+
+        let params = filter_to_index_scan(&filter, &index).unwrap();
+        assert_eq!(params.index_name, "numbers_idx");
+
+        match params.scan_type {
+            IndexScanType::ExactMatch { values } => {
+                assert_eq!(values.len(), 1);
+                assert_eq!(values[0], NormalValue::Int(30));
+            }
+            _ => panic!("expected ExactMatch scan type for _any with _eq"),
+        }
+    }
+
+    #[test]
+    fn test_extract_array_conditions() {
+        // Parse: {_any: {_eq: 30}}
+        let ops = serde_json::from_str::<serde_json::Map<String, JsonValue>>(
+            r#"{"_any": {"_eq": 30}}"#,
+        )
+        .unwrap();
+
+        let conditions = FieldCondition::parse("numbers", &ops);
+        assert_eq!(conditions.len(), 1);
+
+        let cond = &conditions[0];
+        assert_eq!(cond.field_name, "numbers");
+        assert_eq!(cond.op, FilterOp::Eq);
+        assert_eq!(cond.array_op, Some(FilterOp::Any));
+        match &cond.value {
+            ConditionValue::Single(v) => assert_eq!(*v, NormalValue::Int(30)),
+            _ => panic!("expected single value"),
+        }
     }
 }

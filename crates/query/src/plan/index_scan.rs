@@ -1,23 +1,30 @@
 //! IndexScanNode for index-driven document scanning
 //!
 //! This node represents an index-based scan in the query plan.
-//! It uses pre-fetched documents that were retrieved via index lookup,
-//! providing better performance than full collection scans when filters
-//! match indexed fields.
+//! It uses documents retrieved via index lookup, providing better performance
+//! than full collection scans when filters match indexed fields.
+//!
+//! # Data Loading
+//!
+//! IndexScanNode can obtain documents in two ways:
+//! 1. Pre-loaded via `with_docs()` - for testing or when data is already available
+//! 2. On-demand via a `DocFetcher` - fetches during `init()` using index scan params
 
 use async_trait::async_trait;
 use schema::CollectionVersion;
+use std::sync::Arc;
 
-use crate::document::DocumentMapping;
+use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::Result;
+use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::planner::index_selection::IndexScanParams;
 use crate::planner::{Doc, PlanNode};
 
 /// IndexScanNode scans documents retrieved via index lookup.
 ///
-/// Similar to ScanNode, but indicates that documents were fetched
-/// using an index for better performance. The index scan parameters
+/// Similar to ScanNode, but uses index-based document fetching for better
+/// performance when filters match indexed fields. The index scan parameters
 /// are stored for query explanation and optimization analysis.
 pub struct IndexScanNode {
     /// Collection schema
@@ -38,6 +45,10 @@ pub struct IndexScanNode {
     position: usize,
     /// Whether the node has been initialized
     initialized: bool,
+    /// Optional fetcher for loading documents on-demand
+    fetcher: Option<Arc<dyn DocFetcher>>,
+    /// Whether docs were explicitly provided (even if empty)
+    docs_provided: bool,
 }
 
 impl IndexScanNode {
@@ -57,6 +68,8 @@ impl IndexScanNode {
             docs: Vec::new(),
             position: 0,
             initialized: false,
+            fetcher: None,
+            docs_provided: false,
         }
     }
 
@@ -75,9 +88,21 @@ impl IndexScanNode {
         self
     }
 
-    /// Set documents directly (retrieved via index lookup)
+    /// Set documents directly (retrieved via index lookup).
+    ///
+    /// Providing an empty vector is valid and represents an empty result set.
     pub fn with_docs(mut self, docs: Vec<Doc>) -> Self {
         self.docs = docs;
+        self.docs_provided = true;
+        self
+    }
+
+    /// Set a document fetcher for on-demand data loading.
+    ///
+    /// When set, the node will fetch documents from storage during `init()`
+    /// using the index scan parameters if no documents were pre-loaded.
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
+        self.fetcher = Some(fetcher);
         self
     }
 
@@ -101,6 +126,25 @@ impl IndexScanNode {
 impl PlanNode for IndexScanNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
+
+        // If docs weren't provided and we have a fetcher, load documents via index
+        if !self.docs_provided {
+            if let Some(ref fetcher) = self.fetcher {
+                // Use index scan to get document IDs
+                let doc_ids = fetcher
+                    .get_by_index_scan(&self.collection.name, &self.index_params)
+                    .await?;
+
+                if !doc_ids.is_empty() {
+                    // Fetch the actual documents by their IDs
+                    let result = fetcher.get_by_ids(&self.collection.name, &doc_ids).await?;
+                    self.docs = documents_to_plan_docs(result.docs(), &self.document_mapping)?;
+                }
+            }
+            // Note: If no fetcher and no docs, we have an empty result set.
+            // This is valid for index scans that match no documents.
+        }
+
         self.initialized = true;
         Ok(())
     }

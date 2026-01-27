@@ -284,20 +284,21 @@ impl Planner {
         }
 
         // Check if an index can be used for the filter.
-        // Note: Index selection is disabled when a fetcher is attached because:
-        // 1. IndexScanNode expects pre-loaded documents from index lookups
-        // 2. The DocFetcher trait doesn't support index-aware fetching
-        // 3. The Runner handles index lookups for simple queries; the Planner path
-        //    (with fetcher) is used for nested selections where ScanNode suffices
-        let index_scan = if self.fetcher.is_some() {
-            if select.filter.is_some() && !collection.indexes.is_empty() {
-                debug!(
-                    collection = %select.collection_name,
-                    available_indexes = collection.indexes.len(),
-                    "Index selection disabled for nested query path - using full scan"
-                );
+        // Index selection works for both pre-loaded docs and fetcher-based loading.
+        let index_scan = if let Some(ref fetcher) = self.fetcher {
+            // Only use index if fetcher supports index queries
+            if fetcher.supports_index_queries() {
+                self.try_select_index(select, &collection)
+            } else {
+                if select.filter.is_some() && !collection.indexes.is_empty() {
+                    debug!(
+                        collection = %select.collection_name,
+                        available_indexes = collection.indexes.len(),
+                        "Index selection disabled - fetcher does not support index queries"
+                    );
+                }
+                None
             }
-            None // Skip index selection when using fetcher-based data loading
         } else {
             self.try_select_index(select, &collection)
         };
@@ -357,10 +358,14 @@ impl Planner {
 
         // 1. Choose between IndexScanNode and ScanNode based on index availability
         let mut plan: Box<dyn PlanNode> = if let Some(ref params) = index_scan {
-            Box::new(
+            let mut index_scan_node =
                 IndexScanNode::new((*collection).clone(), scan_mapping.clone(), params.clone())
-                    .with_show_deleted(select.show_deleted),
-            )
+                    .with_show_deleted(select.show_deleted);
+            // Attach fetcher if available for on-demand index-based loading
+            if let Some(ref fetcher) = self.fetcher {
+                index_scan_node = index_scan_node.with_fetcher(fetcher.clone());
+            }
+            Box::new(index_scan_node)
         } else {
             let mut scan = ScanNode::new((*collection).clone(), scan_mapping.clone())
                 .with_show_deleted(select.show_deleted);
@@ -1946,6 +1951,20 @@ impl Planner {
                 } else if !doc_id_requested {
                     // Add _docID to render_keys since we're returning all fields
                     mapping.add_render_key(0, "_docID");
+                }
+            }
+        }
+
+        // Add fields referenced by the filter (needed for filter evaluation but not rendered)
+        if let Some(ref filter) = select.filter {
+            for field_name in filter.referenced_fields() {
+                if mapping.first_index_of_name(&field_name).is_none() {
+                    // Only add if field exists in collection schema
+                    if collection.field_by_name(&field_name).is_some() {
+                        let index = mapping.next_index();
+                        mapping.add(index, &field_name);
+                        // Don't add render_key - we don't want to output these fields
+                    }
                 }
             }
         }
