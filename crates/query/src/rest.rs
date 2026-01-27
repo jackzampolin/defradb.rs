@@ -227,7 +227,7 @@ pub struct RestOperationsImpl<F: DocFetcher, R: TransactionRegistry> {
     runner: Arc<QueryRunner<F, R>>,
 }
 
-impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     /// Create a new REST operations implementation.
     ///
     /// The QueryRunner must have a mutator configured for create/update/delete operations.
@@ -377,7 +377,7 @@ impl<F: DocFetcher, R: TransactionRegistry> RestOperationsImpl<F, R> {
 }
 
 #[async_trait]
-impl<F: DocFetcher, R: TransactionRegistry> RestOperations for RestOperationsImpl<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOperationsImpl<F, R> {
     async fn list_collections(&self) -> RestResult<Vec<String>> {
         self.runner
             .collection_names()

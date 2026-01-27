@@ -9,8 +9,9 @@ use async_trait::async_trait;
 use document::DocID;
 use tracing;
 
-use crate::document::DocumentMapping;
+use crate::document::{document_to_plan_doc, DocumentMapping};
 use crate::error::{QueryError, Result};
+use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::mutator::DocMutator;
 use crate::planner::{Doc, PlanNode};
@@ -24,7 +25,7 @@ use crate::planner::{Doc, PlanNode};
 /// # Example
 ///
 /// ```ignore
-/// let mut node = DeleteNode::new("Users", mutator, mapping)
+/// let mut node = DeleteNode::new("Users", mutator, fetcher, mapping)
 ///     .with_doc_ids(vec!["bae-123".to_string()]);
 ///
 /// node.init().await?;
@@ -40,6 +41,8 @@ pub struct DeleteNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// Document fetcher for resolving filters and getting all documents
+    fetcher: Arc<dyn DocFetcher>,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
     /// Document IDs to delete (mutually exclusive with filter)
@@ -67,15 +70,18 @@ impl DeleteNode {
     ///
     /// * `collection_name` - Name of the collection to delete documents from
     /// * `mutator` - Document mutator for storage operations
+    /// * `fetcher` - Document fetcher for resolving filters and getting all documents
     /// * `document_mapping` - Field mapping for result documents
     pub fn new(
         collection_name: impl Into<String>,
         mutator: Arc<dyn DocMutator>,
+        fetcher: Arc<dyn DocFetcher>,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            fetcher,
             document_mapping,
             doc_ids: None,
             filter: None,
@@ -148,14 +154,28 @@ impl PlanNode for DeleteNode {
         // On first call, perform all deletions
         if !self.did_delete {
             // Get document IDs to delete
-            // Note: Filter-based deletion is handled by the mutation runner which resolves
-            // filters to doc_ids before passing to DeleteNode. See resolve_filter_to_doc_ids().
             let doc_ids_to_delete = if let Some(ref ids) = self.doc_ids {
+                // Explicit doc_ids provided
                 ids.clone()
             } else {
-                return Err(QueryError::execution(
-                    "DeleteNode requires doc_ids (filter resolution should be done by runner)",
-                ));
+                // No doc_ids - fetch documents and optionally filter
+                let all_docs = self.fetcher.get_all(&self.collection_name).await?;
+                let mut matching_ids = Vec::new();
+
+                for doc in all_docs {
+                    // If filter exists, check if document matches
+                    if let Some(ref filter) = self.filter {
+                        let plan_doc = document_to_plan_doc(&doc, &self.document_mapping)?;
+                        if !filter.matches(plan_doc.fields(), &self.document_mapping)? {
+                            continue;
+                        }
+                    }
+                    // Include this document
+                    if let Some(id) = doc.id() {
+                        matching_ids.push(id.to_string());
+                    }
+                }
+                matching_ids
             };
 
             // Delete each document
@@ -222,16 +242,17 @@ impl PlanNode for DeleteNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fetcher::FetchByIdsResult;
     use crate::mutator::{CreateResult, DeleteResult, UpdateResult};
     use document::Document;
     use std::sync::Mutex;
 
-    /// Mock mutator for testing
-    struct MockMutator {
+    /// Mock storage that implements both DocMutator and DocFetcher
+    struct MockStorage {
         docs: Mutex<std::collections::HashMap<String, Document>>,
     }
 
-    impl MockMutator {
+    impl MockStorage {
         fn new() -> Self {
             Self {
                 docs: Mutex::new(std::collections::HashMap::new()),
@@ -250,7 +271,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl DocMutator for MockMutator {
+    impl DocMutator for MockStorage {
         async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
             doc.generate_and_set_doc_id()
                 .map_err(|e| QueryError::execution(format!("Failed to generate DocID: {}", e)))?;
@@ -306,6 +327,49 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl DocFetcher for MockStorage {
+        async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
+            Ok(self.docs.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn get_by_ids(
+            &self,
+            _collection_name: &str,
+            doc_ids: &[String],
+        ) -> Result<FetchByIdsResult> {
+            let docs = self.docs.lock().unwrap();
+            let mut found = Vec::new();
+            let mut missing = Vec::new();
+            for id in doc_ids {
+                if let Some(doc) = docs.get(id) {
+                    found.push(doc.clone());
+                } else {
+                    missing.push(id.clone());
+                }
+            }
+            Ok(FetchByIdsResult::partial(found, missing))
+        }
+
+        async fn get_by_field_value(
+            &self,
+            _collection_name: &str,
+            field_name: &str,
+            value: &str,
+        ) -> Result<Vec<Document>> {
+            let docs = self.docs.lock().unwrap();
+            Ok(docs
+                .values()
+                .filter(|doc| {
+                    doc.get(field_name)
+                        .map(|v| v.as_str() == Some(value))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect())
+        }
+    }
+
     fn make_test_mapping() -> DocumentMapping {
         let mut m = DocumentMapping::new();
         m.add(0, "_docID");
@@ -322,19 +386,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_single_document() {
-        let mutator = Arc::new(MockMutator::new());
+        let storage = Arc::new(MockStorage::new());
         let mapping = make_test_mapping();
 
         // Create initial document
         let doc = create_test_doc("Alice");
         let doc_id = doc.id().unwrap().to_string();
-        mutator.add_doc(doc);
+        storage.add_doc(doc);
 
-        assert_eq!(mutator.doc_count(), 1);
+        assert_eq!(storage.doc_count(), 1);
 
         // Delete it
-        let mut node =
-            DeleteNode::new("Users", mutator.clone(), mapping).with_doc_ids(vec![doc_id.clone()]);
+        let mut node = DeleteNode::new("Users", storage.clone(), storage.clone(), mapping)
+            .with_doc_ids(vec![doc_id.clone()]);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -348,28 +412,28 @@ mod tests {
         assert!(!node.next().await.unwrap()); // No more documents
 
         // Verify document was actually deleted
-        assert_eq!(mutator.doc_count(), 0);
+        assert_eq!(storage.doc_count(), 0);
     }
 
     #[tokio::test]
     async fn test_delete_multiple_documents() {
-        let mutator = Arc::new(MockMutator::new());
+        let storage = Arc::new(MockStorage::new());
         let mapping = make_test_mapping();
 
         // Create initial documents
         let doc1 = create_test_doc("Alice");
         let doc1_id = doc1.id().unwrap().to_string();
-        mutator.add_doc(doc1);
+        storage.add_doc(doc1);
 
         let doc2 = create_test_doc("Bob");
         let doc2_id = doc2.id().unwrap().to_string();
-        mutator.add_doc(doc2);
+        storage.add_doc(doc2);
 
-        assert_eq!(mutator.doc_count(), 2);
+        assert_eq!(storage.doc_count(), 2);
 
         // Delete both
-        let mut node =
-            DeleteNode::new("Users", mutator.clone(), mapping).with_doc_ids(vec![doc1_id, doc2_id]);
+        let mut node = DeleteNode::new("Users", storage.clone(), storage.clone(), mapping)
+            .with_doc_ids(vec![doc1_id, doc2_id]);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -382,23 +446,23 @@ mod tests {
 
         assert_eq!(count, 2);
         assert_eq!(node.deleted_count(), 2);
-        assert_eq!(mutator.doc_count(), 0);
+        assert_eq!(storage.doc_count(), 0);
     }
 
     #[tokio::test]
     async fn test_delete_nonexistent_document_skipped() {
-        let mutator = Arc::new(MockMutator::new());
+        let storage = Arc::new(MockStorage::new());
         let mapping = make_test_mapping();
 
         // Create one document
         let doc = create_test_doc("Alice");
         let doc_id = doc.id().unwrap().to_string();
-        mutator.add_doc(doc);
+        storage.add_doc(doc);
 
         // Try to delete with a mix of existing and non-existing IDs
         // Note: We need to use the same format as valid DocIDs
-        let mut node =
-            DeleteNode::new("Users", mutator.clone(), mapping).with_doc_ids(vec![doc_id.clone()]);
+        let mut node = DeleteNode::new("Users", storage.clone(), storage.clone(), mapping)
+            .with_doc_ids(vec![doc_id.clone()]);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
@@ -410,29 +474,65 @@ mod tests {
         }
 
         assert_eq!(count, 1);
-        assert_eq!(mutator.doc_count(), 0);
+        assert_eq!(storage.doc_count(), 0);
     }
 
     #[tokio::test]
-    async fn test_delete_without_doc_ids_or_filter_errors() {
-        let mutator = Arc::new(MockMutator::new());
+    async fn test_delete_without_doc_ids_or_filter_deletes_all() {
+        let storage = Arc::new(MockStorage::new());
         let mapping = make_test_mapping();
 
-        let mut node = DeleteNode::new("Users", mutator, mapping);
+        // Create some documents
+        let doc1 = create_test_doc("Alice");
+        storage.add_doc(doc1);
+
+        let doc2 = create_test_doc("Bob");
+        storage.add_doc(doc2);
+
+        assert_eq!(storage.doc_count(), 2);
+
+        // No doc_ids and no filter - should delete ALL documents
+        let mut node = DeleteNode::new("Users", storage.clone(), storage.clone(), mapping);
+
+        node.init().await.unwrap();
+        node.start().await.unwrap();
+
+        let mut count = 0;
+        while node.next().await.unwrap() {
+            assert!(node.value().is_deleted());
+            count += 1;
+        }
+
+        assert_eq!(count, 2, "Should delete all documents");
+        assert_eq!(node.deleted_count(), 2);
+        assert_eq!(storage.doc_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_without_doc_ids_or_filter_empty_collection() {
+        let storage = Arc::new(MockStorage::new());
+        let mapping = make_test_mapping();
+
+        // Don't add any documents
+
+        // No doc_ids and no filter on empty collection - should succeed with 0 results
+        let mut node = DeleteNode::new("Users", storage.clone(), storage.clone(), mapping);
 
         node.init().await.unwrap();
         node.start().await.unwrap();
 
         let result = node.next().await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // No documents to delete
+        assert_eq!(node.deleted_count(), 0);
     }
 
     #[tokio::test]
     async fn test_delete_next_before_init_errors() {
-        let mutator = Arc::new(MockMutator::new());
+        let storage = Arc::new(MockStorage::new());
         let mapping = make_test_mapping();
 
-        let mut node = DeleteNode::new("Users", mutator, mapping);
+        let mut node = DeleteNode::new("Users", storage.clone(), storage.clone(), mapping);
 
         let result = node.next().await;
         assert!(result.is_err());
@@ -440,22 +540,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_tracks_not_found_documents() {
-        let mutator = Arc::new(MockMutator::new());
+        let storage = Arc::new(MockStorage::new());
         let mapping = make_test_mapping();
 
         // Create one document that exists
         let doc = create_test_doc("Alice");
         let existing_id = doc.id().unwrap().to_string();
-        mutator.add_doc(doc);
+        storage.add_doc(doc);
 
         // Create another valid-looking DocID that doesn't exist in storage
         let mut fake_doc = Document::new();
         fake_doc.set("name", "Fake".to_string());
         fake_doc.generate_and_set_doc_id().unwrap();
         let nonexistent_id = fake_doc.id().unwrap().to_string();
-        // Don't add fake_doc to mutator - it won't exist
+        // Don't add fake_doc to storage - it won't exist
 
-        let mut node = DeleteNode::new("Users", mutator.clone(), mapping)
+        let mut node = DeleteNode::new("Users", storage.clone(), storage.clone(), mapping)
             .with_doc_ids(vec![existing_id.clone(), nonexistent_id.clone()]);
 
         node.init().await.unwrap();
@@ -470,7 +570,7 @@ mod tests {
         // Only the existing document should have been deleted
         assert_eq!(count, 1, "Should only delete one existing document");
         assert_eq!(node.deleted_count(), 1);
-        assert_eq!(mutator.doc_count(), 0, "Existing doc should be removed");
+        assert_eq!(storage.doc_count(), 0, "Existing doc should be removed");
 
         // The non-existent document should be tracked
         let not_found = node.not_found_ids();
