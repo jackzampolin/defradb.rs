@@ -151,9 +151,13 @@ impl<S: Store> CommitsFetcher<S> {
                 commits.push(commit_doc);
 
                 // Check depth limit
+                // Go's depth semantics: depth=1 means only heads (no traversal),
+                // depth=2 means heads + their parents, etc.
+                // So we check current_depth + 1 < max_depth to decide if we should
+                // traverse to the next level.
                 let should_traverse = match options.depth {
                     None => true, // No limit
-                    Some(max_depth) => current_depth < max_depth,
+                    Some(max_depth) => current_depth + 1 < max_depth,
                 };
 
                 if should_traverse {
@@ -175,17 +179,28 @@ impl<S: Store> CommitsFetcher<S> {
 
     /// Sort commits to match Go DefraDB's ordering.
     ///
+    /// Go's ordering for commits:
+    /// 1. Group by docID first (documents in order they were created/discovered)
+    /// 2. Within each document, sort by field ID: regular fields first (by name),
+    ///    composite field (_C) last
+    ///
     /// Go stores field IDs as numeric short IDs in headstore keys, which gives
     /// lexicographic order: "1" < "2" < "C" (composite comes after regular fields).
-    /// Rust uses field names, so we need to sort to match Go's behavior:
-    /// - Regular fields first, sorted by field name
-    /// - Composite field (_C) last
     fn sort_commits_go_order(&self, commits: &mut Vec<Document>) {
         commits.sort_by(|a, b| {
+            // Primary sort: docID
+            let doc_id_a = a.get("docID").and_then(|v| v.as_str()).unwrap_or("");
+            let doc_id_b = b.get("docID").and_then(|v| v.as_str()).unwrap_or("");
+
+            if doc_id_a != doc_id_b {
+                return doc_id_a.cmp(doc_id_b);
+            }
+
+            // Secondary sort: fieldName (composite last)
             let field_a = a.get("fieldName").and_then(|v| v.as_str()).unwrap_or("");
             let field_b = b.get("fieldName").and_then(|v| v.as_str()).unwrap_or("");
 
-            // Composite (_C) should come last
+            // Composite (_C) should come last within each document
             match (field_a == "_C", field_b == "_C") {
                 (true, false) => std::cmp::Ordering::Greater,
                 (false, true) => std::cmp::Ordering::Less,
