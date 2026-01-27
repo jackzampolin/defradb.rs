@@ -929,7 +929,7 @@ fn parse_order_condition(
             Ok(OrderCondition::new(field_name, direction))
         }
         Value::Object(nested_obj) => {
-            // Nested ordering: {relation: {field: ASC}}
+            // Nested ordering: {relation: {field: ASC}} or {_alias: {aliasName: ASC}}
             // Recursively parse the nested object
             if nested_obj.len() != 1 {
                 return Err(QueryError::parse(
@@ -939,8 +939,13 @@ fn parse_order_condition(
             let (nested_field, nested_direction) = nested_obj.iter().next().unwrap();
             let mut nested_condition =
                 parse_order_condition(nested_field.clone(), nested_direction, variables)?;
-            // Prepend the parent field to the path
-            nested_condition.fields.insert(0, field_name);
+            // Handle _alias directive: don't prepend "_alias", just use the nested field name.
+            // This allows ordering by aliased fields like: order: {_alias: {MyAge: ASC}}
+            // where MyAge is an alias for the Age field.
+            if field_name != "_alias" {
+                // For regular nested ordering (relations), prepend the parent field to the path
+                nested_condition.fields.insert(0, field_name);
+            }
             Ok(nested_condition)
         }
         _ => Err(QueryError::parse("order direction must be ASC or DESC")),
