@@ -9,7 +9,51 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 use storage::MemoryStore;
+
+/// In-memory policy store for DAC policies.
+///
+/// Stores policy YAML indexed by content-addressed ID (SHA256 hash).
+#[derive(Default)]
+pub struct PolicyStore {
+    policies: RwLock<HashMap<String, String>>,
+}
+
+impl PolicyStore {
+    /// Create a new empty policy store.
+    pub fn new() -> Self {
+        Self {
+            policies: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Add a policy and return its content-addressed ID.
+    ///
+    /// The ID is a SHA256 hash of the policy content (hex-encoded).
+    pub fn add_policy(&self, policy: &str) -> String {
+        // Compute content-addressed ID (SHA256 hash)
+        let mut hasher = Sha256::new();
+        hasher.update(policy.as_bytes());
+        let hash = hasher.finalize();
+        let policy_id = hex::encode(hash);
+
+        // Store the policy
+        self.policies.write().insert(policy_id.clone(), policy.to_string());
+
+        policy_id
+    }
+
+    /// Get a policy by ID.
+    pub fn get_policy(&self, id: &str) -> Option<String> {
+        self.policies.read().get(id).cloned()
+    }
+
+    /// List all policy IDs.
+    pub fn list_policies(&self) -> Vec<String> {
+        self.policies.read().keys().cloned().collect()
+    }
+}
 
 /// Type alias for the database type used in FFI.
 pub type FfiDatabase = db::DB<MemoryStore>;
@@ -35,6 +79,8 @@ pub struct NodeState {
     pub document_acp: Arc<dyn acp::DocumentACP>,
     /// The event bus for subscriptions.
     pub event_bus: Arc<dyn events::Bus>,
+    /// The policy store for DAC policies.
+    pub policy_store: Arc<PolicyStore>,
 }
 
 /// State held for each FFI subscription.

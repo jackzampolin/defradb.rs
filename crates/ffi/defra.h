@@ -258,6 +258,43 @@ struct FfiResult delete_nac_actor_relationship(uintptr_t node_ptr,
                                                const char *target_did);
 
 /*
+ Add a DAC policy.
+
+ Accepts a policy definition in YAML or JSON format.
+ Returns a JSON object with the policy ID:
+ ```json
+ { "PolicyID": "sha256_hash_of_policy" }
+ ```
+
+ # Safety
+
+ `policy` must be a valid null-terminated UTF-8 string containing
+ the policy definition in YAML or JSON format.
+ */
+struct FfiResult add_dac_policy(uintptr_t node_ptr,
+                                const char *identity_did,
+                                const char *policy);
+
+/*
+ Get a DAC policy by ID.
+
+ Returns a JSON object with the policy content, or null if not found.
+
+ # Safety
+
+ `policy_id` must be a valid null-terminated UTF-8 string.
+ */
+struct FfiResult get_dac_policy(uintptr_t node_ptr,
+                                const char *policy_id);
+
+/*
+ List all DAC policy IDs.
+
+ Returns a JSON array of policy IDs.
+ */
+struct FfiResult list_dac_policies(uintptr_t node_ptr);
+
+/*
  Add a DAC actor relationship (share document access with target).
 
  The requestor must be the document owner. Relation can be:
