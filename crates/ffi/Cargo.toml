@@ -44,6 +44,11 @@ schema = { path = "../schema" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
 lens = { path = "../lens" }
+p2p = { path = "../p2p" }
+blockstore = { path = "../blockstore" }
+
+# P2P dependencies
+libp2p = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.28"

@@ -37,6 +37,7 @@ pub mod acp;
 pub mod collection;
 pub mod index;
 pub mod node;
+pub mod p2p;
 pub mod query;
 pub mod runtime;
 pub mod schema;
@@ -60,6 +61,11 @@ pub use collection::{
 };
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use node::{new_node, node_close};
+pub use p2p::{
+    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_connect, p2p_delete_replicator,
+    p2p_get_all_collections, p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections,
+    p2p_set_replicator,
+};
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections};
 pub use subscription::{close_subscription, create_subscription, poll_subscription};

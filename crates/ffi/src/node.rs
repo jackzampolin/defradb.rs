@@ -78,6 +78,7 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
         let policy_store = Arc::new(PolicyStore::new());
 
         // Create node state
+        // P2P is disabled by default in FFI - use new_node_with_p2p for P2P-enabled nodes
         let state = NodeState {
             database,
             query_runner: runner,
@@ -85,6 +86,7 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
             document_acp,
             event_bus,
             policy_store,
+            p2p: None,
         };
 
         // Register and get handle
