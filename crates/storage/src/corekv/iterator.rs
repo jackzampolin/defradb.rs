@@ -3,9 +3,14 @@
 /// This module provides the iterator abstraction for scanning through
 /// key-value pairs in storage, with support for various filtering and
 /// ordering options.
+///
+/// # WASM Compatibility
+///
+/// For WASM targets, the `Send` bound is removed since WASM is single-threaded.
 use async_trait::async_trait;
 
 use super::errors::Result;
+use super::traits::MaybeSend;
 
 /// A key-value pair returned by an iterator.
 ///
@@ -84,8 +89,9 @@ impl KvPair {
 ///
 /// iter.close().await?;
 /// ```
-#[async_trait]
-pub trait Iterator: Send {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Iterator: MaybeSend {
     /// Advance the iterator and return the next key-value pair.
     ///
     /// Returns:
@@ -171,7 +177,8 @@ pub trait Iterator: Send {
 }
 
 /// Implement Iterator for Box<dyn Iterator> to allow boxing.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Iterator for Box<dyn Iterator> {
     async fn next(&mut self) -> Result<Option<KvPair>> {
         (**self).next().await

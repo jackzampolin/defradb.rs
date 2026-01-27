@@ -43,6 +43,10 @@
 ///     let redb_store = RedbStore::open("/path/to/db")?;
 /// }
 /// ```
+
+// Memory backend uses tokio::sync::RwLock, only available on native platforms
+// For WASM, use the simplified memory store in the wasm crate
+#[cfg(not(target_arch = "wasm32"))]
 pub mod memory;
 
 // Redb is only available on native platforms (not WASM)
@@ -53,9 +57,10 @@ pub mod redb;
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub mod redb_config;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test_suite;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use memory::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]

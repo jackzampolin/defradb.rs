@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use document::NormalValue;
 
-use crate::corekv::Result;
+use crate::corekv::{MaybeSend, Result};
 
 /// A single entry from an index scan.
 ///
@@ -90,8 +90,9 @@ impl Bound {
 ///
 /// IndexIterator provides an async interface for scanning index entries.
 /// Implementations handle the specific iteration strategy (exact match, prefix, range).
-#[async_trait]
-pub trait IndexIterator: Send {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait IndexIterator: MaybeSend {
     /// Advance to the next index entry.
     ///
     /// Returns:
@@ -128,7 +129,8 @@ pub trait IndexIterator: Send {
 }
 
 /// Implement IndexIterator for Box<dyn IndexIterator>
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl IndexIterator for Box<dyn IndexIterator> {
     async fn next(&mut self) -> Result<Option<IndexEntry>> {
         (**self).next().await

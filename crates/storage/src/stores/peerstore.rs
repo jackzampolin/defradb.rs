@@ -85,7 +85,8 @@ impl<S: Store> Peerstore<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Peerstore<S> {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.store.new_txn(readonly).await

@@ -9,7 +9,7 @@ use super::iterator::Bound;
 use super::range_iterator::RangeIterator;
 use super::validate_doc_id;
 use super::CollectionIndex;
-use crate::corekv::{IterOptions, Reader, Result, Writer};
+use crate::corekv::{MaybeSend, IterOptions, Reader, Result, Writer};
 use crate::keys::datastore::IndexedField;
 use crate::keys::IndexDataStoreKey;
 
@@ -119,7 +119,7 @@ impl UniqueIndex {
     ///
     /// Returns an iterator that yields at most one document (uniqueness constraint).
     /// For NULL values, multiple documents may be returned (NULL is not unique).
-    pub async fn get<R: Reader + Send>(
+    pub async fn get<R: Reader + MaybeSend>(
         &self,
         txn: &R,
         values: &[NormalValue],
@@ -130,7 +130,7 @@ impl UniqueIndex {
     /// Scan all entries in the index.
     ///
     /// Returns an iterator over all index entries in order (or reverse order).
-    pub async fn scan<R: Reader + Send>(&self, txn: &R, reverse: bool) -> Result<RangeIterator> {
+    pub async fn scan<R: Reader + MaybeSend>(&self, txn: &R, reverse: bool) -> Result<RangeIterator> {
         RangeIterator::new_scan(txn, self.collection_short_id, &self.desc, true, reverse).await
     }
 
@@ -138,7 +138,7 @@ impl UniqueIndex {
     ///
     /// Returns entries where the first `prefix_values.len()` fields match exactly.
     /// Useful for composite indexes.
-    pub async fn scan_prefix<R: Reader + Send>(
+    pub async fn scan_prefix<R: Reader + MaybeSend>(
         &self,
         txn: &R,
         prefix_values: &[NormalValue],
@@ -159,7 +159,7 @@ impl UniqueIndex {
     ///
     /// Optionally match first `prefix_values.len()` fields exactly,
     /// then apply bounds on the next field.
-    pub async fn scan_range<R: Reader + Send>(
+    pub async fn scan_range<R: Reader + MaybeSend>(
         &self,
         txn: &R,
         prefix_values: &[NormalValue],
@@ -181,13 +181,14 @@ impl UniqueIndex {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CollectionIndex for UniqueIndex {
     fn description(&self) -> &IndexDescription {
         &self.desc
     }
 
-    async fn save<T: Reader + Writer + Send>(
+    async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
         doc_id: &str,
@@ -222,7 +223,7 @@ impl CollectionIndex for UniqueIndex {
         txn.set(&key, doc_id.as_bytes()).await
     }
 
-    async fn update<T: Reader + Writer + Send>(
+    async fn update<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
         doc_id: &str,
@@ -269,7 +270,7 @@ impl CollectionIndex for UniqueIndex {
         }
     }
 
-    async fn delete<T: Reader + Writer + Send>(
+    async fn delete<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
         doc_id: &str,
@@ -287,7 +288,7 @@ impl CollectionIndex for UniqueIndex {
         }
     }
 
-    async fn remove_all<T: Reader + Writer + Send>(&self, txn: &mut T) -> Result<()> {
+    async fn remove_all<T: Reader + Writer + MaybeSend>(&self, txn: &mut T) -> Result<()> {
         let prefix = IndexDataStoreKey::index_prefix(self.collection_short_id, self.desc.id);
         // Iterate over all keys with this prefix and delete them
         let opts = IterOptions::default().with_prefix(prefix.clone());

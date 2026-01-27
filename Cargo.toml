@@ -20,6 +20,7 @@ members = [
     "crates/events",
     "crates/ffi",
     "crates/lens",
+    "crates/wasm",
 ]
 
 [workspace.package]

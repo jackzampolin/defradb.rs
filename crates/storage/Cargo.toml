@@ -14,7 +14,6 @@ schema = { path = "../schema" }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime
-tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 
@@ -43,6 +42,16 @@ parking_lot = "0.12"
 [features]
 default = ["redb"]
 redb = ["dep:redb"]
+# WASM support - disables tokio-dependent features
+wasm = []
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+uuid = { version = "1.0", features = ["v4", "js"] }
+
+# Tokio is only available on non-WASM targets
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
