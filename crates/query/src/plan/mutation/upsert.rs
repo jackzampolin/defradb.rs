@@ -238,7 +238,15 @@ impl UpsertNode {
             );
 
             input.apply_to(&mut doc)?;
-            let result = self.mutator.update(&self.collection_name, doc).await?;
+
+            // Collect the modified field names for block creation
+            let modified_fields: std::collections::HashSet<String> =
+                input.fields.keys().cloned().collect();
+
+            let result = self
+                .mutator
+                .update(&self.collection_name, doc, modified_fields)
+                .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
             self.upserted_docs.push(plan_doc);

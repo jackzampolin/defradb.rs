@@ -120,8 +120,9 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     // Use collection_id as schema_version_id (matches how Go stores it)
                     let schema_version_id = collection.collection_id();
 
+                    // For create operations, all fields are new - pass None for modified_fields
                     if let Err(e) =
-                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id)
+                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id, None)
                             .await
                     {
                         warn!(
@@ -180,6 +181,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         &self,
         collection_name: &str,
         doc: Document,
+        modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         // Get collection from DB cache
         let collection = self
@@ -240,8 +242,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     // Use collection_id as schema_version_id (matches how Go stores it)
                     let schema_version_id = collection.collection_id();
 
+                    // For update operations, pass the modified fields to only create blocks
+                    // for the fields that actually changed
                     if let Err(e) =
-                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id)
+                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id, Some(&modified_fields))
                             .await
                     {
                         warn!(

@@ -110,6 +110,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         &self,
         collection_name: &str,
         doc: Document,
+        modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
@@ -120,8 +121,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("update error: {}", e)))?;
 
-        // Count modified fields (for now, return the total field count)
-        let fields_modified = doc.values().len();
+        // Return count of actually modified fields
+        let fields_modified = modified_fields.len();
 
         Ok(UpdateResult::new(doc, fields_modified))
     }

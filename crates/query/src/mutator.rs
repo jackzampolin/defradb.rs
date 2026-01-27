@@ -201,6 +201,7 @@ pub trait DocMutator: Send + Sync {
     ///
     /// * `collection_name` - The name of the collection
     /// * `doc` - The document with updated fields
+    /// * `modified_fields` - The set of field names that were modified
     ///
     /// # Returns
     ///
@@ -213,7 +214,12 @@ pub trait DocMutator: Send + Sync {
     /// - The document does not have an ID
     /// - The document does not exist in the collection
     /// - The document fails schema validation
-    async fn update(&self, collection_name: &str, doc: Document) -> Result<UpdateResult>;
+    async fn update(
+        &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: std::collections::HashSet<String>,
+    ) -> Result<UpdateResult>;
 
     /// Delete a document by ID.
     ///

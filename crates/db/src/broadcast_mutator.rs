@@ -167,6 +167,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         &self,
         collection_name: &str,
         doc: Document,
+        modified_fields: std::collections::HashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         // Get collection ID for broadcast
         let collection = self
@@ -177,7 +178,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         let collection_id = collection.collection_id().to_string();
 
         // Execute the update mutation
-        let result = self.inner.update(collection_name, doc).await?;
+        let result = self.inner.update(collection_name, doc, modified_fields).await?;
 
         // Build proper Block structures for P2P sync
         let block_result = match build_blocks_from_document(
