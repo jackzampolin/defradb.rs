@@ -36,10 +36,7 @@ fn test_pushlog_reply_error() {
     let reply = PushLogReply::error("msg123", "something went wrong");
     // PushLogReply has flat fields (not nested metadata)
     assert_eq!(reply.message_id, "msg123");
-    assert_eq!(
-        reply.err_message,
-        Some("something went wrong".to_string())
-    );
+    assert_eq!(reply.err_message, Some("something went wrong".to_string()));
 }
 
 #[test]

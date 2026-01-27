@@ -523,7 +523,9 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                         Ok(NormalValue::NillableBoolElementArray(bools))
                     } else {
                         // All values are Some, unwrap to BoolArray
-                        Ok(NormalValue::BoolArray(bools.into_iter().map(|opt| opt.unwrap()).collect()))
+                        Ok(NormalValue::BoolArray(
+                            bools.into_iter().map(|opt| opt.unwrap()).collect(),
+                        ))
                     }
                 }
                 ciborium::Value::Integer(_) => {
@@ -557,7 +559,9 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                         Ok(NormalValue::NillableIntElementArray(ints))
                     } else {
                         // All values are Some, unwrap to IntArray
-                        Ok(NormalValue::IntArray(ints.into_iter().map(|opt| opt.unwrap()).collect()))
+                        Ok(NormalValue::IntArray(
+                            ints.into_iter().map(|opt| opt.unwrap()).collect(),
+                        ))
                     }
                 }
                 ciborium::Value::Float(_) => {
@@ -581,7 +585,9 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                         Ok(NormalValue::NillableFloat64ElementArray(floats))
                     } else {
                         // All values are Some, unwrap to Float64Array
-                        Ok(NormalValue::Float64Array(floats.into_iter().map(|opt| opt.unwrap()).collect()))
+                        Ok(NormalValue::Float64Array(
+                            floats.into_iter().map(|opt| opt.unwrap()).collect(),
+                        ))
                     }
                 }
                 ciborium::Value::Text(_) => {
@@ -605,7 +611,9 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                         Ok(NormalValue::NillableStringElementArray(strings))
                     } else {
                         // All values are Some, unwrap to StringArray
-                        Ok(NormalValue::StringArray(strings.into_iter().map(|opt| opt.unwrap()).collect()))
+                        Ok(NormalValue::StringArray(
+                            strings.into_iter().map(|opt| opt.unwrap()).collect(),
+                        ))
                     }
                 }
                 _ => {

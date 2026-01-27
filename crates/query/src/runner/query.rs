@@ -157,7 +157,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 .filter(|id| seen.insert((*id).clone()))
                 .cloned()
                 .collect();
-            let result = fetcher.get_by_ids(&select.collection_name, &unique_ids).await?;
+            let result = fetcher
+                .get_by_ids(&select.collection_name, &unique_ids)
+                .await?;
             result.into_docs()
         } else {
             fetcher.get_all(&select.collection_name).await?
@@ -362,7 +364,10 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         // Check if this is a top-level aggregate query (e.g., { _avg(Users: {field: Age}) })
         // Top-level aggregates have: only aggregate fields, and all targets have host_name == collection_name
         let is_top_level_aggregate = !select.fields.is_empty()
-            && select.fields.iter().all(|f| matches!(f, Requestable::Aggregate(_)))
+            && select
+                .fields
+                .iter()
+                .all(|f| matches!(f, Requestable::Aggregate(_)))
             && select.fields.iter().all(|f| {
                 if let Requestable::Aggregate(agg) = f {
                     agg.targets
@@ -502,8 +507,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
     ) -> Result<Vec<JsonValue>> {
         // Collect info about relation aggregates
-        let mut aggregates_info: Vec<(String, crate::mapper::AggregateType, Vec<(String, Option<String>)>)> =
-            Vec::new();
+        let mut aggregates_info: Vec<(
+            String,
+            crate::mapper::AggregateType,
+            Vec<(String, Option<String>)>,
+        )> = Vec::new();
 
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
@@ -568,17 +576,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                                 if let JsonValue::Object(item_obj) = item {
                                                     if let Some(val) = item_obj.get(field) {
                                                         if let Some(n) = val.as_f64() {
-                                                            if total_count == 0
-                                                                || n < total_value
-                                                            {
+                                                            if total_count == 0 || n < total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;
                                                         } else if let Some(n) = val.as_i64() {
                                                             let n = n as f64;
-                                                            if total_count == 0
-                                                                || n < total_value
-                                                            {
+                                                            if total_count == 0 || n < total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;
@@ -594,17 +598,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                                 if let JsonValue::Object(item_obj) = item {
                                                     if let Some(val) = item_obj.get(field) {
                                                         if let Some(n) = val.as_f64() {
-                                                            if total_count == 0
-                                                                || n > total_value
-                                                            {
+                                                            if total_count == 0 || n > total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;
                                                         } else if let Some(n) = val.as_i64() {
                                                             let n = n as f64;
-                                                            if total_count == 0
-                                                                || n > total_value
-                                                            {
+                                                            if total_count == 0 || n > total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;
@@ -700,7 +700,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                 .filter(|id| seen.insert((*id).clone()))
                 .cloned()
                 .collect();
-            let result = fetcher.get_by_ids(&select.collection_name, &unique_ids).await?;
+            let result = fetcher
+                .get_by_ids(&select.collection_name, &unique_ids)
+                .await?;
             let missing = result.missing_ids();
             if !missing.is_empty() {
                 warn!(
@@ -865,7 +867,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .iter()
                                 .filter_map(|doc| doc.get(idx))
                                 .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
-                                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                .min_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
                             match min {
                                 Some(v) if v == v.floor() => JsonValue::Number((v as i64).into()),
                                 Some(v) => JsonValue::Number(
@@ -883,7 +887,9 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                 .iter()
                                 .filter_map(|doc| doc.get(idx))
                                 .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
-                                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                .max_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
                             match max {
                                 Some(v) if v == v.floor() => JsonValue::Number((v as i64).into()),
                                 Some(v) => JsonValue::Number(

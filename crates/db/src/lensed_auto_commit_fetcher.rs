@@ -9,8 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use document::Document;
 use lens::{
-    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink,
-    DOC_ID_FIELD,
+    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
 };
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
@@ -87,8 +86,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
 
         let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
         for version in versions {
-            let mut link =
-                CollectionHistoryLink::new(&version.version_id, &version.collection_id);
+            let mut link = CollectionHistoryLink::new(&version.version_id, &version.collection_id);
             if let Some(ref prev) = version.previous_version {
                 link = link.with_previous(&prev.source_collection_id);
                 if let Some(ref transform_id) = prev.transform {

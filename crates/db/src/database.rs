@@ -380,7 +380,11 @@ impl<S: Store> DB<S> {
                         ))
                     })?;
 
-                    (collection_key, Some((updated_data, schema)), collection_name)
+                    (
+                        collection_key,
+                        Some((updated_data, schema)),
+                        collection_name,
+                    )
                 }
                 None => {
                     // Destination schema doesn't exist yet (e.g., registering for P2P)
@@ -1272,7 +1276,10 @@ impl<S: Store> DB<S> {
             );
             Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
         })?;
-        cache.insert(collection_name.to_string(), Collection::new(new_schema.clone()));
+        cache.insert(
+            collection_name.to_string(),
+            Collection::new(new_schema.clone()),
+        );
 
         Ok(new_schema)
     }
@@ -1322,7 +1329,10 @@ impl<S: Store> DB<S> {
                     hasher.update(field.id.as_bytes());
                 }
                 let hash = hasher.finalize();
-                format!("v{:x}", &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
+                format!(
+                    "v{:x}",
+                    &hash[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64)
+                )
             }
         }
     }

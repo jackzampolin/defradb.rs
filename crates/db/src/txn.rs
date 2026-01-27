@@ -387,19 +387,18 @@ impl<S: Store> DbTxn<S> {
             let collection_key = CollectionKey::new(&version_id);
             match systemstore.get(&collection_key.bytes()).await {
                 Ok(Some(data)) => {
-                    let schema: CollectionVersion =
-                        serde_json::from_slice(&data).map_err(|e| {
-                            tracing::error!(
-                                error = ?e,
-                                collection_name = %name,
-                                version_id = %version_id,
-                                "Failed to deserialize schema"
-                            );
-                            Error::Serialization(format!(
-                                "failed to deserialize schema for collection '{}': {}",
-                                name, e
-                            ))
-                        })?;
+                    let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
+                        tracing::error!(
+                            error = ?e,
+                            collection_name = %name,
+                            version_id = %version_id,
+                            "Failed to deserialize schema"
+                        );
+                        Error::Serialization(format!(
+                            "failed to deserialize schema for collection '{}': {}",
+                            name, e
+                        ))
+                    })?;
                     collections.push(Collection::new(schema));
                 }
                 Ok(None) => {

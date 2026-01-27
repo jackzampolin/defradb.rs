@@ -119,8 +119,7 @@ impl<S: Store> LensedDocFetcher<S> {
 
         // Add each version to the history
         for version in versions {
-            let mut link =
-                CollectionHistoryLink::new(&version.version_id, &version.collection_id);
+            let mut link = CollectionHistoryLink::new(&version.version_id, &version.collection_id);
 
             // Check if there's a previous version
             if let Some(ref prev) = version.previous_version {
@@ -182,15 +181,13 @@ impl<S: Store> LensedDocFetcher<S> {
         }
 
         // Build the targeted history
-        let history =
-            Self::build_collection_history_from_versions(&versions, target_version_id).ok_or_else(
-                || {
-                    query::error::QueryError::execution(format!(
-                        "failed to build migration history for collection {}",
-                        collection_id
-                    ))
-                },
-            )?;
+        let history = Self::build_collection_history_from_versions(&versions, target_version_id)
+            .ok_or_else(|| {
+                query::error::QueryError::execution(format!(
+                    "failed to build migration history for collection {}",
+                    collection_id
+                ))
+            })?;
 
         // Cache the history
         {
@@ -434,10 +431,7 @@ impl<S: Store> LensedDocFetcher<S> {
             .set(version_key.as_bytes(), version_bytes)
             .await
             .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to update version: {}",
-                    e
-                ))
+                query::error::QueryError::execution(format!("failed to update version: {}", e))
             })?;
 
         debug!(

@@ -733,8 +733,7 @@ impl Filter {
                     // Field value is neither null, array, nor object - invalid for relation filter
                     return Err(QueryError::invalid_filter(format!(
                         "relation field '{}' must be null, object, or array, got {:?}",
-                        key,
-                        field_value
+                        key, field_value
                     )));
                 }
             } else {
@@ -954,9 +953,9 @@ impl Filter {
                     return Ok(false);
                 }
                 // Expected is a nested condition object like {_gt: 70}
-                let nested_filter = expected.as_object().ok_or_else(|| {
-                    QueryError::invalid_filter("_any requires object condition")
-                })?;
+                let nested_filter = expected
+                    .as_object()
+                    .ok_or_else(|| QueryError::invalid_filter("_any requires object condition"))?;
                 for elem in arr {
                     if self.eval_conditions_on_value(elem, nested_filter)? {
                         return Ok(true); // Found match
@@ -975,9 +974,9 @@ impl Filter {
                 if arr.is_empty() {
                     return Ok(true);
                 }
-                let nested_filter = expected.as_object().ok_or_else(|| {
-                    QueryError::invalid_filter("_all requires object condition")
-                })?;
+                let nested_filter = expected
+                    .as_object()
+                    .ok_or_else(|| QueryError::invalid_filter("_all requires object condition"))?;
                 for elem in arr {
                     if !self.eval_conditions_on_value(elem, nested_filter)? {
                         return Ok(false); // Found non-match
@@ -996,9 +995,9 @@ impl Filter {
                 if arr.is_empty() {
                     return Ok(true);
                 }
-                let nested_filter = expected.as_object().ok_or_else(|| {
-                    QueryError::invalid_filter("_none requires object condition")
-                })?;
+                let nested_filter = expected
+                    .as_object()
+                    .ok_or_else(|| QueryError::invalid_filter("_none requires object condition"))?;
                 for elem in arr {
                     if self.eval_conditions_on_value(elem, nested_filter)? {
                         return Ok(false); // Found match → fail
@@ -1044,8 +1043,10 @@ impl Filter {
                 if a.len() != b.len() {
                     return false;
                 }
-                a.iter()
-                    .all(|(key, val_a)| b.get(key).is_some_and(|val_b| Self::values_equal(val_a, val_b)))
+                a.iter().all(|(key, val_a)| {
+                    b.get(key)
+                        .is_some_and(|val_b| Self::values_equal(val_a, val_b))
+                })
             }
             _ => false,
         }
@@ -1243,7 +1244,10 @@ impl Filter {
     ) -> Result<bool> {
         for (op_str, expected) in conditions {
             let op = FilterOp::parse(op_str).ok_or_else(|| {
-                QueryError::invalid_filter(format!("unknown operator in array condition: {}", op_str))
+                QueryError::invalid_filter(format!(
+                    "unknown operator in array condition: {}",
+                    op_str
+                ))
             })?;
             if !self.eval_op(value, op, expected)? {
                 return Ok(false);

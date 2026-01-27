@@ -1055,23 +1055,27 @@ fn parse_aggregate_field(
                 }
             }
             AggregateType::Sum => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_sum requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_sum requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::sum(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Average => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_avg requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_avg requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::avg(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Min => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_min requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_min requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::min(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Max => {
-                let field_name = target_field
-                    .ok_or_else(|| QueryError::parse("_max requires a 'field' argument or relation targets"))?;
+                let field_name = target_field.ok_or_else(|| {
+                    QueryError::parse("_max requires a 'field' argument or relation targets")
+                })?;
                 Aggregate::max(AggregateTarget::with_field("", field_name))
             }
         }
