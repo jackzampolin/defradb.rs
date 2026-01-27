@@ -12,13 +12,13 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{Filter, Requestable, Select};
-use serde_json::Value as JsonValue;
 use crate::plan::{
-    IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
-    TypeJoinMany, TypeJoinOne,
+    GroupByNode, IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode,
+    SelectNode, TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
+use serde_json::Value as JsonValue;
 
 /// Maximum allowed nesting depth for nested queries (0-indexed).
 /// A depth of 0 is the root query, depth 1 is the first nested level, etc.
@@ -150,6 +150,26 @@ impl Planner {
         } else {
             render_mapping.clone()
         };
+
+        // Add _group field to scan_mapping if present in render_mapping.
+        // _group is a virtual field (not in schema) that needs to be explicitly copied.
+        if let Some(group_index) = render_mapping.first_index_of_name("_group") {
+            let scan_index = scan_mapping.next_index();
+            scan_mapping.add(scan_index, "_group");
+            // Copy render_key from render_mapping
+            for rk in &render_mapping.render_keys {
+                if rk.key == "_group"
+                    || render_mapping.try_find_name_from_index(rk.index) == Some("_group")
+                {
+                    scan_mapping.add_render_key(scan_index, &rk.key);
+                    break;
+                }
+            }
+            // Copy child mapping if present (for _group { field1, field2 } syntax)
+            if let Some(child) = render_mapping.child_at(group_index) {
+                scan_mapping.set_child_at(scan_index, child.clone());
+            }
+        }
 
         // Add ORDER BY fields to scan mapping if not already present (Go compatibility).
         // Go DefraDB allows ordering by fields not in the SELECT clause.
@@ -447,6 +467,16 @@ impl Planner {
             }
         }
 
+        // 4b. Apply GroupBy if present (must be after joins but before order/limit)
+        // Use scan_mapping because the upstream plan produces docs with schema indices
+        if let Some(ref group_by) = select.group_by {
+            plan = Box::new(GroupByNode::new(
+                plan,
+                group_by.clone(),
+                scan_mapping.clone(),
+            ));
+        }
+
         // 5. Apply order by after joins (so nested fields are available)
         if let Some(ref order_by) = select.order_by {
             plan = Box::new(OrderByNode::new(
@@ -523,6 +553,11 @@ impl Planner {
         for requestable in &select.fields {
             if let Requestable::Select(nested_select) = requestable {
                 let relation_field_name = &nested_select.field.name;
+
+                // Skip _group - it's a virtual field for groupBy results, not a relation
+                if relation_field_name == "_group" {
+                    continue;
+                }
 
                 // Find the relation field in the parent collection
                 let relation_field = parent_collection
@@ -858,11 +893,11 @@ impl Planner {
                     }
 
                     // Find the relation field in the parent collection
-                    let relation_field =
-                        match parent_collection.field_by_name(relation_field_name) {
-                            Some(f) => f,
-                            None => continue, // Skip if not found (might be invalid)
-                        };
+                    let relation_field = match parent_collection.field_by_name(relation_field_name)
+                    {
+                        Some(f) => f,
+                        None => continue, // Skip if not found (might be invalid)
+                    };
 
                     // Verify it's a relation field
                     if !relation_field.kind.is_relation() {
@@ -1511,6 +1546,18 @@ impl Planner {
                     mapping.add_render_key(index, field.output_name());
                 }
                 Requestable::Select(nested_select) => {
+                    // Handle _group specially - it's a virtual field for groupBy results
+                    if nested_select.field.name == "_group" {
+                        let index = mapping.next_index();
+                        mapping.add(index, "_group");
+                        mapping.add_render_key(index, nested_select.field.output_name());
+
+                        // Build child mapping for the _group nested fields
+                        let child_mapping =
+                            self.build_group_child_mapping(&nested_select, collection)?;
+                        mapping.set_child_at(index, child_mapping);
+                        continue;
+                    }
                     // Nested select (relation) - add the field but don't recurse here
                     // Child mapping will be built when applying joins
                     let index = mapping.next_index();
@@ -1545,6 +1592,53 @@ impl Planner {
         }
 
         Ok(mapping)
+    }
+
+    /// Build a child mapping for the _group virtual field.
+    /// This maps the nested fields within _group { ... } using the same indices
+    /// as the parent document, so field values can be extracted correctly.
+    fn build_group_child_mapping(
+        &self,
+        group_select: &Select,
+        collection: &CollectionVersion,
+    ) -> Result<DocumentMapping> {
+        let mut child_mapping = DocumentMapping::new();
+
+        // Build render_keys for each requested field, using schema indices
+        for requestable in &group_select.fields {
+            match requestable {
+                Requestable::Field(field) => {
+                    // Get the schema index for this field
+                    let schema_idx = if field.name == "_docID" {
+                        0
+                    } else {
+                        // Validate field exists in collection schema
+                        let schema_field = collection.field_by_name(&field.name);
+                        if schema_field.is_none() {
+                            return Err(QueryError::unknown_field(&field.name));
+                        }
+                        // Find the field's index in the collection
+                        collection
+                            .fields
+                            .iter()
+                            .position(|f| f.name == field.name)
+                            .unwrap_or(0)
+                    };
+
+                    child_mapping.add(schema_idx, &field.name);
+                    child_mapping.add_render_key(schema_idx, field.output_name());
+                }
+                Requestable::Select(_) => {
+                    // Nested selects within _group are not currently supported
+                    // (would be relations within grouped documents)
+                }
+                Requestable::Aggregate(_) => {
+                    // Aggregates within _group are not currently supported
+                }
+            }
+        }
+
+        Ok(child_mapping)
     }
 
     /// Get a collection schema by name.

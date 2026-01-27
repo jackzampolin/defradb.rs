@@ -692,6 +692,65 @@ async fn test_group_by_with_count() {
     assert_eq!(bob["_count"].as_i64(), Some(1));
 }
 
+// Test _group field with nested selection
+#[tokio::test]
+async fn test_group_by_with_group_field() {
+    let fetcher = MockFetcher::new();
+
+    let mut doc1 = Document::new();
+    doc1.set("name", "Alice");
+    doc1.set("age", 30i64);
+    doc1.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc1);
+
+    let mut doc2 = Document::new();
+    doc2.set("name", "Bob");
+    doc2.set("age", 25i64);
+    doc2.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc2);
+
+    let mut doc3 = Document::new();
+    doc3.set("name", "Alice");
+    doc3.set("age", 35i64);
+    doc3.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc3);
+
+    let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+    let result = runner
+        .execute_query("{ Users(groupBy: [name]) { name _group { age } } }")
+        .await
+        .unwrap();
+
+    let users = result["Users"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "Should have 2 groups");
+
+    // Find Alice's group
+    let alice = users
+        .iter()
+        .find(|u| u["name"].as_str() == Some("Alice"))
+        .unwrap();
+    let alice_group = alice["_group"].as_array().unwrap();
+    assert_eq!(alice_group.len(), 2, "Alice's group should have 2 docs");
+
+    // Verify the ages in Alice's group
+    let ages: Vec<i64> = alice_group
+        .iter()
+        .map(|g| g["age"].as_i64().unwrap())
+        .collect();
+    assert!(ages.contains(&30), "Alice's group should have age 30");
+    assert!(ages.contains(&35), "Alice's group should have age 35");
+
+    // Find Bob's group
+    let bob = users
+        .iter()
+        .find(|u| u["name"].as_str() == Some("Bob"))
+        .unwrap();
+    let bob_group = bob["_group"].as_array().unwrap();
+    assert_eq!(bob_group.len(), 1, "Bob's group should have 1 doc");
+    assert_eq!(bob_group[0]["age"].as_i64(), Some(25));
+}
+
 // =============================================================================
 // Alias Tests
 // =============================================================================
