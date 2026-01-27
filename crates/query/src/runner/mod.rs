@@ -52,7 +52,7 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) default_identity: Option<Did>,
 }
 
-impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
+impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
     /// Create a new query runner with the given fetcher and collections.
     ///
     /// This creates a runner without transaction support. Use `with_registry`
@@ -84,7 +84,7 @@ impl<F: DocFetcher> QueryRunner<F, NoOpTransactionRegistry> {
     }
 }
 
-impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Create a new query runner with transaction support.
     ///
     /// This uses a static collection provider for backward compatibility.

@@ -217,10 +217,14 @@ pub fn json_to_normal_value_with_kind(
             // JSON fields: wrap ALL values as JSON (primitives, objects, arrays)
             // This matches Go DefraDB behavior where JSON fields accept any value type
             FieldKind::Scalar(ScalarKind::Json) => Ok(NormalValue::Json(value.clone())),
-            // DateTime fields: parse RFC 3339 strings
+            // DateTime fields: parse RFC 3339 strings or special values like UTC_NOW
             FieldKind::Scalar(ScalarKind::DateTime) => {
                 match value {
                     JsonValue::String(s) => {
+                        // Handle special value UTC_NOW - return current time
+                        if s == "UTC_NOW" {
+                            return Ok(NormalValue::Time(Utc::now()));
+                        }
                         // Parse RFC 3339 string to DateTime (matching Go's time.Parse(time.RFC3339, s))
                         let dt: DateTime<Utc> = s.parse().map_err(|e| {
                             QueryError::execution(format!(

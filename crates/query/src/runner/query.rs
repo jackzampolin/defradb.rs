@@ -20,7 +20,7 @@ use super::fetcher::FetcherWrapper;
 use super::plan;
 use super::{DocFetcher, QueryRunner};
 
-impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL query and return JSON results.
     pub async fn execute_query(&self, query: &str) -> Result<JsonValue> {
         self.execute_query_internal(query, self.fetcher.as_ref(), None)

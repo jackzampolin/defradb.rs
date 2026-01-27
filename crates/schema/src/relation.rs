@@ -12,6 +12,7 @@ impl CollectionVersion {
     /// Go DefraDB uses `_{fieldname}ID` as the convention for storing the foreign key
     /// in non-array relation fields. For example, a field `author` gets `_authorID`.
     pub fn relation_id_field_name(field_name: &str) -> String {
+        // Go DefraDB uses: underscore + fieldname + uppercase "ID"
         format!("_{}ID", field_name)
     }
 
