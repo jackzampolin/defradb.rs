@@ -375,8 +375,11 @@ fn parse_field_to_select(
     for (arg_name, arg_value) in &field.arguments {
         match arg_name.as_str() {
             "filter" => {
-                let filter = parse_filter_value(arg_value, variables)?;
-                select.filter = Some(filter);
+                // Null filter is valid and means "no filter" (operate on all docs)
+                if !matches!(arg_value, Value::Null) {
+                    let filter = parse_filter_value(arg_value, variables)?;
+                    select.filter = Some(filter);
+                }
             }
             "limit" => {
                 let limit_val = parse_int_value(arg_value, variables)?;
@@ -407,8 +410,11 @@ fn parse_field_to_select(
                 select.group_by = Some(group_by);
             }
             "docIDs" | "docID" => {
-                let doc_ids = parse_doc_ids_value(arg_value, variables)?;
-                select.doc_ids = Some(doc_ids);
+                // Null docIDs is valid and means "no specific docIDs" (use filter or all)
+                if !matches!(arg_value, Value::Null) {
+                    let doc_ids = parse_doc_ids_value(arg_value, variables)?;
+                    select.doc_ids = Some(doc_ids);
+                }
             }
             "cid" => {
                 let cid_val = resolve_string_value(arg_value, variables, "cid")?;
@@ -1260,14 +1266,20 @@ fn parse_field_to_mutation(
 
             // UPDATE/DELETE: docID or docIDs to target (Go uses singular docID)
             (MutationType::Update | MutationType::Delete, "docID" | "docIDs" | "_docIDs") => {
-                let doc_ids = parse_doc_ids_value(arg_value, variables)?;
-                mutation.doc_ids = Some(doc_ids);
+                // Null docIDs is valid and means "no specific docIDs" (use filter or all)
+                if !matches!(arg_value, Value::Null) {
+                    let doc_ids = parse_doc_ids_value(arg_value, variables)?;
+                    mutation.doc_ids = Some(doc_ids);
+                }
             }
 
             // UPDATE/DELETE/UPSERT: filter to find documents
             (MutationType::Update | MutationType::Delete | MutationType::Upsert, "filter") => {
-                let filter = parse_filter_value(arg_value, variables)?;
-                mutation.filter = Some(filter);
+                // Null filter is valid and means "no filter" (operate on all docs)
+                if !matches!(arg_value, Value::Null) {
+                    let filter = parse_filter_value(arg_value, variables)?;
+                    mutation.filter = Some(filter);
+                }
             }
 
             // Unknown argument
@@ -1299,20 +1311,12 @@ fn parse_field_to_mutation(
                     collection_name
                 )));
             }
-            if mutation.doc_ids.is_none() && mutation.filter.is_none() {
-                return Err(QueryError::parse(format!(
-                    "update_{} mutation requires either 'docIDs' or 'filter' argument",
-                    collection_name
-                )));
-            }
+            // Note: Go DefraDB allows update without docIDs or filter
+            // (meaning update all documents in the collection)
         }
         MutationType::Delete => {
-            if mutation.doc_ids.is_none() && mutation.filter.is_none() {
-                return Err(QueryError::parse(format!(
-                    "delete_{} mutation requires either 'docIDs' or 'filter' argument",
-                    collection_name
-                )));
-            }
+            // Note: Go DefraDB allows delete without docIDs or filter
+            // (meaning delete all documents in the collection)
         }
         MutationType::Upsert => {
             // Go DefraDB requires all three: filter, create, update
@@ -1378,6 +1382,47 @@ fn parse_create_input(
             // Single document (wrap in array)
             let doc = parse_document_input(obj, variables)?;
             Ok(vec![doc])
+        }
+        // Null input is valid and means "no documents to create"
+        Value::Null => Ok(vec![]),
+        // Variable reference - resolve from variables map
+        Value::Variable(var_name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    var_name
+                ))
+            })?;
+            let json_val = vars.get(var_name).ok_or_else(|| {
+                QueryError::parse(format!("variable '{}' not found in variables", var_name))
+            })?;
+            // Convert JSON value to documents
+            match json_val {
+                JsonValue::Array(items) => {
+                    let mut docs = Vec::new();
+                    for item in items {
+                        if let JsonValue::Object(obj) = item {
+                            let doc: HashMap<String, JsonValue> = obj
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            docs.push(doc);
+                        } else {
+                            return Err(QueryError::parse("CREATE input items must be objects"));
+                        }
+                    }
+                    Ok(docs)
+                }
+                JsonValue::Object(obj) => {
+                    let doc: HashMap<String, JsonValue> =
+                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    Ok(vec![doc])
+                }
+                JsonValue::Null => Ok(vec![]),
+                _ => Err(QueryError::parse(
+                    "CREATE input variable must be an array of objects or a single object",
+                )),
+            }
         }
         _ => Err(QueryError::parse(
             "CREATE input must be an array of objects or a single object",
@@ -1566,7 +1611,8 @@ mod mutation_tests {
     }
 
     #[test]
-    fn test_update_missing_target_error() {
+    fn test_update_without_target_succeeds() {
+        // Go DefraDB allows update without filter or docIDs (meaning update all)
         let query = r#"
             mutation {
                 update_Users(input: {name: "Bob"}) {
@@ -1576,15 +1622,16 @@ mod mutation_tests {
         "#;
 
         let result = parse_mutations(query);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("requires either 'docIDs' or 'filter'"));
+        assert!(result.is_ok(), "update without target should succeed: {:?}", result);
+        let mutations = result.unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert!(mutations[0].doc_ids.is_none());
+        assert!(mutations[0].filter.is_none());
     }
 
     #[test]
-    fn test_delete_missing_target_error() {
+    fn test_delete_without_target_succeeds() {
+        // Go DefraDB allows delete without filter or docIDs (meaning delete all)
         let query = r#"
             mutation {
                 delete_Users {
@@ -1594,7 +1641,11 @@ mod mutation_tests {
         "#;
 
         let result = parse_mutations(query);
-        assert!(result.is_err());
+        assert!(result.is_ok(), "delete without target should succeed: {:?}", result);
+        let mutations = result.unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert!(mutations[0].doc_ids.is_none());
+        assert!(mutations[0].filter.is_none());
     }
 
     #[test]

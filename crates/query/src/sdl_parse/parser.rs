@@ -23,6 +23,35 @@ use super::directives::{
 };
 use super::warnings::{DirectiveLocation, ParseOutput, ParseWarning};
 
+/// Convert a GraphQL schema Value to a serde_json Value
+fn graphql_schema_value_to_json(value: &graphql_parser::schema::Value<'_, String>) -> serde_json::Value {
+    match value {
+        graphql_parser::schema::Value::String(s) => serde_json::Value::String(s.clone()),
+        graphql_parser::schema::Value::Int(n) => {
+            let int_val = n.as_i64().unwrap_or(0);
+            serde_json::Value::Number(serde_json::Number::from(int_val))
+        }
+        graphql_parser::schema::Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        graphql_parser::schema::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        graphql_parser::schema::Value::Null => serde_json::Value::Null,
+        graphql_parser::schema::Value::Enum(s) => serde_json::Value::String(s.clone()),
+        graphql_parser::schema::Value::List(arr) => {
+            let items: Vec<serde_json::Value> = arr.iter().map(graphql_schema_value_to_json).collect();
+            serde_json::Value::Array(items)
+        }
+        graphql_parser::schema::Value::Object(obj) => {
+            let items: serde_json::Map<String, serde_json::Value> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), graphql_schema_value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(items)
+        }
+        graphql_parser::schema::Value::Variable(v) => serde_json::Value::String(format!("${}", v)),
+    }
+}
+
 /// Parse @policy directive arguments
 fn parse_policy_directive(directive: &Directive<'_, String>) -> Result<PolicyConfig> {
     let id = get_directive_string(directive, "id")
@@ -495,6 +524,13 @@ impl<'a> SdlParser<'a> {
                             "@default float value is not a valid JSON number (NaN or Infinity)",
                         )
                     }),
+                // Accept Int values for Float (common in schemas where 10 means 10.0)
+                graphql_parser::schema::Value::Int(n) => {
+                    let int_val = n.as_i64().ok_or_else(|| {
+                        QueryError::parse("@default float value is out of i64 range")
+                    })?;
+                    Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
+                }
                 other => Err(default_type_error("float", "float", other)),
             },
             "float32" => match value {
@@ -513,18 +549,58 @@ impl<'a> SdlParser<'a> {
                             )
                         })
                 }
+                // Accept Int values for Float32 (common in schemas where 10 means 10.0)
+                graphql_parser::schema::Value::Int(n) => {
+                    let int_val = n.as_i64().ok_or_else(|| {
+                        QueryError::parse("@default float32 value is out of i64 range")
+                    })?;
+                    Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
+                }
                 other => Err(default_type_error("float32", "float", other)),
             },
             "dateTime" => match value {
                 graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                // Accept Enum for special values like UTC_NOW
+                graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
                 other => Err(default_type_error("dateTime", "string", other)),
             },
-            "json" => match value {
-                graphql_parser::schema::Value::String(s) => serde_json::from_str(s).map_err(|e| {
-                    QueryError::parse(format!("@default json contains invalid JSON: {}", e))
-                }),
-                other => Err(default_type_error("json", "string", other)),
-            },
+            "json" => {
+                // JSON @default accepts various value types
+                match value {
+                    // String must be valid JSON
+                    graphql_parser::schema::Value::String(s) => {
+                        serde_json::from_str(s).map_err(|e| {
+                            QueryError::parse(format!("@default json contains invalid JSON: {}", e))
+                        })
+                    }
+                    // Primitives and structured types are converted directly
+                    graphql_parser::schema::Value::Int(n) => {
+                        let int_val = n.as_i64().unwrap_or(0);
+                        Ok(serde_json::Value::Number(serde_json::Number::from(int_val)))
+                    }
+                    graphql_parser::schema::Value::Float(f) => serde_json::Number::from_f64(*f)
+                        .map(serde_json::Value::Number)
+                        .ok_or_else(|| QueryError::parse("@default json float is invalid (NaN or Infinity)")),
+                    graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
+                    graphql_parser::schema::Value::Null => Ok(serde_json::Value::Null),
+                    graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
+                    graphql_parser::schema::Value::List(arr) => {
+                        let items: Vec<serde_json::Value> = arr
+                            .iter()
+                            .map(|v| graphql_schema_value_to_json(v))
+                            .collect();
+                        Ok(serde_json::Value::Array(items))
+                    }
+                    graphql_parser::schema::Value::Object(obj) => {
+                        let items: serde_json::Map<String, serde_json::Value> = obj
+                            .iter()
+                            .map(|(k, v)| (k.clone(), graphql_schema_value_to_json(v)))
+                            .collect();
+                        Ok(serde_json::Value::Object(items))
+                    }
+                    graphql_parser::schema::Value::Variable(v) => Ok(serde_json::Value::String(format!("${}", v))),
+                }
+            }
             "blob" => match value {
                 graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
                 other => Err(default_type_error("blob", "string", other)),
