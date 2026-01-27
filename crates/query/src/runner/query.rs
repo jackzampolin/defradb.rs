@@ -19,7 +19,7 @@ use super::fetcher::FetcherWrapper;
 use super::plan;
 use super::{DocFetcher, QueryRunner};
 
-impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL query and return JSON results.
     pub async fn execute_query(&self, query: &str) -> Result<JsonValue> {
         self.execute_query_internal(query, self.fetcher.as_ref(), None)
@@ -470,8 +470,11 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
     ) -> Result<Vec<JsonValue>> {
         // Collect info about relation aggregates
-        let mut aggregates_info: Vec<(String, crate::mapper::AggregateType, Vec<(String, Option<String>)>)> =
-            Vec::new();
+        let mut aggregates_info: Vec<(
+            String,
+            crate::mapper::AggregateType,
+            Vec<(String, Option<String>)>,
+        )> = Vec::new();
 
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
@@ -536,17 +539,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                                 if let JsonValue::Object(item_obj) = item {
                                                     if let Some(val) = item_obj.get(field) {
                                                         if let Some(n) = val.as_f64() {
-                                                            if total_count == 0
-                                                                || n < total_value
-                                                            {
+                                                            if total_count == 0 || n < total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;
                                                         } else if let Some(n) = val.as_i64() {
                                                             let n = n as f64;
-                                                            if total_count == 0
-                                                                || n < total_value
-                                                            {
+                                                            if total_count == 0 || n < total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;
@@ -562,17 +561,13 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                                                 if let JsonValue::Object(item_obj) = item {
                                                     if let Some(val) = item_obj.get(field) {
                                                         if let Some(n) = val.as_f64() {
-                                                            if total_count == 0
-                                                                || n > total_value
-                                                            {
+                                                            if total_count == 0 || n > total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;
                                                         } else if let Some(n) = val.as_i64() {
                                                             let n = n as f64;
-                                                            if total_count == 0
-                                                                || n > total_value
-                                                            {
+                                                            if total_count == 0 || n > total_value {
                                                                 total_value = n;
                                                             }
                                                             total_count += 1;

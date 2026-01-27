@@ -10,7 +10,7 @@ use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 use super::{DocFetcher, QueryRunner};
 
 #[async_trait]
-impl<F: DocFetcher, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> {
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         // First, parse the request to determine if it's a query or mutation
         let parsed = match parse_request(&request.query) {

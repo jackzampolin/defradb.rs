@@ -18,7 +18,7 @@ use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
 
-impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL mutation and return JSON results.
     ///
     /// Requires a mutator to be configured via `with_mutator()`.
@@ -214,8 +214,10 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
             }
             MutationType::Update => {
                 let input = self.build_update_input(mutation)?;
-                let mut node = UpdateNode::new(&mutation.collection_name, mutator, mapping.clone())
-                    .with_input(input);
+                let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
+                let mut node =
+                    UpdateNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone())
+                        .with_input(input);
 
                 // Use resolved doc_ids (from filter) or original doc_ids
                 if let Some(ref doc_ids) = resolved_doc_ids {
@@ -224,16 +226,34 @@ impl<F: DocFetcher, R: TransactionRegistry> QueryRunner<F, R> {
                     node = node.with_doc_ids(doc_ids.clone());
                 }
 
+                // Pass through filter for node-level resolution when no doc_ids resolved
+                if mutation.filter.is_some()
+                    && resolved_doc_ids.is_none()
+                    && mutation.doc_ids.is_none()
+                {
+                    node = node.with_filter(mutation.filter.clone().unwrap());
+                }
+
                 Box::new(node)
             }
             MutationType::Delete => {
-                let mut node = DeleteNode::new(&mutation.collection_name, mutator, mapping.clone());
+                let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
+                let mut node =
+                    DeleteNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone());
 
                 // Use resolved doc_ids (from filter) or original doc_ids
                 if let Some(ref doc_ids) = resolved_doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
                 } else if let Some(ref doc_ids) = mutation.doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
+                }
+
+                // Pass through filter for node-level resolution when no doc_ids resolved
+                if mutation.filter.is_some()
+                    && resolved_doc_ids.is_none()
+                    && mutation.doc_ids.is_none()
+                {
+                    node = node.with_filter(mutation.filter.clone().unwrap());
                 }
 
                 Box::new(node)

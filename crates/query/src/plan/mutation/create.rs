@@ -217,10 +217,14 @@ pub fn json_to_normal_value_with_kind(
             // JSON fields: wrap ALL values as JSON (primitives, objects, arrays)
             // This matches Go DefraDB behavior where JSON fields accept any value type
             FieldKind::Scalar(ScalarKind::Json) => Ok(NormalValue::Json(value.clone())),
-            // DateTime fields: parse RFC 3339 strings
+            // DateTime fields: parse RFC 3339 strings or special values like UTC_NOW
             FieldKind::Scalar(ScalarKind::DateTime) => {
                 match value {
                     JsonValue::String(s) => {
+                        // Handle special value UTC_NOW - return current time
+                        if s == "UTC_NOW" {
+                            return Ok(NormalValue::Time(Utc::now()));
+                        }
                         // Parse RFC 3339 string to DateTime (matching Go's time.Parse(time.RFC3339, s))
                         let dt: DateTime<Utc> = s.parse().map_err(|e| {
                             QueryError::execution(format!(
@@ -251,17 +255,13 @@ pub fn json_to_normal_value_with_kind(
                 }
             }
             // ScalarArray fields: handle empty arrays and nillable elements
-            FieldKind::ScalarArray(array_kind) => {
-                match value {
-                    JsonValue::Array(arr) => {
-                        json_array_to_normal_value_with_kind(arr, *array_kind)
-                    }
-                    _ => Err(QueryError::execution(format!(
-                        "Expected array, got: {:?}",
-                        value
-                    ))),
-                }
-            }
+            FieldKind::ScalarArray(array_kind) => match value {
+                JsonValue::Array(arr) => json_array_to_normal_value_with_kind(arr, *array_kind),
+                _ => Err(QueryError::execution(format!(
+                    "Expected array, got: {:?}",
+                    value
+                ))),
+            },
             // For other scalar types, fall through to default conversion
             _ => json_to_normal_value(value),
         }
@@ -322,9 +322,7 @@ fn json_array_to_normal_value_with_kind(
             let mut ints = Vec::with_capacity(arr.len());
             for (i, v) in arr.iter().enumerate() {
                 match v {
-                    JsonValue::Number(n) if n.as_i64().is_some() => {
-                        ints.push(n.as_i64().unwrap())
-                    }
+                    JsonValue::Number(n) if n.as_i64().is_some() => ints.push(n.as_i64().unwrap()),
                     JsonValue::Null => ints.push(0),
                     _ => {
                         return Err(QueryError::execution(format!(

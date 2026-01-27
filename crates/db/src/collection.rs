@@ -786,11 +786,13 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
             )
         }
         ScalarKind::Float32 => {
-            // Accept Int values for Float32 fields (common in JSON where 5 and 5.0 are equivalent)
+            // Accept Int and Float64 values for Float32 fields (JSON only has one float type)
             matches!(
                 value,
                 NormalValue::Float32(_)
                     | NormalValue::NillableFloat32(_)
+                    | NormalValue::Float64(_)
+                    | NormalValue::NillableFloat64(_)
                     | NormalValue::Int(_)
                     | NormalValue::NillableInt(_)
             )
@@ -805,7 +807,11 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
             )
         }
         ScalarKind::Blob => {
-            matches!(value, NormalValue::Bytes(_) | NormalValue::NillableBytes(_))
+            // Accept String values for Blob fields (hex-encoded strings from JSON)
+            matches!(
+                value,
+                NormalValue::Bytes(_) | NormalValue::NillableBytes(_) | NormalValue::String(_)
+            )
         }
         ScalarKind::Json => matches!(value, NormalValue::Json(_)),
     }
@@ -813,41 +819,93 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
 
 /// Check if a NormalValue is compatible with a ScalarArrayKind.
 fn is_value_compatible_with_array(value: &NormalValue, array: ScalarArrayKind) -> bool {
+    // Accept empty arrays of any type (JSON can't infer type from empty array)
+    if is_empty_array(value) {
+        return true;
+    }
+
     match array {
         ScalarArrayKind::BoolArray => matches!(value, NormalValue::BoolArray(_)),
         ScalarArrayKind::IntArray => matches!(value, NormalValue::IntArray(_)),
-        ScalarArrayKind::Float64Array => matches!(value, NormalValue::Float64Array(_)),
-        ScalarArrayKind::Float32Array => matches!(value, NormalValue::Float32Array(_)),
+        ScalarArrayKind::Float64Array => {
+            // Accept Int arrays for Float64 fields (JSON might parse as ints)
+            matches!(value, NormalValue::Float64Array(_) | NormalValue::IntArray(_))
+        }
+        ScalarArrayKind::Float32Array => {
+            // Accept Int and Float64 arrays for Float32 fields
+            matches!(
+                value,
+                NormalValue::Float32Array(_) | NormalValue::Float64Array(_) | NormalValue::IntArray(_)
+            )
+        }
         ScalarArrayKind::StringArray => matches!(value, NormalValue::StringArray(_)),
+        // Nillable arrays: also accept the non-nillable version
         ScalarArrayKind::NillableBoolArray => {
             matches!(
                 value,
-                NormalValue::NillableBoolArray(_) | NormalValue::NillableBoolElementArray(_)
+                NormalValue::NillableBoolArray(_)
+                    | NormalValue::NillableBoolElementArray(_)
+                    | NormalValue::BoolArray(_)
             )
         }
         ScalarArrayKind::NillableIntArray => {
             matches!(
                 value,
-                NormalValue::NillableIntArray(_) | NormalValue::NillableIntElementArray(_)
+                NormalValue::NillableIntArray(_)
+                    | NormalValue::NillableIntElementArray(_)
+                    | NormalValue::IntArray(_)
             )
         }
         ScalarArrayKind::NillableFloat64Array => {
             matches!(
                 value,
-                NormalValue::NillableFloat64Array(_) | NormalValue::NillableFloat64ElementArray(_)
+                NormalValue::NillableFloat64Array(_)
+                    | NormalValue::NillableFloat64ElementArray(_)
+                    | NormalValue::Float64Array(_)
+                    | NormalValue::IntArray(_)
             )
         }
         ScalarArrayKind::NillableFloat32Array => {
             matches!(
                 value,
-                NormalValue::NillableFloat32Array(_) | NormalValue::NillableFloat32ElementArray(_)
+                NormalValue::NillableFloat32Array(_)
+                    | NormalValue::NillableFloat32ElementArray(_)
+                    | NormalValue::Float32Array(_)
+                    | NormalValue::Float64Array(_)
+                    | NormalValue::IntArray(_)
             )
         }
         ScalarArrayKind::NillableStringArray => {
             matches!(
                 value,
-                NormalValue::NillableStringArray(_) | NormalValue::NillableStringElementArray(_)
+                NormalValue::NillableStringArray(_)
+                    | NormalValue::NillableStringElementArray(_)
+                    | NormalValue::StringArray(_)
             )
         }
+    }
+}
+
+/// Check if a NormalValue is an empty array of any type.
+fn is_empty_array(value: &NormalValue) -> bool {
+    match value {
+        NormalValue::BoolArray(arr) => arr.is_empty(),
+        NormalValue::IntArray(arr) => arr.is_empty(),
+        NormalValue::Float32Array(arr) => arr.is_empty(),
+        NormalValue::Float64Array(arr) => arr.is_empty(),
+        NormalValue::StringArray(arr) => arr.is_empty(),
+        // NillableXxxArray wraps Option<Vec<_>>
+        NormalValue::NillableBoolArray(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
+        NormalValue::NillableIntArray(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
+        NormalValue::NillableFloat32Array(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
+        NormalValue::NillableFloat64Array(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
+        NormalValue::NillableStringArray(opt) => opt.as_ref().is_none_or(|v| v.is_empty()),
+        // NillableXxxElementArray wraps Vec<Option<_>>
+        NormalValue::NillableBoolElementArray(arr) => arr.is_empty(),
+        NormalValue::NillableIntElementArray(arr) => arr.is_empty(),
+        NormalValue::NillableFloat32ElementArray(arr) => arr.is_empty(),
+        NormalValue::NillableFloat64ElementArray(arr) => arr.is_empty(),
+        NormalValue::NillableStringElementArray(arr) => arr.is_empty(),
+        _ => false,
     }
 }
