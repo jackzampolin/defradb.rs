@@ -234,14 +234,16 @@ impl IndexManager {
                 }
             };
 
-            // Extract field values for the index
-            let values = self.extract_index_values(doc, index.description(), schema)?;
+            // Extract field values for the index (may return multiple value sets for arrays)
+            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
 
-            // Save to index
-            index
-                .save(&mut mutable_datastore, &doc_id, &values)
-                .await
-                .map_err(Error::Storage)?;
+            // Save all value sets to index (one entry per array element combination)
+            for values in &value_sets {
+                index
+                    .save(&mut mutable_datastore, &doc_id, values)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
 
             indexed_count += 1;
         }
@@ -267,17 +269,24 @@ impl IndexManager {
         let mut mutable_datastore = datastore.clone();
 
         for index in self.indexes.values() {
-            let values = self.extract_index_values(doc, index.description(), schema)?;
-            index
-                .save(&mut mutable_datastore, &doc_id, &values)
-                .await
-                .map_err(Error::Storage)?;
+            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            // Save all value sets (one entry per array element combination)
+            for values in &value_sets {
+                index
+                    .save(&mut mutable_datastore, &doc_id, values)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
         }
 
         Ok(())
     }
 
     /// Update indexes when a document is updated.
+    ///
+    /// For array fields, this deletes all old index entries and creates new ones.
+    /// The update is performed by deleting all old value combinations and saving
+    /// all new value combinations.
     pub async fn on_document_update(
         &self,
         datastore: &NamespaceView,
@@ -293,15 +302,25 @@ impl IndexManager {
         let mut mutable_datastore = datastore.clone();
 
         for index in self.indexes.values() {
-            let old_values = self.extract_index_values(old_doc, index.description(), schema)?;
-            let new_values = self.extract_index_values(new_doc, index.description(), schema)?;
+            let old_value_sets = self.extract_index_values(old_doc, index.description(), schema)?;
+            let new_value_sets = self.extract_index_values(new_doc, index.description(), schema)?;
 
-            // Only update if values changed
-            if old_values != new_values {
-                index
-                    .update(&mut mutable_datastore, &doc_id, &old_values, &new_values)
-                    .await
-                    .map_err(Error::Storage)?;
+            // Only update if value sets changed
+            if old_value_sets != new_value_sets {
+                // Delete all old entries
+                for old_values in &old_value_sets {
+                    index
+                        .delete(&mut mutable_datastore, &doc_id, old_values)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+                // Save all new entries
+                for new_values in &new_value_sets {
+                    index
+                        .save(&mut mutable_datastore, &doc_id, new_values)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
             }
         }
 
@@ -323,17 +342,30 @@ impl IndexManager {
         let mut mutable_datastore = datastore.clone();
 
         for index in self.indexes.values() {
-            let values = self.extract_index_values(doc, index.description(), schema)?;
-            index
-                .delete(&mut mutable_datastore, &doc_id, &values)
-                .await
-                .map_err(Error::Storage)?;
+            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            // Delete all value set entries (one per array element combination)
+            for values in &value_sets {
+                index
+                    .delete(&mut mutable_datastore, &doc_id, values)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
         }
 
         Ok(())
     }
 
     /// Extract field values from a document for indexing.
+    ///
+    /// # Multi-Value Indexing (Arrays)
+    ///
+    /// When a field contains an array, multiple index entries are created - one per
+    /// array element. For composite indexes with multiple array fields, the Cartesian
+    /// product of all array elements is generated.
+    ///
+    /// Example: For document `{tags: ["a", "b"], categories: ["x", "y"]}` with a
+    /// composite index on `(tags, categories)`, four index entries are created:
+    /// `("a", "x")`, `("a", "y")`, `("b", "x")`, `("b", "y")`
     ///
     /// # Null Handling
     ///
@@ -349,12 +381,14 @@ impl IndexManager {
         doc: &Document,
         index_desc: &IndexDescription,
         schema: &CollectionVersion,
-    ) -> Result<Vec<NormalValue>> {
+    ) -> Result<Vec<Vec<NormalValue>>> {
         // Build a set of field names for O(1) lookup
         let schema_fields: std::collections::HashSet<&str> =
             schema.fields.iter().map(|f| f.name.as_str()).collect();
 
-        let mut values = Vec::with_capacity(index_desc.fields.len());
+        // Collect expanded values for each field (arrays become multiple values)
+        let mut field_value_sets: Vec<Vec<NormalValue>> =
+            Vec::with_capacity(index_desc.fields.len());
 
         for field in &index_desc.fields {
             // Validate that index field exists in schema (except for system fields)
@@ -366,10 +400,185 @@ impl IndexManager {
             }
 
             let value = doc.get(&field.name).cloned().unwrap_or(NormalValue::Null);
-            values.push(value);
+
+            // Expand arrays into multiple values; scalars become single-element sets
+            let expanded = Self::expand_value_for_indexing(value);
+            field_value_sets.push(expanded);
         }
 
-        Ok(values)
+        // Compute Cartesian product of all field value sets
+        Ok(Self::cartesian_product(field_value_sets))
+    }
+
+    /// Expand a value for multi-value indexing.
+    ///
+    /// Arrays are expanded into their elements. Empty arrays result in a single
+    /// NULL value to ensure the document is still indexed.
+    fn expand_value_for_indexing(value: NormalValue) -> Vec<NormalValue> {
+        // Helper macro to handle array expansion with conversion to NormalValue
+        macro_rules! expand_array {
+            ($arr:expr, $variant:ident) => {
+                if $arr.is_empty() {
+                    vec![NormalValue::Null]
+                } else {
+                    $arr.iter().map(|v| NormalValue::$variant(v.clone())).collect()
+                }
+            };
+        }
+
+        // Helper macro for nillable arrays (Some/None)
+        macro_rules! expand_nillable_array {
+            ($opt:expr, $variant:ident) => {
+                match $opt {
+                    Some(arr) => {
+                        if arr.is_empty() {
+                            vec![NormalValue::Null]
+                        } else {
+                            arr.iter().map(|v| NormalValue::$variant(v.clone())).collect()
+                        }
+                    }
+                    None => vec![NormalValue::Null],
+                }
+            };
+        }
+
+        // Helper macro for arrays with nillable elements
+        macro_rules! expand_nillable_element_array {
+            ($arr:expr, $variant:ident) => {
+                if $arr.is_empty() {
+                    vec![NormalValue::Null]
+                } else {
+                    $arr.iter()
+                        .map(|v| match v {
+                            Some(val) => NormalValue::$variant(val.clone()),
+                            None => NormalValue::Null,
+                        })
+                        .collect()
+                }
+            };
+        }
+
+        match value {
+            // Non-array scalar types - single element
+            NormalValue::Null
+            | NormalValue::Bool(_)
+            | NormalValue::Int(_)
+            | NormalValue::Float64(_)
+            | NormalValue::Float32(_)
+            | NormalValue::String(_)
+            | NormalValue::Bytes(_)
+            | NormalValue::Time(_)
+            | NormalValue::Document(_)
+            | NormalValue::Json(_)
+            | NormalValue::NillableBool(_)
+            | NormalValue::NillableInt(_)
+            | NormalValue::NillableFloat64(_)
+            | NormalValue::NillableFloat32(_)
+            | NormalValue::NillableString(_)
+            | NormalValue::NillableBytes(_)
+            | NormalValue::NillableTime(_)
+            | NormalValue::NillableDocument(_) => vec![value],
+
+            // Typed array types - expand to elements
+            NormalValue::BoolArray(ref arr) => expand_array!(arr, Bool),
+            NormalValue::IntArray(ref arr) => expand_array!(arr, Int),
+            NormalValue::Float64Array(ref arr) => expand_array!(arr, Float64),
+            NormalValue::Float32Array(ref arr) => expand_array!(arr, Float32),
+            NormalValue::StringArray(ref arr) => expand_array!(arr, String),
+            NormalValue::BytesArray(ref arr) => expand_array!(arr, Bytes),
+            NormalValue::TimeArray(ref arr) => expand_array!(arr, Time),
+            NormalValue::DocumentArray(ref arr) => {
+                if arr.is_empty() {
+                    vec![NormalValue::Null]
+                } else {
+                    arr.iter()
+                        .map(|v| NormalValue::Document(Box::new(v.clone())))
+                        .collect()
+                }
+            }
+            NormalValue::JsonArray(ref arr) => expand_array!(arr, Json),
+
+            // Nillable arrays (whole array can be null)
+            NormalValue::NillableBoolArray(ref opt) => expand_nillable_array!(opt, Bool),
+            NormalValue::NillableIntArray(ref opt) => expand_nillable_array!(opt, Int),
+            NormalValue::NillableFloat64Array(ref opt) => expand_nillable_array!(opt, Float64),
+            NormalValue::NillableFloat32Array(ref opt) => expand_nillable_array!(opt, Float32),
+            NormalValue::NillableStringArray(ref opt) => expand_nillable_array!(opt, String),
+            NormalValue::NillableBytesArray(ref opt) => expand_nillable_array!(opt, Bytes),
+            NormalValue::NillableTimeArray(ref opt) => expand_nillable_array!(opt, Time),
+            NormalValue::NillableDocumentArray(ref opt) => match opt {
+                Some(arr) => {
+                    if arr.is_empty() {
+                        vec![NormalValue::Null]
+                    } else {
+                        arr.iter()
+                            .map(|v| NormalValue::Document(Box::new(v.clone())))
+                            .collect()
+                    }
+                }
+                None => vec![NormalValue::Null],
+            },
+
+            // Arrays with nillable elements
+            NormalValue::NillableBoolElementArray(ref arr) => {
+                expand_nillable_element_array!(arr, Bool)
+            }
+            NormalValue::NillableIntElementArray(ref arr) => {
+                expand_nillable_element_array!(arr, Int)
+            }
+            NormalValue::NillableFloat64ElementArray(ref arr) => {
+                expand_nillable_element_array!(arr, Float64)
+            }
+            NormalValue::NillableFloat32ElementArray(ref arr) => {
+                expand_nillable_element_array!(arr, Float32)
+            }
+            NormalValue::NillableStringElementArray(ref arr) => {
+                expand_nillable_element_array!(arr, String)
+            }
+            NormalValue::NillableBytesElementArray(ref arr) => {
+                expand_nillable_element_array!(arr, Bytes)
+            }
+            NormalValue::NillableTimeElementArray(ref arr) => {
+                expand_nillable_element_array!(arr, Time)
+            }
+            NormalValue::NillableDocumentElementArray(ref arr) => {
+                if arr.is_empty() {
+                    vec![NormalValue::Null]
+                } else {
+                    arr.iter()
+                        .map(|v| match v {
+                            Some(doc) => NormalValue::Document(Box::new(doc.clone())),
+                            None => NormalValue::Null,
+                        })
+                        .collect()
+                }
+            }
+        }
+    }
+
+    /// Compute Cartesian product of field value sets.
+    ///
+    /// Given `[[a, b], [x, y]]`, produces `[[a, x], [a, y], [b, x], [b, y]]`.
+    fn cartesian_product(sets: Vec<Vec<NormalValue>>) -> Vec<Vec<NormalValue>> {
+        if sets.is_empty() {
+            return vec![vec![]];
+        }
+
+        let mut result: Vec<Vec<NormalValue>> = vec![vec![]];
+
+        for set in sets {
+            let mut new_result = Vec::with_capacity(result.len() * set.len());
+            for combo in &result {
+                for val in &set {
+                    let mut new_combo = combo.clone();
+                    new_combo.push(val.clone());
+                    new_result.push(new_combo);
+                }
+            }
+            result = new_result;
+        }
+
+        result
     }
 
     /// Get all index names.
