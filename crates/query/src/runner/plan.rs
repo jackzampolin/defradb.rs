@@ -23,9 +23,12 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
     // Note: Nested selections (relations) are now supported via the Planner
 
     // Helper to check if a field exists in the collection schema
-    // Special fields: _docID (document ID), _group (groupBy results)
+    // Special fields: _docID (document ID), _group (groupBy results), __typename (GraphQL introspection)
     let field_exists = |name: &str| -> bool {
-        name == "_docID" || name == "_group" || collection.fields.iter().any(|f| f.name == name)
+        name == "_docID"
+            || name == "_group"
+            || name == "__typename"
+            || collection.fields.iter().any(|f| f.name == name)
     };
 
     // Validate that all requested simple fields exist in schema
@@ -89,6 +92,13 @@ pub(crate) fn build_mapping(
     for requestable in &select.fields {
         match requestable {
             Requestable::Field(field) => {
+                // Handle __typename for GraphQL introspection
+                if field.name == "__typename" {
+                    mapping.set_type_name(&select.collection_name);
+                    let index = mapping.first_index_of_name("__typename").unwrap();
+                    mapping.add_render_key(index, field.output_name());
+                    continue;
+                }
                 let index = mapping.next_index();
                 mapping.add(index, &field.name);
                 mapping.add_render_key(index, field.output_name());
@@ -164,10 +174,21 @@ pub(crate) fn build_mapping(
 
     // Add ORDER BY fields if not already present (Go compatibility).
     // Go DefraDB allows ordering by fields not in the SELECT clause.
+    // But for _alias directive ORDER BY, we should NOT add alias names as fields -
+    // they must already exist in render_keys from selected aliased fields.
     if let Some(ref order_by) = select.order_by {
         for condition in &order_by.conditions {
             if let Some(field_name) = condition.fields.first() {
-                if mapping.first_index_of_name(field_name).is_none() {
+                // Skip if already in mapping (by name or as render_key/alias)
+                if mapping.first_index_of_name(field_name).is_some()
+                    || mapping.try_find_index_from_render_key(field_name).is_some()
+                {
+                    continue;
+                }
+                // Only add if it's a valid schema field (not an alias name)
+                // This prevents adding non-existent alias names like "UserAge"
+                // when the query uses _alias directive with a non-existent alias
+                if collection.fields.iter().any(|f| f.name == *field_name) {
                     let index = mapping.next_index();
                     mapping.add(index, field_name);
                     // Don't add render_key - we don't want to output these fields
@@ -337,16 +358,37 @@ fn add_aggregate_nodes(
 }
 
 /// Convert a plan Doc to JSON for output.
+///
+/// Special handling for `__typename`: if the mapping has type_info set and the
+/// render_key index matches the __typename field index, the stored type name is used.
 pub(crate) fn doc_to_json(doc: &Doc, mapping: &DocumentMapping) -> Result<JsonValue> {
     let mut obj = Map::new();
 
+    // Get the __typename index and name if set
+    let typename_info = mapping
+        .first_index_of_name("__typename")
+        .and_then(|idx| mapping.type_name().map(|name| (idx, name.to_string())));
+
     for render_key in &mapping.render_keys {
-        let value = doc
-            .fields()
-            .get(render_key.index)
-            .cloned()
-            .flatten()
-            .unwrap_or(JsonValue::Null);
+        // Check for __typename special handling
+        let value = if let Some((typename_idx, ref typename)) = typename_info {
+            if render_key.index == typename_idx {
+                // Return the stored type name for __typename
+                JsonValue::String(typename.clone())
+            } else {
+                doc.fields()
+                    .get(render_key.index)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or(JsonValue::Null)
+            }
+        } else {
+            doc.fields()
+                .get(render_key.index)
+                .cloned()
+                .flatten()
+                .unwrap_or(JsonValue::Null)
+        };
         obj.insert(render_key.key.clone(), value);
     }
 
