@@ -1114,7 +1114,25 @@ fn parse_aggregate_field(
                                 }
                             }
                             "order" => {
-                                let order = parse_order_value(val, variables)?;
+                                // For inline array aggregates, order can be a bare
+                                // direction enum (e.g., `order: ASC`) rather than
+                                // the structured `order: {field: ASC}` used by queries.
+                                let order = match val {
+                                    Value::Enum(s) | Value::String(s) => {
+                                        let direction =
+                                            OrderDirection::parse(s).ok_or_else(|| {
+                                                QueryError::parse(format!(
+                                                    "invalid order direction: {}",
+                                                    s
+                                                ))
+                                            })?;
+                                        OrderBy::new().with_condition(OrderCondition::new(
+                                            "",
+                                            direction,
+                                        ))
+                                    }
+                                    _ => parse_order_value(val, variables)?,
+                                };
                                 target.order = Some(order);
                             }
                             _ => {

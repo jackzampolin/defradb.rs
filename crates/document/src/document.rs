@@ -354,17 +354,22 @@ impl Document {
         let mut keys: Vec<&str> = self.values.keys().map(|k| k.as_str()).collect();
         keys.sort_by(canonical_cbor_key_order);
 
-        // Build CBOR map using ciborium::Value for proper map encoding
+        // Build CBOR map using ciborium::Value for proper map encoding.
+        // Skip null values to match Go's toMap(true) behavior: setting a
+        // property to nil produces the same serialization as omitting it,
+        // which is critical for deterministic docID generation.
         let mut map_entries: Vec<(ciborium::Value, ciborium::Value)> =
             Vec::with_capacity(keys.len());
         for k in keys {
+            let field_value = self
+                .values
+                .get(k)
+                .ok_or_else(|| Error::FieldNotFound(k.to_string()))?;
+            if field_value.value().is_nil() {
+                continue;
+            }
             let key = ciborium::Value::Text(k.to_string());
-            let value = normal_value_to_cbor(
-                self.values
-                    .get(k)
-                    .ok_or_else(|| Error::FieldNotFound(k.to_string()))?
-                    .value(),
-            )?;
+            let value = normal_value_to_cbor(field_value.value())?;
             map_entries.push((key, value));
         }
 
@@ -471,5 +476,105 @@ impl Default for Document {
 impl PartialEq for Document {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id && self.values == other.values
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_docid_generation_matches_go() {
+        // Go's JSON type stores ALL numbers as float64. When CBOR-encoding
+        // with CanonicalEncOptions (ShortestFloat16), float64(250) becomes
+        // CBOR float16 (f9 5bd0), not CBOR integer (18 fa).
+        //
+        // Go output for: {"name": "John", "custom": {"tree": "maple", "age": 250}}
+        // with CollectionID "1" and JSON-typed "custom" field:
+        //
+        // CBOR bytes: a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65
+        // SHA256: d60b53278b02df404694ae586b12b88557dee6af4c98b1f1fc7e30a98290608c
+        // CID: bafkreigwbnjspcyc35aenffolbvrfoefk7ponl2mtcy7d7d6gcuyfedarq
+
+        let json = r#"{"name": "John", "custom": {"tree": "maple", "age": 250}}"#;
+        let mut doc = Document::from_json_str(json).expect("should parse");
+
+        // Set a collection with CollectionID "1"
+        doc.set_collection(schema::CollectionVersion {
+            name: "Users".to_string(),
+            version_id: "test-version".to_string(),
+            collection_id: "1".to_string(),
+            collection_set: None,
+            query: None,
+            previous_version: None,
+            fields: vec![],
+            indexes: vec![],
+            encrypted_indexes: vec![],
+            policy: None,
+            is_active: true,
+            is_materialized: false,
+            is_branchable: false,
+            is_embedded_only: false,
+            is_placeholder: false,
+            vector_embeddings: vec![],
+        });
+
+        // Generate the docID
+        let doc_id = doc.generate_doc_id().expect("should generate");
+
+        // The CID should match Go's
+        let cid = doc_id.cid().expect("should have CID");
+        let cid_str = cid.to_string();
+
+        // Verify the CBOR bytes match Go's JSON-type encoding
+        let cbor_bytes = doc.to_cbor().expect("should encode");
+        let expected_cbor = "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
+        let actual_cbor: String = cbor_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+
+        assert_eq!(actual_cbor, expected_cbor, "CBOR should match Go's JSON-type encoding");
+        assert_eq!(
+            cid_str, "bafkreigwbnjspcyc35aenffolbvrfoefk7ponl2mtcy7d7d6gcuyfedarq",
+            "CID should match Go"
+        );
+    }
+
+    #[test]
+    fn test_cbor_encoding_matches_go() {
+        // Go's JSON type encodes numbers as float64, which CBOR canonical
+        // encoding with ShortestFloat16 encodes as float16 when possible.
+        //
+        // Go canonical CBOR output for:
+        // {"name": "John", "custom": {"tree": "maple", "age": 250}}
+        // where "custom" is stored as NormalValue::Json (Go's JSON type)
+        //
+        // Expected bytes (37 bytes):
+        // a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65
+        //
+        // Breakdown:
+        // a2                 - map(2)
+        // 64 6e616d65        - text(4) "name"
+        // 64 4a6f686e        - text(4) "John"
+        // 66 637573746f6d    - text(6) "custom"
+        // a2                 - map(2)
+        // 63 616765          - text(3) "age"
+        // f9 5bd0            - float16(250.0)
+        // 64 74726565        - text(4) "tree"
+        // 65 6d61706c65      - text(5) "maple"
+        let expected_hex = "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
+        let expected_bytes: Vec<u8> = (0..expected_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&expected_hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        // Create the same document in Rust
+        let json = r#"{"name": "John", "custom": {"tree": "maple", "age": 250}}"#;
+        let doc = Document::from_json_str(json).expect("should parse");
+
+        let cbor_bytes = doc.to_cbor().expect("should encode");
+
+        assert_eq!(
+            cbor_bytes, expected_bytes,
+            "CBOR encoding should match Go's JSON-type canonical encoding"
+        );
     }
 }

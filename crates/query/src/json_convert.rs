@@ -20,7 +20,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
         NormalValue::String(s) => Ok(JsonValue::String(s.clone())),
         NormalValue::Bytes(b) => bytes_to_json(b),
         NormalValue::Time(t) => Ok(JsonValue::String(
-            t.to_rfc3339_opts(SecondsFormat::Secs, true),
+            t.to_rfc3339_opts(SecondsFormat::Nanos, true),
         )),
         NormalValue::Json(j) => Ok(j.clone()),
         NormalValue::IntArray(arr) => Ok(JsonValue::Array(
@@ -46,7 +46,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
         NormalValue::NillableFloat32(opt) => nillable_float32_to_json(*opt),
         NormalValue::NillableTime(opt) => Ok(opt
             .as_ref()
-            .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+            .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
             .unwrap_or(JsonValue::Null)),
         NormalValue::Document(doc) => Ok(JsonValue::String(format!("<document:{:?}>", doc.id()))),
         NormalValue::DocumentArray(docs) => Ok(JsonValue::Array(
@@ -62,7 +62,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
         NormalValue::BytesArray(arr) => bytes_array_to_json(arr),
         NormalValue::TimeArray(arr) => Ok(JsonValue::Array(
             arr.iter()
-                .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+                .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
                 .collect(),
         )),
         NormalValue::JsonArray(arr) => Ok(JsonValue::Array(arr.clone())),
@@ -88,7 +88,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
             .map(|arr| {
                 JsonValue::Array(
                     arr.iter()
-                        .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+                        .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
                         .collect(),
                 )
             })
@@ -136,7 +136,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
             arr.iter()
                 .map(|opt| {
                     opt.as_ref()
-                        .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Secs, true)))
+                        .map(|t| JsonValue::String(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
                         .unwrap_or(JsonValue::Null)
                 })
                 .collect(),
@@ -154,6 +154,17 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
 }
 
 fn float64_to_json(f: f64) -> Result<JsonValue> {
+    if !f.is_finite() {
+        return Err(QueryError::execution(format!(
+            "cannot serialize non-finite float64 value '{}' to JSON",
+            f
+        )));
+    }
+    // Match Go's json.Marshal behavior: whole-number floats serialize
+    // without a decimal point (e.g., float64(21.0) → "21").
+    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+        return Ok(JsonValue::Number(serde_json::Number::from(f as i64)));
+    }
     serde_json::Number::from_f64(f)
         .map(JsonValue::Number)
         .ok_or_else(|| {
@@ -165,7 +176,18 @@ fn float64_to_json(f: f64) -> Result<JsonValue> {
 }
 
 fn float32_to_json(f: f32) -> Result<JsonValue> {
-    serde_json::Number::from_f64(f as f64)
+    let f64_val = f as f64;
+    if !f64_val.is_finite() {
+        return Err(QueryError::execution(format!(
+            "cannot serialize non-finite float32 value '{}' to JSON",
+            f
+        )));
+    }
+    // Match Go's json.Marshal behavior for whole-number floats
+    if f64_val.fract() == 0.0 && f64_val >= i64::MIN as f64 && f64_val <= i64::MAX as f64 {
+        return Ok(JsonValue::Number(serde_json::Number::from(f64_val as i64)));
+    }
+    serde_json::Number::from_f64(f64_val)
         .map(JsonValue::Number)
         .ok_or_else(|| {
             QueryError::execution(format!(
@@ -281,8 +303,11 @@ mod tests {
     #[test]
     fn test_float64_to_json_valid() {
         assert_eq!(float64_to_json(3.14).unwrap(), serde_json::json!(3.14));
-        assert_eq!(float64_to_json(0.0).unwrap(), serde_json::json!(0.0));
+        // Whole-number floats are serialized as integers to match Go's json.Marshal
+        assert_eq!(float64_to_json(0.0).unwrap(), serde_json::json!(0));
         assert_eq!(float64_to_json(-42.5).unwrap(), serde_json::json!(-42.5));
+        assert_eq!(float64_to_json(21.0).unwrap(), serde_json::json!(21));
+        assert_eq!(float64_to_json(21.5).unwrap(), serde_json::json!(21.5));
     }
 
     #[test]

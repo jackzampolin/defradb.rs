@@ -1272,6 +1272,81 @@ impl Filter {
         Ok(if negate { !matches } else { matches })
     }
 
+    /// Evaluate the filter's conditions directly against a scalar JSON value.
+    ///
+    /// Used for inline array aggregate filters where each array element is tested
+    /// against operator conditions like `{_gt: 0}` or `{_and: [{_gt: -2}, {_lt: 2}]}`.
+    ///
+    /// Null values don't match comparison filters (they are excluded from aggregation).
+    pub fn matches_scalar_value(&self, value: &JsonValue) -> Result<bool> {
+        if self.conditions.is_empty() {
+            return Ok(true);
+        }
+        // Null scalar values don't pass comparison filters in inline array context
+        if value.is_null() {
+            return Ok(false);
+        }
+        for (key, expected) in &self.conditions {
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And => {
+                        let arr = expected
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
+                        for item in arr {
+                            let sub: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            let f = Filter::from_conditions(sub);
+                            if !f.matches_scalar_value(value)? {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    FilterOp::Or => {
+                        let arr = expected
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
+                        let mut any_match = false;
+                        for item in arr {
+                            let sub: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            let f = Filter::from_conditions(sub);
+                            if f.matches_scalar_value(value)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                        if !any_match {
+                            return Ok(false);
+                        }
+                    }
+                    FilterOp::Not => {
+                        let sub: HashMap<String, JsonValue> =
+                            serde_json::from_value(expected.clone())
+                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                        let f = Filter::from_conditions(sub);
+                        if f.matches_scalar_value(value)? {
+                            return Ok(false);
+                        }
+                    }
+                    _ => {
+                        if !self.eval_op(value, op, expected)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                return Err(QueryError::invalid_filter(format!(
+                    "unknown operator in scalar filter: {}",
+                    key
+                )));
+            }
+        }
+        Ok(true)
+    }
+
     /// Evaluate a filter condition against a single JSON value (used by array element operators).
     ///
     /// For example, when evaluating `{_gt: 70}` against `85`, this method checks if 85 > 70.

@@ -277,6 +277,25 @@ impl Planner {
                             }
                         }
                     }
+
+                    // For inline array aggregates (e.g., _count(favouriteIntegers: {})),
+                    // the host_name refers to an inline array field, not a relation.
+                    // We need to render the field data so compute_relation_aggregates()
+                    // can operate on it after plan execution.
+                    if !target.host_name.is_empty() && target.host_name != "_group" {
+                        let host_name = &target.host_name;
+                        if let Some(field_desc) = collection.field_by_name(host_name) {
+                            if !field_desc.kind.is_relation() {
+                                // It's an inline array field — ensure it's in scan_mapping.
+                                // Use next_index() to avoid conflicting with existing indices.
+                                if scan_mapping.first_index_of_name(host_name).is_none() {
+                                    let idx = scan_mapping.next_index();
+                                    scan_mapping.add(idx, host_name);
+                                    scan_mapping.add_render_key(idx, host_name);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -703,6 +722,10 @@ impl Planner {
     }
 
     /// Add aggregate nodes to the plan based on the select's aggregate fields.
+    ///
+    /// Only adds plan nodes for group-by and field-only aggregates. Relation
+    /// and inline-array aggregates (targets with non-empty host_name) are
+    /// handled by compute_relation_aggregates() in the runner instead.
     fn add_aggregate_nodes(
         &self,
         mut plan: Box<dyn PlanNode>,
@@ -711,6 +734,15 @@ impl Planner {
     ) -> Result<Box<dyn PlanNode>> {
         for field in &select.fields {
             if let Requestable::Aggregate(agg) = field {
+                // Skip relation and inline-array aggregates — they are computed
+                // in compute_relation_aggregates() after plan execution.
+                let is_host_aggregate = agg.targets.iter().any(|t| {
+                    !t.host_name.is_empty() && t.host_name != "_group"
+                });
+                if is_host_aggregate {
+                    continue;
+                }
+
                 // Get the index where the aggregate result should be stored.
                 // Use the output name (alias if set, otherwise type name) to look up the
                 // correct render_key index. This handles aliased aggregates correctly
@@ -1372,19 +1404,21 @@ impl Planner {
             }
         }
 
-        // Also handle relation-based aggregates (e.g., _count(books: {}))
-        // These need joins to fetch the related data for aggregation.
+        // Also handle relation-based and inline-array aggregates.
+        // Relation aggregates (e.g., _count(books: {})) need joins to fetch data.
+        // Inline array aggregates (e.g., _count(favouriteIntegers: {})) need the
+        // array field added to the render mapping so the data appears in output.
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
                 for target in &agg.targets {
-                    // Only handle relation-based aggregates (non-empty host_name)
+                    // Only handle aggregates with a named target (non-empty host_name)
                     if target.host_name.is_empty() {
                         continue;
                     }
 
                     let relation_field_name = &target.host_name;
 
-                    // Check if this relation is already being joined (via a Select)
+                    // Check if this field is already being selected
                     let already_joined = select.fields.iter().any(|f| {
                         if let Requestable::Select(s) = f {
                             s.field.name == *relation_field_name
@@ -1394,17 +1428,18 @@ impl Planner {
                     });
 
                     if already_joined {
-                        continue; // Join already exists, aggregate will use that data
+                        continue; // Data already available, aggregate will use it
                     }
 
-                    // Find the relation field in the parent collection
+                    // Find the field in the parent collection
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
                     {
                         Some(f) => f,
                         None => continue, // Skip if not found (might be invalid)
                     };
 
-                    // Verify it's a relation field
+                    // Inline array fields are handled by scan_mapping setup
+                    // in build_plan() — no join needed.
                     if !relation_field.kind.is_relation() {
                         continue;
                     }
