@@ -14,6 +14,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
+use crate::block_builder::write_document_blocks;
 use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
@@ -99,7 +100,41 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
         match result {
             Ok(_returned_doc_id) => {
-                // Commit the transaction (datastore reference is now dropped)
+                // Build blocks and write to blockstore/headstore in a scoped block
+                // This enables _commits queries to find the document's version history
+                // The stores must be dropped before commit, so scope them
+                {
+                    let blockstore = txn.blockstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get blockstore: {}",
+                            e
+                        ))
+                    })?;
+                    let headstore = txn.headstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get headstore: {}",
+                            e
+                        ))
+                    })?;
+
+                    // Use collection_id as schema_version_id (matches how Go stores it)
+                    let schema_version_id = collection.collection_id();
+
+                    if let Err(e) =
+                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id)
+                            .await
+                    {
+                        warn!(
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to write document blocks - commits queries may not work"
+                        );
+                        // Don't fail the mutation, just log the warning
+                        // The document was stored successfully, blocks are for commit history
+                    }
+                } // blockstore and headstore dropped here
+
+                // Commit the transaction (all store references now dropped)
                 if let Err(e) = txn.commit().await {
                     warn!(
                         collection = %collection_name,
@@ -186,7 +221,39 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
         match result {
             Ok(()) => {
-                // Commit the transaction (datastore reference is now dropped)
+                // Build blocks and write to blockstore/headstore in a scoped block
+                // This enables _commits queries to find the document's version history
+                {
+                    let blockstore = txn.blockstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get blockstore: {}",
+                            e
+                        ))
+                    })?;
+                    let headstore = txn.headstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get headstore: {}",
+                            e
+                        ))
+                    })?;
+
+                    // Use collection_id as schema_version_id (matches how Go stores it)
+                    let schema_version_id = collection.collection_id();
+
+                    if let Err(e) =
+                        write_document_blocks(&blockstore, &headstore, &doc, schema_version_id)
+                            .await
+                    {
+                        warn!(
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to write document blocks - commits queries may not work"
+                        );
+                        // Don't fail the mutation, just log the warning
+                    }
+                } // blockstore and headstore dropped here
+
+                // Commit the transaction (all store references now dropped)
                 if let Err(e) = txn.commit().await {
                     warn!(
                         collection = %collection_name,

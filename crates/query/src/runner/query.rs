@@ -332,6 +332,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
+        // Handle _commits system collection specially
+        if select.collection_name == "_commits" {
+            return self.execute_commits_query(select).await;
+        }
+
         // Get collection schema on-demand from provider
         let collection = self.get_collection(&select.collection_name).await?;
 
@@ -958,5 +963,51 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         } else {
             Ok(JsonValue::Null)
         }
+    }
+
+    /// Execute a _commits system collection query.
+    ///
+    /// This handles queries to the special _commits collection which fetches
+    /// commit history from the headstore and blockstore.
+    async fn execute_commits_query(&self, select: &Select) -> Result<JsonValue> {
+        use crate::fetcher::CommitsQueryOptions;
+
+        // Build options from the select
+        let options = CommitsQueryOptions {
+            doc_id: select.doc_ids.as_ref().and_then(|ids| ids.first().cloned()),
+            cid: select.cid.clone(),
+            depth: select.depth,
+            field_name: None, // Can be added later if needed
+        };
+
+        // Fetch commits using the fetcher
+        let commits = self.fetcher.get_commits(&options).await?;
+
+        // Build a simple mapping for the commit fields
+        let mut results = Vec::new();
+        for commit in commits {
+            let mut obj = serde_json::Map::new();
+
+            // Map requested fields from the commit document
+            for field in &select.fields {
+                if let Requestable::Field(f) = field {
+                    let field_name = &f.name;
+                    let output_name = f.output_name();
+
+                    if let Some(value) = commit.get(field_name) {
+                        // Convert NormalValue to JsonValue
+                        let json_value = crate::json_convert::normal_value_to_json(value)
+                            .unwrap_or(JsonValue::Null);
+                        obj.insert(output_name.to_string(), json_value);
+                    } else {
+                        obj.insert(output_name.to_string(), JsonValue::Null);
+                    }
+                }
+            }
+
+            results.push(JsonValue::Object(obj));
+        }
+
+        Ok(JsonValue::Array(results))
     }
 }

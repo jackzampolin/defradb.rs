@@ -100,6 +100,40 @@ pub trait DocFetcher: Send + Sync {
         field_name: &str,
         value: &str,
     ) -> Result<Vec<Document>>;
+
+    /// Fetch commits from the _commits system collection.
+    ///
+    /// This method fetches commit history from the headstore and blockstore.
+    /// Default implementation returns an error - implementations that support
+    /// commits queries should override this.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Query options (docID, cid, depth, fieldName filters)
+    ///
+    /// # Returns
+    ///
+    /// Commit documents with fields: cid, height, fieldName, docID, delta,
+    /// collectionVersionId, links, heads, signature.
+    async fn get_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
+        let _ = options;
+        Err(crate::error::QueryError::execution(
+            "_commits queries are not supported by this fetcher".to_string(),
+        ))
+    }
+}
+
+/// Options for _commits queries
+#[derive(Debug, Clone, Default)]
+pub struct CommitsQueryOptions {
+    /// Filter by document ID
+    pub doc_id: Option<String>,
+    /// Filter by specific CID
+    pub cid: Option<String>,
+    /// Maximum depth to traverse (None = unlimited)
+    pub depth: Option<u64>,
+    /// Filter by field name
+    pub field_name: Option<String>,
 }
 
 /// Provides collection schemas on-demand.

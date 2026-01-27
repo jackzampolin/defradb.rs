@@ -33,6 +33,9 @@ multihash.workspace = true
 # Hashing
 sha2.workspace = true
 
+# Encoding
+base64.workspace = true
+
 # P2P
 libp2p.workspace = true
 
