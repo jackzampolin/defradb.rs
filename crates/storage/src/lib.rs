@@ -115,6 +115,9 @@ pub use backends::MemoryStore;
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use backends::RedbStore;
 
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub use backends::LevelDbStore;
+
 pub use corekv::{
     Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer,
 };
