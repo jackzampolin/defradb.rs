@@ -1888,6 +1888,13 @@ impl Planner {
                         mapping.add_render_key(index, field.output_name());
                         continue;
                     }
+                    // Handle __typename for GraphQL introspection
+                    if field.name == "__typename" {
+                        mapping.set_type_name(&select.collection_name);
+                        let index = mapping.first_index_of_name("__typename").unwrap();
+                        mapping.add_render_key(index, field.output_name());
+                        continue;
+                    }
                     // Validate field exists in schema
                     if collection.field_by_name(&field.name).is_none() {
                         return Err(QueryError::unknown_field(&field.name));

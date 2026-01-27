@@ -162,14 +162,29 @@ impl DocumentMapping {
     ///
     /// Missing fields are rendered as `null` to match GraphQL conventions and provide
     /// consistent output structure regardless of data presence.
+    ///
+    /// Special handling for `__typename`: if the type_info is set and the render_key
+    /// matches the __typename index, the stored type name is used instead of looking
+    /// up the value in the document.
     pub fn render_doc_to_json(&self, doc: &Doc) -> JsonValue {
         let mut obj = serde_json::Map::new();
         for render_key in &self.render_keys {
-            // Use null for missing fields to match GraphQL conventions
-            let value = doc
-                .get(render_key.index)
-                .cloned()
-                .unwrap_or(JsonValue::Null);
+            // Check for __typename special handling
+            let value = if let Some(ref type_info) = self.type_info {
+                if render_key.index == type_info.index {
+                    // Return the stored type name for __typename
+                    JsonValue::String(type_info.name.clone())
+                } else {
+                    doc.get(render_key.index)
+                        .cloned()
+                        .unwrap_or(JsonValue::Null)
+                }
+            } else {
+                // Use null for missing fields to match GraphQL conventions
+                doc.get(render_key.index)
+                    .cloned()
+                    .unwrap_or(JsonValue::Null)
+            };
             obj.insert(render_key.key.clone(), value);
         }
         JsonValue::Object(obj)
