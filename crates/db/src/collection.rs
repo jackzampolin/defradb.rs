@@ -831,13 +831,18 @@ fn is_value_compatible_with_array(value: &NormalValue, array: ScalarArrayKind) -
         ScalarArrayKind::IntArray => matches!(value, NormalValue::IntArray(_)),
         ScalarArrayKind::Float64Array => {
             // Accept Int arrays for Float64 fields (JSON might parse as ints)
-            matches!(value, NormalValue::Float64Array(_) | NormalValue::IntArray(_))
+            matches!(
+                value,
+                NormalValue::Float64Array(_) | NormalValue::IntArray(_)
+            )
         }
         ScalarArrayKind::Float32Array => {
             // Accept Int and Float64 arrays for Float32 fields
             matches!(
                 value,
-                NormalValue::Float32Array(_) | NormalValue::Float64Array(_) | NormalValue::IntArray(_)
+                NormalValue::Float32Array(_)
+                    | NormalValue::Float64Array(_)
+                    | NormalValue::IntArray(_)
             )
         }
         ScalarArrayKind::StringArray => matches!(value, NormalValue::StringArray(_)),

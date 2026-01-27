@@ -689,13 +689,18 @@ impl Filter {
             // Example: filter: {_alias: {myAge: {_gt: 20}}} where myAge is an alias for Age
             // Also supports logical operators: {_alias: {_and: [{myAge: {_gt: 20}}]}}
             if key == "_alias" {
-                // Null _alias is a no-op (matches all)
+                // Null or non-object _alias filters out all documents (Go compatibility)
                 if value.is_null() {
-                    continue;
+                    return Ok(false);
                 }
                 let alias_conditions: HashMap<String, JsonValue> =
-                    serde_json::from_value(value.clone())
-                        .map_err(|e| QueryError::invalid_filter(format!("_alias value must be object: {}", e)))?;
+                    match serde_json::from_value(value.clone()) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            // Non-object _alias (e.g., integer) filters everything out
+                            return Ok(false);
+                        }
+                    };
 
                 if !self.eval_alias_conditions(&alias_conditions, fields, mapping)? {
                     return Ok(false);
@@ -1102,15 +1107,10 @@ impl Filter {
     }
 
     /// Compare two values for ordering.
-    /// Implements Go DefraDB semantics where null is treated as "smaller" than all other values:
-    /// - value > null → true (any non-null value is greater than null)
-    /// - null > null → false
-    /// - value >= null → true
-    /// - null >= null → true
-    /// - value < null → false (no value is less than null)
-    /// - null < null → false
-    /// - value <= null → false
-    /// - null <= null → true
+    /// Implements Go DefraDB semantics:
+    /// - null vs null → Equal (null == null)
+    /// - null vs non-null → None (null document values are excluded from comparisons)
+    /// - non-null vs null → Greater (filter value is null, any non-null value is greater)
     fn compare(&self, a: &JsonValue, b: &JsonValue) -> Result<Option<std::cmp::Ordering>> {
         match (a, b) {
             // Go DefraDB treats null as smallest value
@@ -1118,8 +1118,8 @@ impl Filter {
             (JsonValue::Null, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Equal)),
             // value vs null → Greater (any non-null value is greater than null)
             (_, JsonValue::Null) => Ok(Some(std::cmp::Ordering::Greater)),
-            // null vs value → Less (null is less than any non-null value)
-            (JsonValue::Null, _) => Ok(Some(std::cmp::Ordering::Less)),
+            // null vs non-null → incomparable (Go DefraDB excludes null documents from comparisons)
+            (JsonValue::Null, _) => Ok(None),
 
             // Number comparisons: support int/float coercion (Go's numbers.TryUpcast behavior)
             (JsonValue::Number(a), JsonValue::Number(b)) => {
@@ -1367,9 +1367,9 @@ impl Filter {
             if let Some(op) = FilterOp::parse(key) {
                 match op {
                     FilterOp::And => {
-                        let arr = value
-                            .as_array()
-                            .ok_or_else(|| QueryError::invalid_filter("_and requires array in _alias"))?;
+                        let arr = value.as_array().ok_or_else(|| {
+                            QueryError::invalid_filter("_and requires array in _alias")
+                        })?;
                         for item in arr {
                             let sub_conditions: HashMap<String, JsonValue> =
                                 serde_json::from_value(item.clone())
@@ -1381,9 +1381,9 @@ impl Filter {
                         continue;
                     }
                     FilterOp::Or => {
-                        let arr = value
-                            .as_array()
-                            .ok_or_else(|| QueryError::invalid_filter("_or requires array in _alias"))?;
+                        let arr = value.as_array().ok_or_else(|| {
+                            QueryError::invalid_filter("_or requires array in _alias")
+                        })?;
                         let mut any_match = false;
                         for item in arr {
                             let sub_conditions: HashMap<String, JsonValue> =
@@ -1423,9 +1423,9 @@ impl Filter {
                 .cloned()
                 .unwrap_or(JsonValue::Null);
 
-            let ops = value
-                .as_object()
-                .ok_or_else(|| QueryError::invalid_filter("alias field condition must be object"))?;
+            let ops = value.as_object().ok_or_else(|| {
+                QueryError::invalid_filter("alias field condition must be object")
+            })?;
 
             for (op_key, op_value) in ops {
                 if let Some(op) = FilterOp::parse(op_key) {

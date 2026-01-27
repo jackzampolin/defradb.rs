@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use document::{DocID, Document};
+use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
 use tracing;
 
@@ -17,7 +18,7 @@ use crate::error::{QueryError, Result};
 use crate::mutator::DocMutator;
 use crate::planner::{Doc, PlanNode};
 
-use super::create::{json_to_normal_value, normal_value_to_json, CreateInput};
+use super::create::{json_to_normal_value_with_kind, normal_value_to_json, CreateInput};
 
 /// Input for an upsert mutation - field values for create or update.
 #[derive(Debug, Clone)]
@@ -49,12 +50,22 @@ impl UpsertInput {
         input
     }
 
-    /// Apply as update to an existing document.
-    pub fn apply_to(&self, doc: &mut Document) -> Result<usize> {
+    /// Apply as update to an existing document, using schema-aware type coercion when available.
+    pub fn apply_to(
+        &self,
+        doc: &mut Document,
+        collection: Option<&CollectionVersion>,
+    ) -> Result<usize> {
         let mut modified_count = 0;
 
         for (field_name, value) in &self.fields {
-            let normal_value = json_to_normal_value(value)?;
+            let field_kind = collection.and_then(|c| {
+                c.fields
+                    .iter()
+                    .find(|f| f.name == *field_name)
+                    .map(|f| &f.kind)
+            });
+            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
             doc.set(field_name.clone(), normal_value);
             modified_count += 1;
         }
@@ -237,7 +248,7 @@ impl UpsertNode {
                 "Upsert: updating existing document"
             );
 
-            input.apply_to(&mut doc)?;
+            input.apply_to(&mut doc, None)?;
 
             // Collect the modified field names for block creation
             let modified_fields: std::collections::HashSet<String> =
@@ -262,7 +273,7 @@ impl UpsertNode {
             // Create document with the specified ID
             let mut doc = Document::with_id(doc_id);
             for (field_name, value) in &input.fields {
-                let normal_value = json_to_normal_value(value)?;
+                let normal_value = json_to_normal_value_with_kind(value, None)?;
                 doc.set(field_name.clone(), normal_value);
             }
 

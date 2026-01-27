@@ -434,9 +434,12 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         };
 
         let commits_fetcher = CommitsFetcher::new(txn_holder.clone());
-        let result = commits_fetcher.fetch_commits(&db_options).await.map_err(|e| {
-            query::error::QueryError::execution(format!("commits fetch error: {}", e))
-        });
+        let result = commits_fetcher
+            .fetch_commits(&db_options)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("commits fetch error: {}", e))
+            });
 
         // Clean up transaction
         if let Some(txn) = txn_holder.lock().await.take() {
@@ -531,7 +534,13 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                 reverse,
             } => {
                 let mut iter = index
-                    .scan_range(&datastore, prefix_values, lower.clone(), upper.clone(), *reverse)
+                    .scan_range(
+                        &datastore,
+                        prefix_values,
+                        lower.clone(),
+                        upper.clone(),
+                        *reverse,
+                    )
                     .await
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))

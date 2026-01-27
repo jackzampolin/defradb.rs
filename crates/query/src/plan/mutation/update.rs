@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use document::{DocID, Document};
+use document::{DocID, Document, NormalValue};
+use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
 use tracing;
 
@@ -17,7 +18,7 @@ use crate::mapper::Filter;
 use crate::mutator::{DocMutator, UpdateResult};
 use crate::planner::{Doc, PlanNode};
 
-use super::create::{json_to_normal_value, normal_value_to_json};
+use super::create::{json_to_normal_value_with_kind, normal_value_to_json};
 
 /// Input for an update mutation - field values to patch on existing documents.
 #[derive(Debug, Clone)]
@@ -40,12 +41,38 @@ impl UpdateInput {
         self
     }
 
-    /// Apply this update to a document.
-    pub fn apply_to(&self, doc: &mut Document) -> Result<usize> {
+    /// Apply this update to a document, using schema-aware type coercion when available.
+    ///
+    /// For counter CRDT fields (PCounter/PNCounter), the input value is treated as an
+    /// increment rather than a replacement, matching Go DefraDB behavior.
+    pub fn apply_to(
+        &self,
+        doc: &mut Document,
+        collection: Option<&CollectionVersion>,
+    ) -> Result<usize> {
         let mut modified_count = 0;
 
         for (field_name, value) in &self.fields {
-            let normal_value = json_to_normal_value(value)?;
+            let field_def =
+                collection.and_then(|c| c.fields.iter().find(|f| f.name == *field_name));
+            let field_kind = field_def.map(|f| &f.kind);
+            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
+
+            // Counter CRDT fields use increment semantics
+            if let Some(fd) = field_def {
+                if fd.crdt_type.is_counter() {
+                    // PCounter rejects negative increments
+                    if fd.crdt_type == CType::PCounter {
+                        validate_pcounter_increment(&normal_value)?;
+                    }
+                    let current = doc.get(field_name);
+                    let new_value = increment_value(current, &normal_value)?;
+                    doc.set(field_name.clone(), new_value);
+                    modified_count += 1;
+                    continue;
+                }
+            }
+
             doc.set(field_name.clone(), normal_value);
             modified_count += 1;
         }
@@ -57,6 +84,58 @@ impl UpdateInput {
 impl Default for UpdateInput {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Validate that a PCounter increment is non-negative.
+fn validate_pcounter_increment(value: &NormalValue) -> Result<()> {
+    let is_negative = match value {
+        NormalValue::Int(v) => *v < 0,
+        NormalValue::Float64(v) => *v < 0.0,
+        NormalValue::Float32(v) => *v < 0.0,
+        _ => false,
+    };
+    if is_negative {
+        return Err(QueryError::execution("value cannot be negative"));
+    }
+    Ok(())
+}
+
+/// Increment a counter value by an increment amount.
+/// For counter CRDTs, updates add to the current value rather than replacing it.
+/// Uses wrapping arithmetic to match Go DefraDB overflow behavior.
+fn increment_value(current: Option<&NormalValue>, increment: &NormalValue) -> Result<NormalValue> {
+    match increment {
+        NormalValue::Int(inc) => {
+            let cur = match current {
+                Some(NormalValue::Int(v)) => *v,
+                None | Some(NormalValue::Null) => 0,
+                _ => 0,
+            };
+            Ok(NormalValue::Int(cur.wrapping_add(*inc)))
+        }
+        NormalValue::Float64(inc) => {
+            let cur = match current {
+                Some(NormalValue::Float64(v)) => *v,
+                Some(NormalValue::Float32(v)) => *v as f64,
+                None | Some(NormalValue::Null) => 0.0,
+                _ => 0.0,
+            };
+            Ok(NormalValue::Float64(cur + inc))
+        }
+        NormalValue::Float32(inc) => {
+            let cur = match current {
+                Some(NormalValue::Float32(v)) => *v,
+                Some(NormalValue::Float64(v)) => *v as f32,
+                None | Some(NormalValue::Null) => 0.0,
+                _ => 0.0,
+            };
+            Ok(NormalValue::Float32(cur + inc))
+        }
+        _ => Err(QueryError::execution(format!(
+            "Counter fields only support numeric increments, got: {:?}",
+            increment
+        ))),
     }
 }
 
@@ -93,6 +172,8 @@ pub struct UpdateNode {
     fetcher: Arc<dyn DocFetcher>,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
+    /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
+    collection: Option<Arc<CollectionVersion>>,
     /// Document IDs to update (mutually exclusive with filter)
     doc_ids: Option<Vec<String>>,
     /// Filter to find documents to update (mutually exclusive with doc_ids)
@@ -133,6 +214,7 @@ impl UpdateNode {
             mutator,
             fetcher,
             document_mapping,
+            collection: None,
             doc_ids: None,
             filter: None,
             input: UpdateInput::new(),
@@ -160,6 +242,12 @@ impl UpdateNode {
     /// Set the update input (fields to patch).
     pub fn with_input(mut self, input: UpdateInput) -> Self {
         self.input = input;
+        self
+    }
+
+    /// Set the collection schema for schema-aware type coercion.
+    pub fn with_collection(mut self, collection: Arc<CollectionVersion>) -> Self {
+        self.collection = Some(collection);
         self
     }
 
@@ -249,9 +337,19 @@ impl PlanNode for UpdateNode {
 
             // Update each document
             for doc_id_str in doc_ids_to_update {
-                let doc_id = DocID::from_string(&doc_id_str).map_err(|e| {
-                    QueryError::execution(format!("Invalid DocID '{}': {}", doc_id_str, e))
-                })?;
+                let doc_id = match DocID::from_string(&doc_id_str) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        // Invalid DocID format - treat as not found (Go compatibility)
+                        tracing::warn!(
+                            collection = %self.collection_name,
+                            doc_id = %doc_id_str,
+                            "Invalid DocID format - skipping"
+                        );
+                        self.not_found_ids.push(doc_id_str.clone());
+                        continue;
+                    }
+                };
 
                 // Fetch document for update
                 let doc_opt = self
@@ -260,8 +358,8 @@ impl PlanNode for UpdateNode {
                     .await?;
 
                 if let Some(mut doc) = doc_opt {
-                    // Apply update input
-                    self.input.apply_to(&mut doc)?;
+                    // Apply update input with schema-aware coercion
+                    self.input.apply_to(&mut doc, self.collection.as_deref())?;
 
                     // Collect the modified field names for block creation
                     let modified_fields: std::collections::HashSet<String> =
@@ -275,6 +373,26 @@ impl PlanNode for UpdateNode {
 
                     // Convert to plan Doc
                     let plan_doc = self.update_result_to_doc(&result)?;
+
+                    // Re-filter: if a filter was used, the updated document must still
+                    // match the filter to be included in results (Go compatibility).
+                    // Use the full document with a collection-based mapping since the
+                    // filter may reference fields not in the mutation result mapping.
+                    if let Some(ref filter) = self.filter {
+                        if let Some(ref col) = self.collection {
+                            let mut filter_mapping = DocumentMapping::new();
+                            for field in &col.fields {
+                                let idx = filter_mapping.next_index();
+                                filter_mapping.add(idx, &field.name);
+                            }
+                            let full_doc =
+                                document_to_plan_doc(&result.document, &filter_mapping)?;
+                            if !filter.matches(full_doc.fields(), &filter_mapping)? {
+                                continue;
+                            }
+                        }
+                    }
+
                     self.updated_docs.push(plan_doc);
                 } else {
                     // Track and log missing documents instead of silently skipping

@@ -462,7 +462,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             if let Requestable::Field(field) = f {
                 let field_name = &field.name;
                 // Check pattern: _<relationName>ID
-                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3 {
+                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3
+                {
                     let relation_name = &field_name[1..field_name.len() - 2];
                     if let Some(relation_field) = collection.field_by_name(relation_name) {
                         // Only secondary relations need a join to compute the ID
@@ -1247,8 +1248,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                     nested_obj
                                                         .insert(nf_output.to_string(), json_val);
                                                 } else {
-                                                    nested_obj
-                                                        .insert(nf_output.to_string(), JsonValue::Null);
+                                                    nested_obj.insert(
+                                                        nf_output.to_string(),
+                                                        JsonValue::Null,
+                                                    );
                                                 }
                                             }
                                         }
@@ -1393,9 +1396,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         field_names
             .iter()
             .map(|name| {
-                commit.get(*name).and_then(|v| {
-                    crate::json_convert::normal_value_to_json(v).ok()
-                })
+                commit
+                    .get(*name)
+                    .and_then(|v| crate::json_convert::normal_value_to_json(v).ok())
             })
             .collect()
     }

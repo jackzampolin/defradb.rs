@@ -410,8 +410,11 @@ pub async fn write_document_blocks(
     };
 
     // Create the composite block with heads linking to previous version
-    let composite_block =
-        Block::new(CrdtDelta::Composite(composite_payload), composite_heads, field_links);
+    let composite_block = Block::new(
+        CrdtDelta::Composite(composite_payload),
+        composite_heads,
+        field_links,
+    );
 
     // Serialize the composite block
     let composite_bytes = composite_block

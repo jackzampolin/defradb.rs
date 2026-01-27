@@ -834,10 +834,9 @@ fn parse_optional_int_value(
             if json_val.is_null() {
                 Ok(None)
             } else {
-                json_val
-                    .as_i64()
-                    .map(Some)
-                    .ok_or_else(|| QueryError::parse(format!("Variable \"${}\" must be of type Int", name)))
+                json_val.as_i64().map(Some).ok_or_else(|| {
+                    QueryError::parse(format!("Variable \"${}\" must be of type Int", name))
+                })
             }
         }
         _ => Err(QueryError::parse("expected integer value")),
@@ -940,6 +939,10 @@ fn parse_order_condition(
         }
         Value::Object(nested_obj) => {
             // Nested ordering: {relation: {field: ASC}} or {_alias: {aliasName: ASC}}
+            // Empty nested order is a no-op (Go compatibility)
+            if nested_obj.is_empty() {
+                return Ok(None);
+            }
             // Recursively parse the nested object
             if nested_obj.len() != 1 {
                 return Err(QueryError::parse(
@@ -1382,19 +1385,29 @@ fn parse_field_to_mutation(
         MutationType::Upsert => Mutation::upsert(&collection_name),
     };
 
+    // Track if input argument was present (even if null)
+    let mut has_input_arg = false;
+
     // Parse arguments based on mutation type
     for (arg_name, arg_value) in &field.arguments {
         match (mutation_type, arg_name.as_str()) {
-            // CREATE: input is array of documents
+            // CREATE: input is array of documents (null means empty operation)
             (MutationType::Create, "input") => {
-                let input = parse_create_input(arg_value, variables)?;
-                mutation.create_input = input;
+                has_input_arg = true;
+                if !matches!(arg_value, Value::Null) {
+                    let input = parse_create_input(arg_value, variables)?;
+                    mutation.create_input = input;
+                }
+                // null input is valid - leaves create_input empty for empty result
             }
 
-            // UPDATE: input is patch object
+            // UPDATE: input is patch object (null means empty operation)
             (MutationType::Update, "input") => {
-                let input = parse_update_input(arg_value, variables)?;
-                mutation.update_input = input;
+                has_input_arg = true;
+                if !matches!(arg_value, Value::Null) {
+                    let input = parse_update_input(arg_value, variables)?;
+                    mutation.update_input = input;
+                }
             }
 
             // UPSERT: create is the document to create if no match (single object, not array)
@@ -1443,7 +1456,7 @@ fn parse_field_to_mutation(
     // Validate mutation has required arguments
     match mutation_type {
         MutationType::Create => {
-            if mutation.create_input.is_empty() {
+            if mutation.create_input.is_empty() && !has_input_arg {
                 return Err(QueryError::parse(format!(
                     "create_{} mutation requires 'input' argument with array of documents",
                     collection_name
@@ -1451,7 +1464,7 @@ fn parse_field_to_mutation(
             }
         }
         MutationType::Update => {
-            if mutation.update_input.is_empty() {
+            if mutation.update_input.is_empty() && !has_input_arg {
                 return Err(QueryError::parse(format!(
                     "update_{} mutation requires 'input' argument with fields to update",
                     collection_name
@@ -1575,13 +1588,14 @@ fn parse_create_input(
 }
 
 /// Parse UPDATE mutation input (patch object).
+/// Non-object input (e.g., array "patch") is treated as empty/no-op (Go compatibility).
 fn parse_update_input(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<HashMap<String, JsonValue>> {
     match value {
         Value::Object(obj) => parse_document_input(obj, variables),
-        _ => Err(QueryError::parse("UPDATE input must be an object")),
+        _ => Ok(HashMap::new()),
     }
 }
 

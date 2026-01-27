@@ -151,7 +151,9 @@ impl PlanNode for CountNode {
                     .filter(|d| !d.hidden)
                     .filter(|d| {
                         if let Some(ref filter) = self.aggregate_filter {
-                            filter.matches(d.fields(), &self.document_mapping).unwrap_or(false)
+                            filter
+                                .matches(d.fields(), &self.document_mapping)
+                                .unwrap_or(false)
                         } else {
                             true
                         }

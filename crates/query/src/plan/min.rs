@@ -103,14 +103,17 @@ impl MinNode {
             .filter(|d| !d.hidden)
             .filter(|d| {
                 if let Some(ref filter) = self.aggregate_filter {
-                    filter.matches(d.fields(), &self.document_mapping).unwrap_or(false)
+                    filter
+                        .matches(d.fields(), &self.document_mapping)
+                        .unwrap_or(false)
                 } else {
                     true
                 }
             })
             .collect();
 
-        let limited: Box<dyn Iterator<Item = &&Doc>> = if let Some(ref limit) = self.aggregate_limit {
+        let limited: Box<dyn Iterator<Item = &&Doc>> = if let Some(ref limit) = self.aggregate_limit
+        {
             let offset = limit.offset as usize;
             let effective_limit = limit.limit.map(|l| l as usize);
             match (effective_limit, offset) {

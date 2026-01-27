@@ -838,10 +838,9 @@ mod tests {
     #[test]
     fn test_extract_array_conditions() {
         // Parse: {_any: {_eq: 30}}
-        let ops = serde_json::from_str::<serde_json::Map<String, JsonValue>>(
-            r#"{"_any": {"_eq": 30}}"#,
-        )
-        .unwrap();
+        let ops =
+            serde_json::from_str::<serde_json::Map<String, JsonValue>>(r#"{"_any": {"_eq": 30}}"#)
+                .unwrap();
 
         let conditions = FieldCondition::parse("numbers", &ops);
         assert_eq!(conditions.len(), 1);

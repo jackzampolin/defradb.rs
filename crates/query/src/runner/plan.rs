@@ -396,8 +396,7 @@ fn add_aggregate_nodes(
                     plan = Box::new(node);
                 }
                 AggregateType::Average => {
-                    let mut node =
-                        AverageNode::new(plan, mapping.clone(), field_index, agg_index);
+                    let mut node = AverageNode::new(plan, mapping.clone(), field_index, agg_index);
                     if let Some(filter) = target_filter {
                         node = node.with_filter(filter);
                     }
@@ -444,9 +443,14 @@ pub(crate) fn doc_to_json(doc: &Doc, mapping: &DocumentMapping) -> Result<JsonVa
         .first_index_of_name("__typename")
         .and_then(|idx| mapping.type_name().map(|name| (idx, name.to_string())));
 
+    // Get the _deleted index if present
+    let deleted_index = mapping.first_index_of_name("_deleted");
+
     for render_key in &mapping.render_keys {
-        // Check for __typename special handling
-        let value = if let Some((typename_idx, ref typename)) = typename_info {
+        // Check for _deleted special handling
+        let value = if Some(render_key.index) == deleted_index && render_key.key == "_deleted" {
+            JsonValue::Bool(doc.is_deleted())
+        } else if let Some((typename_idx, ref typename)) = typename_info {
             if render_key.index == typename_idx {
                 // Return the stored type name for __typename
                 JsonValue::String(typename.clone())

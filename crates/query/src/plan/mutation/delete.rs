@@ -119,7 +119,14 @@ impl DeleteNode {
         &self.not_found_ids
     }
 
-    /// Create a minimal Doc representing a deleted document.
+    /// Create a Doc from a fetched document, then mark it deleted.
+    fn create_deleted_doc_from_document(&self, storage_doc: &document::Document) -> Result<Doc> {
+        let mut plan_doc = document_to_plan_doc(storage_doc, &self.document_mapping)?;
+        plan_doc.mark_deleted();
+        Ok(plan_doc)
+    }
+
+    /// Create a minimal Doc for a deleted document (fallback when doc was not fetched).
     fn create_deleted_doc(&self, doc_id: &str) -> Doc {
         let num_fields = self.document_mapping.next_index();
         let mut doc = Doc::new(num_fields);
@@ -153,52 +160,70 @@ impl PlanNode for DeleteNode {
 
         // On first call, perform all deletions
         if !self.did_delete {
-            // Get document IDs to delete
-            let doc_ids_to_delete = if let Some(ref ids) = self.doc_ids {
-                // Explicit doc_ids provided
-                ids.clone()
+            if let Some(ref ids) = self.doc_ids {
+                // Explicit doc_ids: fetch documents first to populate result fields
+                let fetch_result = self.fetcher.get_by_ids(&self.collection_name, ids).await?;
+
+                // Build a map from doc_id -> Document for lookup
+                let mut doc_map: std::collections::HashMap<String, document::Document> =
+                    std::collections::HashMap::new();
+                for doc in fetch_result.into_docs() {
+                    if let Some(id) = doc.id() {
+                        doc_map.insert(id.to_string(), doc);
+                    }
+                }
+
+                for doc_id_str in ids {
+                    let doc_id = DocID::from_string(doc_id_str).map_err(|e| {
+                        QueryError::execution(format!("Invalid DocID '{}': {}", doc_id_str, e))
+                    })?;
+
+                    let result = self.mutator.delete(&self.collection_name, &doc_id).await?;
+
+                    if result.existed {
+                        let plan_doc = if let Some(storage_doc) = doc_map.get(doc_id_str) {
+                            self.create_deleted_doc_from_document(storage_doc)?
+                        } else {
+                            self.create_deleted_doc(doc_id_str)
+                        };
+                        self.deleted_docs.push(plan_doc);
+                    } else {
+                        tracing::warn!(
+                            collection = %self.collection_name,
+                            doc_id = %doc_id_str,
+                            "Attempted to delete non-existent document"
+                        );
+                        self.not_found_ids.push(doc_id_str.clone());
+                    }
+                }
             } else {
                 // No doc_ids - fetch documents and optionally filter
                 let all_docs = self.fetcher.get_all(&self.collection_name).await?;
-                let mut matching_ids = Vec::new();
+                let mut docs_to_delete: Vec<document::Document> = Vec::new();
 
                 for doc in all_docs {
-                    // If filter exists, check if document matches
                     if let Some(ref filter) = self.filter {
                         let plan_doc = document_to_plan_doc(&doc, &self.document_mapping)?;
                         if !filter.matches(plan_doc.fields(), &self.document_mapping)? {
                             continue;
                         }
                     }
-                    // Include this document
-                    if let Some(id) = doc.id() {
-                        matching_ids.push(id.to_string());
-                    }
+                    docs_to_delete.push(doc);
                 }
-                matching_ids
-            };
 
-            // Delete each document
-            for doc_id_str in doc_ids_to_delete {
-                let doc_id = DocID::from_string(&doc_id_str).map_err(|e| {
-                    QueryError::execution(format!("Invalid DocID '{}': {}", doc_id_str, e))
-                })?;
+                for storage_doc in &docs_to_delete {
+                    if let Some(id) = storage_doc.id() {
+                        let doc_id = DocID::from_string(&id.to_string()).map_err(|e| {
+                            QueryError::execution(format!("Invalid DocID '{}': {}", id, e))
+                        })?;
 
-                // Attempt to delete
-                let result = self.mutator.delete(&self.collection_name, &doc_id).await?;
+                        let result = self.mutator.delete(&self.collection_name, &doc_id).await?;
 
-                // Only yield if the document actually existed
-                if result.existed {
-                    let plan_doc = self.create_deleted_doc(&doc_id_str);
-                    self.deleted_docs.push(plan_doc);
-                } else {
-                    // Track and log non-existent documents
-                    tracing::warn!(
-                        collection = %self.collection_name,
-                        doc_id = %doc_id_str,
-                        "Attempted to delete non-existent document"
-                    );
-                    self.not_found_ids.push(doc_id_str);
+                        if result.existed {
+                            let plan_doc = self.create_deleted_doc_from_document(storage_doc)?;
+                            self.deleted_docs.push(plan_doc);
+                        }
+                    }
                 }
             }
 

@@ -193,7 +193,9 @@ impl GroupByNode {
     /// Compare two field values for ordering.
     fn compare_field_values(a: Option<&JsonValue>, b: Option<&JsonValue>) -> std::cmp::Ordering {
         match (a, b) {
-            (None | Some(JsonValue::Null), None | Some(JsonValue::Null)) => std::cmp::Ordering::Equal,
+            (None | Some(JsonValue::Null), None | Some(JsonValue::Null)) => {
+                std::cmp::Ordering::Equal
+            }
             (None | Some(JsonValue::Null), _) => std::cmp::Ordering::Less,
             (_, None | Some(JsonValue::Null)) => std::cmp::Ordering::Greater,
             (Some(JsonValue::Number(na)), Some(JsonValue::Number(nb))) => {
@@ -281,11 +283,7 @@ impl GroupByNode {
 
             if let Some(inner_group_index) = inner_group_info {
                 // Nested _group: sub-group the docs and produce nested arrays
-                return self.build_nested_group_array(
-                    &docs_to_render,
-                    mapping,
-                    inner_group_index,
-                );
+                return self.build_nested_group_array(&docs_to_render, mapping, inner_group_index);
             }
         }
 
@@ -295,7 +293,11 @@ impl GroupByNode {
         } else {
             &self.document_mapping.render_keys
         };
-        Self::render_docs_with_keys(&docs_to_render, render_keys, self.collection_name.as_deref())
+        Self::render_docs_with_keys(
+            &docs_to_render,
+            render_keys,
+            self.collection_name.as_deref(),
+        )
     }
 
     /// Build a sub-grouped _group array using inner_group_by_fields.
@@ -345,7 +347,10 @@ impl GroupByNode {
                         if render_key.key == "_group" || render_key.key == "__typename" {
                             if render_key.key == "__typename" {
                                 if let Some(ref name) = self.collection_name {
-                                    obj.insert(render_key.key.clone(), JsonValue::String(name.clone()));
+                                    obj.insert(
+                                        render_key.key.clone(),
+                                        JsonValue::String(name.clone()),
+                                    );
                                 }
                             }
                             continue;
@@ -360,10 +365,7 @@ impl GroupByNode {
                     // Fallback: just render the groupBy fields
                     for field_name in &self.inner_group_by_fields {
                         if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
-                            let value = first_doc
-                                .get(idx)
-                                .cloned()
-                                .unwrap_or(JsonValue::Null);
+                            let value = first_doc.get(idx).cloned().unwrap_or(JsonValue::Null);
                             obj.insert(field_name.clone(), value);
                         }
                     }
@@ -378,7 +380,9 @@ impl GroupByNode {
 
             // Check if child mapping has inner _group (for deeply nested _group)
             if let Some(mapping) = child_mapping {
-                if let Some(inner_group_rk) = mapping.render_keys.iter().find(|rk| rk.key == "_group") {
+                if let Some(inner_group_rk) =
+                    mapping.render_keys.iter().find(|rk| rk.key == "_group")
+                {
                     let inner_child_mapping = mapping.child_at(inner_group_rk.index);
                     let inner_render_keys = if let Some(inner_mapping) = inner_child_mapping {
                         &inner_mapping.render_keys
@@ -474,11 +478,19 @@ impl GroupByNode {
                         inner_inner_group_index,
                     )
                 } else {
-                    Self::render_docs_with_keys(sub_group_docs, &inner_mapping.render_keys, self.collection_name.as_deref())
+                    Self::render_docs_with_keys(
+                        sub_group_docs,
+                        &inner_mapping.render_keys,
+                        self.collection_name.as_deref(),
+                    )
                 }
             } else {
                 // No inner child mapping: render docs with all non-_group parent render keys
-                Self::render_docs_with_keys(sub_group_docs, &child_mapping.render_keys, self.collection_name.as_deref())
+                Self::render_docs_with_keys(
+                    sub_group_docs,
+                    &child_mapping.render_keys,
+                    self.collection_name.as_deref(),
+                )
             };
 
             obj.insert("_group".to_string(), inner_group_array);
@@ -500,9 +512,7 @@ impl GroupByNode {
         let visible_docs: Vec<&&Doc> = docs.iter().filter(|d| !d.hidden).collect();
 
         match agg_def.aggregate_type {
-            AggregateType::Count => {
-                JsonValue::Number((visible_docs.len() as i64).into())
-            }
+            AggregateType::Count => JsonValue::Number((visible_docs.len() as i64).into()),
             AggregateType::Sum => {
                 let mut sum = 0.0;
                 let mut has_float = false;
@@ -603,10 +613,7 @@ impl GroupByNode {
                 // Handle __typename
                 if render_key.key == "__typename" {
                     if let Some(name) = type_name {
-                        obj.insert(
-                            render_key.key.clone(),
-                            JsonValue::String(name.to_string()),
-                        );
+                        obj.insert(render_key.key.clone(), JsonValue::String(name.to_string()));
                         continue;
                     }
                 }

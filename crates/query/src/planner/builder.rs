@@ -13,7 +13,7 @@ use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupByNode, InnerAggregateDef, IndexScanNode, JoinSide,
+    AllDocsNode, AverageNode, CountNode, GroupByNode, IndexScanNode, InnerAggregateDef, JoinSide,
     LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode, SumNode,
     TypeJoinMany, TypeJoinOne,
 };
@@ -192,10 +192,7 @@ impl Planner {
                             .iter()
                             .any(|f| *f == nested_field_name)
                         {
-                            result.push((
-                                relation_field_name.clone(),
-                                nested_field_name.clone(),
-                            ));
+                            result.push((relation_field_name.clone(), nested_field_name.clone()));
                         }
                     }
                 }
@@ -576,12 +573,8 @@ impl Planner {
             // 4b. Apply GroupBy
             // Use scan_mapping because the upstream plan produces docs with schema indices
             if let Some(ref group_by) = select.group_by {
-                let mut group_node = GroupByNode::new(
-                    plan,
-                    group_by.clone(),
-                    scan_mapping.clone(),
-                )
-                .with_collection_name(select.collection_name.clone());
+                let mut group_node = GroupByNode::new(plan, group_by.clone(), scan_mapping.clone())
+                    .with_collection_name(select.collection_name.clone());
 
                 // Extract _group child's limit/filter/order from the nested Select
                 // Also extract inner aggregate definitions for nested group rendering
@@ -610,8 +603,12 @@ impl Planner {
                                 if let Requestable::Aggregate(inner_agg) = inner_field {
                                     // Get the target field index from the scan mapping
                                     let field_index = if !inner_agg.targets.is_empty() {
-                                        if let Some(ref field_name) = inner_agg.targets[0].field_name {
-                                            scan_mapping.first_index_of_name(field_name).unwrap_or(0)
+                                        if let Some(ref field_name) =
+                                            inner_agg.targets[0].field_name
+                                        {
+                                            scan_mapping
+                                                .first_index_of_name(field_name)
+                                                .unwrap_or(0)
                                         } else {
                                             0
                                         }
@@ -744,7 +741,8 @@ impl Planner {
                         "_count" | "_sum" | "_avg" | "_min" | "_max"
                     );
                     if agg.targets[0].host_name == "_group"
-                        && (is_aggregate_name || mapping.first_index_of_name(target_field).is_none())
+                        && (is_aggregate_name
+                            || mapping.first_index_of_name(target_field).is_none())
                     {
                         is_child_aggregate = true;
                         child_field_name = target_field.clone();
@@ -784,7 +782,10 @@ impl Planner {
                     AggregateType::Count => {
                         let mut node = CountNode::new(plan, mapping.clone(), agg_index);
                         if is_child_aggregate {
-                            node = node.with_child_aggregate_source(group_field_index, child_field_name.clone());
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
                         }
                         if let Some(filter) = target_filter {
                             node = node.with_filter(filter);
@@ -795,10 +796,12 @@ impl Planner {
                         plan = Box::new(node);
                     }
                     AggregateType::Sum => {
-                        let mut node =
-                            SumNode::new(plan, mapping.clone(), field_index, agg_index);
+                        let mut node = SumNode::new(plan, mapping.clone(), field_index, agg_index);
                         if is_child_aggregate {
-                            node = node.with_child_aggregate_source(group_field_index, child_field_name.clone());
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
                         }
                         if let Some(filter) = target_filter {
                             node = node.with_filter(filter);
@@ -812,7 +815,10 @@ impl Planner {
                         let mut node =
                             AverageNode::new(plan, mapping.clone(), field_index, agg_index);
                         if is_child_aggregate {
-                            node = node.with_child_aggregate_source(group_field_index, child_field_name.clone());
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
                         }
                         if let Some(filter) = target_filter {
                             node = node.with_filter(filter);
@@ -823,10 +829,12 @@ impl Planner {
                         plan = Box::new(node);
                     }
                     AggregateType::Min => {
-                        let mut node =
-                            MinNode::new(plan, mapping.clone(), field_index, agg_index);
+                        let mut node = MinNode::new(plan, mapping.clone(), field_index, agg_index);
                         if is_child_aggregate {
-                            node = node.with_child_aggregate_source(group_field_index, child_field_name.clone());
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
                         }
                         if let Some(filter) = target_filter {
                             node = node.with_filter(filter);
@@ -837,10 +845,12 @@ impl Planner {
                         plan = Box::new(node);
                     }
                     AggregateType::Max => {
-                        let mut node =
-                            MaxNode::new(plan, mapping.clone(), field_index, agg_index);
+                        let mut node = MaxNode::new(plan, mapping.clone(), field_index, agg_index);
                         if is_child_aggregate {
-                            node = node.with_child_aggregate_source(group_field_index, child_field_name.clone());
+                            node = node.with_child_aggregate_source(
+                                group_field_index,
+                                child_field_name.clone(),
+                            );
                         }
                         if let Some(filter) = target_filter {
                             node = node.with_filter(filter);
@@ -2821,17 +2831,32 @@ mod tests {
         assert!(author_field.is_some(), "Book should have 'author' field");
 
         let author_field = author_field.unwrap();
-        assert!(author_field.kind.is_relation(), "'author' should be a relation field");
-        assert!(!author_field.is_primary, "'author' on Book should NOT be primary (secondary side)");
+        assert!(
+            author_field.kind.is_relation(),
+            "'author' should be a relation field"
+        );
+        assert!(
+            !author_field.is_primary,
+            "'author' on Book should NOT be primary (secondary side)"
+        );
 
         // Verify Author collection has published field
         let author = make_author_collection();
         let published_field = author.field_by_name("published");
-        assert!(published_field.is_some(), "Author should have 'published' field");
+        assert!(
+            published_field.is_some(),
+            "Author should have 'published' field"
+        );
 
         let published_field = published_field.unwrap();
-        assert!(published_field.kind.is_relation(), "'published' should be a relation field");
-        assert!(published_field.is_primary, "'published' on Author SHOULD be primary (primary side)");
+        assert!(
+            published_field.kind.is_relation(),
+            "'published' should be a relation field"
+        );
+        assert!(
+            published_field.is_primary,
+            "'published' on Author SHOULD be primary (primary side)"
+        );
     }
 
     #[tokio::test]
@@ -2845,7 +2870,11 @@ mod tests {
             .with_field(Field::new("_authorID"));
 
         let result = planner.plan(&select);
-        assert!(result.is_ok(), "Planning should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Planning should succeed: {:?}",
+            result.err()
+        );
 
         let plan = result.unwrap();
         // The plan should have a TypeJoinOne node somewhere in the tree
@@ -2853,7 +2882,10 @@ mod tests {
 
         // For now, just verify the plan was created
         // A more thorough test would execute the plan with test data
-        assert!(plan.kind() == "selectNode" || plan.kind() == "typeJoinOne",
-            "Plan should be selectNode or typeJoinOne, got: {}", plan.kind());
+        assert!(
+            plan.kind() == "selectNode" || plan.kind() == "typeJoinOne",
+            "Plan should be selectNode or typeJoinOne, got: {}",
+            plan.kind()
+        );
     }
 }
