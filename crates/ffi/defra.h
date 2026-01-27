@@ -274,6 +274,36 @@ struct FfiResult delete_nac_actor_relationship(uintptr_t node_ptr,
 
  All string parameters must be valid null-terminated UTF-8 strings.
  */
+/*
+ Add a DAC policy to the node.
+
+ Registers a policy document and returns its content-addressed ID.
+
+ Returns JSON with the policy ID:
+ ```json
+ { "PolicyID": "bafyreigh..." }
+ ```
+
+ # Safety
+
+ All string parameters must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult add_dac_policy(uintptr_t node_ptr,
+                                const char *identity_did,
+                                const char *policy);
+
+/*
+ Get a DAC policy by ID.
+
+ Returns JSON with the policy definition.
+
+ # Safety
+
+ All string parameters must be valid null-terminated UTF-8 strings.
+ */
+struct FfiResult get_dac_policy(uintptr_t node_ptr,
+                                const char *policy_id);
+
 struct FfiResult add_dac_actor_relationship(uintptr_t node_ptr,
                                             const char *requestor_did,
                                             const char *target_did,

@@ -3,7 +3,7 @@
 //! This module provides encoding/decoding of document field values
 //! using order-preserving encoding for use in secondary index keys.
 
-use chrono::{TimeZone, Utc};
+use chrono::{FixedOffset, TimeZone, Utc};
 use document::NormalValue;
 use schema::FieldKind;
 
@@ -217,12 +217,15 @@ pub fn decode_field_value<'a>(
                 let nsecs = ((nanos % 1_000_000_000) + 1_000_000_000) % 1_000_000_000;
                 (secs, nsecs as u32)
             };
-            let dt = Utc.timestamp_opt(secs, nsecs).single().ok_or_else(|| {
+            let dt_utc = Utc.timestamp_opt(secs, nsecs).single().ok_or_else(|| {
                 crate::corekv::Error::Other(format!(
                     "invalid timestamp: cannot construct DateTime from secs={}, nsecs={}",
                     secs, nsecs
                 ))
             })?;
+            // Convert to FixedOffset (UTC+0) since storage doesn't preserve timezone
+            let utc_offset = FixedOffset::east_opt(0).unwrap();
+            let dt = dt_utc.with_timezone(&utc_offset);
             Ok((rest, NormalValue::Time(dt)))
         }
         _ => Err(crate::corekv::Error::Other(format!(

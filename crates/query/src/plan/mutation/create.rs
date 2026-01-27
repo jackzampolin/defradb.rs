@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use document::Document;
 use schema::{CollectionVersion, FieldKind, ScalarArrayKind, ScalarKind};
 use serde_json::Value as JsonValue;
@@ -218,15 +218,19 @@ pub fn json_to_normal_value_with_kind(
             // This matches Go DefraDB behavior where JSON fields accept any value type
             FieldKind::Scalar(ScalarKind::Json) => Ok(NormalValue::Json(value.clone())),
             // DateTime fields: parse RFC 3339 strings or special values like UTC_NOW
+            // CRITICAL: Must preserve original timezone to match Go's CID calculation
             FieldKind::Scalar(ScalarKind::DateTime) => {
                 match value {
                     JsonValue::String(s) => {
-                        // Handle special value UTC_NOW - return current time
+                        // Handle special value UTC_NOW - return current time in UTC
                         if s == "UTC_NOW" {
-                            return Ok(NormalValue::Time(Utc::now()));
+                            // Convert to FixedOffset for consistent type
+                            let utc_offset = FixedOffset::east_opt(0).unwrap();
+                            return Ok(NormalValue::Time(Utc::now().with_timezone(&utc_offset)));
                         }
-                        // Parse RFC 3339 string to DateTime (matching Go's time.Parse(time.RFC3339, s))
-                        let dt: DateTime<Utc> = s.parse().map_err(|e| {
+                        // Parse RFC 3339 string to DateTime, preserving original timezone
+                        // Go's time.Parse(time.RFC3339, s) preserves the original timezone
+                        let dt = DateTime::parse_from_rfc3339(s).map_err(|e| {
                             QueryError::execution(format!(
                                 "Invalid DateTime format '{}': expected RFC 3339 (e.g., '2024-01-15T10:30:00Z'). Error: {}",
                                 s, e
@@ -240,7 +244,9 @@ pub fn json_to_normal_value_with_kind(
                             let dt = DateTime::from_timestamp(ts, 0).ok_or_else(|| {
                                 QueryError::execution(format!("Invalid Unix timestamp: {}", ts))
                             })?;
-                            Ok(NormalValue::Time(dt))
+                            // Convert to FixedOffset in UTC
+                            let utc_offset = FixedOffset::east_opt(0).unwrap();
+                            Ok(NormalValue::Time(dt.with_timezone(&utc_offset)))
                         } else {
                             Err(QueryError::execution(format!(
                                 "Expected DateTime string or Unix timestamp, got: {:?}",
@@ -259,6 +265,35 @@ pub fn json_to_normal_value_with_kind(
                 JsonValue::Array(arr) => json_array_to_normal_value_with_kind(arr, *array_kind),
                 _ => Err(QueryError::execution(format!(
                     "Expected array, got: {:?}",
+                    value
+                ))),
+            },
+            // Float64 fields: convert integers to float64 for Go compatibility
+            // Go DefraDB coerces JSON integers to the schema's float type
+            FieldKind::Scalar(ScalarKind::Float64) => match value {
+                JsonValue::Number(n) => {
+                    // Convert any numeric value to f64
+                    let f = n.as_f64().ok_or_else(|| {
+                        QueryError::execution(format!("Cannot convert number to f64: {:?}", n))
+                    })?;
+                    Ok(NormalValue::Float64(f))
+                }
+                _ => Err(QueryError::execution(format!(
+                    "Expected number for Float64 field, got: {:?}",
+                    value
+                ))),
+            },
+            // Float32 fields: convert integers to float32 for Go compatibility
+            FieldKind::Scalar(ScalarKind::Float32) => match value {
+                JsonValue::Number(n) => {
+                    // Convert any numeric value to f32
+                    let f = n.as_f64().ok_or_else(|| {
+                        QueryError::execution(format!("Cannot convert number to f32: {:?}", n))
+                    })? as f32;
+                    Ok(NormalValue::Float32(f))
+                }
+                _ => Err(QueryError::execution(format!(
+                    "Expected number for Float32 field, got: {:?}",
                     value
                 ))),
             },
