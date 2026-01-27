@@ -1725,8 +1725,8 @@ mod tests {
                 FieldDescription::new("3", "author", FieldKind::relation("users", false))
                     .with_relation_name("author_posts")
                     .as_primary(),
-                // Auto-generated FK field
-                FieldDescription::new("4", "author_id", FieldKind::doc_id())
+                // Auto-generated FK field (Go naming: _{fieldname}ID)
+                FieldDescription::new("4", "_authorID", FieldKind::doc_id())
                     .with_relation_name("author_posts")
                     .as_primary(),
             ],

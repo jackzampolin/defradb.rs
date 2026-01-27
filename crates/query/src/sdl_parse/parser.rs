@@ -1023,12 +1023,12 @@ impl<'a> SdlParser<'a> {
                 field = field.with_relation_name(relation_name.clone());
 
                 // For single-object relations (not arrays), Go automatically creates an
-                // implicit {field}_id field to store the foreign key.
+                // implicit _{field}ID field to store the foreign key.
                 // The FK field has the SAME is_primary status as the main relation field:
                 // - If main field is PRIMARY, FK field is also PRIMARY (non-empty FieldID)
                 // - If main field is SECONDARY, FK field is also SECONDARY (empty FieldID)
                 if creates_fk_field {
-                    let id_field_name = format!("{}_id", parsed_field.name);
+                    let id_field_name = format!("_{}ID", parsed_field.name);
                     let id_field_kind = FieldKind::doc_id();
                     let id_field_crdt = CType::LwwRegister;
 

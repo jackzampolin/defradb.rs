@@ -17,11 +17,11 @@ use std::collections::BTreeMap;
 fn test_relation_id_field_name() {
     assert_eq!(
         CollectionVersion::relation_id_field_name("author"),
-        "author_id"
+        "_authorID"
     );
     assert_eq!(
         CollectionVersion::relation_id_field_name("posts"),
-        "posts_id"
+        "_postsID"
     );
 }
 
@@ -45,7 +45,7 @@ fn test_add_relation_id_fields() {
     assert_eq!(coll.fields.len(), 3);
 
     // Verify _id field was added
-    let id_field = coll.field_by_name("author_id").unwrap();
+    let id_field = coll.field_by_name("_authorID").unwrap();
     assert_eq!(id_field.id, "101");
     assert_eq!(id_field.kind, FieldKind::doc_id());
     assert_eq!(id_field.relation_name, Some("user_posts".to_string()));
@@ -57,7 +57,7 @@ fn test_add_relation_id_fields() {
     let author_id_idx = coll
         .fields
         .iter()
-        .position(|f| f.name == "author_id")
+        .position(|f| f.name == "_authorID")
         .unwrap();
     assert_eq!(author_id_idx, author_idx + 1);
 }
@@ -76,7 +76,7 @@ fn test_add_relation_id_fields_skips_arrays() {
 
     // No _id field should be added for array relations
     assert_eq!(coll.fields.len(), 2);
-    assert!(coll.field_by_name("posts_id").is_none());
+    assert!(coll.field_by_name("_postsID").is_none());
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn test_add_relation_id_fields_skips_existing() {
         FieldDescription::new("2", "author", FieldKind::relation("users", false))
             .with_relation_name("user_posts"),
         // _id field already exists
-        FieldDescription::new("3", "author_id", FieldKind::doc_id())
+        FieldDescription::new("3", "_authorID", FieldKind::doc_id())
             .with_relation_name("user_posts"),
     ];
     let mut coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
@@ -96,7 +96,7 @@ fn test_add_relation_id_fields_skips_existing() {
     // No new _id field should be added
     assert_eq!(coll.fields.len(), 3);
     // Original _id field should remain
-    assert_eq!(coll.field_by_name("author_id").unwrap().id, "3");
+    assert_eq!(coll.field_by_name("_authorID").unwrap().id, "3");
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn test_has_relation_id_field() {
     let fields = vec![
         FieldDescription::new("1", "_docID", FieldKind::doc_id()),
         FieldDescription::new("2", "author", FieldKind::relation("users", false)),
-        FieldDescription::new("3", "author_id", FieldKind::doc_id()),
+        FieldDescription::new("3", "_authorID", FieldKind::doc_id()),
     ];
     let coll = CollectionVersion::new("posts", "v1", "coll-posts", fields);
 
@@ -154,10 +154,10 @@ fn test_finalize_relations_adds_id_fields() {
     let posts = collections.get("posts").unwrap();
 
     // Users shouldn't have _id field (array relation)
-    assert!(users.field_by_name("posts_id").is_none());
+    assert!(users.field_by_name("_postsID").is_none());
 
     // Posts should have _id field (non-array relation)
-    assert!(posts.field_by_name("author_id").is_some());
+    assert!(posts.field_by_name("_authorID").is_some());
 
     // Posts.author should be marked as primary (other side is array)
     assert!(posts.field_by_name("author").unwrap().is_primary);
@@ -224,8 +224,8 @@ fn test_finalize_relations_hashmap() {
     // Verify HashMap was updated in place
     let posts = collections.get("posts").unwrap();
     assert!(
-        posts.field_by_name("author_id").is_some(),
-        "author_id field should be added"
+        posts.field_by_name("_authorID").is_some(),
+        "_authorID field should be added"
     );
 
     // Verify auto-primary was applied (author side is primary since users.posts is array)
