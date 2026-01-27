@@ -4164,3 +4164,58 @@ async fn test_order_by_relation_field_strips_ordering_only_fields() {
         second_author
     );
 }
+
+// Test GROUP BY with _avg aggregate
+#[tokio::test]
+async fn test_group_by_with_average() {
+    let fetcher = MockFetcher::new();
+
+    let mut doc1 = Document::new();
+    doc1.set("name", "John");
+    doc1.set("age", 32i64);
+    doc1.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc1);
+
+    let mut doc2 = Document::new();
+    doc2.set("name", "John");
+    doc2.set("age", 38i64);
+    doc2.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc2);
+
+    let mut doc3 = Document::new();
+    doc3.set("name", "Alice");
+    doc3.set("age", -19i64);
+    doc3.generate_and_set_doc_id().unwrap();
+    fetcher.add_doc("Users", doc3);
+
+    let runner = QueryRunner::new(fetcher, vec![make_test_collection()]);
+
+    // Use the same syntax as the Go test: _avg(_group: {field: Age})
+    let result = runner
+        .execute_query("{ Users(groupBy: [name]) { name _avg(_group: {field: age}) } }")
+        .await
+        .unwrap();
+
+    let users = result["Users"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "Should have 2 groups: John and Alice");
+
+    let john = users
+        .iter()
+        .find(|u| u["name"].as_str() == Some("John"))
+        .unwrap();
+    assert_eq!(
+        john["_avg"].as_f64(),
+        Some(35.0),
+        "John's average age should be 35 (32+38)/2"
+    );
+
+    let alice = users
+        .iter()
+        .find(|u| u["name"].as_str() == Some("Alice"))
+        .unwrap();
+    assert_eq!(
+        alice["_avg"].as_f64(),
+        Some(-19.0),
+        "Alice's average age should be -19"
+    );
+}
