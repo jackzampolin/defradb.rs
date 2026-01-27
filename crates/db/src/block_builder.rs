@@ -165,6 +165,110 @@ fn encode_priority_varint(priority: u64) -> Vec<u8> {
     buf
 }
 
+/// Decode a varint to priority (matching Go's binary.Uvarint).
+fn decode_priority_varint(buf: &[u8]) -> u64 {
+    let mut n: u64 = 0;
+    let mut shift: u32 = 0;
+    for &byte in buf {
+        if shift >= 64 {
+            return 0; // Overflow protection
+        }
+        n |= ((byte & 0x7f) as u64) << shift;
+        if byte < 0x80 {
+            return n;
+        }
+        shift += 7;
+    }
+    n
+}
+
+/// Information about existing heads for a document field.
+struct FieldHeadInfo {
+    /// The CID of the existing head (if any)
+    cid: Option<Cid>,
+    /// The priority of the existing head (0 if none)
+    priority: u64,
+    /// The full key (for deletion when replacing)
+    key: Option<Vec<u8>>,
+}
+
+/// Get existing head info for a specific field of a document.
+///
+/// Returns the current head CID and priority for the field.
+/// Used to build proper head links when creating update blocks.
+async fn get_field_head(
+    headstore: &NamespaceView,
+    doc_id: &str,
+    field_id: &str,
+) -> Result<FieldHeadInfo, String> {
+    use storage::corekv::IterOptions;
+
+    let prefix = HeadstoreDocKey::field_prefix(doc_id, field_id);
+    let opts = IterOptions::new().with_prefix(prefix);
+
+    let mut iter = headstore
+        .iterator(opts)
+        .await
+        .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
+
+    // There should be at most one head per field
+    if let Some(kv_pair) = iter
+        .next()
+        .await
+        .map_err(|e| format!("Failed to iterate headstore: {}", e))?
+    {
+        let priority = decode_priority_varint(&kv_pair.value);
+        // Parse CID from key: /d/{doc_id}/{field_id}/{cid}
+        let key_str = String::from_utf8_lossy(&kv_pair.key);
+        let parts: Vec<&str> = key_str.split('/').collect();
+        if let Some(cid_str) = parts.last() {
+            if let Ok(cid) = cid_str.parse::<Cid>() {
+                return Ok(FieldHeadInfo {
+                    cid: Some(cid),
+                    priority,
+                    key: Some(kv_pair.key.clone()),
+                });
+            }
+        }
+    }
+
+    Ok(FieldHeadInfo {
+        cid: None,
+        priority: 0,
+        key: None,
+    })
+}
+
+/// Get the maximum priority from existing heads for a document.
+///
+/// Scans the headstore for all existing heads of the given document
+/// and returns the maximum priority found. Returns 0 if no heads exist.
+async fn get_max_priority(headstore: &NamespaceView, doc_id: &str) -> Result<u64, String> {
+    use storage::corekv::IterOptions;
+
+    let prefix = HeadstoreDocKey::document_prefix(doc_id);
+    let opts = IterOptions::new().with_prefix(prefix);
+
+    let mut iter = headstore
+        .iterator(opts)
+        .await
+        .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
+
+    let mut max_priority: u64 = 0;
+    while let Some(kv_pair) = iter
+        .next()
+        .await
+        .map_err(|e| format!("Failed to iterate headstore: {}", e))?
+    {
+        let priority = decode_priority_varint(&kv_pair.value);
+        if priority > max_priority {
+            max_priority = priority;
+        }
+    }
+
+    Ok(max_priority)
+}
+
 /// Write document blocks to blockstore and heads to headstore.
 ///
 /// This function creates CRDT blocks for a document and writes:
@@ -198,7 +302,12 @@ pub async fn write_document_blocks(
 
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
-    let priority: u64 = 1; // Initial priority for new/updated documents
+
+    // Get max existing priority for this document and increment by 1.
+    // For new documents, max is 0, so priority becomes 1.
+    // For updates, priority = max_existing + 1 (matches Go behavior).
+    let max_priority = get_max_priority(headstore, &doc_id_str).await?;
+    let priority: u64 = max_priority + 1;
 
     // Create an LWW block for each field
     for (field_name, field_value) in doc.values() {
@@ -206,6 +315,10 @@ pub async fn write_document_blocks(
         if field_name.starts_with('_') {
             continue;
         }
+
+        // Get existing head for this field (if any) to build proper DAG links
+        let field_head = get_field_head(headstore, &doc_id_str, field_name).await?;
+        let heads: Vec<Cid> = field_head.cid.into_iter().collect();
 
         // Encode the field value as CBOR
         let value_bytes = encode_value_as_cbor(field_value.value())?;
@@ -219,8 +332,8 @@ pub async fn write_document_blocks(
             data: value_bytes,
         };
 
-        // Create the field block
-        let field_block = Block::new(CrdtDelta::Lww(lww_payload), vec![], vec![]);
+        // Create the field block with heads linking to previous version
+        let field_block = Block::new(CrdtDelta::Lww(lww_payload), heads, vec![]);
 
         // Serialize and generate CID
         let field_block_bytes = field_block
@@ -236,7 +349,15 @@ pub async fn write_document_blocks(
             .await
             .map_err(|e| format!("Failed to store field block: {}", e))?;
 
-        // Write head CID to headstore: /d/{doc_id}/{field_name}/{cid} → priority
+        // Delete old head entry if it exists (replace, not accumulate)
+        if let Some(old_key) = field_head.key {
+            headstore
+                .delete(&old_key)
+                .await
+                .map_err(|e| format!("Failed to delete old field head: {}", e))?;
+        }
+
+        // Write new head CID to headstore: /d/{doc_id}/{field_name}/{cid} → priority
         let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
         let priority_bytes = encode_priority_varint(priority);
         headstore
@@ -247,6 +368,7 @@ pub async fn write_document_blocks(
         tracing::debug!(
             field_name = %field_name,
             cid = %field_cid,
+            has_prev_head = field_head.cid.is_some(),
             "Stored LWW field block and head"
         );
 
@@ -254,6 +376,11 @@ pub async fn write_document_blocks(
         field_links.push(DAGLink::new(field_name.clone(), field_cid));
         field_cids.push(field_cid);
     }
+
+    // Get existing composite head (if any) to build proper DAG links
+    // "C" is the marker for composite/document-level commits (matches Go)
+    let composite_head = get_field_head(headstore, &doc_id_str, "C").await?;
+    let composite_heads: Vec<Cid> = composite_head.cid.into_iter().collect();
 
     // Create the Composite delta payload
     let composite_payload = CompositeDeltaPayload {
@@ -263,8 +390,9 @@ pub async fn write_document_blocks(
         status: 1, // Active document
     };
 
-    // Create the composite block with links to all field blocks
-    let composite_block = Block::new(CrdtDelta::Composite(composite_payload), vec![], field_links);
+    // Create the composite block with heads linking to previous version
+    let composite_block =
+        Block::new(CrdtDelta::Composite(composite_payload), composite_heads, field_links);
 
     // Serialize the composite block
     let composite_bytes = composite_block
@@ -280,8 +408,15 @@ pub async fn write_document_blocks(
         .await
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
-    // Write composite head to headstore: /d/{doc_id}/C/{cid} → priority
-    // "C" is the marker for composite/document-level commits (matches Go)
+    // Delete old composite head entry if it exists (replace, not accumulate)
+    if let Some(old_key) = composite_head.key {
+        headstore
+            .delete(&old_key)
+            .await
+            .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
+    }
+
+    // Write new composite head to headstore: /d/{doc_id}/C/{cid} → priority
     let composite_head_key = HeadstoreDocKey::new(&doc_id_str, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore
@@ -293,6 +428,7 @@ pub async fn write_document_blocks(
         doc_id = %doc_id_str,
         cid = %composite_cid,
         field_count = field_cids.len(),
+        has_prev_head = composite_head.cid.is_some(),
         "Built composite block with field links and wrote heads"
     );
 
