@@ -1106,14 +1106,21 @@ fn parse_top_level_aggregate(
         .unwrap_or_else(|| String::new());
 
     // Create a Select that wraps this aggregate
+    // The field name should be the aggregate name (e.g., "_avg") so the response
+    // key is correct (e.g., {"_avg": 29} not {"Users": 29})
     let mut select = Select::new(&collection_name);
+    let agg_name = agg_type.as_str();
     if let Some(ref a) = field.alias {
-        select.field = SelectField::with_alias(&collection_name, a.clone());
+        // If aliased, use alias as the output name: { average: _avg(...) } -> {"average": ...}
+        select.field = SelectField::with_alias(agg_name, a.clone());
+    } else {
+        // Otherwise use the aggregate name: { _avg(...) } -> {"_avg": ...}
+        select.field = SelectField::new(agg_name);
     }
 
     // Add to document mapping
     let index = select.document_mapping.next_index();
-    select.document_mapping.add(index, agg_type.as_str());
+    select.document_mapping.add(index, agg_name);
     select
         .document_mapping
         .add_render_key(index, aggregate.output_name());
