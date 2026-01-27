@@ -1955,6 +1955,20 @@ impl Planner {
             }
         }
 
+        // Add fields referenced by the filter (needed for filter evaluation but not rendered)
+        if let Some(ref filter) = select.filter {
+            for field_name in filter.referenced_fields() {
+                if mapping.first_index_of_name(&field_name).is_none() {
+                    // Only add if field exists in collection schema
+                    if collection.field_by_name(&field_name).is_some() {
+                        let index = mapping.next_index();
+                        mapping.add(index, &field_name);
+                        // Don't add render_key - we don't want to output these fields
+                    }
+                }
+            }
+        }
+
         Ok(mapping)
     }
 

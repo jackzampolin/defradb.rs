@@ -145,67 +145,119 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
-        // Build document mapping and plan
-        let mapping = plan::build_mapping(select, &collection)?;
-
-        // Fetch documents
         let fetcher = self.fetcher.as_ref();
-        let docs = if let Some(ref doc_ids) = select.doc_ids {
-            // Deduplicate doc_ids while preserving order (Go compatibility)
-            let mut seen = HashSet::new();
-            let unique_ids: Vec<String> = doc_ids
-                .iter()
-                .filter(|id| seen.insert((*id).clone()))
-                .cloned()
-                .collect();
-            let result = fetcher
-                .get_by_ids(&select.collection_name, &unique_ids)
-                .await?;
-            result.into_docs()
+
+        // Check if we can use an index (only when not fetching by specific doc_ids)
+        let can_use_index = select.doc_ids.is_none()
+            && select.filter.is_some()
+            && !collection.indexes.is_empty()
+            && fetcher.supports_index_queries()
+            && select
+                .filter
+                .as_ref()
+                .map(|f| select_best_index(f, &collection.indexes).is_some())
+                .unwrap_or(false);
+
+        if can_use_index {
+            // Use Planner path for index-based queries (shows indexScanNode in explain)
+            let fetcher_arc = FetcherWrapper::new(fetcher);
+            let collections_map = self.collections_map().await?;
+            let collections: Vec<CollectionVersion> =
+                collections_map.values().map(|c| (**c).clone()).collect();
+
+            let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            let plan_result = planner.plan_with_index_info(select)?;
+            let mut plan = plan_result.plan;
+
+            // Wrap with permission filter if needed
+            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                plan = Box::new(PermissionFilterNode::new(
+                    plan,
+                    acp.clone(),
+                    Identity::from(caller_identity),
+                    &policy.id,
+                    &policy.resource_name,
+                ));
+            }
+
+            // Execute the plan and count iterations
+            plan.init().await?;
+            plan.start().await?;
+
+            let mut iterations: u64 = 0;
+            let mut result_count = 0;
+            let mut doc_count = 0;
+
+            while plan.next().await? {
+                iterations += 1;
+                result_count += 1;
+                doc_count += 1;
+            }
+
+            plan.close().await?;
+
+            let explanation = plan.explain();
+            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+
+            Ok((explanation, result_count, iterations))
         } else {
-            fetcher.get_all(&select.collection_name).await?
-        };
+            // Standard path: fetch all docs and build scan-based plan
+            let mapping = plan::build_mapping(select, &collection)?;
 
-        // Convert to plan docs
-        let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
-        let doc_count = plan_docs.len();
+            let docs = if let Some(ref doc_ids) = select.doc_ids {
+                // Deduplicate doc_ids while preserving order (Go compatibility)
+                let mut seen = HashSet::new();
+                let unique_ids: Vec<String> = doc_ids
+                    .iter()
+                    .filter(|id| seen.insert((*id).clone()))
+                    .cloned()
+                    .collect();
+                let result = fetcher
+                    .get_by_ids(&select.collection_name, &unique_ids)
+                    .await?;
+                result.into_docs()
+            } else {
+                fetcher.get_all(&select.collection_name).await?
+            };
 
-        // Build the plan
-        let mut plan = plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection)?;
+            // Convert to plan docs
+            let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
+            let doc_count = plan_docs.len();
 
-        // Wrap with permission filter if needed
-        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-            plan = Box::new(PermissionFilterNode::new(
-                plan,
-                acp.clone(),
-                Identity::from(caller_identity),
-                &policy.id,
-                &policy.resource_name,
-            ));
+            // Build the plan
+            let mut plan =
+                plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection)?;
+
+            // Wrap with permission filter if needed
+            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                plan = Box::new(PermissionFilterNode::new(
+                    plan,
+                    acp.clone(),
+                    Identity::from(caller_identity),
+                    &policy.id,
+                    &policy.resource_name,
+                ));
+            }
+
+            // Execute the plan and count iterations
+            plan.init().await?;
+            plan.start().await?;
+
+            let mut iterations: u64 = 0;
+            let mut result_count = 0;
+
+            while plan.next().await? {
+                iterations += 1;
+                result_count += 1;
+            }
+
+            plan.close().await?;
+
+            let explanation = plan.explain();
+            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+
+            Ok((explanation, result_count, iterations))
         }
-
-        // Execute the plan and count iterations
-        plan.init().await?;
-        plan.start().await?;
-
-        let mut iterations: u64 = 0;
-        let mut result_count = 0;
-
-        while plan.next().await? {
-            iterations += 1;
-            result_count += 1;
-        }
-
-        plan.close().await?;
-
-        // Get the execution explain from the plan (Go format: { "nodeKind": { ... } })
-        let explanation = plan.explain();
-
-        // Go adds iterations to each node during execute explain
-        // For now, we add it to the outermost node
-        let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
-
-        Ok((explanation, result_count, iterations))
     }
 
     /// Add execution metrics to the explain output (Go format).
