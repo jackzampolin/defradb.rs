@@ -3926,3 +3926,127 @@ async fn test_secondary_relation_id_field_without_relation_object() {
         "_authorID should be the Author's _docID from reverse lookup"
     );
 }
+
+/// Test compound filter with both scalar and relation conditions.
+/// This matches the failing FFI test: TestQueryOneToOneWithCompoundAndFilterThatIncludesRelation
+///
+/// Schema:
+/// - Book { name, rating, author } where author is SECONDARY
+/// - Author { name, age, verified, published @primary }
+///
+/// Query: Book(filter: {_and: [{rating: {_geq: 4.0}}, {author: {verified: {_eq: true}}}]}) { name rating }
+/// Expected: Only books where rating >= 4.0 AND author.verified == true
+#[tokio::test]
+async fn test_compound_filter_with_relation_condition() {
+    let fetcher = MockFetcher::new();
+
+    // Create Book collection - author is SECONDARY
+    let book_collection = CollectionVersion::new(
+        "Book",
+        "v1",
+        "coll-book",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "rating", FieldKind::float64()),
+            // author relation field - SECONDARY (is_primary = false)
+            FieldDescription::new("", "author", FieldKind::relation("Author", false))
+                .with_relation_name("published"),
+            // _authorID field for the relation ID - also SECONDARY
+            FieldDescription::new("", "_authorID", FieldKind::doc_id())
+                .with_relation_name("published"),
+        ],
+    );
+
+    // Create Author collection - published is PRIMARY
+    let author_collection = CollectionVersion::new(
+        "Author",
+        "v1",
+        "coll-author",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "age", FieldKind::int()),
+            FieldDescription::new("4", "verified", FieldKind::bool()),
+            // published relation field - PRIMARY
+            FieldDescription::new("5", "published", FieldKind::relation("Book", false))
+                .with_relation_name("published")
+                .as_primary(),
+            // _publishedID FK field - also PRIMARY
+            FieldDescription::new("6", "_publishedID", FieldKind::doc_id())
+                .with_relation_name("published")
+                .as_primary(),
+        ],
+    );
+
+    // Add Books
+    let mut book1 = Document::new();
+    book1.set("_docID", "book-1");
+    book1.set("name", "Painted House");
+    book1.set("rating", 4.9f64);
+    fetcher.add_doc("Book", book1);
+
+    let mut book2 = Document::new();
+    book2.set("_docID", "book-2");
+    book2.set("name", "Some Book");
+    book2.set("rating", 4.0f64);
+    fetcher.add_doc("Book", book2);
+
+    let mut book3 = Document::new();
+    book3.set("_docID", "book-3");
+    book3.set("name", "Low Rated Book");
+    book3.set("rating", 3.0f64);
+    fetcher.add_doc("Book", book3);
+
+    // Add Authors with verified status
+    let mut author1 = Document::new();
+    author1.set("_docID", "author-1");
+    author1.set("name", "John Grisham");
+    author1.set("age", 65i64);
+    author1.set("verified", true);
+    author1.set("_publishedID", "book-1"); // FK points to Painted House
+    fetcher.add_doc("Author", author1);
+
+    let mut author2 = Document::new();
+    author2.set("_docID", "author-2");
+    author2.set("name", "Some Writer");
+    author2.set("age", 45i64);
+    author2.set("verified", false); // NOT verified
+    author2.set("_publishedID", "book-2"); // FK points to Some Book
+    fetcher.add_doc("Author", author2);
+
+    let mut author3 = Document::new();
+    author3.set("_docID", "author-3");
+    author3.set("name", "Another Writer");
+    author3.set("age", 30i64);
+    author3.set("verified", true); // verified but low rated book
+    author3.set("_publishedID", "book-3"); // FK points to Low Rated Book
+    fetcher.add_doc("Author", author3);
+
+    let runner = QueryRunner::new(fetcher, vec![book_collection, author_collection]);
+
+    // Compound filter: rating >= 4.0 AND author.verified == true
+    let result = runner
+        .execute_query(
+            r#"{ Book(filter: {_and: [{rating: {_ge: 4.0}}, {author: {verified: {_eq: true}}}]}) { name rating } }"#,
+        )
+        .await
+        .unwrap();
+
+    eprintln!("Result: {}", serde_json::to_string_pretty(&result).unwrap());
+
+    let books = result.get("Book").unwrap().as_array().unwrap();
+
+    // Expected: Only "Painted House" because:
+    // - rating 4.9 >= 4.0 ✓
+    // - author (John Grisham) verified = true ✓
+    //
+    // "Some Book" is excluded because author.verified = false
+    // "Low Rated Book" is excluded because rating 3.0 < 4.0
+    assert_eq!(
+        books.len(),
+        1,
+        "Should return 1 book matching both conditions"
+    );
+    assert_eq!(books[0].get("name").unwrap(), "Painted House");
+}
