@@ -1079,12 +1079,57 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             });
         }
 
+        // Apply groupBy if present - this changes how we process commits
+        // Each entry is (representative_commit, all_commits_in_group)
+        let grouped: Option<Vec<(document::Document, Vec<document::Document>)>> =
+            if let Some(ref group_by) = select.group_by {
+                if !group_by.fields.is_empty() {
+                    let mut groups: Vec<(String, document::Document, Vec<document::Document>)> =
+                        Vec::new();
+                    let mut group_map: std::collections::HashMap<String, usize> =
+                        std::collections::HashMap::new();
+
+                    for commit in commits.drain(..) {
+                        let key = Self::generate_commit_group_key(&commit, &group_by.fields);
+                        if let Some(&idx) = group_map.get(&key) {
+                            groups[idx].2.push(commit);
+                        } else {
+                            let idx = groups.len();
+                            group_map.insert(key.clone(), idx);
+                            groups.push((key, commit.clone(), vec![commit]));
+                        }
+                    }
+
+                    Some(
+                        groups
+                            .into_iter()
+                            .map(|(_, rep, docs)| (rep, docs))
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        // Get the list of commits to process (either grouped representatives or all commits)
+        let mut work_items: Vec<(document::Document, Option<Vec<document::Document>>)> =
+            if let Some(grouped) = grouped {
+                grouped
+                    .into_iter()
+                    .map(|(rep, all)| (rep, Some(all)))
+                    .collect()
+            } else {
+                commits.into_iter().map(|c| (c, None)).collect()
+            };
+
         // Apply ordering if present
         if let Some(ref order_by) = select.order_by {
             for condition in order_by.conditions.iter().rev() {
                 if let Some(field_name) = condition.fields.first() {
                     let desc = matches!(condition.direction, OrderDirection::Desc);
-                    commits.sort_by(|a, b| {
+                    work_items.sort_by(|(a, _), (b, _)| {
                         let val_a = a.get(field_name);
                         let val_b = b.get(field_name);
                         let cmp = Self::compare_json_values(val_a, val_b);
@@ -1101,19 +1146,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Apply limit and offset if present
         if let Some(ref limit_spec) = select.limit {
             let offset = limit_spec.offset as usize;
-            if offset > 0 && offset < commits.len() {
-                commits = commits.split_off(offset);
-            } else if offset >= commits.len() {
-                commits.clear();
+            if offset > 0 && offset < work_items.len() {
+                work_items = work_items.split_off(offset);
+            } else if offset >= work_items.len() {
+                work_items.clear();
             }
             if let Some(limit) = limit_spec.limit {
-                commits.truncate(limit as usize);
+                work_items.truncate(limit as usize);
             }
         }
 
         // Build results
         let mut results = Vec::new();
-        for commit in &commits {
+        for (commit, group_docs) in &work_items {
             let mut obj = serde_json::Map::new();
 
             // Map requested fields from the commit document
@@ -1178,12 +1223,45 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         obj.insert(output_name.to_string(), JsonValue::Number(count.into()));
                     }
                     Requestable::Select(nested) => {
-                        // Handle nested selects (e.g., links { cid })
                         let field_name = &nested.field.name;
                         let output_name = nested.field.output_name();
 
-                        if let Some(value) = commit.get(field_name) {
-                            // Convert NormalValue to JSON first
+                        // Handle _group special field for grouped results
+                        if field_name == "_group" {
+                            if let Some(docs) = group_docs {
+                                // Build array of group documents with requested fields
+                                let group_array: Vec<JsonValue> = docs
+                                    .iter()
+                                    .map(|doc: &document::Document| {
+                                        let mut nested_obj = serde_json::Map::new();
+                                        for nested_field in &nested.fields {
+                                            if let Requestable::Field(nf) = nested_field {
+                                                let nf_name = &nf.name;
+                                                let nf_output = nf.output_name();
+                                                if let Some(val) = doc.get(nf_name) {
+                                                    let json_val =
+                                                        crate::json_convert::normal_value_to_json(
+                                                            val,
+                                                        )
+                                                        .unwrap_or(JsonValue::Null);
+                                                    nested_obj
+                                                        .insert(nf_output.to_string(), json_val);
+                                                } else {
+                                                    nested_obj
+                                                        .insert(nf_output.to_string(), JsonValue::Null);
+                                                }
+                                            }
+                                        }
+                                        JsonValue::Object(nested_obj)
+                                    })
+                                    .collect();
+                                obj.insert(output_name.to_string(), JsonValue::Array(group_array));
+                            } else {
+                                // Not grouped, _group is empty
+                                obj.insert(output_name.to_string(), JsonValue::Array(vec![]));
+                            }
+                        } else if let Some(value) = commit.get(field_name) {
+                            // Handle nested selects (e.g., links { cid })
                             if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
                                 if let Some(arr) = json_val.as_array() {
                                     let nested_results: Vec<JsonValue> = arr
@@ -1231,6 +1309,54 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(JsonValue::Array(results))
+    }
+
+    /// Generate a group key from commit field values.
+    /// Format matches Go DefraDB: `{index}_{value}_` for each field.
+    fn generate_commit_group_key(commit: &document::Document, fields: &[String]) -> String {
+        let mut key = String::new();
+        for (i, field_name) in fields.iter().enumerate() {
+            key.push_str(&format!("{}_", i));
+            if let Some(value) = commit.get(field_name) {
+                if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
+                    key.push_str(&Self::json_value_to_key(&json_val));
+                } else {
+                    key.push_str("null");
+                }
+            } else {
+                key.push_str("null");
+            }
+            key.push('_');
+        }
+        key
+    }
+
+    /// Convert a JSON value to a string for use in group key.
+    fn json_value_to_key(value: &JsonValue) -> String {
+        match value {
+            JsonValue::Null => "null".to_string(),
+            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Number(n) => n.to_string(),
+            JsonValue::String(s) => s.clone(),
+            JsonValue::Array(arr) => {
+                format!(
+                    "[{}]",
+                    arr.iter()
+                        .map(Self::json_value_to_key)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            JsonValue::Object(obj) => {
+                format!(
+                    "{{{}}}",
+                    obj.iter()
+                        .map(|(k, v)| format!("{}:{}", k, Self::json_value_to_key(v)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+        }
     }
 
     /// Build a DocumentMapping for commit fields.
