@@ -461,13 +461,15 @@ impl Planner {
                     _ => continue, // Not a valid relation field
                 };
 
-                plan = self.apply_filter_relation_join(
+                let (new_plan, new_mapping) = self.apply_filter_relation_join(
                     plan,
                     &collection,
                     relation_field,
                     relation_field_name,
                     scan_mapping.clone(),
                 )?;
+                plan = new_plan;
+                scan_mapping = new_mapping;
             }
         }
 
@@ -507,13 +509,15 @@ impl Planner {
                     _ => continue, // Not a valid relation field
                 };
 
-                plan = self.apply_filter_relation_join(
+                let (new_plan, new_mapping) = self.apply_filter_relation_join(
                     plan,
                     &collection,
                     relation_field,
                     relation_field_name,
                     scan_mapping.clone(),
                 )?;
+                plan = new_plan;
+                scan_mapping = new_mapping;
             }
         }
 
@@ -1306,6 +1310,10 @@ impl Planner {
     /// This creates a TypeJoinOne that brings in the child documents so that complex
     /// filters can evaluate conditions on the relation. The child documents are merged
     /// into the parent but won't appear in the final output (no render_key).
+    ///
+    /// Returns both the updated plan and mapping. The mapping is updated with child mappings
+    /// for the relation field so that post-join filter evaluation can traverse into the
+    /// merged child document.
     fn apply_filter_relation_join(
         &self,
         plan: Box<dyn PlanNode>,
@@ -1313,7 +1321,7 @@ impl Planner {
         relation_field: &schema::FieldDescription,
         relation_field_name: &str,
         mut mapping: DocumentMapping,
-    ) -> Result<Box<dyn PlanNode>> {
+    ) -> Result<(Box<dyn PlanNode>, DocumentMapping)> {
         // Get the target collection for this relation
         let target_collection_id =
             relation_field
@@ -1402,9 +1410,9 @@ impl Planner {
 
         // Create TypeJoinOne (filter relations are typically one-to-one)
         // No relation filter here - the complex filter is applied after all joins
-        let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping);
+        let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
 
-        Ok(Box::new(join))
+        Ok((Box::new(join), mapping))
     }
 
     /// Apply sub-joins for remaining elements of a multi-level filter path.
