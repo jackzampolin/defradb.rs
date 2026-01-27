@@ -440,8 +440,11 @@ fn parse_field_to_select(
                 }
             }
             "showDeleted" => {
-                let show_deleted = resolve_bool_value(arg_value, variables, "showDeleted")?;
-                select.show_deleted = show_deleted;
+                // null means "don't show deleted" (false) - skip setting it
+                if !matches!(arg_value, Value::Null) {
+                    let show_deleted = resolve_bool_value(arg_value, variables, "showDeleted")?;
+                    select.show_deleted = show_deleted;
+                }
             }
             "depth" => {
                 // depth is only valid for _commits queries
@@ -858,9 +861,11 @@ fn parse_order_value(
                 ));
             }
             for (field_name, direction_val) in obj {
-                let condition =
-                    parse_order_condition(field_name.clone(), direction_val, variables)?;
-                order_by = order_by.with_condition(condition);
+                if let Some(condition) =
+                    parse_order_condition(field_name.clone(), direction_val, variables)?
+                {
+                    order_by = order_by.with_condition(condition);
+                }
             }
         }
         Value::List(items) => {
@@ -868,9 +873,11 @@ fn parse_order_value(
             for item in items {
                 if let Value::Object(obj) = item {
                     for (field_name, direction_val) in obj {
-                        let condition =
-                            parse_order_condition(field_name.clone(), direction_val, variables)?;
-                        order_by = order_by.with_condition(condition);
+                        if let Some(condition) =
+                            parse_order_condition(field_name.clone(), direction_val, variables)?
+                        {
+                            order_by = order_by.with_condition(condition);
+                        }
                     }
                 } else {
                     return Err(QueryError::parse(
@@ -887,12 +894,15 @@ fn parse_order_value(
 
 /// Parse a single order condition, handling nested relation ordering.
 /// Supports both simple `{field: ASC}` and nested `{relation: {field: DESC}}`.
+/// Returns None for null values (order field is ignored).
 fn parse_order_condition(
     field_name: String,
     direction_val: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
-) -> Result<OrderCondition> {
+) -> Result<Option<OrderCondition>> {
     match direction_val {
+        // Null order direction means skip this field (Go compatibility)
+        Value::Null => Ok(None),
         Value::Enum(s) | Value::String(s) => {
             let direction = OrderDirection::parse(s).ok_or_else(|| {
                 // Match Go DefraDB error format
@@ -901,7 +911,7 @@ fn parse_order_condition(
                     field_name, s
                 ))
             })?;
-            Ok(OrderCondition::new(field_name, direction))
+            Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
@@ -926,7 +936,7 @@ fn parse_order_condition(
                     field_name, s
                 ))
             })?;
-            Ok(OrderCondition::new(field_name, direction))
+            Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Object(nested_obj) => {
             // Nested ordering: {relation: {field: ASC}} or {_alias: {aliasName: ASC}}
@@ -937,16 +947,22 @@ fn parse_order_condition(
                 ));
             }
             let (nested_field, nested_direction) = nested_obj.iter().next().unwrap();
-            let mut nested_condition =
+            let nested_condition =
                 parse_order_condition(nested_field.clone(), nested_direction, variables)?;
-            // Handle _alias directive: don't prepend "_alias", just use the nested field name.
-            // This allows ordering by aliased fields like: order: {_alias: {MyAge: ASC}}
-            // where MyAge is an alias for the Age field.
-            if field_name != "_alias" {
-                // For regular nested ordering (relations), prepend the parent field to the path
-                nested_condition.fields.insert(0, field_name);
+            // If nested condition is None (null value), propagate the None
+            match nested_condition {
+                Some(mut cond) => {
+                    // Handle _alias directive: don't prepend "_alias", just use the nested field name.
+                    // This allows ordering by aliased fields like: order: {_alias: {MyAge: ASC}}
+                    // where MyAge is an alias for the Age field.
+                    if field_name != "_alias" {
+                        // For regular nested ordering (relations), prepend the parent field to the path
+                        cond.fields.insert(0, field_name);
+                    }
+                    Ok(Some(cond))
+                }
+                None => Ok(None),
             }
-            Ok(nested_condition)
         }
         _ => Err(QueryError::parse("order direction must be ASC or DESC")),
     }

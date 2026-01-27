@@ -1,19 +1,37 @@
 //! QueryExecutor trait implementation for QueryRunner.
 
 use async_trait::async_trait;
+use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 use crate::error::{Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-use crate::query_parse::{parse_request, ParsedOperation};
+use crate::query_parse::{parse_request_with_variables, ParsedOperation};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
 
+/// Convert JSON variables from request format to parser format.
+/// Variables in requests are `Option<JsonValue>` (a JSON object), but the
+/// parser expects `Option<HashMap<String, JsonValue>>`.
+fn convert_variables(variables: &Option<JsonValue>) -> Option<HashMap<String, JsonValue>> {
+    variables.as_ref().and_then(|v| {
+        if let JsonValue::Object(map) = v {
+            Some(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        } else {
+            None // Non-object variables are ignored (invalid per GraphQL spec)
+        }
+    })
+}
+
 #[async_trait]
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> {
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
+        // Convert variables from JSON to HashMap format for the parser
+        let variables = convert_variables(&request.variables);
+
         // First, parse the request to determine if it's a query or mutation
-        let parsed = match parse_request(&request.query) {
+        let parsed = match parse_request_with_variables(&request.query, variables.as_ref()) {
             Ok(p) => p,
             Err(e) => {
                 return QueryResponse {
@@ -101,8 +119,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
+        // Convert variables from JSON to HashMap format for the parser
+        let variables = convert_variables(&request.variables);
+
         // Parse the request to determine if it's a query or mutation
-        let parsed = match parse_request(&request.query) {
+        let parsed = match parse_request_with_variables(&request.query, variables.as_ref()) {
             Ok(p) => p,
             Err(e) => {
                 return QueryResponse {

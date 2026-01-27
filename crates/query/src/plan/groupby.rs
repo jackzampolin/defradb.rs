@@ -6,8 +6,22 @@ use std::collections::HashMap;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
-use crate::mapper::GroupBy;
+use crate::mapper::{AggregateType, Filter, GroupBy, Limit, OrderBy, OrderDirection};
 use crate::planner::{Doc, PlanNode};
+
+/// Definition of an inner aggregate to compute during nested group rendering.
+///
+/// When a query has nested _group with aggregates (e.g., `_group(groupBy: [Verified]) { _avg(...) }`),
+/// the GroupByNode computes these aggregates inline during _group array rendering,
+/// so that outer aggregates (e.g., `_max(_group: {field: _avg})`) can read the values.
+#[derive(Debug, Clone)]
+pub struct InnerAggregateDef {
+    pub aggregate_type: AggregateType,
+    /// Render key name for the aggregate result (e.g., "_avg" or alias)
+    pub output_key: String,
+    /// Index of the target field in the parent mapping (e.g., Age field index)
+    pub field_index: usize,
+}
 
 /// A group of documents with the same group key
 #[derive(Debug)]
@@ -53,6 +67,18 @@ pub struct GroupByNode {
     current_doc: Doc,
     /// Whether start() has been called
     started: bool,
+    /// Optional limit for _group child rendering
+    group_limit: Option<Limit>,
+    /// Optional filter for _group child rendering
+    group_filter: Option<Filter>,
+    /// Optional order for _group child rendering
+    group_order: Option<OrderBy>,
+    /// Inner aggregate definitions to compute during nested _group rendering
+    inner_aggregates: Vec<InnerAggregateDef>,
+    /// Collection name (for __typename support in _group rendering)
+    collection_name: Option<String>,
+    /// Inner group-by field names (from the nested _group Select's groupBy clause)
+    inner_group_by_fields: Vec<String>,
 }
 
 impl GroupByNode {
@@ -70,7 +96,43 @@ impl GroupByNode {
             position: 0,
             current_doc: Doc::default(),
             started: false,
+            group_limit: None,
+            group_filter: None,
+            group_order: None,
+            inner_aggregates: Vec::new(),
+            collection_name: None,
+            inner_group_by_fields: Vec::new(),
         }
+    }
+
+    pub fn with_group_limit(mut self, limit: Limit) -> Self {
+        self.group_limit = Some(limit);
+        self
+    }
+
+    pub fn with_group_filter(mut self, filter: Filter) -> Self {
+        self.group_filter = Some(filter);
+        self
+    }
+
+    pub fn with_group_order(mut self, order: OrderBy) -> Self {
+        self.group_order = Some(order);
+        self
+    }
+
+    pub fn with_inner_aggregates(mut self, inner_aggregates: Vec<InnerAggregateDef>) -> Self {
+        self.inner_aggregates = inner_aggregates;
+        self
+    }
+
+    pub fn with_collection_name(mut self, name: String) -> Self {
+        self.collection_name = Some(name);
+        self
+    }
+
+    pub fn with_inner_group_by_fields(mut self, fields: Vec<String>) -> Self {
+        self.inner_group_by_fields = fields;
+        self
     }
 
     /// Get the groups (for aggregation nodes to access)
@@ -128,42 +190,432 @@ impl GroupByNode {
         }
     }
 
+    /// Compare two field values for ordering.
+    fn compare_field_values(a: Option<&JsonValue>, b: Option<&JsonValue>) -> std::cmp::Ordering {
+        match (a, b) {
+            (None | Some(JsonValue::Null), None | Some(JsonValue::Null)) => std::cmp::Ordering::Equal,
+            (None | Some(JsonValue::Null), _) => std::cmp::Ordering::Less,
+            (_, None | Some(JsonValue::Null)) => std::cmp::Ordering::Greater,
+            (Some(JsonValue::Number(na)), Some(JsonValue::Number(nb))) => {
+                let fa = na.as_f64().unwrap_or(0.0);
+                let fb = nb.as_f64().unwrap_or(0.0);
+                fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Some(JsonValue::String(sa)), Some(JsonValue::String(sb))) => sa.cmp(sb),
+            (Some(JsonValue::Bool(ba)), Some(JsonValue::Bool(bb))) => ba.cmp(bb),
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
     /// Build a JSON array of documents for the _group field
     fn build_group_array(&self, docs: &[Doc], group_index: usize) -> JsonValue {
         // Get the child mapping for _group to determine which fields to render
         let child_mapping = self.document_mapping.child_at(group_index);
 
-        let mut array = Vec::with_capacity(docs.len());
-        for doc in docs {
-            let mut obj = serde_json::Map::new();
+        // Apply filter to docs if present
+        let filtered_docs: Vec<&Doc> = if let Some(ref filter) = self.group_filter {
+            docs.iter()
+                .filter(|d| {
+                    filter
+                        .matches(d.fields(), &self.document_mapping)
+                        .unwrap_or(false)
+                })
+                .collect()
+        } else {
+            docs.iter().collect()
+        };
 
-            if let Some(mapping) = child_mapping {
-                // Use the child mapping's render_keys to determine output fields
-                for render_key in &mapping.render_keys {
-                    // Skip _group itself to avoid infinite recursion
-                    if render_key.key == "_group" {
-                        continue;
+        // Apply order
+        let ordered_docs: Vec<&Doc> = if let Some(ref order) = self.group_order {
+            let mut sorted = filtered_docs;
+            sorted.sort_by(|a, b| {
+                for cond in &order.conditions {
+                    if let Some(field_name) = cond.fields.first() {
+                        if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
+                            let val_a = a.get(idx);
+                            let val_b = b.get(idx);
+                            let cmp = Self::compare_field_values(val_a, val_b);
+                            let cmp = match cond.direction {
+                                OrderDirection::Asc => cmp,
+                                OrderDirection::Desc => cmp.reverse(),
+                            };
+                            if cmp != std::cmp::Ordering::Equal {
+                                return cmp;
+                            }
+                        }
                     }
-                    let value = doc
-                        .get(render_key.index)
-                        .cloned()
-                        .unwrap_or(JsonValue::Null);
-                    obj.insert(render_key.key.clone(), value);
                 }
-            } else {
-                // Fallback: use parent's render_keys if no child mapping
-                for render_key in &self.document_mapping.render_keys {
-                    if render_key.key == "_group" {
-                        continue;
-                    }
-                    let value = doc
-                        .get(render_key.index)
-                        .cloned()
-                        .unwrap_or(JsonValue::Null);
-                    obj.insert(render_key.key.clone(), value);
+                std::cmp::Ordering::Equal
+            });
+            sorted
+        } else {
+            filtered_docs
+        };
+
+        // Apply limit and offset
+        let docs_to_render: Vec<&Doc> = if let Some(ref limit) = self.group_limit {
+            let offset = limit.offset as usize;
+            let effective_limit = limit.limit.map(|l| l as usize);
+            match (effective_limit, offset) {
+                (Some(0), _) => ordered_docs, // limit=0 means no limit
+                (Some(l), o) => ordered_docs.into_iter().skip(o).take(l).collect(),
+                (None, o) if o > 0 => ordered_docs.into_iter().skip(o).collect(),
+                _ => ordered_docs,
+            }
+        } else {
+            ordered_docs
+        };
+
+        // Check if we need to sub-group docs (inner groupBy)
+        if !self.inner_group_by_fields.is_empty() {
+            return self.build_subgrouped_array(&docs_to_render, child_mapping);
+        }
+
+        // Check if child_mapping has a nested _group that requires sub-grouping
+        if let Some(mapping) = child_mapping {
+            let inner_group_info = mapping
+                .render_keys
+                .iter()
+                .find(|rk| rk.key == "_group")
+                .map(|rk| rk.index);
+
+            if let Some(inner_group_index) = inner_group_info {
+                // Nested _group: sub-group the docs and produce nested arrays
+                return self.build_nested_group_array(
+                    &docs_to_render,
+                    mapping,
+                    inner_group_index,
+                );
+            }
+        }
+
+        // Simple case: no nested _group, just render fields
+        let render_keys = if let Some(mapping) = child_mapping {
+            &mapping.render_keys
+        } else {
+            &self.document_mapping.render_keys
+        };
+        Self::render_docs_with_keys(&docs_to_render, render_keys, self.collection_name.as_deref())
+    }
+
+    /// Build a sub-grouped _group array using inner_group_by_fields.
+    ///
+    /// Sub-groups docs by the inner groupBy fields, then for each sub-group:
+    /// - Outputs the groupBy field values
+    /// - Computes inner aggregates
+    /// - Optionally includes an inner _group array of the remaining docs
+    fn build_subgrouped_array(
+        &self,
+        docs: &[&Doc],
+        child_mapping: Option<&DocumentMapping>,
+    ) -> JsonValue {
+        // Sub-group documents by the inner groupBy field values
+        let mut sub_groups: Vec<(String, Vec<&Doc>)> = Vec::new();
+        let mut sub_group_map: HashMap<String, usize> = HashMap::new();
+
+        for doc in docs {
+            let mut key = String::new();
+            for field_name in &self.inner_group_by_fields {
+                if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
+                    key.push_str(&format!("{}_", idx));
+                    let value = doc.get(idx);
+                    key.push_str(&format!("{}_", Self::value_to_key(value)));
                 }
             }
 
+            if let Some(&idx) = sub_group_map.get(&key) {
+                sub_groups[idx].1.push(doc);
+            } else {
+                let idx = sub_groups.len();
+                sub_group_map.insert(key.clone(), idx);
+                sub_groups.push((key, vec![doc]));
+            }
+        }
+
+        // Build JSON array: one object per sub-group
+        let mut array = Vec::with_capacity(sub_groups.len());
+        for (_key, sub_group_docs) in &sub_groups {
+            let mut obj = serde_json::Map::new();
+
+            // Add groupBy field values from the first doc
+            if let Some(first_doc) = sub_group_docs.first() {
+                // Render fields from the child mapping's render keys
+                if let Some(mapping) = child_mapping {
+                    for render_key in &mapping.render_keys {
+                        if render_key.key == "_group" || render_key.key == "__typename" {
+                            if render_key.key == "__typename" {
+                                if let Some(ref name) = self.collection_name {
+                                    obj.insert(render_key.key.clone(), JsonValue::String(name.clone()));
+                                }
+                            }
+                            continue;
+                        }
+                        let value = first_doc
+                            .get(render_key.index)
+                            .cloned()
+                            .unwrap_or(JsonValue::Null);
+                        obj.insert(render_key.key.clone(), value);
+                    }
+                } else {
+                    // Fallback: just render the groupBy fields
+                    for field_name in &self.inner_group_by_fields {
+                        if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
+                            let value = first_doc
+                                .get(idx)
+                                .cloned()
+                                .unwrap_or(JsonValue::Null);
+                            obj.insert(field_name.clone(), value);
+                        }
+                    }
+                }
+            }
+
+            // Compute inner aggregates for this sub-group
+            for agg_def in &self.inner_aggregates {
+                let value = Self::compute_inline_aggregate(agg_def, sub_group_docs);
+                obj.insert(agg_def.output_key.clone(), value);
+            }
+
+            // Check if child mapping has inner _group (for deeply nested _group)
+            if let Some(mapping) = child_mapping {
+                if let Some(inner_group_rk) = mapping.render_keys.iter().find(|rk| rk.key == "_group") {
+                    let inner_child_mapping = mapping.child_at(inner_group_rk.index);
+                    let inner_render_keys = if let Some(inner_mapping) = inner_child_mapping {
+                        &inner_mapping.render_keys
+                    } else {
+                        &mapping.render_keys
+                    };
+                    let inner_array = Self::render_docs_with_keys(
+                        sub_group_docs,
+                        inner_render_keys,
+                        self.collection_name.as_deref(),
+                    );
+                    obj.insert("_group".to_string(), inner_array);
+                }
+            }
+
+            array.push(JsonValue::Object(obj));
+        }
+
+        JsonValue::Array(array)
+    }
+
+    /// Build a nested _group array by sub-grouping documents.
+    ///
+    /// The sub-group fields are the non-_group render_keys from the child mapping.
+    /// Documents are grouped by these field values, and each sub-group produces
+    /// a JSON object with the grouping field values + a `_group` array.
+    fn build_nested_group_array(
+        &self,
+        docs: &[&Doc],
+        child_mapping: &DocumentMapping,
+        inner_group_index: usize,
+    ) -> JsonValue {
+        // Sub-group fields: all render_keys except _group
+        let sub_group_fields: Vec<_> = child_mapping
+            .render_keys
+            .iter()
+            .filter(|rk| rk.key != "_group")
+            .collect();
+
+        // Sub-group documents by the sub-grouping field values
+        let mut sub_groups: Vec<(String, Vec<&Doc>)> = Vec::new();
+        let mut sub_group_map: HashMap<String, usize> = HashMap::new();
+
+        for doc in docs {
+            let mut key = String::new();
+            for field in &sub_group_fields {
+                key.push_str(&format!("{}_", field.index));
+                let value = doc.get(field.index);
+                key.push_str(&format!("{}_", Self::value_to_key(value)));
+            }
+
+            if let Some(&idx) = sub_group_map.get(&key) {
+                sub_groups[idx].1.push(doc);
+            } else {
+                let idx = sub_groups.len();
+                sub_group_map.insert(key.clone(), idx);
+                sub_groups.push((key, vec![doc]));
+            }
+        }
+
+        // Get the inner child mapping for the nested _group
+        let inner_child_mapping = child_mapping.child_at(inner_group_index);
+
+        // Build the JSON array: one object per sub-group
+        let mut array = Vec::with_capacity(sub_groups.len());
+        for (_key, sub_group_docs) in &sub_groups {
+            let mut obj = serde_json::Map::new();
+
+            // Add sub-grouping field values from the first doc in the sub-group
+            if let Some(first_doc) = sub_group_docs.first() {
+                for field in &sub_group_fields {
+                    let value = first_doc
+                        .get(field.index)
+                        .cloned()
+                        .unwrap_or(JsonValue::Null);
+                    obj.insert(field.key.clone(), value);
+                }
+            }
+
+            // Build the inner _group array
+            let inner_group_array = if let Some(inner_mapping) = inner_child_mapping {
+                // Check if the inner mapping has its own nested _group (recursive)
+                let inner_nested_group = inner_mapping
+                    .render_keys
+                    .iter()
+                    .find(|rk| rk.key == "_group")
+                    .map(|rk| rk.index);
+
+                if let Some(inner_inner_group_index) = inner_nested_group {
+                    self.build_nested_group_array(
+                        sub_group_docs,
+                        inner_mapping,
+                        inner_inner_group_index,
+                    )
+                } else {
+                    Self::render_docs_with_keys(sub_group_docs, &inner_mapping.render_keys, self.collection_name.as_deref())
+                }
+            } else {
+                // No inner child mapping: render docs with all non-_group parent render keys
+                Self::render_docs_with_keys(sub_group_docs, &child_mapping.render_keys, self.collection_name.as_deref())
+            };
+
+            obj.insert("_group".to_string(), inner_group_array);
+
+            // Compute inner aggregates for this sub-group
+            for agg_def in &self.inner_aggregates {
+                let value = Self::compute_inline_aggregate(agg_def, sub_group_docs);
+                obj.insert(agg_def.output_key.clone(), value);
+            }
+
+            array.push(JsonValue::Object(obj));
+        }
+
+        JsonValue::Array(array)
+    }
+
+    /// Compute an aggregate value inline for a sub-group of documents.
+    fn compute_inline_aggregate(agg_def: &InnerAggregateDef, docs: &[&Doc]) -> JsonValue {
+        let visible_docs: Vec<&&Doc> = docs.iter().filter(|d| !d.hidden).collect();
+
+        match agg_def.aggregate_type {
+            AggregateType::Count => {
+                JsonValue::Number((visible_docs.len() as i64).into())
+            }
+            AggregateType::Sum => {
+                let mut sum = 0.0;
+                let mut has_float = false;
+                for doc in &visible_docs {
+                    if let Some(JsonValue::Number(n)) = doc.get(agg_def.field_index) {
+                        if let Some(i) = n.as_i64() {
+                            sum += i as f64;
+                        } else if let Some(f) = n.as_f64() {
+                            sum += f;
+                            has_float = true;
+                        }
+                    }
+                }
+                if has_float {
+                    serde_json::Number::from_f64(sum)
+                        .map(JsonValue::Number)
+                        .unwrap_or(JsonValue::Null)
+                } else {
+                    JsonValue::Number((sum as i64).into())
+                }
+            }
+            AggregateType::Average => {
+                let mut sum = 0.0;
+                let mut count = 0usize;
+                for doc in &visible_docs {
+                    if let Some(JsonValue::Number(n)) = doc.get(agg_def.field_index) {
+                        if let Some(f) = n.as_f64() {
+                            sum += f;
+                            count += 1;
+                        }
+                    }
+                }
+                let avg = if count == 0 { 0.0 } else { sum / count as f64 };
+                serde_json::Number::from_f64(avg)
+                    .map(JsonValue::Number)
+                    .unwrap_or_else(|| JsonValue::Number(serde_json::Number::from(0)))
+            }
+            AggregateType::Min => {
+                let mut min: Option<f64> = None;
+                let mut has_float = false;
+                for doc in &visible_docs {
+                    if let Some(JsonValue::Number(n)) = doc.get(agg_def.field_index) {
+                        if let Some(i) = n.as_i64() {
+                            let v = i as f64;
+                            min = Some(min.map_or(v, |m: f64| m.min(v)));
+                        } else if let Some(f) = n.as_f64() {
+                            min = Some(min.map_or(f, |m: f64| m.min(f)));
+                            has_float = true;
+                        }
+                    }
+                }
+                match min {
+                    None => JsonValue::Null,
+                    Some(val) if has_float => serde_json::Number::from_f64(val)
+                        .map(JsonValue::Number)
+                        .unwrap_or(JsonValue::Null),
+                    Some(val) => JsonValue::Number((val as i64).into()),
+                }
+            }
+            AggregateType::Max => {
+                let mut max: Option<f64> = None;
+                let mut has_float = false;
+                for doc in &visible_docs {
+                    if let Some(JsonValue::Number(n)) = doc.get(agg_def.field_index) {
+                        if let Some(i) = n.as_i64() {
+                            let v = i as f64;
+                            max = Some(max.map_or(v, |m: f64| m.max(v)));
+                        } else if let Some(f) = n.as_f64() {
+                            max = Some(max.map_or(f, |m: f64| m.max(f)));
+                            has_float = true;
+                        }
+                    }
+                }
+                match max {
+                    None => JsonValue::Null,
+                    Some(val) if has_float => serde_json::Number::from_f64(val)
+                        .map(JsonValue::Number)
+                        .unwrap_or(JsonValue::Null),
+                    Some(val) => JsonValue::Number((val as i64).into()),
+                }
+            }
+        }
+    }
+
+    /// Render a list of documents to a JSON array using the given render keys.
+    fn render_docs_with_keys(
+        docs: &[&Doc],
+        render_keys: &[crate::document::RenderKey],
+        type_name: Option<&str>,
+    ) -> JsonValue {
+        let mut array = Vec::with_capacity(docs.len());
+        for doc in docs {
+            let mut obj = serde_json::Map::new();
+            for render_key in render_keys {
+                if render_key.key == "_group" {
+                    continue;
+                }
+                // Handle __typename
+                if render_key.key == "__typename" {
+                    if let Some(name) = type_name {
+                        obj.insert(
+                            render_key.key.clone(),
+                            JsonValue::String(name.to_string()),
+                        );
+                        continue;
+                    }
+                }
+                let value = doc
+                    .get(render_key.index)
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+                obj.insert(render_key.key.clone(), value);
+            }
             array.push(JsonValue::Object(obj));
         }
         JsonValue::Array(array)
@@ -252,5 +704,9 @@ impl PlanNode for GroupByNode {
         } else {
             None
         }
+    }
+
+    fn is_grouped_source(&self) -> bool {
+        true
     }
 }

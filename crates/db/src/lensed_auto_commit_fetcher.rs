@@ -325,9 +325,16 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         let mut missing_ids = Vec::new();
 
         for id_str in doc_ids {
-            let doc_id = document::DocID::from_string(id_str).map_err(|e| {
-                query::error::QueryError::execution(format!("invalid doc ID '{}': {}", id_str, e))
-            })?;
+            // Go DefraDB treats invalid doc IDs as "not found" rather than errors.
+            // This matches behavior where querying for a non-existent ID returns empty results.
+            let doc_id = match document::DocID::from_string(id_str) {
+                Ok(id) => id,
+                Err(_) => {
+                    // Invalid doc ID format - treat as not found
+                    missing_ids.push(id_str.clone());
+                    continue;
+                }
+            };
 
             match collection
                 .get_with_datastore(&datastore, &doc_id)

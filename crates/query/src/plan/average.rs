@@ -5,6 +5,7 @@ use serde_json::Value as JsonValue;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
+use crate::mapper::{Filter, Limit};
 use crate::planner::{Doc, PlanNode};
 
 /// AverageNode computes the average of a numeric field from its source.
@@ -34,6 +35,12 @@ pub struct AverageNode {
     started: bool,
     /// Whether we're in grouped mode (source provides group docs)
     grouped_mode: bool,
+    /// Optional filter to apply to group documents before averaging
+    aggregate_filter: Option<Filter>,
+    /// Optional limit/offset to apply to group documents before averaging
+    aggregate_limit: Option<Limit>,
+    /// If set, operate in "child aggregate" mode: read values from _group JSON array.
+    child_aggregate_source: Option<(usize, String)>,
 }
 
 impl AverageNode {
@@ -55,7 +62,25 @@ impl AverageNode {
             done: false,
             started: false,
             grouped_mode: false,
+            aggregate_filter: None,
+            aggregate_limit: None,
+            child_aggregate_source: None,
         }
+    }
+
+    pub fn with_child_aggregate_source(mut self, group_index: usize, field_name: String) -> Self {
+        self.child_aggregate_source = Some((group_index, field_name));
+        self
+    }
+
+    pub fn with_filter(mut self, filter: Filter) -> Self {
+        self.aggregate_filter = Some(filter);
+        self
+    }
+
+    pub fn with_limit(mut self, limit: Limit) -> Self {
+        self.aggregate_limit = Some(limit);
+        self
     }
 
     /// Extract numeric value from JSON, returning None for nulls
@@ -72,10 +97,32 @@ impl AverageNode {
         let mut sum = 0.0;
         let mut count = 0usize;
 
-        for doc in docs {
-            if doc.hidden {
-                continue;
+        let filtered: Vec<&Doc> = docs
+            .iter()
+            .filter(|d| !d.hidden)
+            .filter(|d| {
+                if let Some(ref filter) = self.aggregate_filter {
+                    filter.matches(d.fields(), &self.document_mapping).unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        let limited: Box<dyn Iterator<Item = &&Doc>> = if let Some(ref limit) = self.aggregate_limit {
+            let offset = limit.offset as usize;
+            let effective_limit = limit.limit.map(|l| l as usize);
+            match (effective_limit, offset) {
+                (Some(0), _) => Box::new(filtered.iter()),
+                (Some(l), o) => Box::new(filtered.iter().skip(o).take(l)),
+                (None, o) if o > 0 => Box::new(filtered.iter().skip(o)),
+                _ => Box::new(filtered.iter()),
             }
+        } else {
+            Box::new(filtered.iter())
+        };
+
+        for doc in limited {
             if let Some(val) = Self::extract_numeric(doc.get(self.field_index)) {
                 sum += val;
                 count += 1;
@@ -122,11 +169,43 @@ impl PlanNode for AverageNode {
             self.start().await?;
         }
 
+        // Child aggregate mode: read from _group JSON array on each doc
+        if let Some((group_index, ref field_name)) = self.child_aggregate_source {
+            if !self.source.next().await? {
+                return Ok(false);
+            }
+            let doc = self.source.value();
+            let avg = if let Some(JsonValue::Array(items)) = doc.get(group_index) {
+                let mut sum = 0.0;
+                let mut count = 0usize;
+                for item in items {
+                    if let JsonValue::Object(obj) = item {
+                        if let Some(val) = obj.get(field_name.as_str()) {
+                            if let Some(f) = val.as_f64() {
+                                sum += f;
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                if count == 0 { 0.0 } else { sum / count as f64 }
+            } else {
+                0.0
+            };
+            let mut new_doc = doc.deep_clone();
+            new_doc.set(self.aggregate_index, Self::avg_to_json(avg));
+            self.current_doc = new_doc;
+            return Ok(true);
+        }
+
         loop {
             // Try to get next from source
             if !self.source.next().await? {
                 // No more source documents
                 if !self.grouped_mode && !self.done {
+                    if self.source.is_grouped_source() {
+                        return Ok(false);
+                    }
                     // Non-grouped mode: Return the single result
                     self.done = true;
                     // Go DefraDB returns 0 for empty set, not null
@@ -196,5 +275,9 @@ impl PlanNode for AverageNode {
     fn current_group_docs(&self) -> Option<&[Doc]> {
         // Pass through from source for stacked aggregates
         self.source.current_group_docs()
+    }
+
+    fn is_grouped_source(&self) -> bool {
+        self.source.is_grouped_source()
     }
 }

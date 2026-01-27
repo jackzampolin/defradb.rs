@@ -628,6 +628,10 @@ impl Filter {
             if let Some(op) = FilterOp::parse(key) {
                 match op {
                     FilterOp::And => {
+                        // Null _and is a no-op (matches all)
+                        if value.is_null() {
+                            continue;
+                        }
                         let arr = value
                             .as_array()
                             .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
@@ -642,6 +646,10 @@ impl Filter {
                         continue;
                     }
                     FilterOp::Or => {
+                        // Null _or is a no-op (matches all)
+                        if value.is_null() {
+                            continue;
+                        }
                         let arr = value
                             .as_array()
                             .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
@@ -661,6 +669,10 @@ impl Filter {
                         continue;
                     }
                     FilterOp::Not => {
+                        // Null _not is a no-op (matches all)
+                        if value.is_null() {
+                            continue;
+                        }
                         let sub_conditions: HashMap<String, JsonValue> =
                             serde_json::from_value(value.clone())
                                 .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
@@ -673,6 +685,24 @@ impl Filter {
                 }
             }
 
+            // Handle _alias filter: filter by aliased field names (render keys)
+            // Example: filter: {_alias: {myAge: {_gt: 20}}} where myAge is an alias for Age
+            // Also supports logical operators: {_alias: {_and: [{myAge: {_gt: 20}}]}}
+            if key == "_alias" {
+                // Null _alias is a no-op (matches all)
+                if value.is_null() {
+                    continue;
+                }
+                let alias_conditions: HashMap<String, JsonValue> =
+                    serde_json::from_value(value.clone())
+                        .map_err(|e| QueryError::invalid_filter(format!("_alias value must be object: {}", e)))?;
+
+                if !self.eval_alias_conditions(&alias_conditions, fields, mapping)? {
+                    return Ok(false);
+                }
+                continue;
+            }
+
             // Field condition
             let field_index = mapping
                 .first_index_of_name(key)
@@ -683,6 +713,14 @@ impl Filter {
                 .and_then(|v| v.as_ref())
                 .cloned()
                 .unwrap_or(JsonValue::Null);
+
+            // Handle null field conditions: {Name: null} is equivalent to {Name: {_eq: null}}
+            if value.is_null() {
+                if !Self::values_equal(&field_value, &JsonValue::Null) {
+                    return Ok(false);
+                }
+                continue;
+            }
 
             // Value should be an object with operator keys or nested field conditions
             let ops = value
@@ -1313,6 +1351,96 @@ impl Filter {
         }
 
         None
+    }
+
+    /// Evaluate alias-based filter conditions.
+    /// Alias filters allow filtering by render key names instead of field names.
+    /// Supports logical operators (_and, _or, _not) within the alias block.
+    fn eval_alias_conditions(
+        &self,
+        conditions: &HashMap<String, JsonValue>,
+        fields: &[Option<JsonValue>],
+        mapping: &DocumentMapping,
+    ) -> Result<bool> {
+        for (key, value) in conditions {
+            // Check for logical operators within alias block
+            if let Some(op) = FilterOp::parse(key) {
+                match op {
+                    FilterOp::And => {
+                        let arr = value
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_and requires array in _alias"))?;
+                        for item in arr {
+                            let sub_conditions: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            if !self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                                return Ok(false);
+                            }
+                        }
+                        continue;
+                    }
+                    FilterOp::Or => {
+                        let arr = value
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_or requires array in _alias"))?;
+                        let mut any_match = false;
+                        for item in arr {
+                            let sub_conditions: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            if self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                        if !any_match {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    FilterOp::Not => {
+                        let sub_conditions: HashMap<String, JsonValue> =
+                            serde_json::from_value(value.clone())
+                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                        if self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    _ => {} // Non-logical ops are handled as alias field conditions below
+                }
+            }
+
+            // Look up by render_key (alias) instead of field name
+            let field_index = mapping
+                .try_find_index_from_render_key(key)
+                .ok_or_else(|| QueryError::unknown_field(format!("alias '{}' not found", key)))?;
+
+            let field_value = fields
+                .get(field_index)
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+
+            let ops = value
+                .as_object()
+                .ok_or_else(|| QueryError::invalid_filter("alias field condition must be object"))?;
+
+            for (op_key, op_value) in ops {
+                if let Some(op) = FilterOp::parse(op_key) {
+                    if !self.eval_op(&field_value, op, op_value)? {
+                        return Ok(false);
+                    }
+                } else {
+                    return Err(QueryError::invalid_filter(format!(
+                        "unknown operator '{}' in _alias filter",
+                        op_key
+                    )));
+                }
+            }
+        }
+        Ok(true)
     }
 }
 
