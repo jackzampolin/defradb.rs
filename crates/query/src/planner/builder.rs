@@ -11,10 +11,10 @@ use tracing::{debug, warn};
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::{Filter, Requestable, Select};
+use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    GroupByNode, IndexScanNode, JoinSide, LimitNode, OrderByNode, RelationFilter, ScanNode,
-    SelectNode, TypeJoinMany, TypeJoinOne,
+    AllDocsNode, AverageNode, CountNode, GroupByNode, IndexScanNode, JoinSide, LimitNode, MaxNode,
+    MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode, SumNode, TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
@@ -249,6 +249,35 @@ impl Planner {
                         .find(|(_, f)| &f.name == field_name)
                     {
                         scan_mapping.add(schema_idx, field_name);
+                    }
+                }
+            }
+        }
+
+        // Add aggregate fields to scan_mapping if present in render_mapping.
+        // Aggregates are virtual fields (not in schema) that need explicit copying.
+        for field in &select.fields {
+            if let Requestable::Aggregate(agg) = field {
+                let agg_type_name = agg.aggregate_type.as_str();
+                // Add the aggregate type name if not already in scan_mapping
+                if scan_mapping.first_index_of_name(agg_type_name).is_none() {
+                    let scan_index = scan_mapping.next_index();
+                    scan_mapping.add(scan_index, agg_type_name);
+                    scan_mapping.add_render_key(scan_index, agg.output_name());
+                }
+
+                // Always add aggregate target fields if present (even if aggregate type exists)
+                for target in &agg.targets {
+                    if let Some(ref field_name) = target.field_name {
+                        if scan_mapping.first_index_of_name(field_name).is_none() {
+                            // Verify field exists in collection schema
+                            if collection.field_by_name(field_name).is_some() {
+                                // Use next available index, not schema index,
+                                // to avoid conflicts with other allocated indices
+                                let new_index = scan_mapping.next_index();
+                                scan_mapping.add(new_index, field_name);
+                            }
+                        }
                     }
                 }
             }
@@ -532,36 +561,82 @@ impl Planner {
             }
         }
 
-        // 4b. Apply GroupBy if present (must be after joins but before order/limit)
-        // Use scan_mapping because the upstream plan produces docs with schema indices
-        if let Some(ref group_by) = select.group_by {
-            plan = Box::new(GroupByNode::new(
-                plan,
-                group_by.clone(),
-                scan_mapping.clone(),
-            ));
-        }
+        // Check if we have GROUP BY - this affects the order of operations
+        let has_group_by = select.group_by.is_some();
 
-        // 5. Apply order by after joins (so nested fields are available)
-        if let Some(ref order_by) = select.order_by {
-            plan = Box::new(OrderByNode::new(
-                plan,
-                order_by.clone(),
-                scan_mapping.clone(),
-            ));
-        }
+        if has_group_by {
+            // WITH GROUP BY: GroupByNode → Aggregates → OrderBy → Limit
 
-        // 6. Apply limit/offset if present
-        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
-        if let Some(ref limit) = select.limit {
-            let effective_limit = match limit.limit {
-                Some(0) => None, // limit: 0 means no limit (Go compatibility)
-                other => other,
-            };
-            // Only create LimitNode if there's actually a limit or offset to apply
-            if effective_limit.is_some() || limit.offset > 0 {
-                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+            // 4b. Apply GroupBy
+            // Use scan_mapping because the upstream plan produces docs with schema indices
+            if let Some(ref group_by) = select.group_by {
+                plan = Box::new(GroupByNode::new(
+                    plan,
+                    group_by.clone(),
+                    scan_mapping.clone(),
+                ));
             }
+
+            // 5. Add aggregate nodes (after grouping)
+            plan = self.add_aggregate_nodes(plan, select, &scan_mapping)?;
+
+            // 6. Apply order by (after grouping/aggregation)
+            if let Some(ref order_by) = select.order_by {
+                plan = Box::new(OrderByNode::new(
+                    plan,
+                    order_by.clone(),
+                    scan_mapping.clone(),
+                ));
+            }
+
+            // 7. Apply limit/offset
+            if let Some(ref limit) = select.limit {
+                let effective_limit = match limit.limit {
+                    Some(0) => None, // limit: 0 means no limit (Go compatibility)
+                    other => other,
+                };
+                if effective_limit.is_some() || limit.offset > 0 {
+                    plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+                }
+            }
+        } else {
+            // WITHOUT GROUP BY: OrderBy → Limit → [AllDocsNode] → Aggregates
+
+            // 5. Apply order by (before limit)
+            if let Some(ref order_by) = select.order_by {
+                plan = Box::new(OrderByNode::new(
+                    plan,
+                    order_by.clone(),
+                    scan_mapping.clone(),
+                ));
+            }
+
+            // 6. Apply limit/offset
+            if let Some(ref limit) = select.limit {
+                let effective_limit = match limit.limit {
+                    Some(0) => None, // limit: 0 means no limit (Go compatibility)
+                    other => other,
+                };
+                if effective_limit.is_some() || limit.offset > 0 {
+                    plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+                }
+            }
+
+            // 7. Count aggregates to determine if we need AllDocsNode
+            let aggregate_count = select
+                .fields
+                .iter()
+                .filter(|f| matches!(f, Requestable::Aggregate(_)))
+                .count();
+
+            // If there are multiple aggregates, wrap in AllDocsNode so they all
+            // can access the original documents via current_group_docs()
+            if aggregate_count > 1 {
+                plan = Box::new(AllDocsNode::new(plan, scan_mapping.clone()));
+            }
+
+            // 8. Add aggregate nodes (for top-level aggregates without GROUP BY)
+            plan = self.add_aggregate_nodes(plan, select, &scan_mapping)?;
         }
 
         Ok(PlanResult {
@@ -569,6 +644,69 @@ impl Planner {
             index_scan,
             ordering_only_fields,
         })
+    }
+
+    /// Add aggregate nodes to the plan based on the select's aggregate fields.
+    fn add_aggregate_nodes(
+        &self,
+        mut plan: Box<dyn PlanNode>,
+        select: &Select,
+        mapping: &DocumentMapping,
+    ) -> Result<Box<dyn PlanNode>> {
+        for field in &select.fields {
+            if let Requestable::Aggregate(agg) = field {
+                // Get the index where the aggregate result should be stored
+                // Use the aggregate type name for lookup (that's how it's registered in mapping)
+                let agg_type_name = agg.aggregate_type.as_str();
+                let agg_index = mapping.first_index_of_name(agg_type_name).ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "aggregate '{}' not found in document mapping - this is a bug",
+                        agg_type_name
+                    ))
+                })?;
+
+                // For aggregates that operate on a field, get the field index
+                let field_index = if !agg.targets.is_empty() && agg.targets[0].field_name.is_some()
+                {
+                    let target_field = agg.targets[0].field_name.as_ref().unwrap();
+                    mapping.first_index_of_name(target_field).ok_or_else(|| {
+                        QueryError::execution(format!(
+                            "aggregate target field '{}' not found in mapping",
+                            target_field
+                        ))
+                    })?
+                } else {
+                    0 // Not used for count
+                };
+
+                match agg.aggregate_type {
+                    AggregateType::Count => {
+                        plan = Box::new(CountNode::new(plan, mapping.clone(), agg_index));
+                    }
+                    AggregateType::Sum => {
+                        plan =
+                            Box::new(SumNode::new(plan, mapping.clone(), field_index, agg_index));
+                    }
+                    AggregateType::Average => {
+                        plan = Box::new(AverageNode::new(
+                            plan,
+                            mapping.clone(),
+                            field_index,
+                            agg_index,
+                        ));
+                    }
+                    AggregateType::Min => {
+                        plan =
+                            Box::new(MinNode::new(plan, mapping.clone(), field_index, agg_index));
+                    }
+                    AggregateType::Max => {
+                        plan =
+                            Box::new(MaxNode::new(plan, mapping.clone(), field_index, agg_index));
+                    }
+                }
+            }
+        }
+        Ok(plan)
     }
 
     /// Try to select an index for the given query.

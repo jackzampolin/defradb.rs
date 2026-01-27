@@ -551,7 +551,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             if let Requestable::Aggregate(agg) = requestable {
                 let mut relation_targets = Vec::new();
                 for target in &agg.targets {
-                    if !target.host_name.is_empty() {
+                    // Skip _group targets - they're handled by GroupByNode and aggregate nodes
+                    // The _group virtual field is populated by GroupByNode, not by relation joins
+                    if !target.host_name.is_empty() && target.host_name != "_group" {
                         relation_targets
                             .push((target.host_name.clone(), target.field_name.clone()));
                     }
