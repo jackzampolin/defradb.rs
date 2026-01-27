@@ -387,21 +387,12 @@ pub async fn write_document_blocks(
                 "Stored LWW field block and head"
             );
 
-            // Add link to composite
+            // Add link to composite - only new blocks get linked
             field_links.push(DAGLink::new(field_name.clone(), field_cid));
             field_cids.push(field_cid);
-        } else {
-            // Field was not modified - use existing head CID in composite links
-            if let Some(existing_cid) = field_head.cid {
-                tracing::debug!(
-                    field_name = %field_name,
-                    cid = %existing_cid,
-                    "Using existing field head for unchanged field"
-                );
-                field_links.push(DAGLink::new(field_name.clone(), existing_cid));
-                // Note: don't add to field_cids since we didn't create a new block
-            }
         }
+        // Note: Unchanged fields are NOT added to composite links.
+        // Go only includes newly created field blocks in the composite's links array.
     }
 
     // Get existing composite head (if any) to build proper DAG links
