@@ -421,6 +421,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(JsonValue::Object(results))
     }
 
+    /// Execute already-parsed Select operations with a specific fetcher and identity.
+    pub(crate) async fn execute_selects_internal(
+        &self,
+        selects: Vec<Select>,
+        fetcher: &dyn DocFetcher,
+        caller_identity: Option<Did>,
+    ) -> Result<JsonValue> {
+        let mut results = Map::new();
+
+        for select in selects {
+            let result = self
+                .execute_select_internal(&select, fetcher, caller_identity.clone())
+                .await?;
+            let key = select.field.output_name();
+            results.insert(key.to_string(), result);
+        }
+
+        Ok(JsonValue::Object(results))
+    }
+
     /// Execute a single Select operation with a specific fetcher and identity.
     async fn execute_select_internal(
         &self,

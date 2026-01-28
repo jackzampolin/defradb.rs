@@ -192,7 +192,7 @@ pub fn parse_query_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Vec<Select>> {
-    match parse_request_with_variables(query, variables)? {
+    match parse_request_with_variables(query, variables, None)? {
         ParsedOperation::Query { selects, .. } => Ok(selects),
         ParsedOperation::Mutation(_) => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
@@ -217,7 +217,7 @@ pub fn parse_mutations_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Vec<Mutation>> {
-    match parse_request_with_variables(query, variables)? {
+    match parse_request_with_variables(query, variables, None)? {
         ParsedOperation::Mutation(mutations) => Ok(mutations),
         ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
         ParsedOperation::Subscription { .. } => {
@@ -234,7 +234,7 @@ pub fn parse_mutations_with_variables(
 /// This is the main entry point for parsing GraphQL requests.
 /// For queries with variables, use `parse_request_with_variables` instead.
 pub fn parse_request(query: &str) -> Result<ParsedOperation> {
-    parse_request_with_variables(query, None)
+    parse_request_with_variables(query, None, None)
 }
 
 /// Parse a GraphQL request with variable substitution.
@@ -279,6 +279,7 @@ fn is_introspection_query(doc: &Document<'_, String>) -> bool {
 pub fn parse_request_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
+    operation_name: Option<&str>,
 ) -> Result<ParsedOperation> {
     let doc: Document<'_, String> =
         graphql_parser::parse_query(query).map_err(|e| QueryError::parse(e.to_string()))?;
@@ -299,6 +300,18 @@ pub fn parse_request_with_variables(
         }
     }
 
+    // Count operations (not fragments) to validate operation_name
+    let operation_count = doc
+        .definitions
+        .iter()
+        .filter(|d| matches!(d, Definition::Operation(_)))
+        .count();
+    if operation_count > 1 && operation_name.is_none() {
+        return Err(QueryError::parse(
+            "Must provide operation name if query contains multiple operations.",
+        ));
+    }
+
     let mut selects = Vec::new();
     let mut mutations = Vec::new();
     let mut subscription_selects = Vec::new();
@@ -311,6 +324,19 @@ pub fn parse_request_with_variables(
     for def in &doc.definitions {
         match def {
             Definition::Operation(op) => {
+                // If operation_name is specified, skip operations that don't match
+                if let Some(target_name) = operation_name {
+                    let op_name = match op {
+                        OperationDefinition::Query(q) => q.name.as_deref(),
+                        OperationDefinition::Mutation(m) => m.name.as_deref(),
+                        OperationDefinition::Subscription(s) => s.name.as_deref(),
+                        OperationDefinition::SelectionSet(_) => None,
+                    };
+                    if op_name != Some(target_name) {
+                        continue;
+                    }
+                }
+
                 match op {
                     OperationDefinition::Query(q) => {
                         has_query = true;
@@ -459,6 +485,23 @@ fn parse_field_to_select(
             "filter" => {
                 // Null filter is valid and means "no filter" (operate on all docs)
                 if !matches!(arg_value, Value::Null) {
+                    // Validate _and/_or arrays don't contain null elements
+                    if let Value::Object(obj) = arg_value {
+                        for (key, val) in obj {
+                            if key == "_and" || key == "_or" {
+                                if let Value::List(items) = val {
+                                    for item in items {
+                                        if matches!(item, Value::Null) {
+                                            return Err(QueryError::parse(format!(
+                                                "Expected \"{}FilterArg!\", found null",
+                                                collection_name
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let filter = parse_filter_value(arg_value, variables)?;
                     select.filter = Some(filter);
                 }
@@ -725,6 +768,24 @@ fn parse_filter_value(
             let conditions = parse_filter_object(obj, variables)?;
             Ok(Filter::from_conditions(conditions))
         }
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name.as_str()).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            if let JsonValue::Object(obj) = json_val {
+                let conditions: HashMap<String, JsonValue> =
+                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                Ok(Filter::from_conditions(conditions))
+            } else {
+                Err(QueryError::parse("filter must be an object"))
+            }
+        }
         _ => Err(QueryError::parse("filter must be an object")),
     }
 }
@@ -947,6 +1008,11 @@ fn parse_order_value(
             // Array of order objects: [{rating: ASC}, {publisher: {yearOpened: DESC}}]
             for item in items {
                 if let Value::Object(obj) = item {
+                    if obj.len() > 1 {
+                        return Err(QueryError::parse(
+                            "each order argument can only define one field",
+                        ));
+                    }
                     for (field_name, direction_val) in obj {
                         if let Some(condition) =
                             parse_order_condition(field_name.clone(), direction_val, variables)?
@@ -2207,7 +2273,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("name".to_string(), json!("Alice"))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects.len(), 1);
@@ -2232,7 +2298,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("lim".to_string(), json!(10))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(10));
@@ -2254,7 +2320,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("ids".to_string(), json!(["bae-123", "bae-456"]))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(
@@ -2281,7 +2347,7 @@ mod variable_tests {
             ("userAge".to_string(), json!(25)),
         ]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Mutation(mutations) => {
                 assert_eq!(mutations.len(), 1);
@@ -2305,7 +2371,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("id".to_string(), json!("bae-999"))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Mutation(mutations) => {
                 assert_eq!(mutations[0].doc_ids, Some(vec!["bae-999".to_string()]));
@@ -2325,7 +2391,7 @@ mod variable_tests {
         "#;
 
         let variables = HashMap::new();
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("was not provided"));
     }
@@ -2340,7 +2406,7 @@ mod variable_tests {
             }
         "#;
 
-        let result = parse_request_with_variables(query, None);
+        let result = parse_request_with_variables(query, None, None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2360,7 +2426,7 @@ mod variable_tests {
         "#;
 
         // No variables provided
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects.len(), 1);
@@ -2385,7 +2451,7 @@ mod variable_tests {
 
         // Provide string instead of int
         let variables = HashMap::from([("lim".to_string(), json!("not an int"))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2411,7 +2477,7 @@ mod variable_tests {
             ("lim".to_string(), json!(5)),
         ]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(5));
@@ -2443,7 +2509,7 @@ mod variable_tests {
 
         // Provide string instead of bool
         let variables = HashMap::from([("deleted".to_string(), json!("true"))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2463,7 +2529,7 @@ mod variable_tests {
 
         // Provide integer instead of string
         let variables = HashMap::from([("c".to_string(), json!(12345))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2483,7 +2549,7 @@ mod variable_tests {
         "#;
 
         let variables = HashMap::from([("dir".to_string(), json!("DESC"))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let order = selects[0].order_by.as_ref().unwrap();
@@ -2507,7 +2573,7 @@ mod variable_tests {
         "#;
 
         let variables = HashMap::from([("dir".to_string(), json!("INVALID"))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         // Error format matches Go DefraDB
         assert!(result
@@ -2532,7 +2598,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let filter = selects[0].filter.as_ref().unwrap();
@@ -2559,7 +2625,7 @@ mod variable_tests {
 
         // Provide a value - should override default
         let variables = HashMap::from([("name".to_string(), json!("ProvidedName"))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let filter = selects[0].filter.as_ref().unwrap();
@@ -2584,7 +2650,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default 50
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(50));
@@ -2604,7 +2670,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default true
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert!(selects[0].show_deleted);
@@ -2626,7 +2692,7 @@ mod variable_tests {
 
         // Only provide $name, use defaults for $minAge and $lim
         let variables = HashMap::from([("name".to_string(), json!("Alice"))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(10));
@@ -2653,7 +2719,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Mutation(mutations) => {
                 let input = &mutations[0].create_input;
@@ -2674,7 +2740,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default array
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let doc_ids = selects[0].doc_ids.as_ref().unwrap();
@@ -2697,7 +2763,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default null
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let filter = selects[0].filter.as_ref().unwrap();
@@ -2723,7 +2789,7 @@ mod variable_tests {
             }
         "#;
 
-        let result = parse_request_with_variables(query, None);
+        let result = parse_request_with_variables(query, None, None);
         // graphql-parser rejects this at the parse level since variable references
         // aren't allowed in default value position per the GraphQL spec
         assert!(
@@ -2793,7 +2859,7 @@ mod subscription_tests {
         "#;
 
         let variables = HashMap::from([("active".to_string(), serde_json::json!(true))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Subscription { select } => {
                 assert_eq!(select.collection_name, "User");
@@ -2914,7 +2980,7 @@ mod subscription_tests {
         "#;
 
         // Don't provide the variable - should use default
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Subscription { select } => {
                 assert_eq!(select.limit.as_ref().unwrap().limit, Some(10));
