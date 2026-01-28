@@ -7,9 +7,11 @@ use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 
-use db::{AutoCommitMutator, LensedAutoCommitFetcher, DB};
+use db::{AutoCommitMutator, DbCollectionProvider, LensedAutoCommitFetcher, DB};
 use query::runner::QueryRunner;
 use storage::LevelDbStore;
+
+type WasmRunner = QueryRunner<LensedAutoCommitFetcher<LevelDbStore>>;
 
 use crate::bindings::{from_js, to_js, ClientConfig, CollectionInfo, FieldInfo};
 use crate::error::{Result, WasmError};
@@ -45,6 +47,7 @@ use crate::error::{Result, WasmError};
 #[wasm_bindgen]
 pub struct DefraClient {
     db: Option<Arc<DB<LevelDbStore>>>,
+    runner: Option<WasmRunner>,
     closed: bool,
 }
 
@@ -193,8 +196,17 @@ impl DefraClient {
             WasmError::Storage(format!("Failed to load collections: {}", e))
         })?;
 
+        let db = Arc::new(db);
+
+        let fetcher = LensedAutoCommitFetcher::new(Arc::clone(&db));
+        let provider = DbCollectionProvider::new_arc(Arc::clone(&db));
+        let mutator = Arc::new(AutoCommitMutator::new(Arc::clone(&db)));
+        let runner = QueryRunner::with_provider(fetcher, provider)
+            .with_mutator(mutator);
+
         Ok(Self {
-            db: Some(Arc::new(db)),
+            db: Some(db),
+            runner: Some(runner),
             closed: false,
         })
     }
@@ -240,25 +252,14 @@ impl DefraClient {
     }
 
     async fn query_impl(&self, graphql: &str) -> Result<JsValue> {
-        let db = self.ensure_open()?;
+        self.ensure_open()?;
 
-        // Validate that it looks like a query
         if graphql.trim().is_empty() {
             return Err(WasmError::Query("Empty query string".to_string()));
         }
 
-        // Create fetcher that auto-commits and applies lens migrations
-        let fetcher = LensedAutoCommitFetcher::new(Arc::clone(db));
+        let runner = self.runner.as_ref().ok_or(WasmError::NotInitialized)?;
 
-        // Get collections for the query runner
-        let collections = db::load_active_collections(db)
-            .await
-            .map_err(|e| WasmError::Query(format!("Failed to load collections: {}", e)))?;
-
-        // Create query runner
-        let runner = QueryRunner::new(fetcher, collections);
-
-        // Execute the query
         match runner.execute_query(graphql).await {
             Ok(result) => {
                 let response = serde_json::json!({
@@ -272,25 +273,24 @@ impl DefraClient {
     }
 
     async fn mutate_impl(&mut self, graphql: &str) -> Result<JsValue> {
-        let db = self.ensure_open()?;
+        self.ensure_open()?;
 
         if graphql.trim().is_empty() {
             return Err(WasmError::Query("Empty mutation string".to_string()));
         }
 
-        let fetcher = LensedAutoCommitFetcher::new(Arc::clone(db));
-        let mutator = Arc::new(AutoCommitMutator::new(Arc::clone(db)));
-        let collections = db::load_active_collections(db)
-            .await
-            .map_err(|e| WasmError::Query(format!("Failed to load collections: {}", e)))?;
+        let result = self
+            .runner
+            .as_ref()
+            .ok_or(WasmError::NotInitialized)?
+            .execute_mutation(graphql)
+            .await;
 
-        let runner = QueryRunner::new(fetcher, collections).with_mutator(mutator);
-
-        match runner.execute_mutation(graphql).await {
-            Ok(result) => {
+        match result {
+            Ok(data) => {
                 self.persist_impl().await?;
                 let response = serde_json::json!({
-                    "data": result,
+                    "data": data,
                     "errors": [],
                 });
                 to_js(&response)
@@ -329,6 +329,9 @@ impl DefraClient {
         if self.closed {
             return Ok(());
         }
+
+        // Drop runner first — it holds Arc<DB> refs via fetcher, mutator, and provider
+        self.runner = None;
 
         if let Some(db) = self.db.take() {
             match Arc::try_unwrap(db) {
