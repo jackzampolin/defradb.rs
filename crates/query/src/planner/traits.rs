@@ -237,6 +237,49 @@ pub trait PlanNode: Send + Sync {
 
         JsonValue::Object(obj)
     }
+
+    /// Generate an explanation with execution metrics for EXPLAIN (type: execute).
+    ///
+    /// Returns a JSON object in Go DefraDB format with execution statistics:
+    /// - scanNode: iterations, docFetches, fieldFetches, indexFetches
+    /// - selectNode: iterations, filterMatches
+    /// - etc.
+    fn explain_execute(&self) -> JsonValue {
+        let node_kind = self.kind().to_string();
+        let inner = self.explain_execute_inner();
+
+        let mut wrapper = serde_json::Map::new();
+        wrapper.insert(node_kind, inner);
+        JsonValue::Object(wrapper)
+    }
+
+    /// Generate the inner execution explanation content for this node.
+    ///
+    /// Override this in specific nodes to add execution-specific metrics.
+    /// Default implementation includes child nodes.
+    fn explain_execute_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Recursively explain child nodes with execution info
+        if let Some(source) = self.source() {
+            let child_explain = source.explain_execute();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        JsonValue::Object(obj)
+    }
+
+    /// Get execution info for this node (for Execute explain mode).
+    ///
+    /// Returns the execution statistics collected during query execution.
+    /// Default implementation returns empty ExecInfo.
+    fn exec_info(&self) -> ExecInfo {
+        ExecInfo::default()
+    }
 }
 
 /// Execution statistics for plan nodes

@@ -10,7 +10,7 @@ use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs
 use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, ExecInfo, PlanNode};
 
 /// Derive a short u32 ID from a collection_id string.
 /// Uses the same hash as db::collection_short_id for consistency.
@@ -54,11 +54,16 @@ pub struct ScanNode {
     fetcher: Option<Arc<dyn DocFetcher>>,
     /// Whether docs were explicitly provided (even if empty)
     docs_provided: bool,
+    /// Execution statistics for explain execute mode
+    exec_info: ExecInfo,
+    /// Number of fields per document (for fieldFetches calculation)
+    fields_per_doc: usize,
 }
 
 impl ScanNode {
     /// Create a new scan node for a collection
     pub fn new(collection: CollectionVersion, document_mapping: DocumentMapping) -> Self {
+        let fields_per_doc = document_mapping.field_count();
         Self {
             collection,
             document_mapping,
@@ -70,6 +75,8 @@ impl ScanNode {
             initialized: false,
             fetcher: None,
             docs_provided: false,
+            exec_info: ExecInfo::default(),
+            fields_per_doc,
         }
     }
 
@@ -127,6 +134,8 @@ impl ScanNode {
 impl PlanNode for ScanNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
+        // Reset execution stats
+        self.exec_info = ExecInfo::default();
 
         // If docs weren't provided and we have a fetcher, load documents from storage
         if !self.docs_provided {
@@ -167,6 +176,9 @@ impl PlanNode for ScanNode {
             ));
         }
 
+        // Track iteration (Go counts each call to next, including final false)
+        self.exec_info.iterations += 1;
+
         loop {
             if self.position >= self.docs.len() {
                 return Ok(false);
@@ -174,6 +186,11 @@ impl PlanNode for ScanNode {
 
             let doc = &self.docs[self.position];
             self.position += 1;
+
+            // Track document fetch
+            self.exec_info.docs_fetched += 1;
+            // Track field fetches (each field in the document)
+            self.exec_info.fields_fetched += self.fields_per_doc as u64;
 
             // Skip deleted docs if not showing deleted
             if !self.show_deleted && doc.is_deleted() {
@@ -247,6 +264,34 @@ impl PlanNode for ScanNode {
         if self.show_deleted {
             obj.insert("showDeleted".to_string(), serde_json::Value::Bool(true));
         }
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn exec_info(&self) -> ExecInfo {
+        self.exec_info.clone()
+    }
+
+    fn explain_execute_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // Go DefraDB execute format: iterations, docFetches, fieldFetches, indexFetches
+        obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.exec_info.iterations),
+        );
+        obj.insert(
+            "docFetches".to_string(),
+            serde_json::json!(self.exec_info.docs_fetched),
+        );
+        obj.insert(
+            "fieldFetches".to_string(),
+            serde_json::json!(self.exec_info.fields_fetched),
+        );
+        obj.insert(
+            "indexFetches".to_string(),
+            serde_json::json!(self.exec_info.indexes_fetched),
+        );
 
         serde_json::Value::Object(obj)
     }

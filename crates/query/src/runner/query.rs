@@ -149,25 +149,142 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     pub async fn explain_mutation_with_identity(
         &self,
         mutation_str: &str,
-        _caller_identity: Option<Did>,
+        caller_identity: Option<Did>,
         explain_type: ExplainType,
+    ) -> Result<JsonValue> {
+        use crate::query_parse::parse_mutations;
+
+        match explain_type {
+            ExplainType::Simple | ExplainType::Debug => {
+                // Simple and Debug modes: explain without execution
+                let mutations = parse_mutations(mutation_str)?;
+                let mut operation_children: Vec<JsonValue> = Vec::new();
+
+                for mutation in mutations {
+                    let mutation_explain =
+                        self.explain_single_mutation(&mutation, explain_type).await?;
+                    operation_children.push(mutation_explain);
+                }
+
+                // Wrap all mutations in operationNode array (Go's MultiNode pattern)
+                Ok(serde_json::json!({
+                    "explain": {
+                        "operationNode": operation_children
+                    }
+                }))
+            }
+            ExplainType::Execute => {
+                // Execute mode: run the mutation and collect metrics
+                self.execute_mutation_explain(mutation_str, caller_identity)
+                    .await
+            }
+        }
+    }
+
+    /// Execute mutation and return explain output with execution metrics.
+    async fn execute_mutation_explain(
+        &self,
+        mutation_str: &str,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         use crate::query_parse::parse_mutations;
 
         let mutations = parse_mutations(mutation_str)?;
         let mut operation_children: Vec<JsonValue> = Vec::new();
+        let mut total_executions: u64 = 0;
+        let mut total_docs: usize = 0;
+        let mut execution_success = true;
+        let mut execution_errors: Vec<String> = Vec::new();
 
         for mutation in mutations {
-            let mutation_explain = self.explain_single_mutation(&mutation, explain_type).await?;
-            operation_children.push(mutation_explain);
+            match self
+                .execute_single_mutation_with_metrics(&mutation, caller_identity.clone())
+                .await
+            {
+                Ok((mutation_explain, doc_count, exec_count)) => {
+                    operation_children.push(mutation_explain);
+                    total_docs += doc_count;
+                    total_executions += exec_count;
+                }
+                Err(e) => {
+                    execution_success = false;
+                    execution_errors.push(e.to_string());
+                }
+            }
         }
 
-        // Wrap all mutations in operationNode array (Go's MultiNode pattern)
-        Ok(serde_json::json!({
-            "explain": {
-                "operationNode": operation_children
-            }
-        }))
+        // Build explain result with execution metrics
+        let mut explain_result = Map::new();
+        explain_result.insert(
+            "operationNode".to_string(),
+            JsonValue::Array(operation_children),
+        );
+        explain_result.insert(
+            "executionSuccess".to_string(),
+            serde_json::json!(execution_success),
+        );
+        explain_result.insert(
+            "planExecutions".to_string(),
+            serde_json::json!(total_executions),
+        );
+        explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
+
+        if !execution_errors.is_empty() {
+            explain_result.insert(
+                "executionErrors".to_string(),
+                serde_json::json!(execution_errors),
+            );
+        }
+
+        Ok(serde_json::json!({ "explain": JsonValue::Object(explain_result) }))
+    }
+
+    /// Execute a single mutation and return explain with metrics.
+    async fn execute_single_mutation_with_metrics(
+        &self,
+        mutation: &crate::mapper::Mutation,
+        caller_identity: Option<Did>,
+    ) -> Result<(JsonValue, usize, u64)> {
+        use crate::mapper::MutationType;
+
+        let node_kind = match mutation.mutation_type {
+            MutationType::Create => "createNode",
+            MutationType::Update => "updateNode",
+            MutationType::Delete => "deleteNode",
+            MutationType::Upsert => "upsertNode",
+        };
+
+        let collection = self
+            .collection_provider
+            .get_collection(&mutation.collection_name)
+            .await?
+            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+
+        // Build select for querying results
+        let select = crate::mapper::Select::new(&mutation.collection_name);
+
+        // Execute the select and collect metrics
+        let (select_explain, doc_count, iterations) = self
+            .execute_select_with_metrics(&select, caller_identity)
+            .await?;
+
+        // Wrap in selectTopNode
+        let select_node_content =
+            Self::ensure_select_node_wrapper(select_explain, &select, ExplainType::Execute);
+        let select_top_node = serde_json::json!({
+            "selectTopNode": select_node_content
+        });
+
+        // Build mutation node with iterations
+        let mut mutation_inner = serde_json::Map::new();
+        mutation_inner.insert("iterations".to_string(), serde_json::json!(iterations));
+        mutation_inner.insert("selectTopNode".to_string(), select_top_node["selectTopNode"].clone());
+
+        let mutation_node = serde_json::json!({
+            node_kind: mutation_inner
+        });
+
+        Ok((mutation_node, doc_count, iterations))
     }
 
     /// Generate an explanation for a single mutation operation.
@@ -351,22 +468,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             let mut iterations: u64 = 0;
             let mut result_count = 0;
-            let mut doc_count = 0;
 
             while plan.next().await? {
                 iterations += 1;
                 result_count += 1;
-                doc_count += 1;
             }
 
             plan.close().await?;
 
-            let explanation = plan.explain();
-            // fieldCount = user fields accessed per document (exclude _docID)
-            // Go counts only user-defined fields, not the system _docID field
-            let field_count = collection.fields.len().saturating_sub(1);
-            let explanation =
-                Self::add_iterations_to_explain(explanation, iterations, doc_count, field_count);
+            // Use explain_execute to get metrics from each node
+            let explanation = plan.explain_execute();
 
             Ok((explanation, result_count, iterations))
         } else {
@@ -427,12 +538,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             plan.close().await?;
 
-            let explanation = plan.explain();
-            // fieldCount = user fields accessed per document (exclude _docID)
-            // Go counts only user-defined fields, not the system _docID field
-            let field_count = collection.fields.len().saturating_sub(1);
-            let explanation =
-                Self::add_iterations_to_explain(explanation, iterations, doc_count, field_count);
+            // Use explain_execute to get metrics from each node
+            let explanation = plan.explain_execute();
 
             Ok((explanation, result_count, iterations))
         }
@@ -486,6 +593,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
     }
+
 
     /// Generate an explanation of a single Select operation.
     async fn explain_select(
@@ -622,7 +730,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// Returns a dagScanNode structure matching Go's explain output for commits queries.
     fn explain_commits_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
-        // Build the dagScanNode attributes
+        // For Debug mode, return empty inner objects
+        if matches!(explain_type, ExplainType::Debug) {
+            return Ok(serde_json::json!({
+                "selectNode": {
+                    "dagScanNode": {}
+                }
+            }));
+        }
+
+        // Build the dagScanNode attributes for Simple/Execute mode
         let mut dag_scan_attrs = serde_json::Map::new();
 
         // cid: the specific commit CID if provided, else null
@@ -644,18 +761,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Build the selectNode wrapper (Go structure: selectNode -> dagScanNode)
         let dag_scan_node = serde_json::json!({ "dagScanNode": dag_scan_attrs });
 
-        // For debug mode, include additional structure info
-        if matches!(explain_type, ExplainType::Debug) {
-            // Debug mode typically has more nested structure
-            Ok(serde_json::json!({
-                "selectNode": dag_scan_node
-            }))
-        } else {
-            // Simple mode: selectNode wraps dagScanNode
-            Ok(serde_json::json!({
-                "selectNode": dag_scan_node
-            }))
-        }
+        Ok(serde_json::json!({
+            "selectNode": dag_scan_node
+        }))
     }
 
     /// Check if a select represents a top-level aggregate query (e.g., _avg, _count, _sum).
