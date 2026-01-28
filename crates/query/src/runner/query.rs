@@ -345,10 +345,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     let field_fetches = field_count * doc_fetches;
                     scan_obj.insert("fieldFetches".to_string(), serde_json::json!(field_fetches));
 
-                    // If this scanNode has an indexName, it's an index scan - add indexFetches
-                    if scan_obj.contains_key("indexName") {
-                        scan_obj.insert("indexFetches".to_string(), serde_json::json!(iterations));
-                    }
+                    // indexFetches is set by IndexScanNode::explain_inner() with
+                    // the actual index key lookup count. Only add it if not already present
+                    // (for regular scans without an index, there's no indexFetches).
+                    // This is already set correctly by IndexScanNode, so no override needed.
                     return;
                 }
             }
@@ -1190,8 +1190,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .map(|id| JsonValue::String(id.to_string()))
                     .unwrap_or(JsonValue::Null)
             } else if let Some(nv) = document.get(field_name) {
-                crate::json_convert::normal_value_to_json(nv)
-                    .unwrap_or(JsonValue::Null)
+                crate::json_convert::normal_value_to_json(nv).unwrap_or(JsonValue::Null)
             } else {
                 JsonValue::Null
             };
@@ -1268,9 +1267,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Check if remaining fields need the Planner (has real nested selections)
-        let has_nested = select_without_version.fields.iter().any(|f| {
-            matches!(f, Requestable::Select(_))
-        });
+        let has_nested = select_without_version
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
 
         let filter_has_relations = select
             .filter
@@ -1286,11 +1286,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Execute the query for document data (without _version)
         let result = if has_nested || filter_has_relations || order_has_relations {
-            self.execute_nested_select_with_planner(&select_without_version, fetcher, caller_identity)
-                .await?
+            self.execute_nested_select_with_planner(
+                &select_without_version,
+                fetcher,
+                caller_identity,
+            )
+            .await?
         } else {
-            self.execute_simple_select(&select_without_version, fetcher, &collection, caller_identity)
-                .await?
+            self.execute_simple_select(
+                &select_without_version,
+                fetcher,
+                &collection,
+                caller_identity,
+            )
+            .await?
         };
 
         // If no _version selection, return as-is
@@ -1418,16 +1427,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
                             if let Some(arr) = json_val.as_array() {
                                 // Apply filter if present on the nested selection
-                                let filtered_items: Vec<&JsonValue> = if let Some(ref filter) = nested.filter {
-                                    arr.iter()
-                                        .filter(|item| {
-                                            // Check each filter condition against the item
-                                            self.json_item_matches_filter(item, filter)
-                                        })
-                                        .collect()
-                                } else {
-                                    arr.iter().collect()
-                                };
+                                let filtered_items: Vec<&JsonValue> =
+                                    if let Some(ref filter) = nested.filter {
+                                        arr.iter()
+                                            .filter(|item| {
+                                                // Check each filter condition against the item
+                                                self.json_item_matches_filter(item, filter)
+                                            })
+                                            .collect()
+                                    } else {
+                                        arr.iter().collect()
+                                    };
 
                                 let nested_results: Vec<JsonValue> = filtered_items
                                     .into_iter()
@@ -1441,15 +1451,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                     nested_obj
                                                         .insert(nf_output.to_string(), nv.clone());
                                                 } else {
-                                                    nested_obj
-                                                        .insert(nf_output.to_string(), JsonValue::Null);
+                                                    nested_obj.insert(
+                                                        nf_output.to_string(),
+                                                        JsonValue::Null,
+                                                    );
                                                 }
                                             }
                                         }
                                         JsonValue::Object(nested_obj)
                                     })
                                     .collect();
-                                obj.insert(output_name.to_string(), JsonValue::Array(nested_results));
+                                obj.insert(
+                                    output_name.to_string(),
+                                    JsonValue::Array(nested_results),
+                                );
                             } else {
                                 obj.insert(output_name.to_string(), JsonValue::Null);
                             }
@@ -1527,7 +1542,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 if let JsonValue::Object(obj) = sub_cond {
                                     let sub_map: std::collections::HashMap<String, JsonValue> =
                                         obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    let sub_filter = crate::mapper::Filter::from_conditions(sub_map);
+                                    let sub_filter =
+                                        crate::mapper::Filter::from_conditions(sub_map);
                                     if !self.json_item_matches_filter(item, &sub_filter) {
                                         return false;
                                     }
@@ -1542,7 +1558,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 if let JsonValue::Object(obj) = sub_cond {
                                     let sub_map: std::collections::HashMap<String, JsonValue> =
                                         obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    let sub_filter = crate::mapper::Filter::from_conditions(sub_map);
+                                    let sub_filter =
+                                        crate::mapper::Filter::from_conditions(sub_map);
                                     if self.json_item_matches_filter(item, &sub_filter) {
                                         any_match = true;
                                         break;
@@ -1614,30 +1631,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 (None, _) => true,
                 _ => true,
             },
-            FilterOp::Gt => {
-                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                    (Some(a), Some(b)) => a > b,
-                    _ => false,
-                }
-            }
-            FilterOp::Gte => {
-                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                    (Some(a), Some(b)) => a >= b,
-                    _ => false,
-                }
-            }
-            FilterOp::Lt => {
-                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                    (Some(a), Some(b)) => a < b,
-                    _ => false,
-                }
-            }
-            FilterOp::Lte => {
-                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                    (Some(a), Some(b)) => a <= b,
-                    _ => false,
-                }
-            }
+            FilterOp::Gt => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                (Some(a), Some(b)) => a > b,
+                _ => false,
+            },
+            FilterOp::Gte => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                (Some(a), Some(b)) => a >= b,
+                _ => false,
+            },
+            FilterOp::Lt => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                (Some(a), Some(b)) => a < b,
+                _ => false,
+            },
+            FilterOp::Lte => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                (Some(a), Some(b)) => a <= b,
+                _ => false,
+            },
             FilterOp::In => {
                 if let JsonValue::Array(values) = expected {
                     item_value.map(|v| values.contains(v)).unwrap_or(false)

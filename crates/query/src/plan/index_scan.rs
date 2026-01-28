@@ -49,6 +49,8 @@ pub struct IndexScanNode {
     fetcher: Option<Arc<dyn DocFetcher>>,
     /// Whether docs were explicitly provided (even if empty)
     docs_provided: bool,
+    /// Number of index key lookups performed (for explain output)
+    index_fetches: u64,
 }
 
 impl IndexScanNode {
@@ -70,6 +72,7 @@ impl IndexScanNode {
             initialized: false,
             fetcher: None,
             docs_provided: false,
+            index_fetches: 0,
         }
     }
 
@@ -92,6 +95,7 @@ impl IndexScanNode {
     ///
     /// Providing an empty vector is valid and represents an empty result set.
     pub fn with_docs(mut self, docs: Vec<Doc>) -> Self {
+        self.index_fetches = docs.len() as u64;
         self.docs = docs;
         self.docs_provided = true;
         self
@@ -134,6 +138,9 @@ impl PlanNode for IndexScanNode {
                 let doc_ids = fetcher
                     .get_by_index_scan(&self.collection.name, &self.index_params)
                     .await?;
+
+                // Track number of index key lookups (matches Go's IndexesFetched)
+                self.index_fetches = doc_ids.len() as u64;
 
                 if !doc_ids.is_empty() {
                     // Fetch the actual documents by their IDs
@@ -226,6 +233,12 @@ impl PlanNode for IndexScanNode {
         obj.insert(
             "indexName".to_string(),
             serde_json::Value::String(self.index_params.index_name.clone()),
+        );
+
+        // Index fetch count (set during init, used by explain metrics)
+        obj.insert(
+            "indexFetches".to_string(),
+            serde_json::json!(self.index_fetches),
         );
 
         if let Some(ref filter) = self.residual_filter {
