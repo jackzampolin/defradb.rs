@@ -594,7 +594,43 @@ impl PlanNode for TypeJoinMany {
     }
 
     fn kind(&self) -> &'static str {
-        "typeJoinMany"
+        // Go's explain uses "typeIndexJoin" as the wrapper node
+        "typeIndexJoin"
+    }
+
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // joinType: the actual join type (typeJoinMany)
+        obj.insert("joinType".to_string(), serde_json::json!("typeJoinMany"));
+
+        // rootName: the child side's relation field name (points back to root)
+        let root_name = self.child_side.relation_field().name.clone();
+        obj.insert(
+            "rootName".to_string(),
+            serde_json::json!(serde_json::json!({ "value": root_name })),
+        );
+
+        // subTypeName: the parent side's relation field name (e.g., "articles")
+        obj.insert(
+            "subTypeName".to_string(),
+            serde_json::json!(self.parent_side.relation_field().name),
+        );
+
+        // root: the parent plan's explain (contains scanNode)
+        let root_explain = self.parent_plan.explain();
+        obj.insert("root".to_string(), root_explain);
+
+        // subType: the child plan's explain wrapped in selectTopNode
+        let child_explain = self.child_plan.explain();
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": child_explain
+            }
+        });
+        obj.insert("subType".to_string(), sub_type);
+
+        serde_json::Value::Object(obj)
     }
 }
 
