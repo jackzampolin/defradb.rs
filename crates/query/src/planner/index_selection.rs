@@ -273,7 +273,9 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
             return false;
         }
 
-        // Check if the operator is index-compatible
+        // Check if the operator is index-compatible.
+        // Go DefraDB uses indexes for _ne/_like too (full scan + matcher),
+        // not just narrowing operators. This matches Go's behavior.
         let base_op_compatible = matches!(
             cond.op,
             FilterOp::Eq
@@ -282,6 +284,11 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
                 | FilterOp::Lt
                 | FilterOp::Lte
                 | FilterOp::In
+                | FilterOp::Ne
+                | FilterOp::Like
+                | FilterOp::Nlike
+                | FilterOp::Ilike
+                | FilterOp::Nilike
         );
 
         // For array operators, check if the combination is index-friendly
@@ -403,6 +410,7 @@ pub fn filter_to_index_scan(
     let mut eq_value = None;
     let mut has_in = false;
     let mut in_values = None;
+    let mut has_scan_all = false;
     let mut lower_bound = Bound::Unbounded;
     let mut upper_bound = Bound::Unbounded;
 
@@ -445,6 +453,11 @@ pub fn filter_to_index_scan(
                     upper_bound = Bound::Inclusive(v.clone());
                 }
             }
+            // _ne/_like use full index scan with post-filtering (matches Go behavior)
+            FilterOp::Ne | FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike
+            | FilterOp::Nilike => {
+                has_scan_all = true;
+            }
             _ => {}
         }
     }
@@ -455,7 +468,7 @@ pub fn filter_to_index_scan(
         .map(|(can_order, needs_reverse)| can_order && needs_reverse)
         .unwrap_or(false);
 
-    // Determine scan type
+    // Determine scan type (narrowing scans take priority over full scans)
     let scan_type = if has_eq {
         IndexScanType::ExactMatch {
             values: vec![eq_value.unwrap()],
@@ -469,6 +482,12 @@ pub fn filter_to_index_scan(
             prefix_values: vec![],
             lower: lower_bound,
             upper: upper_bound,
+            reverse,
+        }
+    } else if has_scan_all {
+        // Full index scan with residual filter (for _ne, _like, etc.)
+        IndexScanType::PrefixScan {
+            prefix_values: vec![],
             reverse,
         }
     } else {

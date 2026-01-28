@@ -107,9 +107,7 @@ impl<S: Store> VersionedFetcher<S> {
             .doc_id()
             .map(|bytes| String::from_utf8_lossy(bytes).to_string())
             .ok_or_else(|| {
-                Error::Serialization(
-                    "cid either does not exist or belong to document".to_string(),
-                )
+                Error::Serialization("cid either does not exist or belong to document".to_string())
             })
     }
 
@@ -242,8 +240,7 @@ impl<S: Store> VersionedFetcher<S> {
                             // Decode and store value
                             match ciborium::from_reader::<NormalValue, _>(&payload.data[..]) {
                                 Ok(value) => {
-                                    field_values
-                                        .insert(field_name.clone(), (priority, value));
+                                    field_values.insert(field_name.clone(), (priority, value));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -367,17 +364,23 @@ mod tests {
 
     #[test]
     fn test_looks_like_cidv1() {
-        assert!(VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
-            "bafyreiajq6jmyblg2b6vupjdapzkaodbt7kkwqp4fijekdvydnyxvr4y7q"
-        ));
-        assert!(VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
-            "bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist"
-        ));
-        assert!(!VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
-            "fhbnjfahfhfhanfhga"
-        ));
-        assert!(!VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
-            "short"
-        ));
+        assert!(
+            VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
+                "bafyreiajq6jmyblg2b6vupjdapzkaodbt7kkwqp4fijekdvydnyxvr4y7q"
+            )
+        );
+        assert!(
+            VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
+                "bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist"
+            )
+        );
+        assert!(
+            !VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1(
+                "fhbnjfahfhfhanfhga"
+            )
+        );
+        assert!(
+            !VersionedFetcher::<storage::backends::memory::MemoryStore>::looks_like_cidv1("short")
+        );
     }
 }

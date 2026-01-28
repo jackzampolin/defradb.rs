@@ -185,9 +185,9 @@ pub fn parse_query_with_variables(
         ParsedOperation::Mutation(_) => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
         )),
-        ParsedOperation::Subscription { .. } => Err(QueryError::parse(
-            "Expected query but got subscription.",
-        )),
+        ParsedOperation::Subscription { .. } => {
+            Err(QueryError::parse("Expected query but got subscription."))
+        }
     }
 }
 
