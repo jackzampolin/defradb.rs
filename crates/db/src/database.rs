@@ -1056,6 +1056,39 @@ impl<S: Store> DB<S> {
             .cloned())
     }
 
+    /// Get all collection versions from storage (active and inactive).
+    ///
+    /// This scans `/collection/id/` prefix to load ALL versions, matching
+    /// Go's behavior of loading all versions for cross-collection validation.
+    pub async fn get_all_collection_versions(&self) -> Result<Vec<CollectionVersion>> {
+        let txn = self.new_txn(true).await?;
+        let mut versions = Vec::new();
+        let prefix = CollectionKey::collection_prefix();
+
+        {
+            let systemstore = txn.systemstore()?;
+            let opts = IterOptions::new().with_prefix(prefix);
+            let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
+
+            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                match serde_json::from_slice::<CollectionVersion>(&pair.value) {
+                    Ok(col) => versions.push(col),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to deserialize collection version during scan"
+                        );
+                    }
+                }
+            }
+
+            iter.close().await.map_err(Error::Storage)?;
+        }
+
+        let _ = txn.discard();
+        Ok(versions)
+    }
+
     /// Patch a collection's schema using JSON patch operations.
     ///
     /// This creates a new schema version with a new version_id (CID) and links
@@ -1081,27 +1114,61 @@ impl<S: Store> DB<S> {
         collection_name: &str,
         patch: &str,
     ) -> Result<CollectionVersion> {
-        // Get the current schema
-        let collection = self
-            .get_collection(collection_name)?
-            .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
-        let old_schema = collection.schema().clone();
-        let old_version_id = old_schema.version_id.clone();
-        let collection_id = old_schema.collection_id.clone();
-
-        // Parse the patch
+        // Parse the patch early - needed for both collection lookup fallbacks and processing
         let patch_ops: serde_json::Value =
             serde_json::from_str(patch).map_err(|e| Error::InvalidPatch(e.to_string()))?;
+
+        // Get the current schema - try by name first, then by version ID, then
+        // check for collection-level move/copy targeting a non-existent collection
+        let collection = match self.get_collection(collection_name)? {
+            Some(c) => c,
+            None => {
+                // Try looking up by version ID (tests use CIDs as collection identifiers)
+                match self.get_collection_by_version_id(collection_name)? {
+                    Some(c) => c,
+                    None => {
+                        // Collection not found by name or version ID.
+                        // Check if the patch is a collection-level move/copy where the
+                        // "path" targets a non-existent collection (e.g., move /Users → /Books)
+                        return self
+                            .handle_unknown_collection_patch(collection_name, &patch_ops)
+                            .await;
+                    }
+                }
+            }
+        };
+
+        let old_schema = collection.schema().clone();
+        let actual_name = old_schema.name.clone();
+        let old_version_id = old_schema.version_id.clone();
+        let collection_id = old_schema.collection_id.clone();
 
         // Apply the patch to the schema JSON
         let mut schema_json = serde_json::to_value(&old_schema).map_err(|e| {
             Error::Serialization(format!("failed to serialize schema to JSON: {}", e))
         })?;
 
+        // Ensure optional array fields are present in JSON even when empty.
+        // Go always serializes these as null/empty arrays, but Rust's
+        // skip_serializing_if omits them. Patches targeting these paths
+        // (e.g., /VectorEmbeddings/-) need the key to exist.
+        if let serde_json::Value::Object(ref mut map) = schema_json {
+            for key in &["Indexes", "EncryptedIndexes", "VectorEmbeddings"] {
+                map.entry(key.to_string())
+                    .or_insert(serde_json::Value::Array(vec![]));
+            }
+        }
+
         // Apply JSON patch operations
         // Go DefraDB embeds collection name in patch paths: /CollectionName/Fields/-
         // We need to strip the collection name prefix to get paths relative to schema
+        // Use both the passed-in name and the actual collection name for prefix matching
         let collection_prefix = format!("/{}/", collection_name);
+        let actual_name_prefix = if actual_name != collection_name {
+            Some(format!("/{}/", actual_name))
+        } else {
+            None
+        };
 
         if let serde_json::Value::Array(ops) = patch_ops {
             for op in ops {
@@ -1109,20 +1176,11 @@ impl<S: Store> DB<S> {
                 let raw_path = op.get("path").and_then(|v| v.as_str());
                 let value = op.get("value");
 
-                // Strip collection name prefix from path if present (Go compatibility)
+                // Strip collection name/version prefix from path if present (Go compatibility)
                 let path = raw_path.map(|p| {
-                    let stripped = if p.starts_with(&collection_prefix) {
-                        format!("/{}", &p[collection_prefix.len()..])
-                    } else {
-                        // Path doesn't have expected prefix - log for debugging
-                        tracing::debug!(
-                            path = %p,
-                            expected_prefix = %collection_prefix,
-                            "Patch path does not have collection prefix, using as-is"
-                        );
-                        p.to_string()
-                    };
-
+                    let stripped = Self::strip_collection_prefix(
+                        p, &collection_prefix, actual_name_prefix.as_deref(),
+                    );
                     // Go compatibility: substitute field names for indices in /Fields/<name> paths
                     Self::substitute_field_name_in_path(&stripped, &schema_json)
                 });
@@ -1191,7 +1249,11 @@ impl<S: Store> DB<S> {
                             }
                             _ => {
                                 // Test fails - return error in Go-compatible format
-                                return Err(Error::InvalidPatch("failed: test failed".to_string()));
+                                // Include original path for context
+                                let original_path = raw_path.unwrap_or(path);
+                                return Err(Error::InvalidPatch(format!(
+                                    "testing value {} failed: test failed", original_path
+                                )));
                             }
                         }
                     }
@@ -1227,11 +1289,9 @@ impl<S: Store> DB<S> {
                         // Substitute field names in from path too
                         let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
-                        let from_path = if from_path.starts_with(&collection_prefix) {
-                            format!("/{}", &from_path[collection_prefix.len()..])
-                        } else {
-                            from_path
-                        };
+                        let from_path = Self::strip_collection_prefix(
+                            &from_path, &collection_prefix, actual_name_prefix.as_deref(),
+                        );
 
                         // Get the value to copy
                         let value_to_copy =
@@ -1265,11 +1325,9 @@ impl<S: Store> DB<S> {
                         // Substitute field names in from path too
                         let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
-                        let from_path = if from_path.starts_with(&collection_prefix) {
-                            format!("/{}", &from_path[collection_prefix.len()..])
-                        } else {
-                            from_path
-                        };
+                        let from_path = Self::strip_collection_prefix(
+                            &from_path, &collection_prefix, actual_name_prefix.as_deref(),
+                        );
 
                         // Get the value to move
                         let value_to_move =
@@ -1335,57 +1393,55 @@ impl<S: Store> DB<S> {
             _ => {}
         }
 
-        // Go compatibility: validate field movements and duplicates BEFORE deserialization
-        // This must happen before schema.validate() which would also catch duplicates
-        // Build a map of old field names to indices
-        let old_field_indices: std::collections::HashMap<&str, usize> = old_schema
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(i, f)| (f.name.as_str(), i))
-            .collect();
-
-        // Extract field names and indices from the JSON schema
-        let mut field_move_errors: Vec<String> = Vec::new();
-        if let Some(fields_array) = schema_json.get("Fields").and_then(|f| f.as_array()) {
-            // Check if any old fields are now at different indices
-            for (new_idx, field_json) in fields_array.iter().enumerate() {
-                if let Some(field_name) = field_json.get("Name").and_then(|n| n.as_str()) {
-                    if let Some(&old_idx) = old_field_indices.get(field_name) {
-                        if new_idx != old_idx {
-                            field_move_errors.push(format!(
-                                "moving fields is not currently supported. Name: {}, ProposedIndex: {}, ExistingIndex: {}",
-                                field_name, new_idx, old_idx
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Check for duplicate fields
-            let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            for field_json in fields_array {
-                if let Some(field_name) = field_json.get("Name").and_then(|n| n.as_str()) {
-                    if !seen_names.insert(field_name) {
-                        field_move_errors.push(format!("duplicate field. Name: {}", field_name));
-                    }
-                }
-            }
-        }
-
-        if !field_move_errors.is_empty() {
-            return Err(Error::InvalidPatch(field_move_errors.join("\n")));
-        }
+        // Field movement and duplicate checks are handled by the definition validators
+        // (validate_field_not_moved, validate_field_not_duplicated) which run post-deserialization.
+        // This matches Go's approach of collecting ALL validation errors at once.
 
         // Deserialize back to CollectionVersion
         let mut new_schema: CollectionVersion = serde_json::from_value(schema_json)
             .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
 
-        // Validate the new schema
+        // Go compatibility: default new fields with CType::None to CType::LwwRegister.
+        // Go's patchCollection does this in collection_define.go for new fields that
+        // don't have an explicit CRDT type. This must happen before CID generation.
+        {
+            let old_field_names: std::collections::HashSet<&str> =
+                old_schema.fields.iter().map(|f| f.name.as_str()).collect();
+            for field in &mut new_schema.fields {
+                if !old_field_names.contains(field.name.as_str())
+                    && field.crdt_type == schema::CType::None
+                {
+                    field.crdt_type = schema::CType::LwwRegister;
+                }
+            }
+        }
+
+        // Run Go-compatible cross-collection validators (before schema validate() which
+        // uses different error messages). These validators cover duplicate fields,
+        // CRDT/kind compatibility, and all Go-specific patch constraints.
+        let all_existing = self.get_all_collection_versions().await?;
+        let new_collections: Vec<CollectionVersion> = all_existing
+            .iter()
+            .filter(|c| c.version_id != old_version_id)
+            .cloned()
+            .chain(std::iter::once(new_schema.clone()))
+            .collect();
+        crate::definition_validation::validate_collection_changes(&all_existing, &new_collections)
+            .map_err(Error::InvalidPatch)?;
+
+        // Also run schema-level validation for checks not covered by definition validators
+        // (e.g., relation field requires relation_name, policy format validation)
         new_schema.validate()?;
 
-        // Generate new version_id from the new schema content (CID)
-        let new_version_id = Self::generate_schema_version_id(&new_schema);
+        // Compute version depth: count existing versions for this collection_id
+        let version_depth = all_existing
+            .iter()
+            .filter(|c| c.collection_id == collection_id)
+            .count() as u64;
+
+        // Generate new version_id from schema content with proper priorities
+        let new_version_id =
+            Self::generate_patch_version_id(&mut new_schema, &old_schema, version_depth);
 
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
@@ -1480,40 +1536,81 @@ impl<S: Store> DB<S> {
         Ok(new_schema)
     }
 
-    /// Generate a version ID (CID) from schema content.
+    /// Generate a version ID (CID) from schema content during patching.
     ///
-    /// This generates a CID from the collection's fields using the same
-    /// algorithm as Go DefraDB for compatibility.
-    fn generate_schema_version_id(schema: &CollectionVersion) -> String {
+    /// This generates a CID compatible with Go DefraDB's block-based approach:
+    /// - Existing fields (present in old_schema) reuse their existing CID (field.id)
+    /// - New fields get CIDs generated with priority = version_depth + 1
+    /// - The collection block uses the same priority as new fields
+    ///
+    /// Also updates field.id on new fields to their generated CID string.
+    fn generate_patch_version_id(
+        schema: &mut CollectionVersion,
+        old_schema: &CollectionVersion,
+        version_depth: u64,
+    ) -> String {
         use cid::Cid;
         use sha2::{Digest, Sha256};
+        use std::str::FromStr;
 
-        // Sort fields for deterministic ordering: _docID first, then alphabetically
-        let mut sorted_fields: Vec<&schema::FieldDescription> = schema
+        let new_priority = version_depth + 1;
+
+        // Build map of old field names → field.id (CID string) for reuse
+        let old_field_ids: std::collections::HashMap<&str, &str> = old_schema
             .fields
             .iter()
-            .filter(|f| !f.is_secondary_relation() && !f.id.is_empty())
+            .filter(|f| !f.id.is_empty())
+            .map(|f| (f.name.as_str(), f.id.as_str()))
             .collect();
-        sorted_fields.sort_by(|a, b| {
-            if a.name == "_docID" {
-                std::cmp::Ordering::Less
-            } else if b.name == "_docID" {
-                std::cmp::Ordering::Greater
-            } else {
-                a.name.cmp(&b.name)
-            }
-        });
 
-        // Generate CIDs for each field with priority=1 (Go behavior)
+        // Sort fields for deterministic ordering: _docID first, then alphabetically
+        // Filter out secondary relations and empty-id fields (same as Go)
+        let field_indices: Vec<usize> = {
+            let mut indices: Vec<usize> = schema
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !f.is_secondary_relation() && !f.id.is_empty())
+                .map(|(i, _)| i)
+                .collect();
+            indices.sort_by(|&a, &b| {
+                let fa = &schema.fields[a];
+                let fb = &schema.fields[b];
+                if fa.name == "_docID" {
+                    std::cmp::Ordering::Less
+                } else if fb.name == "_docID" {
+                    std::cmp::Ordering::Greater
+                } else {
+                    fa.name.cmp(&fb.name)
+                }
+            });
+            indices
+        };
+
+        // Generate CIDs for each field
         let mut field_cids: Vec<Cid> = Vec::new();
-        for field in &sorted_fields {
-            if let Ok(cid) = schema::generate_field_cid_with_priority(field, 1) {
+        for &idx in &field_indices {
+            let field = &schema.fields[idx];
+            let field_name = field.name.as_str();
+
+            // Try to reuse existing field CID from old schema
+            if let Some(&old_id) = old_field_ids.get(field_name) {
+                if let Ok(cid) = Cid::from_str(old_id) {
+                    field_cids.push(cid);
+                    continue;
+                }
+            }
+
+            // New field: generate CID with new_priority
+            if let Ok(cid) = schema::generate_field_cid_with_priority(field, new_priority) {
+                schema.fields[idx].id = cid.to_string();
                 field_cids.push(cid);
             }
         }
 
-        // Generate collection CID with priority=1 for Go compatibility
-        match schema::generate_collection_cid_with_priority(&schema.name, &field_cids, 1) {
+        // Generate collection CID with new_priority
+        match schema::generate_collection_cid_with_priority(&schema.name, &field_cids, new_priority)
+        {
             Ok(cid) => cid.to_string(),
             Err(_) => {
                 // Fallback to simple hash if CID generation fails
@@ -1531,6 +1628,77 @@ impl<S: Store> DB<S> {
                 )
             }
         }
+    }
+
+    /// Strip collection name or version ID prefix from a path.
+    ///
+    /// Handles both the collection_name prefix (e.g., "/Users/") and the
+    /// actual_name prefix (when looked up by version ID, the passed-in name
+    /// differs from the real collection name).
+    fn strip_collection_prefix(
+        path: &str,
+        collection_prefix: &str,
+        actual_name_prefix: Option<&str>,
+    ) -> String {
+        if path.starts_with(collection_prefix) {
+            format!("/{}", &path[collection_prefix.len()..])
+        } else if let Some(anp) = actual_name_prefix {
+            if path.starts_with(anp) {
+                format!("/{}", &path[anp.len()..])
+            } else {
+                path.to_string()
+            }
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// Handle patches targeting a collection that doesn't exist by name or version ID.
+    ///
+    /// This handles two cases:
+    /// 1. Collection-level copy where the "path" targets a new collection name
+    ///    (e.g., copy from /Users to /Book) → returns "adding collections not supported"
+    /// 2. Collection-level move to a new name (no-op in Go) → finds source via "from"
+    ///    and returns the original schema unchanged
+    async fn handle_unknown_collection_patch(
+        &self,
+        collection_name: &str,
+        patch_ops: &serde_json::Value,
+    ) -> Result<CollectionVersion> {
+        if let serde_json::Value::Array(ops) = patch_ops {
+            // Look for move/copy operations to determine if this is a routing issue
+            for op in ops {
+                let operation = op.get("op").and_then(|v| v.as_str());
+                let from_raw = op.get("from").and_then(|v| v.as_str());
+
+                match operation {
+                    Some("copy") => {
+                        // Collection-level copy is not supported
+                        return Err(Error::InvalidPatch(format!(
+                            "adding collections via patch is not supported. Name: {}",
+                            collection_name,
+                        )));
+                    }
+                    Some("move") => {
+                        // Collection-level move is a no-op - find source and return unchanged
+                        if let Some(from) = from_raw {
+                            let source_name = from
+                                .trim_start_matches('/')
+                                .split('/')
+                                .next()
+                                .unwrap_or("");
+                            if let Some(source_col) = self.get_collection(source_name)? {
+                                return Ok(source_col.schema().clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // No move/copy fallback found - truly not found
+        Err(Error::CollectionNotFound(collection_name.to_string()))
     }
 
     /// Helper: Set a value at a JSON pointer path.

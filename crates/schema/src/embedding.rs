@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorEmbeddingDescription {
     /// Name of the field on the collection that this embedding applies to.
-    #[serde(rename = "FieldName")]
+    #[serde(rename = "FieldName", default)]
     pub field_name: String,
 
     /// Fields in the parent schema used as basis for vector generation.
@@ -21,12 +21,12 @@ pub struct VectorEmbeddingDescription {
 
     /// The LLM model to use for generating embeddings.
     /// Example: "text-embedding-3-small"
-    #[serde(rename = "Model")]
+    #[serde(rename = "Model", default)]
     pub model: String,
 
     /// The API provider for generating embeddings.
     /// Example: "openai"
-    #[serde(rename = "Provider")]
+    #[serde(rename = "Provider", default)]
     pub provider: String,
 
     /// Optional template path for formatting field values.

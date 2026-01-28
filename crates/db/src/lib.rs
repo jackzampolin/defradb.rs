@@ -56,6 +56,7 @@ pub mod collection_provider;
 pub mod collection_snapshot;
 pub mod commits_fetcher;
 pub mod database;
+pub mod definition_validation;
 pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
