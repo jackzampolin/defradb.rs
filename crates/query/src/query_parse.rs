@@ -198,7 +198,7 @@ pub fn parse_query_with_variables(
 ) -> Result<Vec<Select>> {
     match parse_request_with_variables(query, variables, None)? {
         ParsedOperation::Query { selects, .. } => Ok(selects),
-        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+        ParsedOperation::Mutation { .. } => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
         )),
         ParsedOperation::Subscription { .. } => {

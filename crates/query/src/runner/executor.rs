@@ -199,6 +199,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         );
                     }
 
+                    // Get the transaction-scoped mutator
+                    let mutator = match txn_ctx.doc_mutator() {
+                        Some(m) => m,
+                        None => {
+                            return QueryResponse::error(
+                                "mutations not supported in this transaction context".to_string(),
+                            );
+                        }
+                    };
+
                     self.execute_mutation_internal_with_vars(
                         &request.query,
                         mutator,

@@ -440,8 +440,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let can_use_index = can_use_filter_index || can_use_ordering_index;
 
-        if can_use_index {
-            // Use Planner path for index-based queries (shows indexScanNode in explain)
+        // Check if any aggregates reference relations (e.g., _sum(articles: {field: pages}))
+        // Relation aggregates need the Planner to create TypeJoinMany nodes
+        let has_relation_aggregates = select.fields.iter().any(|f| {
+            if let Requestable::Aggregate(agg) = f {
+                agg.targets
+                    .iter()
+                    .any(|t| !t.host_name.is_empty() && t.host_name != select.collection_name)
+            } else {
+                false
+            }
+        });
+
+        if can_use_index || has_relation_aggregates {
+            // Use Planner path for index-based queries or relation aggregates
             let fetcher_arc = FetcherWrapper::new(fetcher);
             let collections_map = self.collections_map().await?;
             let collections: Vec<CollectionVersion> =
@@ -644,8 +656,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .map(|f| select_best_index(f, &collection.indexes).is_some())
                 .unwrap_or(false);
 
-        if has_nested || has_ordering_index || has_filter_index {
-            // Use the Planner for queries with nested selections or index usage
+        // Check if any aggregates reference relations (e.g., _sum(articles: {field: pages}))
+        let has_relation_aggregates = select.fields.iter().any(|f| {
+            if let Requestable::Aggregate(agg) = f {
+                agg.targets
+                    .iter()
+                    .any(|t| !t.host_name.is_empty() && t.host_name != select.collection_name)
+            } else {
+                false
+            }
+        });
+
+        if has_nested || has_ordering_index || has_filter_index || has_relation_aggregates {
+            // Use the Planner for queries with nested selections, index usage, or relation aggregates
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan

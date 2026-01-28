@@ -71,11 +71,18 @@ impl Planner {
             .into_iter()
             .map(|c| (c.name.clone(), Arc::new(c)))
             .collect();
-        // Build a second map by CollectionID for relation field resolution
-        let collections_by_id: HashMap<String, Arc<CollectionVersion>> = collections
-            .values()
-            .map(|c| (c.collection_id.clone(), c.clone()))
-            .collect();
+        // Build a second map by CollectionID and VersionID for relation field resolution.
+        // FieldKind::Relation stores the schema version CID (version_id), so we need
+        // to look up by both collection_id and version_id.
+        let mut collections_by_id: HashMap<String, Arc<CollectionVersion>> = HashMap::new();
+        for c in collections.values() {
+            if !c.collection_id.is_empty() {
+                collections_by_id.insert(c.collection_id.clone(), c.clone());
+            }
+            if !c.version_id.is_empty() {
+                collections_by_id.insert(c.version_id.clone(), c.clone());
+            }
+        }
         Self {
             collections,
             collections_by_id,
@@ -237,7 +244,6 @@ impl Planner {
         // Build scan mapping: for queries with nested selections, relation filters, relation ordering,
         // relation aggregates, or relation groupBy fields, use full schema mapping so that FK fields
         // are available for TypeJoin lookups and schema indices don't collide with sequential render indices.
-        // For simple queries, use the render_mapping directly.
         let needs_joins = has_nested
             || filter_has_relations
             || order_has_relations
@@ -495,23 +501,8 @@ impl Planner {
             Box::new(scan)
         };
 
-        // 2. Apply scalar filter before join (if present and not complex)
-        // For complex filters, we apply the whole filter after join instead.
-        // Note: Even with IndexScanNode, we may need a SelectNode for:
-        //   - Field projection
-        //   - Conditions not covered by the index
-        if !is_complex_filter && (scalar_filter.is_some() || !select.fields.is_empty()) {
-            let mut select_node = SelectNode::new(plan, scan_mapping.clone());
-            if let Some(filter) = scalar_filter {
-                select_node = select_node.with_filter(filter);
-            }
-            plan = Box::new(select_node);
-        } else if is_complex_filter && !select.fields.is_empty() {
-            // For complex filters, still need SelectNode for field projection (no filter yet)
-            plan = Box::new(SelectNode::new(plan, scan_mapping.clone()));
-        }
-
-        // 3. Apply join nodes for relation fields in the selection set
+        // 2. Apply join nodes BEFORE SelectNode (matches Go DefraDB plan construction order).
+        // TypeJoin nodes wrap the raw ScanNode, and SelectNode wraps the join result.
         // For simple filters: relation filters are extracted and applied inside TypeJoin nodes
         // For complex filters: pass None, the full filter is applied after join
         let filter_for_joins = if is_complex_filter {
@@ -665,6 +656,25 @@ impl Planner {
                 )?;
                 plan = new_plan;
                 scan_mapping = new_mapping;
+            }
+        }
+
+        // 3d. Apply SelectNode AFTER all joins (matches Go DefraDB plan order).
+        // The SelectNode wraps the joined plan and applies scalar filters.
+        // Note: Even with IndexScanNode, we may need a SelectNode for:
+        //   - Field projection
+        //   - Conditions not covered by the index
+        if !is_complex_filter && (scalar_filter.is_some() || !select.fields.is_empty()) {
+            let mut select_node = SelectNode::new(plan, scan_mapping.clone());
+            if let Some(filter) = scalar_filter {
+                select_node = select_node.with_filter(filter);
+            }
+            plan = Box::new(select_node);
+        } else if is_complex_filter && !select.fields.is_empty() {
+            // For complex filters where there are no join-related fields,
+            // still need SelectNode for field projection (filter applied below)
+            if !needs_joins {
+                plan = Box::new(SelectNode::new(plan, scan_mapping.clone()));
             }
         }
 
@@ -918,9 +928,13 @@ impl Planner {
 
     /// Add aggregate nodes to the plan based on the select's aggregate fields.
     ///
-    /// Only adds plan nodes for group-by and field-only aggregates. Relation
-    /// and inline-array aggregates (targets with non-empty host_name) are
-    /// handled by compute_relation_aggregates() in the runner instead.
+    /// Handles three types of aggregates:
+    /// - Simple field aggregates (e.g., _sum(field: age))
+    /// - Group aggregates (e.g., _sum(_group: {field: age}))
+    /// - Relation aggregates (e.g., _sum(articles: {field: pages}))
+    ///
+    /// Relation and inline-array aggregates are handled by iterating through
+    /// the JSON array stored in the relation/array field.
     fn add_aggregate_nodes(
         &self,
         mut plan: Box<dyn PlanNode>,
@@ -929,16 +943,6 @@ impl Planner {
     ) -> Result<Box<dyn PlanNode>> {
         for field in &select.fields {
             if let Requestable::Aggregate(agg) = field {
-                // Skip relation and inline-array aggregates — they are computed
-                // in compute_relation_aggregates() after plan execution.
-                let is_host_aggregate = agg
-                    .targets
-                    .iter()
-                    .any(|t| !t.host_name.is_empty() && t.host_name != "_group");
-                if is_host_aggregate {
-                    continue;
-                }
-
                 // Get the index where the aggregate result should be stored.
                 // Use the output name (alias if set, otherwise type name) to look up the
                 // correct render_key index. This handles aliased aggregates correctly
@@ -952,40 +956,42 @@ impl Planner {
                         ))
                     })?;
 
-                // For aggregates that operate on a field, get the field index.
-                // Also detect child aggregate targets: when host_name="_group" and
-                // the target field is an aggregate name computed by the inner group.
-                let mut is_child_aggregate = false;
-                let mut child_field_name = String::new();
-                let field_index = if !agg.targets.is_empty() && agg.targets[0].field_name.is_some()
-                {
-                    let target_field = agg.targets[0].field_name.as_ref().unwrap();
-                    // Check if this is a child aggregate (inner aggregate within _group).
-                    // When host_name is "_group" and target is an aggregate type name,
-                    // it's always a child aggregate - even if the same name exists in
-                    // the parent mapping (e.g., _max(_group: {field: _max})).
-                    let is_aggregate_name = matches!(
-                        target_field.as_str(),
-                        "_count" | "_sum" | "_avg" | "_min" | "_max"
-                    );
-                    if agg.targets[0].host_name == "_group"
-                        && (is_aggregate_name
-                            || mapping.first_index_of_name(target_field).is_none())
-                    {
-                        is_child_aggregate = true;
-                        child_field_name = target_field.clone();
-                        0 // placeholder - not used in child aggregate mode
-                    } else {
-                        mapping.first_index_of_name(target_field).ok_or_else(|| {
+                // Detect the aggregate source type and set up accordingly:
+                // 1. Child aggregate: host_name="_group" (iterate _group array)
+                // 2. Relation aggregate: host_name is a relation field (iterate relation array)
+                // 3. Simple aggregate: no host_name or host_name is non-relation field
+                let mut is_array_aggregate = false;
+                let mut array_field_index = 0usize;
+                let mut target_field_name = String::new();
+                let mut field_index = 0usize;
+
+                if !agg.targets.is_empty() {
+                    let target = &agg.targets[0];
+                    let host_name = &target.host_name;
+
+                    if host_name == "_group" {
+                        // Child aggregate within _group
+                        is_array_aggregate = true;
+                        array_field_index = mapping.first_index_of_name("_group").unwrap_or(0);
+                        target_field_name = target.field_name.clone().unwrap_or_default();
+                    } else if !host_name.is_empty() {
+                        // Relation or inline-array aggregate (e.g., _sum(articles: {field: pages}))
+                        // Get the relation/array field index
+                        if let Some(idx) = mapping.first_index_of_name(host_name) {
+                            is_array_aggregate = true;
+                            array_field_index = idx;
+                            target_field_name = target.field_name.clone().unwrap_or_default();
+                        }
+                    } else if let Some(ref fname) = target.field_name {
+                        // Simple field aggregate
+                        field_index = mapping.first_index_of_name(fname).ok_or_else(|| {
                             QueryError::execution(format!(
                                 "aggregate target field '{}' not found in mapping",
-                                target_field
+                                fname
                             ))
-                        })?
+                        })?;
                     }
-                } else {
-                    0 // Not used for count
-                };
+                }
 
                 // Extract filter and limit from aggregate target (if any)
                 let target_filter = if !agg.targets.is_empty() {
@@ -999,20 +1005,13 @@ impl Planner {
                     None
                 };
 
-                // Get the _group field index for child aggregate mode
-                let group_field_index = if is_child_aggregate {
-                    mapping.first_index_of_name("_group").unwrap_or(0)
-                } else {
-                    0
-                };
-
                 match agg.aggregate_type {
                     AggregateType::Count => {
                         let mut node = CountNode::new(plan, mapping.clone(), agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1025,10 +1024,10 @@ impl Planner {
                     }
                     AggregateType::Sum => {
                         let mut node = SumNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1042,10 +1041,10 @@ impl Planner {
                     AggregateType::Average => {
                         let mut node =
                             AverageNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1058,10 +1057,10 @@ impl Planner {
                     }
                     AggregateType::Min => {
                         let mut node = MinNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1074,10 +1073,10 @@ impl Planner {
                     }
                     AggregateType::Max => {
                         let mut node = MaxNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1240,14 +1239,33 @@ impl Planner {
                         ))
                     })?;
 
-            // For self-referential relations (empty relative_id), use the parent collection
-            let target_collection = if target_collection_id.is_empty() {
-                // Self-reference: target is the same collection as parent
-                Arc::new(parent_collection.clone())
-            } else {
-                self.get_collection(target_collection_id)
-                    .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
-            };
+                // For self-referential relations (empty relative_id), use the parent collection
+                let target_collection = if target_collection_id.is_empty() {
+                    // Self-reference: target is the same collection as parent
+                    Arc::new(parent_collection.clone())
+                } else {
+                    self.get_collection(target_collection_id)
+                        .or_else(|| {
+                            // CID lookup failed - try to find target by matching relation_name.
+                            // Handles CID mismatch from circular schema set-based versioning.
+                            let rel_name = relation_field.relation_name.as_deref().unwrap_or("");
+                            if rel_name.is_empty() {
+                                return None;
+                            }
+                            for coll in self.collections.values() {
+                                if coll.name == parent_collection.name {
+                                    continue;
+                                }
+                                for f in &coll.fields {
+                                    if f.relation_name.as_deref() == Some(rel_name) {
+                                        return Some(coll.clone());
+                                    }
+                                }
+                            }
+                            None
+                        })
+                        .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
+                };
 
             // Build child mapping for rendering (only selected fields)
             let child_render_mapping = self.build_mapping(nested_select, &target_collection)?;
@@ -1975,7 +1993,7 @@ impl Planner {
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
                     {
                         Some(f) => f,
-                        None => continue, // Skip if not found (might be invalid)
+                        None => continue,
                     };
 
                     // Inline array fields are handled by scan_mapping setup
@@ -1995,7 +2013,35 @@ impl Planner {
                     } else {
                         match self.get_collection(target_collection_id) {
                             Some(c) => c,
-                            None => continue,
+                            None => {
+                                // CID lookup failed - try to find target by matching relation_name.
+                                // This handles cases where the relation's collection_id CID differs
+                                // from the target collection's current collection_id/version_id
+                                // (e.g., circular schema definitions with set-based versioning).
+                                let parent_rel_name =
+                                    relation_field.relation_name.as_deref().unwrap_or("");
+                                let mut found_by_relation = None;
+                                if !parent_rel_name.is_empty() {
+                                    for coll in self.collections.values() {
+                                        if coll.name == parent_collection.name {
+                                            continue;
+                                        }
+                                        for f in &coll.fields {
+                                            if f.relation_name.as_deref() == Some(parent_rel_name) {
+                                                found_by_relation = Some(coll.clone());
+                                                break;
+                                            }
+                                        }
+                                        if found_by_relation.is_some() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                match found_by_relation {
+                                    Some(c) => c,
+                                    None => continue,
+                                }
+                            }
                         }
                     };
 
@@ -3269,8 +3315,11 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The plan should be a TypeJoinOne (for one-to-one)
-        assert_eq!(plan.kind(), "typeJoinOne");
+        // After plan_with_index_info: ScanNode → TypeJoinOne → SelectNode
+        // Outermost is SelectNode (Go DefraDB plan order: joins before select)
+        assert_eq!(plan.kind(), "selectNode");
+        let source = plan.source().unwrap();
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3289,8 +3338,11 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The plan should be a TypeJoinMany (for one-to-many)
-        assert_eq!(plan.kind(), "typeJoinMany");
+        // After plan_with_index_info: ScanNode → TypeJoinMany → SelectNode
+        // Outermost is SelectNode (Go DefraDB plan order: joins before select)
+        assert_eq!(plan.kind(), "selectNode");
+        let source = plan.source().unwrap();
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3326,12 +3378,16 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be a LimitNode wrapping the join
+        // The outermost node should be a LimitNode
         assert_eq!(plan.kind(), "limitNode");
 
-        // The source should be the join
+        // The source should be SelectNode (which wraps the join)
         let source = plan.source().unwrap();
-        assert_eq!(source.kind(), "typeJoinMany");
+        assert_eq!(source.kind(), "selectNode");
+
+        // SelectNode's source should be the join
+        let join = source.source().unwrap();
+        assert_eq!(join.kind(), "typeIndexJoin");
     }
 
     // ========================================================================
@@ -3360,14 +3416,12 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be TypeJoinMany
-        assert_eq!(plan.kind(), "typeJoinMany");
+        // The outermost node should be selectNode (wraps the join)
+        assert_eq!(plan.kind(), "selectNode");
 
-        // The child source of the join should be a selectNode (with the filter)
-        // not a raw scanNode
+        // SelectNode's source should be typeIndexJoin
         let source = plan.source().unwrap();
-        // Parent source is selectNode
-        assert_eq!(source.kind(), "selectNode");
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3392,12 +3446,12 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be TypeJoinOne
-        assert_eq!(plan.kind(), "typeJoinOne");
+        // The outermost node should be selectNode (wraps the join)
+        assert_eq!(plan.kind(), "selectNode");
 
-        // The parent source of the join should be a selectNode
+        // SelectNode's source should be typeIndexJoin
         let source = plan.source().unwrap();
-        assert_eq!(source.kind(), "selectNode");
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3432,12 +3486,12 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be TypeJoinMany
-        assert_eq!(plan.kind(), "typeJoinMany");
+        // The outermost node should be selectNode (wraps the join)
+        assert_eq!(plan.kind(), "selectNode");
 
-        // The parent source should be selectNode (with parent filter)
+        // SelectNode's source should be typeIndexJoin
         let source = plan.source().unwrap();
-        assert_eq!(source.kind(), "selectNode");
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
