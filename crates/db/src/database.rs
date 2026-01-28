@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::{IterOptions, Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};
+use storage::keys::systemstore::{
+    CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
+};
 
 /// Database options.
 #[derive(Clone, Default)]
@@ -553,7 +555,7 @@ impl<S: Store> DB<S> {
                         ))
                     })?;
 
-                let schema: CollectionVersion =
+                let mut schema: CollectionVersion =
                     serde_json::from_slice(&collection_json).map_err(|e| {
                         tracing::error!(
                             error = ?e,
@@ -566,6 +568,17 @@ impl<S: Store> DB<S> {
                             name, e
                         ))
                     })?;
+
+                // Load root_id from /collection/shortID/{collection_id}
+                // (root_id is #[serde(skip)] so it's not in the JSON)
+                let short_id_key = CollectionID::new(&schema.collection_id);
+                if let Some(short_id_bytes) =
+                    systemstore.get(&short_id_key.bytes()).await.map_err(Error::Storage)?
+                {
+                    if let Ok(short_id_str) = String::from_utf8(short_id_bytes) {
+                        schema.root_id = short_id_str.parse::<u32>().unwrap_or(0);
+                    }
+                }
 
                 schemas.insert(name, schema);
             }
@@ -678,16 +691,16 @@ impl<S: Store> DB<S> {
     pub async fn create_collection_with_txn(
         &self,
         txn: &mut DbTxn<S>,
-        schema: CollectionVersion,
-    ) -> Result<()> {
+        mut schema: CollectionVersion,
+    ) -> Result<CollectionVersion> {
         // Validate collection name
         let collection_name = CollectionName::new(&schema.name)?;
 
         // Validate schema (includes policy validation for path traversal prevention)
         schema.validate()?;
         let name = collection_name.as_str().to_string();
-        let version_id = &schema.version_id;
-        let collection_id = &schema.collection_id;
+        let version_id = &schema.version_id.clone();
+        let collection_id = &schema.collection_id.clone();
 
         // Check if collection exists in txn cache or store
         if txn.get_collection(&name).await?.is_some() {
@@ -696,8 +709,22 @@ impl<S: Store> DB<S> {
 
         let systemstore = txn.systemstore()?;
 
+        // Assign sequential short ID (matches Go's monotonic counter)
+        let short_id = Self::next_collection_short_id(&systemstore).await?;
+        schema.root_id = short_id;
+
+        // Store short ID mapping at /collection/shortID/{collection_id}
+        let short_id_key = CollectionID::new(collection_id.as_str());
+        systemstore
+            .set(
+                &short_id_key.bytes(),
+                short_id.to_string().as_bytes(),
+            )
+            .await
+            .map_err(Error::Storage)?;
+
         // 1. Store full schema at /collection/id/{version_id}
-        let collection_key = CollectionKey::new(version_id);
+        let collection_key = CollectionKey::new(version_id.as_str());
         let data = serde_json::to_vec(&schema).map_err(|e| {
             Error::Serialization(format!(
                 "failed to serialize schema for collection '{}': {}",
@@ -717,16 +744,53 @@ impl<S: Store> DB<S> {
             .map_err(Error::Storage)?;
 
         // 3. Store version index at /collection/version/{collection_id}/{version_id}
-        let version_key = CollectionVersionKey::new(collection_id, version_id);
+        let version_key = CollectionVersionKey::new(collection_id.as_str(), version_id.as_str());
         systemstore
             .set(&version_key.bytes(), b"1")
             .await
             .map_err(Error::Storage)?;
 
         // Update txn-local cache
+        let returned_schema = schema.clone();
         txn.cache_collection(Collection::new(schema));
 
-        Ok(())
+        Ok(returned_schema)
+    }
+
+    /// Get the next sequential collection short ID from the system store.
+    ///
+    /// Reads the current value from `/seq/collection`, increments it, and stores
+    /// the updated value. Returns the new ID. Matches Go's sequence.Next() pattern.
+    async fn next_collection_short_id(
+        systemstore: &datastore::NamespaceView,
+    ) -> Result<u32> {
+        let seq_key = CollectionIDSequenceKey::new();
+        let current: u32 = match systemstore
+            .get(&seq_key.bytes())
+            .await
+            .map_err(Error::Storage)?
+        {
+            Some(bytes) => {
+                // Go stores as big-endian u64
+                if bytes.len() == 8 {
+                    let arr: [u8; 8] = bytes[..8].try_into().unwrap_or([0; 8]);
+                    u64::from_be_bytes(arr) as u32
+                } else {
+                    // Try as string for backwards compat
+                    String::from_utf8_lossy(&bytes)
+                        .parse::<u32>()
+                        .unwrap_or(0)
+                }
+            }
+            None => 0,
+        };
+        let next_id = current + 1;
+        // Store as big-endian u64 (matches Go's binary.BigEndian.PutUint64)
+        systemstore
+            .set(&seq_key.bytes(), &(next_id as u64).to_be_bytes())
+            .await
+            .map_err(Error::Storage)?;
+        Ok(next_id)
     }
 
     /// Create a new collection with schema persistence.
@@ -740,14 +804,13 @@ impl<S: Store> DB<S> {
     /// - `CollectionAlreadyExists` if a collection with this name already exists
     pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
         let name = schema.name.clone();
-        let collection = Collection::new(schema.clone());
 
         let mut txn = self.new_txn(false).await?;
         match self.create_collection_with_txn(&mut txn, schema).await {
-            Ok(()) => {
+            Ok(updated_schema) => {
                 txn.commit().await?;
 
-                // Update process-wide cache for callers not using transaction-scoped caching
+                // Update process-wide cache with the schema that has root_id assigned
                 let mut cache = self.collections.write().map_err(|e| {
                     tracing::error!(
                         error = ?e,
@@ -756,7 +819,7 @@ impl<S: Store> DB<S> {
                     );
                     Error::CacheUpdateFailedAfterCommit(name.clone())
                 })?;
-                cache.insert(name, collection);
+                cache.insert(name, Collection::new(updated_schema));
                 Ok(())
             }
             Err(e) => {

@@ -113,6 +113,13 @@ pub struct CollectionVersion {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub vector_embeddings: Vec<VectorEmbeddingDescription>,
+
+    /// Sequential short ID for storage prefixes (matches Go's monotonic counter).
+    ///
+    /// Not serialized — stored separately in system store at /collection/shortID/{collection_id}.
+    /// Set during collection creation or loaded from store. 0 means not yet assigned.
+    #[serde(skip)]
+    pub root_id: u32,
 }
 
 fn default_active() -> bool {
@@ -144,6 +151,7 @@ impl CollectionVersion {
             is_embedded_only: false,
             is_placeholder: false,
             vector_embeddings: Vec::new(),
+            root_id: 0,
         }
     }
 

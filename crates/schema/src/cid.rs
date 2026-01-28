@@ -62,6 +62,20 @@ pub fn generate_collection_cid_with_priority(
     field_cids: &[Cid],
     priority: u64,
 ) -> crate::Result<Cid> {
+    generate_collection_cid_with_priority_and_heads(name, field_cids, priority, &[])
+}
+
+/// Generate a collection CID with specific priority and head CIDs.
+///
+/// This variant is needed to replicate Go's headstore prefix collision behavior,
+/// where some collections inadvertently inherit heads from other collections
+/// whose names share the same prefix (e.g., "Author" prefix-matches "AuthorContact").
+pub fn generate_collection_cid_with_priority_and_heads(
+    name: &str,
+    field_cids: &[Cid],
+    priority: u64,
+    heads: &[Cid],
+) -> crate::Result<Cid> {
     let delta = CollectionDefinitionDeltaPayload::new(priority).with_name(name);
 
     // Convert field CIDs to DAGLinks (Go uses empty string as the link name for field definitions)
@@ -70,7 +84,7 @@ pub fn generate_collection_cid_with_priority(
         .map(|cid| DAGLink::new("", *cid))
         .collect();
 
-    let block = Block::new(CrdtDelta::CollectionDefinition(delta), vec![], links);
+    let block = Block::new(CrdtDelta::CollectionDefinition(delta), heads.to_vec(), links);
     generate_block_cid(&block)
 }
 
