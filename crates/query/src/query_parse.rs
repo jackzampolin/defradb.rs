@@ -1696,9 +1696,9 @@ fn parse_field_to_mutation(
         MutationType::Upsert => Mutation::upsert(&collection_name),
     };
 
-    // Capture alias if present
+    // Capture GraphQL alias if present (e.g., "john: update_Users(...)")
     if let Some(ref alias) = field.alias {
-        mutation.alias = Some(alias.clone());
+        mutation = mutation.with_alias(alias.clone());
     }
 
     // Track if input argument was present (even if null)

@@ -243,6 +243,16 @@ pub fn json_to_normal_value_with_kind(
     field_kind: Option<&FieldKind>,
     utc_now: DateTime<FixedOffset>,
 ) -> Result<document::NormalValue> {
+    json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))
+}
+
+/// Convert a JSON value to a document NormalValue with schema-aware type coercion
+/// and an optional pre-computed request time for UTC_NOW resolution.
+pub fn json_to_normal_value_with_kind_and_time(
+    value: &JsonValue,
+    field_kind: Option<&FieldKind>,
+    request_time: Option<DateTime<FixedOffset>>,
+) -> Result<document::NormalValue> {
     use document::NormalValue;
 
     // Handle null regardless of expected type
@@ -273,7 +283,12 @@ pub fn json_to_normal_value_with_kind(
                         // Handle special value UTC_NOW - use the provided timestamp
                         // This ensures all UTC_NOW values in a single mutation get the same time
                         if s == "UTC_NOW" {
-                            return Ok(NormalValue::Time(utc_now));
+                            // Use pre-computed request time if available, otherwise compute now
+                            let time = request_time.unwrap_or_else(|| {
+                                let utc_offset = FixedOffset::east_opt(0).unwrap();
+                                Utc::now().with_timezone(&utc_offset)
+                            });
+                            return Ok(NormalValue::Time(time));
                         }
                         // Parse RFC 3339 string to DateTime, preserving original timezone
                         // Go's time.Parse(time.RFC3339, s) preserves the original timezone

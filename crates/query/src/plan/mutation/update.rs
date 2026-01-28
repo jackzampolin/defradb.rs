@@ -178,6 +178,8 @@ pub struct UpdateNode {
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
     collection: Option<Arc<CollectionVersion>>,
+    /// Pre-computed timestamp for UTC_NOW resolution (ensures consistency within a request)
+    utc_now: Option<DateTime<FixedOffset>>,
     /// Document IDs to update (mutually exclusive with filter)
     doc_ids: Option<Vec<String>>,
     /// Filter to find documents to update (mutually exclusive with doc_ids)
@@ -219,6 +221,7 @@ impl UpdateNode {
             fetcher,
             document_mapping,
             collection: None,
+            utc_now: None,
             doc_ids: None,
             filter: None,
             input: UpdateInput::new(),
@@ -252,6 +255,16 @@ impl UpdateNode {
     /// Set the collection schema for schema-aware type coercion.
     pub fn with_collection(mut self, collection: Arc<CollectionVersion>) -> Self {
         self.collection = Some(collection);
+        self
+    }
+
+    /// Set the shared UTC timestamp for all UTC_NOW values.
+    ///
+    /// When multiple mutations are executed in the same GraphQL request,
+    /// they should share the same timestamp for UTC_NOW values. This method
+    /// allows the runner to set a shared timestamp captured at request time.
+    pub fn with_utc_now(mut self, utc_now: DateTime<FixedOffset>) -> Self {
+        self.utc_now = Some(utc_now);
         self
     }
 
@@ -340,9 +353,11 @@ impl PlanNode for UpdateNode {
                 matching_ids
             };
 
-            // Capture a single timestamp for all UTC_NOW values in this update
-            let utc_offset = FixedOffset::east_opt(0).unwrap();
-            let utc_now = Utc::now().with_timezone(&utc_offset);
+            // Use pre-computed timestamp if available, otherwise compute now
+            let utc_now = self.utc_now.unwrap_or_else(|| {
+                let utc_offset = FixedOffset::east_opt(0).unwrap();
+                Utc::now().with_timezone(&utc_offset)
+            });
 
             // Update each document
             for doc_id_str in doc_ids_to_update {

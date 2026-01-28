@@ -1217,11 +1217,27 @@ impl<'a> SdlParser<'a> {
 
                     // FK field has same is_primary status as relation object field
                     let mut id_field =
-                        FieldDescription::new(&id_field_id, &id_field_name, id_field_kind)
+                        FieldDescription::new(&id_field_id, &id_field_name.clone(), id_field_kind)
                             .with_crdt_type(id_field_crdt)
                             .with_relation_name(relation_name);
                     if is_primary {
                         id_field = id_field.as_primary();
+
+                        // Go DefraDB automatically creates a unique index on the _*ID field
+                        // for primary one-to-one relations. This enforces that each target
+                        // document can only be linked to once (one-to-one constraint).
+                        // See Go's ensureOneToOneUniqueIndex() in collection_define.go
+                        let idx_name = format!("{}_{}_unique", type_def.name, id_field_name);
+                        indexes.push(IndexDescription {
+                            name: idx_name,
+                            id: field_id_counter,
+                            fields: vec![IndexedFieldDescription {
+                                name: id_field_name.clone(),
+                                descending: false,
+                            }],
+                            unique: true,
+                        });
+                        field_id_counter += 1;
                     }
                     fields.push(id_field);
                     field_id_counter += 1;
