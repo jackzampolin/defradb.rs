@@ -468,6 +468,14 @@ pub fn filter_to_index_scan(
         .map(|(can_order, needs_reverse)| can_order && needs_reverse)
         .unwrap_or(false);
 
+    // For descending indexes, range bounds must be swapped because the encoding
+    // reverses the byte order: higher values have lower encoded bytes.
+    // e.g., _gt:30 on DESC index → upper_bound (not lower) in byte order.
+    let first_field_descending = index.fields.first().map(|f| f.descending).unwrap_or(false);
+    if first_field_descending {
+        std::mem::swap(&mut lower_bound, &mut upper_bound);
+    }
+
     // Determine scan type (narrowing scans take priority over full scans)
     let scan_type = if has_eq {
         IndexScanType::ExactMatch {
