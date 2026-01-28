@@ -472,41 +472,35 @@ impl GroupByNode {
                         };
 
                     // Apply inner _group order
-                    let inner_ordered: Vec<&Doc> =
-                        if let Some(ref order) = self.inner_group_order {
-                            let mut sorted = inner_filtered;
-                            sorted.sort_by(|a, b| {
-                                for cond in &order.conditions {
-                                    if let Some(field_name) = cond.fields.first() {
-                                        if let Some(idx) =
-                                            self.document_mapping.first_index_of_name(field_name)
-                                        {
-                                            let cmp = Self::compare_field_values(
-                                                a.get(idx),
-                                                b.get(idx),
-                                            );
-                                            let cmp = match cond.direction {
-                                                OrderDirection::Asc => cmp,
-                                                OrderDirection::Desc => cmp.reverse(),
-                                            };
-                                            if cmp != std::cmp::Ordering::Equal {
-                                                return cmp;
-                                            }
+                    let inner_ordered: Vec<&Doc> = if let Some(ref order) = self.inner_group_order {
+                        let mut sorted = inner_filtered;
+                        sorted.sort_by(|a, b| {
+                            for cond in &order.conditions {
+                                if let Some(field_name) = cond.fields.first() {
+                                    if let Some(idx) =
+                                        self.document_mapping.first_index_of_name(field_name)
+                                    {
+                                        let cmp =
+                                            Self::compare_field_values(a.get(idx), b.get(idx));
+                                        let cmp = match cond.direction {
+                                            OrderDirection::Asc => cmp,
+                                            OrderDirection::Desc => cmp.reverse(),
+                                        };
+                                        if cmp != std::cmp::Ordering::Equal {
+                                            return cmp;
                                         }
                                     }
                                 }
-                                std::cmp::Ordering::Equal
-                            });
-                            sorted
-                        } else {
-                            inner_filtered
-                        };
+                            }
+                            std::cmp::Ordering::Equal
+                        });
+                        sorted
+                    } else {
+                        inner_filtered
+                    };
 
                     let inner_array = if !self.third_level_group_by_fields.is_empty() {
-                        self.build_innermost_group_array(
-                            &inner_ordered,
-                            inner_child_mapping,
-                        )
+                        self.build_innermost_group_array(&inner_ordered, inner_child_mapping)
                     } else {
                         Self::render_docs_with_keys(
                             &inner_ordered,
@@ -569,10 +563,7 @@ impl GroupByNode {
                         if rk.key == "_group" || rk.key == "__typename" {
                             continue;
                         }
-                        let value = first_doc
-                            .get(rk.index)
-                            .cloned()
-                            .unwrap_or(JsonValue::Null);
+                        let value = first_doc.get(rk.index).cloned().unwrap_or(JsonValue::Null);
                         obj.insert(rk.key.clone(), value);
                     }
                 } else {

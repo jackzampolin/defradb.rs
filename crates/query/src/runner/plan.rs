@@ -98,9 +98,9 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                         continue;
                     }
                     // Allow FK fields for relation groupBy fields (e.g. _authorID for author)
-                    let is_fk_for_group = group_fields.iter().any(|gb_field| {
-                        name == format!("_{}ID", gb_field)
-                    });
+                    let is_fk_for_group = group_fields
+                        .iter()
+                        .any(|gb_field| name == format!("_{}ID", gb_field));
                     if is_fk_for_group {
                         continue;
                     }
@@ -185,9 +185,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 }
 
 /// Format filter conditions in Go graphql-go style (unquoted keys).
-fn format_graphql_conditions(
-    conditions: &std::collections::HashMap<String, JsonValue>,
-) -> String {
+fn format_graphql_conditions(conditions: &std::collections::HashMap<String, JsonValue>) -> String {
     let entries: Vec<String> = conditions
         .iter()
         .map(|(k, v)| format!("{}: {}", k, format_graphql_value(v)))
@@ -384,8 +382,7 @@ pub(crate) fn build_plan(
             for field in &select.fields {
                 if let Requestable::Select(nested) = field {
                     if nested.field.name == "_group" {
-                        let alias_index =
-                            group_indices.get(alias_count).copied().unwrap_or(0);
+                        let alias_index = group_indices.get(alias_count).copied().unwrap_or(0);
                         alias_count += 1;
                         group_aliases.push(GroupAlias {
                             index: alias_index,

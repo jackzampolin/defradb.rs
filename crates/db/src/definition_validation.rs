@@ -204,10 +204,7 @@ fn validate_collection_id_not_mutated(
 }
 
 /// Matches Go's validateIDNotEmpty.
-fn validate_id_not_empty(
-    new_state: &DefinitionState,
-    _old_state: &DefinitionState,
-) -> Vec<String> {
+fn validate_id_not_empty(new_state: &DefinitionState, _old_state: &DefinitionState) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
         if col.collection_id.is_empty() {
@@ -218,19 +215,13 @@ fn validate_id_not_empty(
 }
 
 /// Matches Go's validateIDUnique.
-fn validate_id_unique(
-    new_state: &DefinitionState,
-    _old_state: &DefinitionState,
-) -> Vec<String> {
+fn validate_id_unique(new_state: &DefinitionState, _old_state: &DefinitionState) -> Vec<String> {
     let mut errs = Vec::new();
     let mut seen: HashMap<&str, bool> = HashMap::new();
     for col in &new_state.collections {
         if !col.version_id.is_empty() {
             if seen.contains_key(col.version_id.as_str()) {
-                errs.push(format!(
-                    "collection already exists. ID: {}",
-                    col.version_id
-                ));
+                errs.push(format!("collection already exists. ID: {}", col.version_id));
             }
             seen.insert(&col.version_id, true);
         }
@@ -327,8 +318,11 @@ fn validate_field_not_mutated(
         };
 
         // Build old field map by name
-        let old_fields: HashMap<&str, &schema::FieldDescription> =
-            old_col.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+        let old_fields: HashMap<&str, &schema::FieldDescription> = old_col
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f))
+            .collect();
 
         for new_field in &new_col.fields {
             if let Some(old_field) = old_fields.get(new_field.name.as_str()) {
@@ -484,10 +478,7 @@ fn validate_collection_name_unique(
         }
         if let Some(&existing_id) = seen.get(col.name.as_str()) {
             if existing_id != col.collection_id {
-                errs.push(format!(
-                    "collection already exists. Name: {}",
-                    col.name
-                ));
+                errs.push(format!("collection already exists. Name: {}", col.name));
             }
         }
         seen.insert(&col.name, &col.collection_id);
@@ -661,8 +652,8 @@ fn validate_embedding_fields_for_generation(
 
             for field_name in &embedding.fields {
                 let is_self_ref = field_name == &embedding.field_name;
-                let is_other_embedding_ref = !is_self_ref
-                    && embedding_field_names.contains(field_name.as_str());
+                let is_other_embedding_ref =
+                    !is_self_ref && embedding_field_names.contains(field_name.as_str());
 
                 if is_self_ref {
                     // Self-reference: report error and skip kind check (Go behavior)

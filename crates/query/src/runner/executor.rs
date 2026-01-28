@@ -66,12 +66,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     )
                     .await
                 } else {
-                    self.execute_selects_internal(
-                        selects,
-                        self.fetcher.as_ref(),
-                        identity,
-                    )
-                    .await
+                    self.execute_selects_internal(selects, self.fetcher.as_ref(), identity)
+                        .await
                 }
             }
             ParsedOperation::Mutation(_) => {
@@ -180,12 +176,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     )
                     .await
                 } else {
-                    self.execute_selects_internal(
-                        selects,
-                        fetcher.as_ref(),
-                        identity,
-                    )
-                    .await
+                    self.execute_selects_internal(selects, fetcher.as_ref(), identity)
+                        .await
                 }
             }
             ParsedOperation::Mutation(_) => {
