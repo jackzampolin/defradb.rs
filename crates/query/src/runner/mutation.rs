@@ -13,7 +13,7 @@ use crate::plan::{
     CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertInput, UpsertNode,
 };
 use crate::planner::PlanNode;
-use crate::query_parse::{parse_mutations, parse_mutations_with_variables};
+use crate::query_parse::parse_mutations_with_variables;
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
@@ -76,17 +76,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             variables,
         )
         .await
-    }
-
-    /// Execute a GraphQL mutation with a specific mutator and caller_identity.
-    pub(crate) async fn execute_mutation_internal(
-        &self,
-        mutation_str: &str,
-        mutator: Arc<dyn DocMutator>,
-        caller_identity: Option<Did>,
-    ) -> Result<JsonValue> {
-        self.execute_mutation_internal_with_vars(mutation_str, mutator, caller_identity, None)
-            .await
     }
 
     /// Execute a GraphQL mutation with a specific mutator, caller_identity, and variables.
