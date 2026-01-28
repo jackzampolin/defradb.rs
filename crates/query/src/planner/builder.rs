@@ -736,9 +736,10 @@ impl Planner {
             if let Requestable::Aggregate(agg) = field {
                 // Skip relation and inline-array aggregates — they are computed
                 // in compute_relation_aggregates() after plan execution.
-                let is_host_aggregate = agg.targets.iter().any(|t| {
-                    !t.host_name.is_empty() && t.host_name != "_group"
-                });
+                let is_host_aggregate = agg
+                    .targets
+                    .iter()
+                    .any(|t| !t.host_name.is_empty() && t.host_name != "_group");
                 if is_host_aggregate {
                     continue;
                 }

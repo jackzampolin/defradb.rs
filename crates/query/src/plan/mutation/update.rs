@@ -385,8 +385,7 @@ impl PlanNode for UpdateNode {
                                 let idx = filter_mapping.next_index();
                                 filter_mapping.add(idx, &field.name);
                             }
-                            let full_doc =
-                                document_to_plan_doc(&result.document, &filter_mapping)?;
+                            let full_doc = document_to_plan_doc(&result.document, &filter_mapping)?;
                             if !filter.matches(full_doc.fields(), &filter_mapping)? {
                                 continue;
                             }

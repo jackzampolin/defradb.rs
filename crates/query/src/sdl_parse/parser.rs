@@ -992,7 +992,7 @@ impl<'a> SdlParser<'a> {
             let root = find_root(type_name, &mut component);
             components
                 .entry(root)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(type_name.clone());
         }
 
@@ -1300,7 +1300,7 @@ impl<'a> SdlParser<'a> {
             // use SelfRef with the target's relative index
             if let Some(&target_idx) = collection_set.get(base) {
                 return Ok(FieldKind::self_ref(
-                    &target_idx.to_string(),
+                    target_idx.to_string(),
                     parsed_type.is_list,
                 ));
             }

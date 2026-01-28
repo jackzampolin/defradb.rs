@@ -1155,10 +1155,8 @@ fn parse_aggregate_field(
                                                     s
                                                 ))
                                             })?;
-                                        OrderBy::new().with_condition(OrderCondition::new(
-                                            "",
-                                            direction,
-                                        ))
+                                        OrderBy::new()
+                                            .with_condition(OrderCondition::new("", direction))
                                     }
                                     _ => parse_order_value(val, variables)?,
                                 };

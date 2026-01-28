@@ -720,8 +720,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         use crate::mapper::AggregateType;
 
         // Collect info about relation aggregates with full target references
-        let mut aggregates_info: Vec<(String, AggregateType, Vec<&crate::mapper::AggregateTarget>)> =
-            Vec::new();
+        let mut aggregates_info: Vec<(
+            String,
+            AggregateType,
+            Vec<&crate::mapper::AggregateTarget>,
+        )> = Vec::new();
 
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
@@ -735,7 +738,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 if !relation_targets.is_empty() {
                     aggregates_info.push((
                         agg.output_name().to_string(),
-                        agg.aggregate_type.clone(),
+                        agg.aggregate_type,
                         relation_targets,
                     ));
                 }
@@ -779,114 +782,110 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let relation_name = &target.host_name;
                         let field_name = target.field_name.as_deref();
 
-                        if let Some(relation_data) = obj.get(relation_name) {
-                            if let JsonValue::Array(items) = relation_data {
-                                // Step 1: Apply filter to array elements
-                                let filtered_items: Vec<&JsonValue> =
-                                    if let Some(ref filter) = target.filter {
-                                        items
-                                            .iter()
-                                            .filter(|item| {
-                                                let val = match field_name {
-                                                    Some(f) => item
-                                                        .as_object()
-                                                        .and_then(|o| o.get(f))
-                                                        .unwrap_or(&JsonValue::Null),
-                                                    None => *item,
-                                                };
-                                                filter.matches_scalar_value(val).unwrap_or(false)
-                                            })
-                                            .collect()
-                                    } else {
-                                        items.iter().collect()
-                                    };
+                        if let Some(JsonValue::Array(items)) = obj.get(relation_name) {
+                            // Step 1: Apply filter to array elements
+                            let filtered_items: Vec<&JsonValue> =
+                                if let Some(ref filter) = target.filter {
+                                    items
+                                        .iter()
+                                        .filter(|item| {
+                                            let val = match field_name {
+                                                Some(f) => item
+                                                    .as_object()
+                                                    .and_then(|o| o.get(f))
+                                                    .unwrap_or(&JsonValue::Null),
+                                                None => *item,
+                                            };
+                                            filter.matches_scalar_value(val).unwrap_or(false)
+                                        })
+                                        .collect()
+                                } else {
+                                    items.iter().collect()
+                                };
 
-                                // Step 2: Apply order (sort array elements before limit/offset)
-                                let mut ordered_items = filtered_items;
-                                if let Some(ref order) = target.order {
-                                    if let Some(condition) = order.conditions.first() {
-                                        let desc = matches!(
-                                            condition.direction,
-                                            crate::mapper::OrderDirection::Desc
-                                        );
-                                        ordered_items.sort_by(|a, b| {
-                                            let a_val = match field_name {
-                                                Some(f) => a
-                                                    .as_object()
-                                                    .and_then(|o| o.get(f))
-                                                    .unwrap_or(&JsonValue::Null),
-                                                None => *a,
-                                            };
-                                            let b_val = match field_name {
-                                                Some(f) => b
-                                                    .as_object()
-                                                    .and_then(|o| o.get(f))
-                                                    .unwrap_or(&JsonValue::Null),
-                                                None => *b,
-                                            };
-                                            let a_f = a_val.as_f64().unwrap_or(0.0);
-                                            let b_f = b_val.as_f64().unwrap_or(0.0);
-                                            if desc {
-                                                b_f.partial_cmp(&a_f)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            } else {
-                                                a_f.partial_cmp(&b_f)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            }
-                                        });
+                            // Step 2: Apply order (sort array elements before limit/offset)
+                            let mut ordered_items = filtered_items;
+                            if let Some(ref order) = target.order {
+                                if let Some(condition) = order.conditions.first() {
+                                    let desc = matches!(
+                                        condition.direction,
+                                        crate::mapper::OrderDirection::Desc
+                                    );
+                                    ordered_items.sort_by(|a, b| {
+                                        let a_val = match field_name {
+                                            Some(f) => a
+                                                .as_object()
+                                                .and_then(|o| o.get(f))
+                                                .unwrap_or(&JsonValue::Null),
+                                            None => *a,
+                                        };
+                                        let b_val = match field_name {
+                                            Some(f) => b
+                                                .as_object()
+                                                .and_then(|o| o.get(f))
+                                                .unwrap_or(&JsonValue::Null),
+                                            None => *b,
+                                        };
+                                        let a_f = a_val.as_f64().unwrap_or(0.0);
+                                        let b_f = b_val.as_f64().unwrap_or(0.0);
+                                        if desc {
+                                            b_f.partial_cmp(&a_f)
+                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                        } else {
+                                            a_f.partial_cmp(&b_f)
+                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                        }
+                                    });
+                                }
+                            }
+
+                            // Step 3: Apply limit/offset
+                            let final_items: Vec<&JsonValue> = if let Some(ref limit) = target.limit
+                            {
+                                let offset = limit.offset as usize;
+                                let sliced = if offset < ordered_items.len() {
+                                    &ordered_items[offset..]
+                                } else {
+                                    &[][..]
+                                };
+                                match limit.limit {
+                                    Some(l) => sliced.iter().take(l as usize).copied().collect(),
+                                    None => sliced.to_vec(),
+                                }
+                            } else {
+                                ordered_items
+                            };
+
+                            // Step 4: Compute aggregate over final items
+                            match agg_type {
+                                AggregateType::Count => {
+                                    total_count += final_items.len() as i64;
+                                }
+                                AggregateType::Sum | AggregateType::Average => {
+                                    for item in &final_items {
+                                        if let Some(n) = extract_numeric(item, field_name) {
+                                            total_value += n;
+                                            total_count += 1;
+                                        }
                                     }
                                 }
-
-                                // Step 3: Apply limit/offset
-                                let final_items: Vec<&JsonValue> =
-                                    if let Some(ref limit) = target.limit {
-                                        let offset = limit.offset as usize;
-                                        let sliced = if offset < ordered_items.len() {
-                                            &ordered_items[offset..]
-                                        } else {
-                                            &[][..]
-                                        };
-                                        match limit.limit {
-                                            Some(l) => {
-                                                sliced.iter().take(l as usize).copied().collect()
+                                AggregateType::Min => {
+                                    for item in &final_items {
+                                        if let Some(n) = extract_numeric(item, field_name) {
+                                            if total_count == 0 || n < total_value {
+                                                total_value = n;
                                             }
-                                            None => sliced.to_vec(),
-                                        }
-                                    } else {
-                                        ordered_items
-                                    };
-
-                                // Step 4: Compute aggregate over final items
-                                match agg_type {
-                                    AggregateType::Count => {
-                                        total_count += final_items.len() as i64;
-                                    }
-                                    AggregateType::Sum | AggregateType::Average => {
-                                        for item in &final_items {
-                                            if let Some(n) = extract_numeric(item, field_name) {
-                                                total_value += n;
-                                                total_count += 1;
-                                            }
+                                            total_count += 1;
                                         }
                                     }
-                                    AggregateType::Min => {
-                                        for item in &final_items {
-                                            if let Some(n) = extract_numeric(item, field_name) {
-                                                if total_count == 0 || n < total_value {
-                                                    total_value = n;
-                                                }
-                                                total_count += 1;
+                                }
+                                AggregateType::Max => {
+                                    for item in &final_items {
+                                        if let Some(n) = extract_numeric(item, field_name) {
+                                            if total_count == 0 || n > total_value {
+                                                total_value = n;
                                             }
-                                        }
-                                    }
-                                    AggregateType::Max => {
-                                        for item in &final_items {
-                                            if let Some(n) = extract_numeric(item, field_name) {
-                                                if total_count == 0 || n > total_value {
-                                                    total_value = n;
-                                                }
-                                                total_count += 1;
-                                            }
+                                            total_count += 1;
                                         }
                                     }
                                 }
@@ -980,14 +979,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let a_f = a_val.and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let b_f = b_val.and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let ord = a_f.partial_cmp(&b_f).unwrap_or(std::cmp::Ordering::Equal);
-                        let ord = if matches!(
-                            condition.direction,
-                            crate::mapper::OrderDirection::Desc
-                        ) {
-                            ord.reverse()
-                        } else {
-                            ord
-                        };
+                        let ord =
+                            if matches!(condition.direction, crate::mapper::OrderDirection::Desc) {
+                                ord.reverse()
+                            } else {
+                                ord
+                            };
                         if ord != std::cmp::Ordering::Equal {
                             return ord;
                         }
@@ -2166,7 +2163,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .map(|name| {
                 commit
-                    .get(*name)
+                    .get(name)
                     .and_then(|v| crate::json_convert::normal_value_to_json(v).ok())
             })
             .collect()
