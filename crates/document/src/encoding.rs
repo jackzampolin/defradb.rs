@@ -696,7 +696,13 @@ fn cbor_value_to_json(value: &ciborium::Value) -> Result<serde_json::Value> {
         }
         ciborium::Value::Float(f) => {
             if f.is_finite() {
-                Ok(serde_json::json!(f))
+                // Match Go's json.Marshal behavior: whole-number floats serialize as integers
+                // e.g., 1.0 becomes "1", not "1.0"
+                if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                    Ok(serde_json::json!(*f as i64))
+                } else {
+                    Ok(serde_json::json!(f))
+                }
             } else {
                 // NaN/Infinity can't be represented in JSON
                 Err(Error::NonFiniteFloat(format!("{}", f)))

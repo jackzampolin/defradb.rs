@@ -36,11 +36,7 @@ fn preprocess_empty_types(sdl: &str) -> String {
     let re = Regex::new(r"(\btype\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
 
     re.replace_all(sdl, |caps: &regex::Captures| {
-        format!(
-            "{}{{ {}: String }}",
-            &caps[1],
-            EMPTY_TYPE_PLACEHOLDER
-        )
+        format!("{}{{ {}: String }}", &caps[1], EMPTY_TYPE_PLACEHOLDER)
     })
     .to_string()
 }
@@ -544,10 +540,7 @@ impl<'a> SdlParser<'a> {
     ///
     /// Go format: `@index(includes: [{field: "name"}, {field: "age", direction: DESC}])`
     /// Returns (field_name, descending) tuples extracted from the objects.
-    fn parse_includes_argument(
-        &self,
-        directive: &Directive<'_, String>,
-    ) -> Vec<(String, bool)> {
+    fn parse_includes_argument(&self, directive: &Directive<'_, String>) -> Vec<(String, bool)> {
         let Some(value) = get_directive_arg(directive, "includes") else {
             return Vec::new();
         };
@@ -683,7 +676,9 @@ impl<'a> SdlParser<'a> {
                         .map(serde_json::Value::Number)
                         .ok_or_else(|| QueryError::parse("@default json float is invalid (NaN or Infinity)")),
                     graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-                    graphql_parser::schema::Value::Null => Ok(serde_json::Value::Null),
+                    graphql_parser::schema::Value::Null => {
+                        Err(QueryError::parse("default value is invalid for type JSON"))
+                    }
                     graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
                     graphql_parser::schema::Value::List(arr) => {
                         let items: Vec<serde_json::Value> = arr
@@ -1265,8 +1260,11 @@ impl<'a> SdlParser<'a> {
             }
 
             let idx_name = composite_idx.name.clone().unwrap_or_else(|| {
-                let field_names: Vec<&str> =
-                    composite_idx.fields.iter().map(|(n, _)| n.as_str()).collect();
+                let field_names: Vec<&str> = composite_idx
+                    .fields
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect();
                 format!("{}_{}_idx", type_def.name, field_names.join("_"))
             });
 

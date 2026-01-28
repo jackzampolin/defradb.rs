@@ -86,6 +86,24 @@ impl CreateInput {
                 })?;
         }
 
+        // Apply default values for fields not explicitly provided
+        for field_def in &collection.fields {
+            if self.fields.contains_key(&field_def.name) {
+                continue;
+            }
+            if let Some(ref default_val) = field_def.default_value {
+                let normal_value =
+                    json_to_normal_value_with_kind(default_val, Some(&field_def.kind))?;
+                doc.set_with_crdt(field_def.name.clone(), field_def.crdt_type, normal_value)
+                    .map_err(|e| {
+                        QueryError::execution(format!(
+                            "Failed to set default for field '{}': {}",
+                            field_def.name, e
+                        ))
+                    })?;
+            }
+        }
+
         Ok(doc)
     }
 }

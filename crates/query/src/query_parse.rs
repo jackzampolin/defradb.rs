@@ -197,12 +197,12 @@ pub fn parse_query_with_variables(
         ParsedOperation::Mutation(_) => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
         )),
-        ParsedOperation::Subscription { .. } => Err(QueryError::parse(
-            "Expected query but got subscription.",
-        )),
-        ParsedOperation::Introspection { .. } => Err(QueryError::parse(
-            "Expected query but got introspection.",
-        )),
+        ParsedOperation::Subscription { .. } => {
+            Err(QueryError::parse("Expected query but got subscription."))
+        }
+        ParsedOperation::Introspection { .. } => {
+            Err(QueryError::parse("Expected query but got introspection."))
+        }
     }
 }
 
@@ -621,9 +621,10 @@ fn parse_field_to_select(
                     continue;
                 }
                 // Allow FK fields for relation groupBy fields (e.g. _authorID for author)
-                let is_fk_for_group = group_by.fields.iter().any(|gb_field| {
-                    f.name == format!("_{}ID", gb_field)
-                });
+                let is_fk_for_group = group_by
+                    .fields
+                    .iter()
+                    .any(|gb_field| f.name == format!("_{}ID", gb_field));
                 if is_fk_for_group {
                     continue;
                 }
@@ -1079,7 +1080,8 @@ fn parse_order_from_json(json: &JsonValue) -> Result<OrderBy> {
             for (field_name, dir_val) in obj {
                 if let Some(dir_str) = dir_val.as_str() {
                     if let Some(direction) = OrderDirection::parse(dir_str) {
-                        order_by = order_by.with_condition(OrderCondition::new(field_name, direction));
+                        order_by =
+                            order_by.with_condition(OrderCondition::new(field_name, direction));
                     }
                 }
             }
@@ -1090,16 +1092,19 @@ fn parse_order_from_json(json: &JsonValue) -> Result<OrderBy> {
                     for (field_name, dir_val) in obj {
                         if let Some(dir_str) = dir_val.as_str() {
                             if let Some(direction) = OrderDirection::parse(dir_str) {
-                                order_by = order_by.with_condition(OrderCondition::new(
-                                    field_name, direction,
-                                ));
+                                order_by = order_by
+                                    .with_condition(OrderCondition::new(field_name, direction));
                             }
                         }
                     }
                 }
             }
         }
-        _ => return Err(QueryError::parse("order variable must be an object or array")),
+        _ => {
+            return Err(QueryError::parse(
+                "order variable must be an object or array",
+            ))
+        }
     }
     Ok(order_by)
 }
@@ -1317,8 +1322,10 @@ fn parse_aggregate_target_from_json(
                 "filter" => {
                     // Convert JSON filter to a Filter
                     if let JsonValue::Object(filter_obj) = val {
-                        let conditions: HashMap<String, JsonValue> =
-                            filter_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        let conditions: HashMap<String, JsonValue> = filter_obj
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
                         target.filter = Some(Filter::from_conditions(conditions));
                     }
                 }
@@ -1405,10 +1412,7 @@ fn parse_aggregate_field(
                             ))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "Variable \"${}\" was not provided",
-                                name
-                            ))
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         let target =
                             parse_aggregate_target_from_json(arg_name, json_val, variables)?;
@@ -1495,10 +1499,7 @@ fn parse_top_level_aggregate(
     if agg_type != AggregateType::Count {
         for target in &aggregate.targets {
             if target.field_name.is_none() {
-                let type_name = format!(
-                    "{}NumericFieldsArg!",
-                    capitalize_first(&target.host_name)
-                );
+                let type_name = format!("{}NumericFieldsArg!", capitalize_first(&target.host_name));
                 return Err(QueryError::parse(format!(
                     "Argument \"{}\" has invalid value {{}}.\nIn field \"field\": Expected \"{}\", found null.",
                     target.host_name,
@@ -1695,6 +1696,11 @@ fn parse_field_to_mutation(
         MutationType::Upsert => Mutation::upsert(&collection_name),
     };
 
+    // Capture alias if present
+    if let Some(ref alias) = field.alias {
+        mutation.alias = Some(alias.clone());
+    }
+
     // Track if input argument was present (even if null)
     let mut has_input_arg = false;
 
@@ -1750,6 +1756,9 @@ fn parse_field_to_mutation(
                     mutation.filter = Some(filter);
                 }
             }
+
+            // Encryption arguments: accepted but not yet implemented in Rust
+            (_, "encrypt") | (_, "encryptFields") => {}
 
             // Unknown argument
             _ => {
