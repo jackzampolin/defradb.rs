@@ -918,8 +918,9 @@ impl Planner {
         // Select the best index for this filter
         let best_index = select_best_index(filter, &collection.indexes)?;
 
-        // Convert filter to index scan parameters
-        filter_to_index_scan(filter, best_index)
+        // Convert filter to index scan parameters, passing ordering info
+        // so the scan direction can be set correctly
+        filter_to_index_scan(filter, best_index, select.order_by.as_ref())
     }
 
     /// Apply join nodes for nested selects (relation fields)

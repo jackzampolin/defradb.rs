@@ -10,7 +10,7 @@ use schema::IndexDescription;
 use serde_json::Value as JsonValue;
 use storage::index::Bound;
 
-use crate::mapper::{Filter, FilterOp};
+use crate::mapper::{Filter, FilterOp, OrderBy, OrderDirection};
 
 /// Parameters for executing an index scan.
 #[derive(Debug, Clone)]
@@ -304,9 +304,70 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
     })
 }
 
+/// Determine if an index can be used to satisfy the query ordering.
+///
+/// Returns a tuple of (can_use_index, needs_reverse):
+/// - `can_use_index`: true if the index can satisfy the ordering
+/// - `needs_reverse`: true if the index scan should be reversed
+///
+/// The index can satisfy ordering if:
+/// - All ORDER BY fields are covered by the first N fields of the index (in order)
+/// - Either all field directions match, OR all field directions are opposite
+///
+/// This matches Go DefraDB's `CanBeOrderedByIndex` behavior.
+pub fn can_be_ordered_by_index(order_by: &OrderBy, index: &IndexDescription) -> (bool, bool) {
+    if order_by.is_empty() || order_by.conditions.len() > index.fields.len() {
+        return (false, false);
+    }
+
+    let mut mismatch_count = 0;
+
+    for (i, condition) in order_by.conditions.iter().enumerate() {
+        // Only consider simple field ordering (not nested relation paths)
+        if condition.fields.len() != 1 {
+            return (false, false);
+        }
+
+        let order_field = &condition.fields[0];
+        let index_field = &index.fields[i];
+
+        // Field names must match in order
+        if order_field != &index_field.name {
+            return (false, false);
+        }
+
+        // Check direction match
+        let order_is_desc = condition.direction == OrderDirection::Desc;
+        if index_field.descending != order_is_desc {
+            mismatch_count += 1;
+        }
+    }
+
+    // Can use index if:
+    // - All directions match (mismatch_count == 0) → no reversal needed
+    // - All directions are opposite (mismatch_count == len) → reverse needed
+    let all_match = mismatch_count == 0;
+    let all_mismatch = mismatch_count == order_by.conditions.len();
+
+    if all_match {
+        (true, false)
+    } else if all_mismatch {
+        (true, true)
+    } else {
+        (false, false)
+    }
+}
+
 /// Convert a filter to index scan parameters.
 ///
 /// Returns None if the filter cannot use the index efficiently.
+///
+/// # Ordering Support
+///
+/// If `order_by` is provided, the scan direction will be set based on whether
+/// the index can satisfy the ordering:
+/// - If ordering matches index direction: forward scan
+/// - If ordering is opposite of index direction: reverse scan
 ///
 /// # Array Field Support
 ///
@@ -314,7 +375,11 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
 /// by the inner operator. For example:
 /// - `{numbers: {_any: {_eq: 30}}}` → ExactMatch{values: [30]}
 /// - `{tags: {_any: {_in: ["red", "blue"]}}}` → InScan{values: ["red", "blue"]}
-pub fn filter_to_index_scan(filter: &Filter, index: &IndexDescription) -> Option<IndexScanParams> {
+pub fn filter_to_index_scan(
+    filter: &Filter,
+    index: &IndexDescription,
+    order_by: Option<&OrderBy>,
+) -> Option<IndexScanParams> {
     if !can_use_index(filter, index) {
         return None;
     }
@@ -384,6 +449,12 @@ pub fn filter_to_index_scan(filter: &Filter, index: &IndexDescription) -> Option
         }
     }
 
+    // Determine if we need to reverse the scan based on ordering
+    let reverse = order_by
+        .map(|o| can_be_ordered_by_index(o, index))
+        .map(|(can_order, needs_reverse)| can_order && needs_reverse)
+        .unwrap_or(false);
+
     // Determine scan type
     let scan_type = if has_eq {
         IndexScanType::ExactMatch {
@@ -398,7 +469,7 @@ pub fn filter_to_index_scan(filter: &Filter, index: &IndexDescription) -> Option
             prefix_values: vec![],
             lower: lower_bound,
             upper: upper_bound,
-            reverse: false,
+            reverse,
         }
     } else {
         return None;
@@ -598,7 +669,7 @@ mod tests {
         )]));
         let index = single_field_index("name");
 
-        let params = filter_to_index_scan(&filter, &index).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None).unwrap();
         assert_eq!(params.index_name, "name_idx");
 
         match params.scan_type {
@@ -618,7 +689,7 @@ mod tests {
         )]));
         let index = single_field_index("status");
 
-        let params = filter_to_index_scan(&filter, &index).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None).unwrap();
 
         match params.scan_type {
             IndexScanType::InScan { values } => {
@@ -636,7 +707,7 @@ mod tests {
         )]));
         let index = single_field_index("age");
 
-        let params = filter_to_index_scan(&filter, &index).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None).unwrap();
 
         match params.scan_type {
             IndexScanType::RangeScan {
@@ -823,7 +894,7 @@ mod tests {
         )]));
         let index = single_field_index("numbers");
 
-        let params = filter_to_index_scan(&filter, &index).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None).unwrap();
         assert_eq!(params.index_name, "numbers_idx");
 
         match params.scan_type {
