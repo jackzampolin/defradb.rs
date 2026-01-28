@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
-use crate::mapper::{OrderBy, OrderDirection};
+use crate::mapper::{GroupBy, OrderBy, OrderDirection};
 use crate::planner::{Doc, PlanNode};
 
 use super::{JoinSide, RelationFilter};
@@ -65,6 +65,14 @@ pub struct TypeJoinMany {
     /// Example: `Author(filter: {published: {rating: {_gt: 4}}})` means only include
     /// authors who have at least one book with rating > 4.
     relation_filter: Option<RelationFilter>,
+    /// Optional groupBy for nested grouping of children.
+    /// When set, children are grouped by the specified fields and output includes
+    /// a `_group` array containing the grouped documents.
+    /// Example: `published(groupBy: [rating]) { rating, _group { name } }`
+    child_group_by: Option<GroupBy>,
+    /// Mapping for rendering documents inside the _group array.
+    /// Only used when child_group_by is set.
+    group_mapping: Option<DocumentMapping>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -129,6 +137,8 @@ impl TypeJoinMany {
             child_offset: 0,
             child_order_by: None,
             relation_filter: None,
+            child_group_by: None,
+            group_mapping: None,
         })
     }
 
@@ -158,6 +168,28 @@ impl TypeJoinMany {
     /// who have published at least one book with rating > 4.
     pub fn with_relation_filter(mut self, filter: RelationFilter) -> Self {
         self.relation_filter = Some(filter);
+        self
+    }
+
+    /// Set a groupBy specification for grouping children.
+    ///
+    /// When set, children will be grouped by the specified fields. The output
+    /// will be an array of objects, each containing the groupBy field values
+    /// and a `_group` array of documents in that group.
+    ///
+    /// Example: `published(groupBy: [rating]) { rating, _group { name } }`
+    /// Groups books by rating, outputting: `[{rating: 4.9, _group: [{name: "..."}]}, ...]`
+    pub fn with_group_by(mut self, group_by: GroupBy) -> Self {
+        self.child_group_by = Some(group_by);
+        self
+    }
+
+    /// Set the mapping for rendering documents inside the _group array.
+    ///
+    /// This mapping determines which fields are rendered for documents inside _group.
+    /// Only used when child_group_by is set.
+    pub fn with_group_mapping(mut self, mapping: DocumentMapping) -> Self {
+        self.group_mapping = Some(mapping);
         self
     }
 
@@ -269,24 +301,174 @@ impl TypeJoinMany {
     }
 
     /// Merge child documents into parent as an array.
+    ///
+    /// If `child_group_by` is set, groups children by the specified fields and
+    /// outputs an array of group objects with `_group` arrays.
+    /// Otherwise, outputs a simple array of child documents.
     fn merge_children(&self, parent_doc: &mut Doc, children: Vec<Doc>) {
-        // Get child mapping. Falls back to child plan's mapping if not explicitly
-        // set in parent mapping - this happens for simple queries where child
-        // mapping was not pre-configured during planning.
-        let child_mapping = self
-            .document_mapping
-            .child_at(self.parent_side.relation_field_index())
-            .unwrap_or(self.child_plan.document_map());
-
-        let array: Vec<JsonValue> = children
-            .iter()
-            .map(|doc| child_mapping.render_doc_to_json(doc))
-            .collect();
+        let array = if let Some(ref group_by) = self.child_group_by {
+            self.build_grouped_array(&children, group_by)
+        } else {
+            self.build_simple_array(&children)
+        };
 
         parent_doc.set(
             self.parent_side.relation_field_index(),
             JsonValue::Array(array),
         );
+    }
+
+    /// Build a simple array of child documents (no grouping).
+    fn build_simple_array(&self, children: &[Doc]) -> Vec<JsonValue> {
+        let child_mapping = self
+            .document_mapping
+            .child_at(self.parent_side.relation_field_index())
+            .unwrap_or(self.child_plan.document_map());
+
+        children
+            .iter()
+            .map(|doc| child_mapping.render_doc_to_json(doc))
+            .collect()
+    }
+
+    /// Build a grouped array where children are grouped by the specified fields.
+    ///
+    /// Output format for each group:
+    /// `{groupByField1: value1, groupByField2: value2, _group: [doc1, doc2, ...]}`
+    fn build_grouped_array(&self, children: &[Doc], group_by: &GroupBy) -> Vec<JsonValue> {
+        if children.is_empty() {
+            return Vec::new();
+        }
+
+        // Get the child mapping for looking up field indices
+        let child_mapping = self.child_plan.document_map();
+
+        // Group children by the groupBy field values
+        let mut groups: Vec<(String, Vec<&Doc>)> = Vec::new();
+        let mut group_map: HashMap<String, usize> = HashMap::new();
+
+        for child in children {
+            let key = self.generate_group_key(child, group_by, child_mapping);
+            if let Some(&idx) = group_map.get(&key) {
+                groups[idx].1.push(child);
+            } else {
+                let idx = groups.len();
+                group_map.insert(key.clone(), idx);
+                groups.push((key, vec![child]));
+            }
+        }
+
+        // Get the mapping for rendering. Use the child mapping from document_mapping
+        // if available, otherwise fall back to child_plan's mapping.
+        let render_mapping = self
+            .document_mapping
+            .child_at(self.parent_side.relation_field_index())
+            .unwrap_or(child_mapping);
+
+        // Build output array: one object per group
+        let mut result = Vec::with_capacity(groups.len());
+        for (_key, group_docs) in &groups {
+            let mut obj = serde_json::Map::new();
+
+            // Add groupBy field values from the first document in the group
+            if let Some(first_doc) = group_docs.first() {
+                for field_name in &group_by.fields {
+                    if let Some(idx) = child_mapping.first_index_of_name(field_name) {
+                        if let Some(value) = first_doc.get(idx) {
+                            obj.insert(field_name.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+
+            // Build the _group array
+            let group_array: Vec<JsonValue> = if let Some(ref group_mapping) = self.group_mapping {
+                // Use explicit group mapping for rendering _group contents
+                group_docs
+                    .iter()
+                    .map(|doc| group_mapping.render_doc_to_json(doc))
+                    .collect()
+            } else {
+                // Fall back to render mapping, excluding groupBy fields
+                group_docs
+                    .iter()
+                    .map(|doc| {
+                        self.render_doc_excluding_fields(doc, render_mapping, &group_by.fields)
+                    })
+                    .collect()
+            };
+
+            obj.insert("_group".to_string(), JsonValue::Array(group_array));
+            result.push(JsonValue::Object(obj));
+        }
+
+        result
+    }
+
+    /// Generate a group key from a document based on groupBy fields.
+    fn generate_group_key(
+        &self,
+        doc: &Doc,
+        group_by: &GroupBy,
+        mapping: &DocumentMapping,
+    ) -> String {
+        let mut key = String::new();
+        for field_name in &group_by.fields {
+            if let Some(idx) = mapping.first_index_of_name(field_name) {
+                key.push_str(&format!("{}_", idx));
+                let value = doc.get(idx);
+                key.push_str(&format!("{}_", Self::value_to_key(value)));
+            }
+        }
+        key
+    }
+
+    /// Convert a JSON value to a string key component.
+    fn value_to_key(value: Option<&JsonValue>) -> String {
+        match value {
+            None | Some(JsonValue::Null) => "null".to_string(),
+            Some(JsonValue::Bool(b)) => b.to_string(),
+            Some(JsonValue::Number(n)) => n.to_string(),
+            Some(JsonValue::String(s)) => s.clone(),
+            Some(JsonValue::Array(arr)) => {
+                format!(
+                    "[{}]",
+                    arr.iter()
+                        .map(|v| Self::value_to_key(Some(v)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            Some(JsonValue::Object(obj)) => {
+                format!(
+                    "{{{}}}",
+                    obj.iter()
+                        .map(|(k, v)| format!("{}:{}", k, Self::value_to_key(Some(v))))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+        }
+    }
+
+    /// Render a document excluding the specified fields.
+    fn render_doc_excluding_fields(
+        &self,
+        doc: &Doc,
+        mapping: &DocumentMapping,
+        exclude_fields: &[String],
+    ) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+        for rk in &mapping.render_keys {
+            // Skip excluded fields (groupBy fields) and _group pseudo-field
+            if exclude_fields.contains(&rk.key) || rk.key == "_group" {
+                continue;
+            }
+            if let Some(value) = doc.get(rk.index) {
+                obj.insert(rk.key.clone(), value.clone());
+            }
+        }
+        JsonValue::Object(obj)
     }
 
     /// Check if at least one child document passes the relation filter.

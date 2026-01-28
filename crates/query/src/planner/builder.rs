@@ -1503,8 +1503,39 @@ impl Planner {
                     if nested_offset > 0 {
                         join_many = join_many.with_offset(nested_offset);
                     }
-                    if let Some(order_by) = nested_order_by {
+                    if let Some(order_by) = nested_order_by.clone() {
                         join_many = join_many.with_order_by(order_by);
+                    }
+
+                    // Apply nested groupBy if present
+                    if let Some(ref group_by) = nested_select.group_by {
+                        join_many = join_many.with_group_by(group_by.clone());
+
+                        // Find the _group nested select and build its mapping
+                        // Use indices from child_scan_mapping so the mapping matches
+                        // the child document's field array indices.
+                        for field in &nested_select.fields {
+                            if let Requestable::Select(group_select) = field {
+                                if group_select.field.name == "_group" {
+                                    // Build mapping for _group contents using child_scan_mapping indices
+                                    let mut group_mapping = DocumentMapping::new();
+                                    for group_field in &group_select.fields {
+                                        if let Requestable::Field(f) = group_field {
+                                            // Use the index from child_scan_mapping
+                                            if let Some(idx) =
+                                                child_scan_mapping.first_index_of_name(&f.name)
+                                            {
+                                                let output_name = f.output_name().to_string();
+                                                group_mapping.add(idx, &output_name);
+                                                group_mapping.add_render_key(idx, output_name);
+                                            }
+                                        }
+                                    }
+                                    join_many = join_many.with_group_mapping(group_mapping);
+                                    break;
+                                }
+                            }
+                        }
                     }
 
                     plan = Box::new(join_many);
