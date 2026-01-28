@@ -269,17 +269,52 @@ impl<S: Store> VersionedFetcher<S> {
                     // Note: Counter replay needs nonce tracking for idempotency
                     // For now, we apply all deltas (may double-count on concurrent updates)
                     if !payload.data.is_empty() {
-                        match ciborium::from_reader::<i64, _>(&payload.data[..]) {
-                            Ok(increment) => {
-                                let current: i64 = field_values
-                                    .get(field_name)
-                                    .and_then(|(_, v)| v.as_int())
-                                    .unwrap_or(0);
-                                let new_value = current.saturating_add(increment);
-                                field_values.insert(
-                                    field_name.clone(),
-                                    (payload.priority, NormalValue::Int(new_value)),
-                                );
+                        // Try decoding as NormalValue to handle both Int and Float counters
+                        match ciborium::from_reader::<NormalValue, _>(&payload.data[..]) {
+                            Ok(increment_value) => {
+                                // Handle both Int and Float counter values
+                                match &increment_value {
+                                    NormalValue::Int(increment) => {
+                                        let current: i64 = field_values
+                                            .get(field_name)
+                                            .and_then(|(_, v)| v.as_int())
+                                            .unwrap_or(0);
+                                        let new_value = current.saturating_add(*increment);
+                                        field_values.insert(
+                                            field_name.clone(),
+                                            (payload.priority, NormalValue::Int(new_value)),
+                                        );
+                                    }
+                                    NormalValue::Float64(increment) => {
+                                        let current: f64 = field_values
+                                            .get(field_name)
+                                            .and_then(|(_, v)| v.as_float64())
+                                            .unwrap_or(0.0);
+                                        let new_value = current + increment;
+                                        field_values.insert(
+                                            field_name.clone(),
+                                            (payload.priority, NormalValue::Float64(new_value)),
+                                        );
+                                    }
+                                    NormalValue::Float32(increment) => {
+                                        let current: f32 = field_values
+                                            .get(field_name)
+                                            .and_then(|(_, v)| v.as_float32())
+                                            .unwrap_or(0.0);
+                                        let new_value = current + increment;
+                                        field_values.insert(
+                                            field_name.clone(),
+                                            (payload.priority, NormalValue::Float32(new_value)),
+                                        );
+                                    }
+                                    other => {
+                                        tracing::warn!(
+                                            field_name = %field_name,
+                                            value_type = ?other,
+                                            "Unexpected Counter value type during replay"
+                                        );
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(
