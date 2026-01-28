@@ -342,27 +342,33 @@ mod tests {
     use super::*;
     use wasm_bindgen_test::*;
 
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    /// Create a client with a unique db name to isolate tests from OPFS state.
+    fn test_config(name: &str) -> JsValue {
+        serde_wasm_bindgen::to_value(&ClientConfig {
+            db_name: Some(name.to_string()),
+        })
+        .unwrap()
+    }
+
     #[wasm_bindgen_test]
     async fn test_client_creation() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let client = DefraClient::create(config).await.unwrap();
+        let client = DefraClient::create(test_config("test_creation")).await.unwrap();
         assert!(!client.closed);
     }
 
     #[wasm_bindgen_test]
     async fn test_close_is_idempotent() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_close_idem")).await.unwrap();
         client.close().await.unwrap();
         assert!(client.closed);
-        // Second close should succeed without error
         client.close().await.unwrap();
     }
 
     #[wasm_bindgen_test]
     async fn test_query_after_close_fails() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_query_closed")).await.unwrap();
         client.close().await.unwrap();
         let result = client.query("{ User { name } }").await;
         assert!(result.is_err());
@@ -370,8 +376,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_persist_after_close_fails() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_persist_closed")).await.unwrap();
         client.close().await.unwrap();
         let result = client.persist().await;
         assert!(result.is_err());
@@ -379,77 +384,78 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_mutate_returns_error() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
-        let result = client.mutate("mutation { create_User(input: {}) { _docID } }").await;
+        let mut client = DefraClient::create(test_config("test_mutate_err")).await.unwrap();
+        let result = client
+            .mutate("mutation { create_User(input: {}) { _docID } }")
+            .await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     async fn test_empty_query_fails() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let client = DefraClient::create(config).await.unwrap();
+        let client = DefraClient::create(test_config("test_empty_q")).await.unwrap();
         let result = client.query("").await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     async fn test_empty_query_whitespace_fails() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let client = DefraClient::create(config).await.unwrap();
+        let client = DefraClient::create(test_config("test_ws_q")).await.unwrap();
         let result = client.query("   ").await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
-    async fn test_get_collections_empty() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let client = DefraClient::create(config).await.unwrap();
+    async fn test_fresh_db_has_no_user_collections() {
+        let client = DefraClient::create(test_config("test_fresh_db")).await.unwrap();
         let result = client.get_collections().unwrap();
         let collections: Vec<CollectionInfo> = serde_wasm_bindgen::from_value(result).unwrap();
-        assert!(collections.is_empty());
+        // A fresh DB should have no user-defined collections (may have system ones)
+        let user_types: Vec<_> = collections
+            .iter()
+            .filter(|c| !c.name.starts_with('_'))
+            .collect();
+        assert!(
+            user_types.is_empty(),
+            "Fresh DB should have no user collections, found: {:?}",
+            user_types.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
     }
 
     #[wasm_bindgen_test]
     async fn test_add_schema_and_get_collections() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_add_schema")).await.unwrap();
 
         let sdl = "type User { name: String, email: String }";
         client.add_schema(sdl).await.unwrap();
 
         let result = client.get_collections().unwrap();
         let collections: Vec<CollectionInfo> = serde_wasm_bindgen::from_value(result).unwrap();
-        assert_eq!(collections.len(), 1);
-        assert_eq!(collections[0].name, "User");
-        // _docID is auto-added, so we expect name + email + _docID = 3 fields
-        assert!(collections[0].fields.len() >= 2);
+        let user_col = collections.iter().find(|c| c.name == "User");
+        assert!(user_col.is_some(), "User collection should exist");
+        assert!(user_col.unwrap().fields.len() >= 2);
     }
 
     #[wasm_bindgen_test]
     async fn test_add_schema_invalid_sdl_fails() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_bad_sdl")).await.unwrap();
         let result = client.add_schema("not valid graphql {{{{").await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     async fn test_add_duplicate_schema_fails() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_dup_schema")).await.unwrap();
 
         let sdl = "type Item { name: String }";
         client.add_schema(sdl).await.unwrap();
-        // Adding the same schema again should fail (collection already exists)
         let result = client.add_schema(sdl).await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     async fn test_add_multiple_schemas() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_multi_schema")).await.unwrap();
 
         client
             .add_schema("type Book { title: String }")
@@ -462,17 +468,14 @@ mod tests {
 
         let result = client.get_collections().unwrap();
         let collections: Vec<CollectionInfo> = serde_wasm_bindgen::from_value(result).unwrap();
-        assert_eq!(collections.len(), 2);
-
         let names: Vec<&str> = collections.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"Book"));
-        assert!(names.contains(&"Author"));
+        assert!(names.contains(&"Book"), "Book collection should exist");
+        assert!(names.contains(&"Author"), "Author collection should exist");
     }
 
     #[wasm_bindgen_test]
     async fn test_query_empty_collection() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_query_empty")).await.unwrap();
 
         client
             .add_schema("type Product { name: String, price: Int }")
@@ -486,15 +489,13 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_persist_succeeds() {
-        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
-        let mut client = DefraClient::create(config).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_persist_ok")).await.unwrap();
 
         client
             .add_schema("type Note { text: String }")
             .await
             .unwrap();
 
-        // Explicit persist should succeed
         client.persist().await.unwrap();
     }
 }

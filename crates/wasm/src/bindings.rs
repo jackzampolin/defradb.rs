@@ -32,7 +32,7 @@ impl Default for ClientConfig {
 }
 
 /// Collection info returned to JavaScript.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CollectionInfo {
     pub name: String,
     pub schema_version_id: String,
@@ -40,7 +40,7 @@ pub struct CollectionInfo {
 }
 
 /// Field info within a collection.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FieldInfo {
     pub name: String,
     pub kind: String,
