@@ -100,6 +100,14 @@ impl CType {
     pub fn is_counter(&self) -> bool {
         matches!(self, CType::PnCounter | CType::PCounter)
     }
+
+    /// Returns true if this counter type allows decrement (negative increments)
+    ///
+    /// - PnCounter (Positive-Negative Counter): allows both increment and decrement
+    /// - PCounter (Positive Counter): only allows increment
+    pub fn allows_decrement(&self) -> bool {
+        matches!(self, CType::PnCounter)
+    }
 }
 
 impl fmt::Display for CType {
