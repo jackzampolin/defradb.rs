@@ -94,11 +94,19 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                     if name == "_docID" || name == "_group" || name == "__typename" {
                         continue;
                     }
-                    if !group_fields.contains(&name) {
-                        return Err(QueryError::parse(
-                            "cannot select a non-group-by field at group-level",
-                        ));
+                    if group_fields.contains(&name) {
+                        continue;
                     }
+                    // Allow FK fields for relation groupBy fields (e.g. _authorID for author)
+                    let is_fk_for_group = group_fields.iter().any(|gb_field| {
+                        name == format!("_{}ID", gb_field)
+                    });
+                    if is_fk_for_group {
+                        continue;
+                    }
+                    return Err(QueryError::parse(
+                        "cannot select a non-group-by field at group-level",
+                    ));
                 }
                 Requestable::Select(nested) => {
                     if nested.field.name == "_group" {
@@ -156,7 +164,56 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
         }
     }
 
+    // Validate top-level filter field names exist in schema
+    if let Some(ref filter) = select.filter {
+        for key in filter.conditions().keys() {
+            // Skip logical operators and special filter directives
+            if key == "_and" || key == "_or" || key == "_not" || key == "_alias" {
+                continue;
+            }
+            if !field_exists(key) {
+                let filter_repr = format_graphql_conditions(filter.conditions());
+                return Err(QueryError::parse(format!(
+                    "Argument \"filter\" has invalid value {}.\nIn field \"{}\": Unknown field.",
+                    filter_repr, key
+                )));
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Format filter conditions in Go graphql-go style (unquoted keys).
+fn format_graphql_conditions(
+    conditions: &std::collections::HashMap<String, JsonValue>,
+) -> String {
+    let entries: Vec<String> = conditions
+        .iter()
+        .map(|(k, v)| format!("{}: {}", k, format_graphql_value(v)))
+        .collect();
+    format!("{{{}}}", entries.join(", "))
+}
+
+/// Format a JSON value in Go graphql-go style.
+fn format_graphql_value(val: &JsonValue) -> String {
+    match val {
+        JsonValue::Object(obj) => {
+            let entries: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, format_graphql_value(v)))
+                .collect();
+            format!("{{{}}}", entries.join(", "))
+        }
+        JsonValue::String(s) => format!("\"{}\"", s),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(format_graphql_value).collect();
+            format!("[{}]", items.join(", "))
+        }
+    }
 }
 
 /// Build the document mapping for a select operation.
