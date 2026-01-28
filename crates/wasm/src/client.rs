@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 
-use db::{LensedAutoCommitFetcher, DB};
+use db::{AutoCommitMutator, LensedAutoCommitFetcher, DB};
 use query::runner::QueryRunner;
 use storage::LevelDbStore;
 
@@ -271,11 +271,32 @@ impl DefraClient {
         }
     }
 
-    async fn mutate_impl(&mut self, _graphql: &str) -> Result<JsValue> {
-        self.ensure_open()?;
-        Err(WasmError::Query(
-            "Mutations are not yet supported. Use query() for reads.".to_string(),
-        ))
+    async fn mutate_impl(&mut self, graphql: &str) -> Result<JsValue> {
+        let db = self.ensure_open()?;
+
+        if graphql.trim().is_empty() {
+            return Err(WasmError::Query("Empty mutation string".to_string()));
+        }
+
+        let fetcher = LensedAutoCommitFetcher::new(Arc::clone(db));
+        let mutator = Arc::new(AutoCommitMutator::new(Arc::clone(db)));
+        let collections = db::load_active_collections(db)
+            .await
+            .map_err(|e| WasmError::Query(format!("Failed to load collections: {}", e)))?;
+
+        let runner = QueryRunner::new(fetcher, collections).with_mutator(mutator);
+
+        match runner.execute_mutation(graphql).await {
+            Ok(result) => {
+                self.persist_impl().await?;
+                let response = serde_json::json!({
+                    "data": result,
+                    "errors": [],
+                });
+                to_js(&response)
+            }
+            Err(e) => Err(WasmError::Query(e.to_string())),
+        }
     }
 
     fn get_collections_impl(&self) -> Result<JsValue> {
@@ -383,11 +404,26 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    async fn test_mutate_returns_error() {
-        let mut client = DefraClient::create(test_config("test_mutate_err")).await.unwrap();
+    async fn test_mutate_no_schema_fails() {
+        let mut client = DefraClient::create(test_config("test_mutate_no_schema")).await.unwrap();
         let result = client
-            .mutate("mutation { create_User(input: {}) { _docID } }")
+            .mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#)
             .await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_empty_mutation_fails() {
+        let mut client = DefraClient::create(test_config("test_empty_mut")).await.unwrap();
+        let result = client.mutate("").await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_mutate_after_close_fails() {
+        let mut client = DefraClient::create(test_config("test_mut_closed")).await.unwrap();
+        client.close().await.unwrap();
+        let result = client.mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#).await;
         assert!(result.is_err());
     }
 
@@ -497,5 +533,103 @@ mod tests {
             .unwrap();
 
         client.persist().await.unwrap();
+    }
+
+    // --- Mutation integration tests ---
+
+    #[wasm_bindgen_test]
+    async fn test_create_and_query_document() {
+        let mut client = DefraClient::create(test_config("test_create_query")).await.unwrap();
+        client
+            .add_schema("type User { name: String, age: Int }")
+            .await
+            .unwrap();
+
+        let result = client
+            .mutate(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+        assert!(response.get("data").is_some(), "Mutation should return data");
+
+        let result = client.query("{ User { name age } }").await.unwrap();
+        let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+        let data_str = response["data"].to_string();
+        assert!(data_str.contains("Alice"), "Query should find Alice, got: {}", data_str);
+        assert!(data_str.contains("30"), "Query should find age 30, got: {}", data_str);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_create_multiple_documents() {
+        let mut client = DefraClient::create(test_config("test_create_multi")).await.unwrap();
+        client
+            .add_schema("type Person { name: String }")
+            .await
+            .unwrap();
+
+        client
+            .mutate(r#"mutation { create_Person(input: {name: "Bob"}) { _docID } }"#)
+            .await
+            .unwrap();
+        client
+            .mutate(r#"mutation { create_Person(input: {name: "Carol"}) { _docID } }"#)
+            .await
+            .unwrap();
+
+        let result = client.query("{ Person { name } }").await.unwrap();
+        let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+        let data_str = response["data"].to_string();
+        assert!(data_str.contains("Bob"), "Should find Bob, got: {}", data_str);
+        assert!(data_str.contains("Carol"), "Should find Carol, got: {}", data_str);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_create_returns_doc_id() {
+        let mut client = DefraClient::create(test_config("test_create_docid")).await.unwrap();
+        client
+            .add_schema("type Widget { label: String }")
+            .await
+            .unwrap();
+
+        let result = client
+            .mutate(r#"mutation { create_Widget(input: {label: "test"}) { _docID } }"#)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+        let data_str = response["data"].to_string();
+        assert!(data_str.contains("_docID"), "Mutation result should include _docID, got: {}", data_str);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_create_persist_reopen_query() {
+        // Create a doc, persist, close, reopen, and verify data survives
+        let db_name = "test_create_persist_reopen";
+
+        {
+            let mut client = DefraClient::create(test_config(db_name)).await.unwrap();
+            client
+                .add_schema("type Task { title: String }")
+                .await
+                .unwrap();
+            client
+                .mutate(r#"mutation { create_Task(input: {title: "Survive"}) { _docID } }"#)
+                .await
+                .unwrap();
+            // mutate_impl auto-persists, but explicit persist for clarity
+            client.persist().await.unwrap();
+            client.close().await.unwrap();
+        }
+
+        // Reopen the same database
+        let client = DefraClient::create(test_config(db_name)).await.unwrap();
+
+        let result = client.query("{ Task { title } }").await.unwrap();
+        let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+        let data_str = response["data"].to_string();
+        assert!(
+            data_str.contains("Survive"),
+            "Data should survive persist→close→reopen, got: {}",
+            data_str
+        );
     }
 }
