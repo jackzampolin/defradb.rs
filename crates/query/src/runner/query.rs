@@ -14,7 +14,7 @@ use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index};
 use crate::planner::Planner;
-use crate::query_parse::{parse_query, parse_query_with_variables, ExplainType};
+use crate::query_parse::{parse_query_with_variables, ExplainType};
 use crate::txn::TransactionRegistry;
 
 use super::fetcher::FetcherWrapper;
@@ -101,17 +101,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-    /// Execute the query and return explain output with execution metrics.
-    /// Format matches Go DefraDB's executeAndExplainRequest output.
-    async fn execute_explain(
-        &self,
-        query: &str,
-        caller_identity: Option<Did>,
-    ) -> Result<JsonValue> {
-        self.execute_explain_with_vars(query, caller_identity, None).await
-    }
-
     /// Execute the query with variables and return explain output with execution metrics.
+    /// Format matches Go DefraDB's executeAndExplainRequest output.
     async fn execute_explain_with_vars(
         &self,
         query: &str,
