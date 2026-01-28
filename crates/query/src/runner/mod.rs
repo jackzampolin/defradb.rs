@@ -11,6 +11,7 @@
 
 mod executor;
 mod fetcher;
+mod introspection;
 mod mutation;
 mod plan;
 mod query;
@@ -258,5 +259,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
         Ok(None)
+    }
+
+    /// Execute an introspection query (__schema, __type).
+    ///
+    /// Introspection queries are executed against a dynamically generated GraphQL
+    /// schema based on the current collections, rather than against document storage.
+    pub(crate) async fn execute_introspection(&self, query: &str) -> Result<JsonValue> {
+        // Get all collections for schema generation
+        let collections = self.collection_provider.list_collections().await?;
+        let mut collection_versions = Vec::new();
+        for name in collections {
+            if let Some(coll) = self.collection_provider.get_collection(&name).await? {
+                collection_versions.push((*coll).clone());
+            }
+        }
+
+        // Execute introspection query
+        introspection::execute_introspection(collection_versions, query).await
     }
 }

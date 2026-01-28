@@ -521,6 +521,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(JsonValue::Object(results))
     }
 
+    /// Execute already-parsed Select operations with a specific fetcher and identity.
+    pub(crate) async fn execute_selects_internal(
+        &self,
+        selects: Vec<Select>,
+        fetcher: &dyn DocFetcher,
+        caller_identity: Option<Did>,
+    ) -> Result<JsonValue> {
+        let mut results = Map::new();
+
+        for select in selects {
+            let result = self
+                .execute_select_internal(&select, fetcher, caller_identity.clone())
+                .await?;
+            let key = select.field.output_name();
+            results.insert(key.to_string(), result);
+        }
+
+        Ok(JsonValue::Object(results))
+    }
+
     /// Execute a single Select operation with a specific fetcher and identity.
     async fn execute_select_internal(
         &self,
@@ -787,11 +807,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         use crate::mapper::AggregateType;
 
         // Collect info about relation aggregates with full target references
-        let mut aggregates_info: Vec<(
-            String,
-            AggregateType,
-            Vec<&crate::mapper::AggregateTarget>,
-        )> = Vec::new();
+        let mut aggregates_info: Vec<(String, AggregateType, Vec<&crate::mapper::AggregateTarget>)> =
+            Vec::new();
 
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
@@ -805,7 +822,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 if !relation_targets.is_empty() {
                     aggregates_info.push((
                         agg.output_name().to_string(),
-                        agg.aggregate_type,
+                        agg.aggregate_type.clone(),
                         relation_targets,
                     ));
                 }
@@ -849,106 +866,137 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let relation_name = &target.host_name;
                         let field_name = target.field_name.as_deref();
 
-                        if let Some(JsonValue::Array(items)) = obj.get(relation_name) {
-                            // Step 1: Apply filter to array elements
-                            let filtered_items: Vec<&JsonValue> =
-                                if let Some(ref filter) = target.filter {
-                                    items
-                                        .iter()
-                                        .filter(|item| {
-                                            let val = match field_name {
-                                                Some(f) => item
+                        if let Some(relation_data) = obj.get(relation_name) {
+                            if let JsonValue::Array(items) = relation_data {
+                                // Array data: relation or inline array aggregate
+                                // Step 1: Apply filter to array elements
+                                let filtered_items: Vec<&JsonValue> =
+                                    if let Some(ref filter) = target.filter {
+                                        items
+                                            .iter()
+                                            .filter(|item| {
+                                                let val = match field_name {
+                                                    Some(f) => item
+                                                        .as_object()
+                                                        .and_then(|o| o.get(f))
+                                                        .unwrap_or(&JsonValue::Null),
+                                                    None => *item,
+                                                };
+                                                filter.matches_scalar_value(val).unwrap_or(false)
+                                            })
+                                            .collect()
+                                    } else {
+                                        items.iter().collect()
+                                    };
+
+                                // Step 2: Apply order (sort array elements before limit/offset)
+                                let mut ordered_items = filtered_items;
+                                if let Some(ref order) = target.order {
+                                    if let Some(condition) = order.conditions.first() {
+                                        let desc = matches!(
+                                            condition.direction,
+                                            crate::mapper::OrderDirection::Desc
+                                        );
+                                        ordered_items.sort_by(|a, b| {
+                                            let a_val = match field_name {
+                                                Some(f) => a
                                                     .as_object()
                                                     .and_then(|o| o.get(f))
                                                     .unwrap_or(&JsonValue::Null),
-                                                None => *item,
+                                                None => *a,
                                             };
-                                            filter.matches_scalar_value(val).unwrap_or(false)
-                                        })
-                                        .collect()
-                                } else {
-                                    items.iter().collect()
-                                };
+                                            let b_val = match field_name {
+                                                Some(f) => b
+                                                    .as_object()
+                                                    .and_then(|o| o.get(f))
+                                                    .unwrap_or(&JsonValue::Null),
+                                                None => *b,
+                                            };
+                                            let a_f = a_val.as_f64().unwrap_or(0.0);
+                                            let b_f = b_val.as_f64().unwrap_or(0.0);
+                                            if desc {
+                                                b_f.partial_cmp(&a_f)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            } else {
+                                                a_f.partial_cmp(&b_f)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            }
+                                        });
+                                    }
+                                }
 
-                            // Step 2: Apply order (sort array elements before limit/offset)
-                            let mut ordered_items = filtered_items;
-                            if let Some(ref order) = target.order {
-                                if let Some(condition) = order.conditions.first() {
-                                    let desc = matches!(
-                                        condition.direction,
-                                        crate::mapper::OrderDirection::Desc
-                                    );
-                                    ordered_items.sort_by(|a, b| {
-                                        let a_val = match field_name {
-                                            Some(f) => a
-                                                .as_object()
-                                                .and_then(|o| o.get(f))
-                                                .unwrap_or(&JsonValue::Null),
-                                            None => *a,
-                                        };
-                                        let b_val = match field_name {
-                                            Some(f) => b
-                                                .as_object()
-                                                .and_then(|o| o.get(f))
-                                                .unwrap_or(&JsonValue::Null),
-                                            None => *b,
-                                        };
-                                        let a_f = a_val.as_f64().unwrap_or(0.0);
-                                        let b_f = b_val.as_f64().unwrap_or(0.0);
-                                        if desc {
-                                            b_f.partial_cmp(&a_f)
-                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                // Step 3: Apply limit/offset
+                                let final_items: Vec<&JsonValue> =
+                                    if let Some(ref limit) = target.limit {
+                                        let offset = limit.offset as usize;
+                                        let sliced = if offset < ordered_items.len() {
+                                            &ordered_items[offset..]
                                         } else {
-                                            a_f.partial_cmp(&b_f)
-                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                            &[][..]
+                                        };
+                                        match limit.limit {
+                                            Some(l) => {
+                                                sliced.iter().take(l as usize).copied().collect()
+                                            }
+                                            None => sliced.to_vec(),
                                         }
-                                    });
-                                }
-                            }
+                                    } else {
+                                        ordered_items
+                                    };
 
-                            // Step 3: Apply limit/offset
-                            let final_items: Vec<&JsonValue> = if let Some(ref limit) = target.limit
-                            {
-                                let offset = limit.offset as usize;
-                                let sliced = if offset < ordered_items.len() {
-                                    &ordered_items[offset..]
-                                } else {
-                                    &[][..]
-                                };
-                                match limit.limit {
-                                    Some(l) => sliced.iter().take(l as usize).copied().collect(),
-                                    None => sliced.to_vec(),
-                                }
-                            } else {
-                                ordered_items
-                            };
-
-                            // Step 4: Compute aggregate over final items
-                            match agg_type {
-                                AggregateType::Count => {
-                                    total_count += final_items.len() as i64;
-                                }
-                                AggregateType::Sum | AggregateType::Average => {
-                                    for item in &final_items {
-                                        if let Some(n) = extract_numeric(item, field_name) {
-                                            total_value += n;
-                                            total_count += 1;
+                                // Step 4: Compute aggregate over final items
+                                match agg_type {
+                                    AggregateType::Count => {
+                                        total_count += final_items.len() as i64;
+                                    }
+                                    AggregateType::Sum | AggregateType::Average => {
+                                        for item in &final_items {
+                                            if let Some(n) = extract_numeric(item, field_name) {
+                                                total_value += n;
+                                                total_count += 1;
+                                            }
+                                        }
+                                    }
+                                    AggregateType::Min => {
+                                        for item in &final_items {
+                                            if let Some(n) = extract_numeric(item, field_name) {
+                                                if total_count == 0 || n < total_value {
+                                                    total_value = n;
+                                                }
+                                                total_count += 1;
+                                            }
+                                        }
+                                    }
+                                    AggregateType::Max => {
+                                        for item in &final_items {
+                                            if let Some(n) = extract_numeric(item, field_name) {
+                                                if total_count == 0 || n > total_value {
+                                                    total_value = n;
+                                                }
+                                                total_count += 1;
+                                            }
                                         }
                                     }
                                 }
-                                AggregateType::Min => {
-                                    for item in &final_items {
-                                        if let Some(n) = extract_numeric(item, field_name) {
+                            } else {
+                                // Scalar data: multi-field per-document aggregate
+                                // e.g., _avg(HeightM: {}, Age: {}) where HeightM is a scalar
+                                if let Some(n) = relation_data.as_f64() {
+                                    match agg_type {
+                                        AggregateType::Count => {
+                                            total_count += 1;
+                                        }
+                                        AggregateType::Sum | AggregateType::Average => {
+                                            total_value += n;
+                                            total_count += 1;
+                                        }
+                                        AggregateType::Min => {
                                             if total_count == 0 || n < total_value {
                                                 total_value = n;
                                             }
                                             total_count += 1;
                                         }
-                                    }
-                                }
-                                AggregateType::Max => {
-                                    for item in &final_items {
-                                        if let Some(n) = extract_numeric(item, field_name) {
+                                        AggregateType::Max => {
                                             if total_count == 0 || n > total_value {
                                                 total_value = n;
                                             }
@@ -1046,12 +1094,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let a_f = a_val.and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let b_f = b_val.and_then(|v| v.as_f64()).unwrap_or(0.0);
                         let ord = a_f.partial_cmp(&b_f).unwrap_or(std::cmp::Ordering::Equal);
-                        let ord =
-                            if matches!(condition.direction, crate::mapper::OrderDirection::Desc) {
-                                ord.reverse()
-                            } else {
-                                ord
-                            };
+                        let ord = if matches!(
+                            condition.direction,
+                            crate::mapper::OrderDirection::Desc
+                        ) {
+                            ord.reverse()
+                        } else {
+                            ord
+                        };
                         if ord != std::cmp::Ordering::Equal {
                             return ord;
                         }
@@ -1207,12 +1257,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         {
             Ok(doc) => doc,
             Err(e) => {
-                // Check if this is a "CID not found" or "docID mismatch" error
-                // In these cases, Go returns empty results
                 let err_msg = e.to_string();
+                // docID mismatch: Go returns empty results
                 if err_msg.contains("cid either does not exist or belong to document") {
                     return Ok(JsonValue::Array(vec![]));
                 }
+                // Block not found in blockstore: propagate as error (Go does the same)
                 return Err(e);
             }
         };
@@ -1257,7 +1307,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .map(|id| JsonValue::String(id.to_string()))
                     .unwrap_or(JsonValue::Null)
             } else if let Some(nv) = document.get(field_name) {
-                crate::json_convert::normal_value_to_json(nv).unwrap_or(JsonValue::Null)
+                crate::json_convert::normal_value_to_json(nv)
+                    .unwrap_or(JsonValue::Null)
             } else {
                 JsonValue::Null
             };
@@ -1334,10 +1385,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Check if remaining fields need the Planner (has real nested selections)
-        let has_nested = select_without_version
-            .fields
-            .iter()
-            .any(|f| matches!(f, Requestable::Select(_)));
+        let has_nested = select_without_version.fields.iter().any(|f| {
+            matches!(f, Requestable::Select(_))
+        });
 
         let filter_has_relations = select
             .filter
@@ -1353,20 +1403,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Execute the query for document data (without _version)
         let result = if has_nested || filter_has_relations || order_has_relations {
-            self.execute_nested_select_with_planner(
-                &select_without_version,
-                fetcher,
-                caller_identity,
-            )
-            .await?
+            self.execute_nested_select_with_planner(&select_without_version, fetcher, caller_identity)
+                .await?
         } else {
-            self.execute_simple_select(
-                &select_without_version,
-                fetcher,
-                &collection,
-                caller_identity,
-            )
-            .await?
+            self.execute_simple_select(&select_without_version, fetcher, &collection, caller_identity)
+                .await?
         };
 
         // If no _version selection, return as-is
@@ -1430,10 +1471,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         use crate::fetcher::CommitsQueryOptions;
 
         // Fetch commits for this document
+        // When we have a target CID, we need to traverse all commits back to genesis
+        // by setting a large depth. Without a target CID (regular query), depth=None
+        // traverses all heads to genesis anyway.
+        let depth = if target_cid.is_some() {
+            Some(1000) // Reasonable max depth for version history traversal
+        } else {
+            None
+        };
+
         let options = CommitsQueryOptions {
             doc_id: Some(doc_id.to_string()),
             cid: target_cid.map(|s| s.to_string()),
-            depth: None,
+            depth,
             field_name: None,
         };
 
@@ -1494,17 +1544,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
                             if let Some(arr) = json_val.as_array() {
                                 // Apply filter if present on the nested selection
-                                let filtered_items: Vec<&JsonValue> =
-                                    if let Some(ref filter) = nested.filter {
-                                        arr.iter()
-                                            .filter(|item| {
-                                                // Check each filter condition against the item
-                                                self.json_item_matches_filter(item, filter)
-                                            })
-                                            .collect()
-                                    } else {
-                                        arr.iter().collect()
-                                    };
+                                let filtered_items: Vec<&JsonValue> = if let Some(ref filter) = nested.filter {
+                                    arr.iter()
+                                        .filter(|item| {
+                                            // Check each filter condition against the item
+                                            self.json_item_matches_filter(item, filter)
+                                        })
+                                        .collect()
+                                } else {
+                                    arr.iter().collect()
+                                };
 
                                 let nested_results: Vec<JsonValue> = filtered_items
                                     .into_iter()
@@ -1518,20 +1567,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                     nested_obj
                                                         .insert(nf_output.to_string(), nv.clone());
                                                 } else {
-                                                    nested_obj.insert(
-                                                        nf_output.to_string(),
-                                                        JsonValue::Null,
-                                                    );
+                                                    nested_obj
+                                                        .insert(nf_output.to_string(), JsonValue::Null);
                                                 }
                                             }
                                         }
                                         JsonValue::Object(nested_obj)
                                     })
                                     .collect();
-                                obj.insert(
-                                    output_name.to_string(),
-                                    JsonValue::Array(nested_results),
-                                );
+                                obj.insert(output_name.to_string(), JsonValue::Array(nested_results));
                             } else {
                                 obj.insert(output_name.to_string(), JsonValue::Null);
                             }
@@ -1609,8 +1653,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 if let JsonValue::Object(obj) = sub_cond {
                                     let sub_map: std::collections::HashMap<String, JsonValue> =
                                         obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    let sub_filter =
-                                        crate::mapper::Filter::from_conditions(sub_map);
+                                    let sub_filter = crate::mapper::Filter::from_conditions(sub_map);
                                     if !self.json_item_matches_filter(item, &sub_filter) {
                                         return false;
                                     }
@@ -1625,8 +1668,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 if let JsonValue::Object(obj) = sub_cond {
                                     let sub_map: std::collections::HashMap<String, JsonValue> =
                                         obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    let sub_filter =
-                                        crate::mapper::Filter::from_conditions(sub_map);
+                                    let sub_filter = crate::mapper::Filter::from_conditions(sub_map);
                                     if self.json_item_matches_filter(item, &sub_filter) {
                                         any_match = true;
                                         break;
@@ -1698,22 +1740,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 (None, _) => true,
                 _ => true,
             },
-            FilterOp::Gt => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                (Some(a), Some(b)) => a > b,
-                _ => false,
-            },
-            FilterOp::Gte => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                (Some(a), Some(b)) => a >= b,
-                _ => false,
-            },
-            FilterOp::Lt => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                (Some(a), Some(b)) => a < b,
-                _ => false,
-            },
-            FilterOp::Lte => match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
-                (Some(a), Some(b)) => a <= b,
-                _ => false,
-            },
+            FilterOp::Gt => {
+                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                    (Some(a), Some(b)) => a > b,
+                    _ => false,
+                }
+            }
+            FilterOp::Gte => {
+                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                    (Some(a), Some(b)) => a >= b,
+                    _ => false,
+                }
+            }
+            FilterOp::Lt => {
+                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                    (Some(a), Some(b)) => a < b,
+                    _ => false,
+                }
+            }
+            FilterOp::Lte => {
+                match (item_value.and_then(|v| v.as_f64()), expected.as_f64()) {
+                    (Some(a), Some(b)) => a <= b,
+                    _ => false,
+                }
+            }
             FilterOp::In => {
                 if let JsonValue::Array(values) = expected {
                     item_value.map(|v| values.contains(v)).unwrap_or(false)

@@ -7,8 +7,8 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupByNode, LimitNode, MaxNode, MinNode, OrderByNode,
-    ScanNode, SelectNode, SumNode,
+    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, LimitNode, MaxNode, MinNode,
+    OrderByNode, ScanNode, SelectNode, SumNode,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -81,6 +81,77 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                     "GROUP BY field '{}' not found in collection '{}'",
                     field_name, select.collection_name
                 )));
+            }
+        }
+
+        // Validate that non-special fields selected at group level are in the groupBy list
+        let group_fields: Vec<&str> = group_by.fields.iter().map(|s| s.as_str()).collect();
+        for requestable in &select.fields {
+            match requestable {
+                Requestable::Field(field) => {
+                    let name = field.name.as_str();
+                    // Skip special fields
+                    if name == "_docID" || name == "_group" || name == "__typename" {
+                        continue;
+                    }
+                    if !group_fields.contains(&name) {
+                        return Err(QueryError::parse(
+                            "cannot select a non-group-by field at group-level",
+                        ));
+                    }
+                }
+                Requestable::Select(nested) => {
+                    if nested.field.name == "_group" {
+                        // _group is always allowed in groupBy queries
+                        continue;
+                    }
+                }
+                Requestable::Aggregate(_) => {
+                    // Aggregates are allowed at group level
+                }
+            }
+        }
+    }
+
+    // Validate _group references only appear within groupBy context
+    let has_group_by = select.group_by.is_some();
+    for requestable in &select.fields {
+        // Check for _count(_group: {}) or similar aggregates referencing _group
+        if let Requestable::Aggregate(agg) = requestable {
+            for target in &agg.targets {
+                if target.host_name == "_group" && !has_group_by {
+                    return Err(QueryError::parse(
+                        "_group may only be referenced when within a groupBy request",
+                    ));
+                }
+            }
+        }
+
+        // Check for _group references inside nested _group selections
+        if let Requestable::Select(nested) = requestable {
+            if nested.field.name == "_group" {
+                for inner in &nested.fields {
+                    if let Requestable::Aggregate(inner_agg) = inner {
+                        for target in &inner_agg.targets {
+                            if target.host_name == "_group" && nested.group_by.is_none() {
+                                return Err(QueryError::parse(
+                                    "_group may only be referenced when within a groupBy request",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Validate bare aggregates have a property to aggregate
+    for requestable in &select.fields {
+        if let Requestable::Aggregate(agg) = requestable {
+            if agg.targets.is_empty() {
+                return Err(QueryError::parse(
+                    "aggregate must be provided with a property to aggregate",
+                ));
             }
         }
     }
@@ -246,22 +317,31 @@ pub(crate) fn build_plan(
         // Add GroupByNode
         if let Some(ref group_by) = select.group_by {
             let mut group_node = GroupByNode::new(plan, group_by.clone(), mapping.clone());
-            // Extract _group child's limit/filter/order from the nested Select
+            // Extract _group alias definitions with per-alias filter/limit/order
+            let group_indices = mapping
+                .indexes_of_name("_group")
+                .map(|s| s.to_vec())
+                .unwrap_or_default();
+            let mut group_aliases = Vec::new();
+            let mut alias_count = 0;
             for field in &select.fields {
                 if let Requestable::Select(nested) = field {
                     if nested.field.name == "_group" {
-                        if let Some(ref limit) = nested.limit {
-                            group_node = group_node.with_group_limit(limit.clone());
-                        }
-                        if let Some(ref filter) = nested.filter {
-                            group_node = group_node.with_group_filter(filter.clone());
-                        }
-                        if let Some(ref order) = nested.order_by {
-                            group_node = group_node.with_group_order(order.clone());
-                        }
-                        break;
+                        let alias_index =
+                            group_indices.get(alias_count).copied().unwrap_or(0);
+                        alias_count += 1;
+                        group_aliases.push(GroupAlias {
+                            index: alias_index,
+                            filter: nested.filter.clone(),
+                            limit: nested.limit.clone(),
+                            order: nested.order_by.clone(),
+                            doc_ids: nested.doc_ids.clone(),
+                        });
                     }
                 }
+            }
+            if !group_aliases.is_empty() {
+                group_node = group_node.with_group_aliases(group_aliases);
             }
             plan = Box::new(group_node);
         }

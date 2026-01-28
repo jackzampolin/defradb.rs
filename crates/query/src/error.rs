@@ -171,6 +171,10 @@ pub enum QueryError {
     /// ACP registration status check failed
     #[error("failed to check ACP registration status for document '{doc_id}': {message}")]
     AcpRegistrationCheckFailed { doc_id: String, message: String },
+
+    /// Introspection query error
+    #[error("introspection error: {0}")]
+    Introspection(String),
 }
 
 impl QueryError {
@@ -253,6 +257,11 @@ impl QueryError {
             doc_id: doc_id.into(),
             message: error.to_string(),
         }
+    }
+
+    /// Create an introspection error
+    pub fn introspection(msg: impl Into<String>) -> Self {
+        Self::Introspection(msg.into())
     }
 }
 

@@ -31,7 +31,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let variables = convert_variables(&request.variables);
 
         // First, parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_variables(&request.query, variables.as_ref()) {
+        let parsed = match parse_request_with_variables(
+            &request.query,
+            variables.as_ref(),
+            request.operation_name.as_deref(),
+        ) {
             Ok(p) => p,
             Err(e) => {
                 return QueryResponse {
@@ -51,7 +55,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
         let result = match parsed {
-            ParsedOperation::Query { explain, .. } => {
+            ParsedOperation::Query { selects, explain } => {
                 if let Some(explain_type) = explain {
                     // Return query plan instead of executing
                     self.explain_query_with_identity_and_vars(
@@ -62,10 +66,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     )
                     .await
                 } else {
-                    self.execute_query_with_identity_and_vars(
-                        &request.query,
+                    self.execute_selects_internal(
+                        selects,
+                        self.fetcher.as_ref(),
                         identity,
-                        variables.as_ref(),
                     )
                     .await
                 }
@@ -84,6 +88,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     "Subscriptions must be executed via Server-Sent Events (SSE). \
                      Send the request with Accept: text/event-stream header.",
                 ))
+            }
+            ParsedOperation::Introspection { query } => {
+                // Introspection queries are executed against the GraphQL schema
+                self.execute_introspection(&query).await
             }
         };
 
@@ -136,7 +144,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let variables = convert_variables(&request.variables);
 
         // Parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_variables(&request.query, variables.as_ref()) {
+        let parsed = match parse_request_with_variables(
+            &request.query,
+            variables.as_ref(),
+            request.operation_name.as_deref(),
+        ) {
             Ok(p) => p,
             Err(e) => {
                 return QueryResponse {
@@ -155,7 +167,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         // Route to appropriate handler based on operation type
         let result = match parsed {
-            ParsedOperation::Query { explain, .. } => {
+            ParsedOperation::Query { selects, explain } => {
                 // Get the transaction-scoped fetcher and execute with identity for ACP
                 let fetcher = txn_ctx.doc_fetcher();
                 if let Some(explain_type) = explain {
@@ -168,11 +180,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     )
                     .await
                 } else {
-                    self.execute_query_internal_with_vars(
-                        &request.query,
+                    self.execute_selects_internal(
+                        selects,
                         fetcher.as_ref(),
                         identity,
-                        variables.as_ref(),
                     )
                     .await
                 }
@@ -209,6 +220,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     "Subscriptions must be executed via Server-Sent Events (SSE). \
                      Send the request with Accept: text/event-stream header.",
                 ))
+            }
+            ParsedOperation::Introspection { query } => {
+                // Introspection queries are executed against the GraphQL schema
+                self.execute_introspection(&query).await
             }
         };
 

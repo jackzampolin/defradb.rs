@@ -14,9 +14,9 @@ use datastore::NamespaceView;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
+use schema;
 use events::{Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
-use schema;
 use storage::corekv::Store;
 
 use crate::database::DB;
@@ -600,15 +600,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             })?;
 
         // Get field definition to determine numeric kind and allow_decrement
-        let field = collection
-            .schema()
-            .field_by_name(&payload.field_name)
-            .ok_or_else(|| {
-                MergeError::MissingMetadata(format!(
-                    "Field '{}' not found in collection",
-                    payload.field_name
-                ))
-            })?;
+        let field = collection.schema().field_by_name(&payload.field_name).ok_or_else(|| {
+            MergeError::MissingMetadata(format!(
+                "Field '{}' not found in collection",
+                payload.field_name
+            ))
+        })?;
 
         // Determine numeric kind from field type
         let numeric_kind = self.get_numeric_kind_from_field(field)?;
@@ -714,15 +711,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             })?;
 
         // Get field definition
-        let field = collection
-            .schema()
-            .field_by_name(&payload.field_name)
-            .ok_or_else(|| {
-                MergeError::MissingMetadata(format!(
-                    "Field '{}' not found in collection",
-                    payload.field_name
-                ))
-            })?;
+        let field = collection.schema().field_by_name(&payload.field_name).ok_or_else(|| {
+            MergeError::MissingMetadata(format!(
+                "Field '{}' not found in collection",
+                payload.field_name
+            ))
+        })?;
 
         // Determine numeric kind and allow_decrement
         let numeric_kind = self.get_numeric_kind_from_field(field)?;

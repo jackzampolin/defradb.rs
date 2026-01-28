@@ -609,6 +609,42 @@ impl Filter {
         (scalar, relation)
     }
 
+    /// Split the filter into non-alias and alias parts.
+    ///
+    /// Returns (non_alias_filter, alias_filter) where:
+    /// - non_alias_filter contains all conditions except `_alias`
+    /// - alias_filter contains only the `_alias` condition
+    ///
+    /// This is used to apply alias filters after aggregation in grouped queries,
+    /// since alias filters on aggregate fields can only be evaluated after the
+    /// aggregate values have been computed.
+    pub fn split_alias(&self) -> (Option<Filter>, Option<Filter>) {
+        let mut non_alias = HashMap::new();
+        let mut alias_only = HashMap::new();
+
+        for (key, value) in &self.conditions {
+            if key == "_alias" {
+                alias_only.insert(key.clone(), value.clone());
+            } else {
+                non_alias.insert(key.clone(), value.clone());
+            }
+        }
+
+        let non_alias_filter = if non_alias.is_empty() {
+            None
+        } else {
+            Some(Filter::from_conditions(non_alias))
+        };
+
+        let alias_filter = if alias_only.is_empty() {
+            None
+        } else {
+            Some(Filter::from_conditions(alias_only))
+        };
+
+        (non_alias_filter, alias_filter)
+    }
+
     /// Evaluate the filter against document fields
     pub fn matches(&self, fields: &[Option<JsonValue>], mapping: &DocumentMapping) -> Result<bool> {
         if self.conditions.is_empty() {
