@@ -1105,17 +1105,46 @@ impl Planner {
             )));
         }
 
+        // Collect all Select items to process, including those inside _group.
+        // Track the _group index for relation fields inside _group so we can update
+        // the _group child mapping with the correct relation field index later.
+        // Tuple: (select, _group_index if from inside _group)
+        let mut selects_to_process: Vec<(&Select, Option<usize>)> = Vec::new();
         for requestable in &select.fields {
             if let Requestable::Select(nested_select) = requestable {
-                let relation_field_name = &nested_select.field.name;
-
-                // Skip _group - it's a virtual field for groupBy results, not a relation
-                if relation_field_name == "_group" {
-                    continue;
+                if nested_select.field.name == "_group" {
+                    // Get the _group index in the parent mapping
+                    let group_index = mapping.first_index_of_name("_group");
+                    // _group is a virtual field - process its inner relation fields
+                    for inner_requestable in &nested_select.fields {
+                        if let Requestable::Select(inner_select) = inner_requestable {
+                            // Skip special fields
+                            if !inner_select.field.name.starts_with('_') {
+                                selects_to_process.push((inner_select, group_index));
+                            }
+                        }
+                    }
+                } else {
+                    selects_to_process.push((nested_select, None));
                 }
+            }
+        }
 
-                // Find the relation field in the parent collection
-                let relation_field = parent_collection
+        for (nested_select, group_index) in selects_to_process {
+            let relation_field_name = &nested_select.field.name;
+            let output_name = nested_select.field.output_name();
+
+            // Ensure the relation field is in the parent mapping.
+            // This is especially important for relation fields inside _group
+            // which aren't direct children of the select.
+            if mapping.first_index_of_name(relation_field_name).is_none() {
+                let index = mapping.next_index();
+                mapping.add(index, relation_field_name);
+                // Don't add render_key - for _group fields, rendering is handled by GroupByNode
+            }
+
+            // Find the relation field in the parent collection
+            let relation_field = parent_collection
                     .field_by_name(relation_field_name)
                     .ok_or_else(|| QueryError::unknown_field(relation_field_name))?;
 
@@ -1290,18 +1319,38 @@ impl Planner {
                 }
 
                 // Get the relation field index in the parent mapping.
-                // Use output_name (alias if set) to find the correct index.
-                // This ensures aliased fields like "p1: published" and "p2: published"
-                // get distinct indices and separate child mappings/filters.
-                let output_name = nested_select.field.output_name();
+                // First try by render_key (for aliased fields), then fall back to name lookup.
+                // The fallback handles relation fields inside _group which are added without render_keys.
                 let relation_field_index = mapping
                     .try_find_index_from_render_key(output_name)
+                    .or_else(|| mapping.first_index_of_name(relation_field_name))
                     .ok_or_else(|| {
                         QueryError::internal(format!(
                             "relation field '{}' (output name '{}') not in mapping",
                             relation_field_name, output_name
                         ))
                     })?;
+
+                // If this relation field is inside _group, update the _group child mapping
+                // to use the correct index for rendering. TypeJoinMany stores the relation
+                // data at relation_field_index, so the child mapping must use the same index.
+                if let Some(grp_idx) = group_index {
+                    if let Some(group_child_mapping) = mapping.child_at_mut(grp_idx) {
+                        // Update the child mapping: replace the dynamic index with relation_field_index
+                        // First, find and remove any existing entry for this field
+                        let old_index =
+                            group_child_mapping.first_index_of_name(relation_field_name);
+                        if let Some(old_idx) = old_index {
+                            // Remove old render_key with the wrong index
+                            group_child_mapping
+                                .render_keys
+                                .retain(|rk| rk.index != old_idx);
+                        }
+                        // Add with the correct index
+                        group_child_mapping.add(relation_field_index, relation_field_name);
+                        group_child_mapping.add_render_key(relation_field_index, output_name);
+                    }
+                }
 
                 // Set up child scan mapping in parent (for TypeJoin to render children).
                 // We use child_scan_mapping (not child_render_mapping) because child docs
@@ -1553,7 +1602,6 @@ impl Planner {
                     }
                     plan = Box::new(join);
                 }
-            }
         }
 
         // Handle relation filters without corresponding selections.
@@ -2730,6 +2778,15 @@ impl Planner {
                         let inner_child_mapping =
                             self.build_group_child_mapping(nested_select, collection)?;
                         child_mapping.set_child_at(index, inner_child_mapping);
+                    } else {
+                        // Relation field inside _group (e.g., published {...})
+                        // Add it to the child mapping so it can be rendered.
+                        // The actual index must match where TypeJoinMany will populate the data.
+                        // TypeJoinMany will use the parent mapping's index for this field.
+                        // We need to find or allocate an index for this relation field.
+                        let index = child_mapping.next_index();
+                        child_mapping.add(index, &nested_select.field.name);
+                        child_mapping.add_render_key(index, nested_select.field.output_name());
                     }
                 }
                 Requestable::Aggregate(_) => {
