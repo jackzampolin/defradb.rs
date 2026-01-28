@@ -193,7 +193,9 @@ impl<S: Store> VersionedFetcher<S> {
             .await
             .map_err(Error::Storage)?
             .ok_or_else(|| {
-                Error::Serialization("cid either does not exist or belong to document".to_string())
+                Error::Serialization(
+                    "failed to get block in blockstore: ipld: could not find".to_string(),
+                )
             })?;
 
         Block::from_dag_cbor(&data)

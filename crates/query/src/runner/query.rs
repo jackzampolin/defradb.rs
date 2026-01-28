@@ -1091,12 +1091,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         {
             Ok(doc) => doc,
             Err(e) => {
-                // Check if this is a "CID not found" or "docID mismatch" error
-                // In these cases, Go returns empty results
                 let err_msg = e.to_string();
+                // docID mismatch: Go returns empty results
                 if err_msg.contains("cid either does not exist or belong to document") {
                     return Ok(JsonValue::Array(vec![]));
                 }
+                // Block not found in blockstore: propagate as error (Go does the same)
                 return Err(e);
             }
         };
@@ -1305,10 +1305,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         use crate::fetcher::CommitsQueryOptions;
 
         // Fetch commits for this document
+        // When we have a target CID, we need to traverse all commits back to genesis
+        // by setting a large depth. Without a target CID (regular query), depth=None
+        // traverses all heads to genesis anyway.
+        let depth = if target_cid.is_some() {
+            Some(1000) // Reasonable max depth for version history traversal
+        } else {
+            None
+        };
+
         let options = CommitsQueryOptions {
             doc_id: Some(doc_id.to_string()),
             cid: target_cid.map(|s| s.to_string()),
-            depth: None,
+            depth,
             field_name: None,
         };
 
