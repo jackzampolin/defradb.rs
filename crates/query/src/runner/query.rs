@@ -673,6 +673,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For aggregates like _count(books: {}), compute the value from joined data
         let results = self.compute_relation_aggregates(results, select)?;
 
+        // Apply deferred limit/offset to relation fields.
+        // TypeJoinMany stores ALL children (for aggregates to count), so we apply
+        // the select's limit/offset here after aggregates have been computed.
+        let results = Self::apply_relation_limits(results, select);
+
         Ok(JsonValue::Array(results))
     }
 
@@ -1139,6 +1144,67 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(results)
+    }
+
+    /// Apply deferred limit/offset to relation fields in query results.
+    ///
+    /// TypeJoinMany stores ALL children so that relation aggregates (e.g., _count)
+    /// can see the full set. This function applies the limit/offset from the select's
+    /// nested relation fields after aggregates have been computed.
+    fn apply_relation_limits(mut results: Vec<JsonValue>, select: &Select) -> Vec<JsonValue> {
+        // Collect relation fields with limits
+        let mut relation_limits: Vec<(String, u64, u64)> = Vec::new(); // (field_name, limit, offset)
+        for requestable in &select.fields {
+            if let Requestable::Select(nested_select) = requestable {
+                if nested_select.field.name == "_group" {
+                    continue; // _group is handled by GroupByNode
+                }
+                if let Some(ref limit) = nested_select.limit {
+                    let limit_val = limit.limit.unwrap_or(0); // 0 means no limit
+                    let offset_val = limit.offset;
+                    if limit_val > 0 || offset_val > 0 {
+                        relation_limits.push((
+                            nested_select.field.output_name().to_string(),
+                            limit_val,
+                            offset_val,
+                        ));
+                    }
+                }
+            }
+        }
+
+        if relation_limits.is_empty() {
+            return results;
+        }
+
+        for result in &mut results {
+            if let JsonValue::Object(ref mut obj) = result {
+                for (field_name, limit, offset) in &relation_limits {
+                    if let Some(relation_data) = obj.get_mut(field_name) {
+                        if let JsonValue::Array(items) = relation_data {
+                            let offset = *offset as usize;
+                            let total = items.len();
+                            if offset >= total {
+                                *items = Vec::new();
+                            } else {
+                                let remaining: Vec<JsonValue> =
+                                    items.drain(offset..).collect();
+                                *items = if *limit > 0 {
+                                    remaining
+                                        .into_iter()
+                                        .take(*limit as usize)
+                                        .collect()
+                                } else {
+                                    remaining
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     /// Execute a simple query without nested selections.

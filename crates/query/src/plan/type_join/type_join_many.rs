@@ -195,6 +195,9 @@ impl TypeJoinMany {
 
     /// Find all child documents that match the parent's _docID using the cache.
     /// Applies ordering, offset, and limit per-parent.
+    /// Find all child docs for a parent, applying ordering but NOT limit/offset.
+    /// Limit/offset are deferred to the runner's post-processing step so that
+    /// relation aggregates (e.g., _count) can see ALL children.
     fn find_child_docs(&self, parent_doc_id: &str) -> Vec<Doc> {
         let Some(docs) = self.child_cache.get(parent_doc_id) else {
             return Vec::new();
@@ -207,8 +210,6 @@ impl TypeJoinMany {
             let child_mapping = self.child_plan.document_map();
             children.sort_by(|a, b| {
                 for condition in &order_by.conditions {
-                    // For nested selections, the order field should be a simple field name
-                    // (not a compound path through relations)
                     let field_name = condition.fields.first().map(|s| s.as_str()).unwrap_or("");
                     let field_idx = child_mapping.first_index_of_name(field_name);
 
@@ -229,19 +230,10 @@ impl TypeJoinMany {
             });
         }
 
-        // Apply offset
-        if self.child_offset > 0 {
-            let offset = self.child_offset as usize;
-            if offset >= children.len() {
-                return Vec::new();
-            }
-            children = children.into_iter().skip(offset).collect();
-        }
-
-        // Apply limit
-        if let Some(limit) = self.child_limit {
-            children.truncate(limit as usize);
-        }
+        // NOTE: Limit/offset are NOT applied here. They are applied in the runner's
+        // apply_relation_limits() after compute_relation_aggregates() has counted
+        // all children. This ensures _count(published: {}) sees all children even
+        // when published(limit: 1) limits the rendered output.
 
         children
     }
