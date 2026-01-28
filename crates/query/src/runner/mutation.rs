@@ -244,6 +244,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut node =
                     UpdateNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone())
                         .with_collection(collection.clone())
+                        .with_utc_now(request_utc_now)
                         .with_input(input);
 
                 // Use resolved doc_ids (from filter) or original doc_ids

@@ -62,7 +62,7 @@ pub struct Mutation {
     pub mutation_type: MutationType,
     /// Target collection name
     pub collection_name: String,
-    /// Optional GraphQL alias for the mutation field
+    /// GraphQL alias for this mutation (e.g., "john" in `john: update_Users(...)`)
     pub alias: Option<String>,
     /// For CREATE: Array of documents to create (each is a field-value map)
     pub create_input: Vec<HashMap<String, JsonValue>>,
@@ -139,6 +139,12 @@ impl Mutation {
         }
     }
 
+    /// Set the GraphQL alias for this mutation.
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
     /// Get the output key for this mutation in the result JSON.
     ///
     /// Uses the alias if present, otherwise falls back to the default
@@ -147,11 +153,7 @@ impl Mutation {
         if let Some(ref alias) = self.alias {
             alias.clone()
         } else {
-            format!(
-                "{}_{}",
-                self.mutation_type.as_prefix(),
-                self.collection_name
-            )
+            format!("{}_{}", self.mutation_type.as_prefix(), self.collection_name)
         }
     }
 
