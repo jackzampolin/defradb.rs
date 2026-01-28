@@ -200,10 +200,49 @@ mod tests {
     #[test]
     fn test_sha256_hash() {
         let hash = sha256_hash(b"hello");
-        // Known SHA-256 of "hello"
         assert_eq!(
             hash,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    #[test]
+    fn test_sha256_empty_input() {
+        let hash = sha256_hash(b"");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_sha256_deterministic() {
+        let h1 = sha256_hash(b"defradb");
+        let h2 = sha256_hash(b"defradb");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_verify_invalid_merkle_proof_json() {
+        let result = verify_merkle_proof_impl("not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_ed25519_bad_key_fails() {
+        let result = verify_ed25519_impl("not_hex", b"msg", "not_hex");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_secp256k1_bad_key_fails() {
+        let result = verify_secp256k1_impl("not_hex", b"msg", "not_hex");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compute_cid_invalid_json() {
+        let result = compute_cid_impl("not json");
+        assert!(result.is_err());
     }
 }

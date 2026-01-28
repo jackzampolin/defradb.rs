@@ -142,6 +142,31 @@ async fn test_load_missing_collection_definition_returns_error() {
 }
 
 #[tokio::test]
+async fn test_db_store_accessor_returns_shared_store() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+
+    // store() should return a reference to the underlying Arc<S>
+    let store_ref = db.store();
+    assert!(std::sync::Arc::strong_count(store_ref) >= 1);
+
+    // Creating a transaction should work through the same store
+    let txn = db.new_txn(true).await.unwrap();
+    let _ = txn.discard();
+}
+
+#[tokio::test]
+async fn test_db_store_accessor_same_instance() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+
+    // Two calls to store() should return the same Arc
+    let s1 = db.store();
+    let s2 = db.store();
+    assert!(std::sync::Arc::ptr_eq(s1, s2));
+}
+
+#[tokio::test]
 async fn test_load_invalid_json_collection_returns_error() {
     let store = Arc::new(MemoryStore::new());
     let db = DB::new((*store).clone()).unwrap();

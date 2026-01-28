@@ -271,21 +271,11 @@ impl DefraClient {
         }
     }
 
-    async fn mutate_impl(&mut self, graphql: &str) -> Result<JsValue> {
+    async fn mutate_impl(&mut self, _graphql: &str) -> Result<JsValue> {
         self.ensure_open()?;
-
-        // Validate that it looks like a mutation
-        if graphql.trim().is_empty() {
-            return Err(WasmError::Query("Empty mutation string".to_string()));
-        }
-
-        // For now, return a placeholder response
-        // Full mutation execution requires the mutator integration
-        to_js(&serde_json::json!({
-            "data": {},
-            "errors": [],
-            "_info": "Mutation execution coming soon. Use GraphQL query for reads."
-        }))
+        Err(WasmError::Query(
+            "Mutations are not yet supported. Use query() for reads.".to_string(),
+        ))
     }
 
     fn get_collections_impl(&self) -> Result<JsValue> {
@@ -320,15 +310,24 @@ impl DefraClient {
         }
 
         if let Some(db) = self.db.take() {
-            // Try to get exclusive ownership to close properly
             match Arc::try_unwrap(db) {
                 Ok(db) => {
                     db.close().await.map_err(|e| {
                         WasmError::Storage(format!("Failed to close database: {}", e))
                     })?;
                 }
-                Err(_arc) => {
-                    // Other references exist - this shouldn't happen in normal usage
+                Err(arc) => {
+                    // Other references exist — persist to avoid data loss, then drop our ref
+                    web_sys::console::warn_1(
+                        &format!(
+                            "Cannot close DB exclusively ({} refs), persisting before release",
+                            Arc::strong_count(&arc)
+                        )
+                        .into(),
+                    );
+                    arc.store().persist().await.map_err(|e| {
+                        WasmError::Storage(format!("Persist failed during close: {}", e))
+                    })?;
                 }
             }
         }
@@ -348,5 +347,154 @@ mod tests {
         let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
         let client = DefraClient::create(config).await.unwrap();
         assert!(!client.closed);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_close_is_idempotent() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+        client.close().await.unwrap();
+        assert!(client.closed);
+        // Second close should succeed without error
+        client.close().await.unwrap();
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_query_after_close_fails() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+        client.close().await.unwrap();
+        let result = client.query("{ User { name } }").await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_persist_after_close_fails() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+        client.close().await.unwrap();
+        let result = client.persist().await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_mutate_returns_error() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+        let result = client.mutate("mutation { create_User(input: {}) { _docID } }").await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_empty_query_fails() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let client = DefraClient::create(config).await.unwrap();
+        let result = client.query("").await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_empty_query_whitespace_fails() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let client = DefraClient::create(config).await.unwrap();
+        let result = client.query("   ").await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_get_collections_empty() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let client = DefraClient::create(config).await.unwrap();
+        let result = client.get_collections().unwrap();
+        let collections: Vec<CollectionInfo> = serde_wasm_bindgen::from_value(result).unwrap();
+        assert!(collections.is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_add_schema_and_get_collections() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+
+        let sdl = "type User { name: String, email: String }";
+        client.add_schema(sdl).await.unwrap();
+
+        let result = client.get_collections().unwrap();
+        let collections: Vec<CollectionInfo> = serde_wasm_bindgen::from_value(result).unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "User");
+        // _docID is auto-added, so we expect name + email + _docID = 3 fields
+        assert!(collections[0].fields.len() >= 2);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_add_schema_invalid_sdl_fails() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+        let result = client.add_schema("not valid graphql {{{{").await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_add_duplicate_schema_fails() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+
+        let sdl = "type Item { name: String }";
+        client.add_schema(sdl).await.unwrap();
+        // Adding the same schema again should fail (collection already exists)
+        let result = client.add_schema(sdl).await;
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_add_multiple_schemas() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+
+        client
+            .add_schema("type Book { title: String }")
+            .await
+            .unwrap();
+        client
+            .add_schema("type Author { name: String }")
+            .await
+            .unwrap();
+
+        let result = client.get_collections().unwrap();
+        let collections: Vec<CollectionInfo> = serde_wasm_bindgen::from_value(result).unwrap();
+        assert_eq!(collections.len(), 2);
+
+        let names: Vec<&str> = collections.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Book"));
+        assert!(names.contains(&"Author"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_query_empty_collection() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+
+        client
+            .add_schema("type Product { name: String, price: Int }")
+            .await
+            .unwrap();
+
+        let result = client.query("{ Product { name price } }").await.unwrap();
+        let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
+        assert!(response.get("data").is_some());
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_persist_succeeds() {
+        let config = serde_wasm_bindgen::to_value(&ClientConfig::default()).unwrap();
+        let mut client = DefraClient::create(config).await.unwrap();
+
+        client
+            .add_schema("type Note { text: String }")
+            .await
+            .unwrap();
+
+        // Explicit persist should succeed
+        client.persist().await.unwrap();
     }
 }
