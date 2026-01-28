@@ -140,7 +140,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         _caller_identity: Option<Did>,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
-        use crate::mapper::{Mutation, MutationType};
         use crate::query_parse::parse_mutations;
 
         let mutations = parse_mutations(mutation_str)?;
