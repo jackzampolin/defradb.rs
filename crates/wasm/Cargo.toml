@@ -70,6 +70,7 @@ defra-core = { path = "../defra-core" }
 schema = { path = "../schema" }
 document = { path = "../document" }
 crypto = { path = "../crypto" }
+storage = { path = "../storage", default-features = false, features = ["leveldb"] }
 
 # IPLD
 cid.workspace = true

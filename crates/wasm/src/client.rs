@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 use schema::{validate_schema, CollectionVersion};
@@ -168,6 +169,46 @@ impl DefraClient {
         self.get_collections_impl().map_err(|e| e.into())
     }
 
+    /// Get a single document by collection and document ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `collection` - The collection name
+    /// * `doc_id` - The document ID
+    ///
+    /// # Returns
+    ///
+    /// The document as a JSON object, or null if not found.
+    #[wasm_bindgen]
+    pub async fn get_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+    ) -> std::result::Result<JsValue, JsValue> {
+        self.get_document_impl(collection, doc_id)
+            .await
+            .map_err(|e| e.into())
+    }
+
+    /// Get all documents in a collection.
+    ///
+    /// # Arguments
+    ///
+    /// * `collection` - The collection name
+    ///
+    /// # Returns
+    ///
+    /// An array of documents in the collection.
+    #[wasm_bindgen]
+    pub async fn get_documents(
+        &self,
+        collection: &str,
+    ) -> std::result::Result<JsValue, JsValue> {
+        self.get_documents_impl(collection)
+            .await
+            .map_err(|e| e.into())
+    }
+
     /// Close the client and release resources.
     ///
     /// After closing, the client cannot be used.
@@ -273,19 +314,157 @@ impl DefraClient {
     ) -> Result<JsValue> {
         self.ensure_open()?;
 
+        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
+
         // Parse the documents
         let documents: Vec<serde_json::Value> = serde_json::from_str(documents_json)?;
 
-        // For MVP, just count the documents
-        // Full implementation will verify proofs and merge with CRDT
-        let count = documents.len();
+        let mut synced = 0u32;
+        let mut failed = 0u32;
+        let mut merged = 0u32;
+        let mut errors: Vec<String> = Vec::new();
+
+        for doc in documents {
+            match self.sync_single_document(store, &doc).await {
+                Ok(was_merge) => {
+                    synced += 1;
+                    if was_merge {
+                        merged += 1;
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    errors.push(e.to_string());
+                }
+            }
+        }
 
         to_js(&serde_json::json!({
-            "synced": count,
-            "failed": 0,
-            "merged": 0,
-            "_info": "Documents received. Full sync with CRDT merge not yet implemented."
+            "synced": synced,
+            "failed": failed,
+            "merged": merged,
+            "errors": errors,
         }))
+    }
+
+    /// Sync a single document to storage.
+    /// Returns Ok(true) if this was a merge (document already existed), Ok(false) if new.
+    async fn sync_single_document(
+        &self,
+        store: &WasmStore,
+        doc: &serde_json::Value,
+    ) -> Result<bool> {
+        // Extract collection name - required field
+        let collection = doc
+            .get("_collection")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WasmError::Sync("Document missing '_collection' field".to_string()))?;
+
+        // Validate collection exists in schema
+        if !self.collections.contains_key(collection) {
+            return Err(WasmError::Sync(format!(
+                "Unknown collection '{}'. Add schema first.",
+                collection
+            )));
+        }
+
+        // Extract or generate document ID
+        let doc_id = doc
+            .get("_docID")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                // Generate a UUID-based document ID if not provided
+                Uuid::new_v4().to_string()
+            });
+
+        // Build storage key: docs/{collection}/{docID}
+        let key = format!("docs/{}/{}", collection, doc_id);
+        let key_bytes = key.as_bytes();
+
+        // Check if document already exists
+        let existing = store.get(key_bytes).await?;
+        let was_merge = existing.is_some();
+
+        // If document exists, check if we should merge/update
+        if let Some(existing_bytes) = existing {
+            // Parse existing document
+            if let Ok(existing_doc) = serde_json::from_slice::<serde_json::Value>(&existing_bytes) {
+                // Simple LWW: compare _updatedAt timestamps if available
+                let existing_ts = existing_doc
+                    .get("_updatedAt")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let incoming_ts = doc.get("_updatedAt").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                // If existing is newer or equal, skip update
+                if existing_ts >= incoming_ts && incoming_ts > 0 {
+                    return Ok(true); // Was a merge, but kept existing
+                }
+            }
+        }
+
+        // Serialize and store the document
+        let doc_bytes = serde_json::to_vec(doc)?;
+        store.set(key_bytes, &doc_bytes).await?;
+
+        Ok(was_merge)
+    }
+
+    async fn get_document_impl(&self, collection: &str, doc_id: &str) -> Result<JsValue> {
+        self.ensure_open()?;
+
+        // Validate collection exists
+        if !self.collections.contains_key(collection) {
+            return Err(WasmError::Sync(format!(
+                "Unknown collection '{}'",
+                collection
+            )));
+        }
+
+        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
+
+        // Build storage key
+        let key = format!("docs/{}/{}", collection, doc_id);
+        let key_bytes = key.as_bytes();
+
+        match store.get(key_bytes).await? {
+            Some(bytes) => {
+                let doc: serde_json::Value = serde_json::from_slice(&bytes)?;
+                to_js(&doc)
+            }
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    async fn get_documents_impl(&self, collection: &str) -> Result<JsValue> {
+        self.ensure_open()?;
+
+        // Validate collection exists
+        if !self.collections.contains_key(collection) {
+            return Err(WasmError::Sync(format!(
+                "Unknown collection '{}'",
+                collection
+            )));
+        }
+
+        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
+
+        // Get all keys with the collection prefix
+        let prefix = format!("docs/{}/", collection);
+        let keys = store.keys_with_prefix(prefix.as_bytes()).await?;
+
+        // Load all documents
+        let mut documents = Vec::new();
+        for key in keys {
+            if let Some(bytes) = store.get(&key).await? {
+                if let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    documents.push(doc);
+                }
+            }
+        }
+
+        to_js(&documents)
     }
 
     fn get_collections_impl(&self) -> Result<JsValue> {
@@ -307,7 +486,7 @@ impl DefraClient {
             return Ok(());
         }
 
-        if let Some(store) = self.store.take() {
+        if let Some(mut store) = self.store.take() {
             store.close().await?;
         }
 

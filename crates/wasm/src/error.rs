@@ -40,6 +40,9 @@ pub enum WasmError {
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
+
+    #[error("Sync error: {0}")]
+    Sync(String),
 }
 
 impl From<WasmError> for JsValue {

@@ -44,6 +44,9 @@ pub enum StorageType {
     #[default]
     Memory,
     IndexedDb,
+    /// LevelDB storage - pure Rust LSM-tree implementation.
+    /// Currently uses in-memory storage; OPFS persistence planned.
+    LevelDb,
 }
 
 /// Collection info returned to JavaScript.
