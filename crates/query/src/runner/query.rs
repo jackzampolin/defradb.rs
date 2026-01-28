@@ -14,7 +14,7 @@ use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index};
 use crate::planner::Planner;
-use crate::query_parse::{parse_query, ExplainType};
+use crate::query_parse::{parse_query, parse_query_with_variables, ExplainType};
 use crate::txn::TransactionRegistry;
 
 use super::fetcher::FetcherWrapper;
@@ -38,6 +38,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await
     }
 
+    /// Execute a GraphQL query with identity and variables.
+    pub async fn execute_query_with_identity_and_vars(
+        &self,
+        query: &str,
+        caller_identity: Option<Did>,
+        variables: Option<&std::collections::HashMap<String, JsonValue>>,
+    ) -> Result<JsonValue> {
+        self.execute_query_internal_with_vars(
+            query,
+            self.fetcher.as_ref(),
+            caller_identity,
+            variables,
+        )
+        .await
+    }
+
     /// Generate an explanation of the query plan.
     ///
     /// Used when queries include the @explain directive.
@@ -51,10 +67,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         caller_identity: Option<Did>,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
+        self.explain_query_with_identity_and_vars(query, caller_identity, explain_type, None)
+            .await
+    }
+
+    /// Generate an explanation of the query plan with variable support.
+    pub async fn explain_query_with_identity_and_vars(
+        &self,
+        query: &str,
+        caller_identity: Option<Did>,
+        explain_type: ExplainType,
+        variables: Option<&std::collections::HashMap<String, JsonValue>>,
+    ) -> Result<JsonValue> {
         match explain_type {
             ExplainType::Simple | ExplainType::Debug => {
                 // Simple and Debug modes: explain without execution
-                let selects = parse_query(query)?;
+                let selects = parse_query_with_variables(query, variables)?;
                 let mut results = Map::new();
 
                 for select in selects {
@@ -67,7 +95,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
             ExplainType::Execute => {
                 // Execute mode: run the query and collect metrics
-                self.execute_explain(query, caller_identity).await
+                self.execute_explain_with_vars(query, caller_identity, variables)
+                    .await
             }
         }
     }
@@ -79,7 +108,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         query: &str,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
-        let selects = parse_query(query)?;
+        self.execute_explain_with_vars(query, caller_identity, None).await
+    }
+
+    /// Execute the query with variables and return explain output with execution metrics.
+    async fn execute_explain_with_vars(
+        &self,
+        query: &str,
+        caller_identity: Option<Did>,
+        variables: Option<&std::collections::HashMap<String, JsonValue>>,
+    ) -> Result<JsonValue> {
+        let selects = parse_query_with_variables(query, variables)?;
 
         let mut explain_result = Map::new();
         let mut total_executions: u64 = 0;
@@ -363,7 +402,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
-        let selects = parse_query(query)?;
+        self.execute_query_internal_with_vars(query, fetcher, caller_identity, None)
+            .await
+    }
+
+    /// Execute a GraphQL query with a specific fetcher, identity, and variables.
+    pub(crate) async fn execute_query_internal_with_vars(
+        &self,
+        query: &str,
+        fetcher: &dyn DocFetcher,
+        caller_identity: Option<Did>,
+        variables: Option<&std::collections::HashMap<String, JsonValue>>,
+    ) -> Result<JsonValue> {
+        let selects = parse_query_with_variables(query, variables)?;
 
         let mut results = Map::new();
 
