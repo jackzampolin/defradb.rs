@@ -416,6 +416,50 @@ impl PlanNode for TypeJoinOne {
     }
 
     fn kind(&self) -> &'static str {
-        "typeJoinOne"
+        // Go's explain uses "typeIndexJoin" as the wrapper node
+        "typeIndexJoin"
+    }
+
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // joinType: the actual join type (typeJoinOne)
+        obj.insert("joinType".to_string(), serde_json::json!("typeJoinOne"));
+
+        // direction: primary or secondary (Go uses "secondary" not "inverted")
+        let direction = match self.direction {
+            JoinDirection::Primary { .. } => "primary",
+            JoinDirection::Inverted => "secondary",
+        };
+        obj.insert("direction".to_string(), serde_json::json!(direction));
+
+        // rootName: the parent side's relation field name (optional)
+        // This is the field on the child side that points back to the root
+        let root_name = self.child_side.relation_field().name.clone();
+        obj.insert(
+            "rootName".to_string(),
+            serde_json::json!(serde_json::json!({ "value": root_name })),
+        );
+
+        // subTypeName: the child side's relation field name (from parent perspective)
+        obj.insert(
+            "subTypeName".to_string(),
+            serde_json::json!(self.parent_side.relation_field().name),
+        );
+
+        // root: the parent plan's explain (contains scanNode)
+        let root_explain = self.parent_plan.explain();
+        obj.insert("root".to_string(), root_explain);
+
+        // subType: the child plan's explain wrapped in selectTopNode
+        let child_explain = self.child_plan.explain();
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": child_explain
+            }
+        });
+        obj.insert("subType".to_string(), sub_type);
+
+        serde_json::Value::Object(obj)
     }
 }
