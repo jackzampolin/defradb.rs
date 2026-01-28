@@ -14,11 +14,7 @@ use crate::planner::{Doc, PlanNode};
 
 /// Validate that the select doesn't use unsupported features.
 pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -> Result<()> {
-    if select.cid.is_some() {
-        return Err(QueryError::execution(
-            "CID-based queries are not yet implemented; remove the 'cid' argument",
-        ));
-    }
+    // Note: CID-based queries are now handled by execute_cid_query() before this validation
 
     // Note: Nested selections (relations) are now supported via the Planner
 

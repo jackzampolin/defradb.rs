@@ -13,6 +13,7 @@ use tracing::warn;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::txn::DbTxn;
+use crate::versioned_fetcher::VersionedFetcher;
 
 /// Document fetcher that uses a database transaction.
 ///
@@ -272,5 +273,17 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
 
     fn supports_index_queries(&self) -> bool {
         true
+    }
+
+    async fn get_document_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Document> {
+        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        versioned_fetcher
+            .get_document_at_cid(cid, expected_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 }
