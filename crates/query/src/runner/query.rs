@@ -716,13 +716,43 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             return Ok(results);
         }
 
-        // Collect which relation fields are explicitly selected (for cleanup later)
+        // Collect which relation fields are explicitly selected and their requested fields (for cleanup later)
         let selected_relations: std::collections::HashSet<String> = select
             .fields
             .iter()
             .filter_map(|f| {
                 if let Requestable::Select(s) = f {
                     Some(s.field.name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // For each selected relation, collect the fields that were explicitly requested.
+        // Any fields NOT in this set were added for aggregate filter evaluation and should be cleaned up.
+        let selected_relation_fields: std::collections::HashMap<String, std::collections::HashSet<String>> = select
+            .fields
+            .iter()
+            .filter_map(|f| {
+                if let Requestable::Select(s) = f {
+                    let mut fields = std::collections::HashSet::new();
+                    // Always include _docID as it's implicit
+                    fields.insert("_docID".to_string());
+                    for requestable in &s.fields {
+                        match requestable {
+                            Requestable::Field(f) => {
+                                fields.insert(f.output_name().to_string());
+                            }
+                            Requestable::Select(nested) => {
+                                fields.insert(nested.field.output_name().to_string());
+                            }
+                            Requestable::Aggregate(agg) => {
+                                fields.insert(agg.output_name().to_string());
+                            }
+                        }
+                    }
+                    Some((s.field.name.clone(), fields))
                 } else {
                     None
                 }
@@ -755,17 +785,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 // Step 1: Apply filter to array elements
                                 let filtered_items: Vec<&JsonValue> =
                                     if let Some(ref filter) = target.filter {
+                                        // Check if the filter has field-based conditions
+                                        // (keys that are not operators like _gt, _eq, etc.)
+                                        let has_field_conditions = filter.has_field_conditions();
+
                                         items
                                             .iter()
                                             .filter(|item| {
-                                                let val = match field_name {
-                                                    Some(f) => item
-                                                        .as_object()
-                                                        .and_then(|o| o.get(f))
-                                                        .unwrap_or(&JsonValue::Null),
-                                                    None => *item,
-                                                };
-                                                filter.matches_scalar_value(val).unwrap_or(false)
+                                                if has_field_conditions {
+                                                    // Field-based filter like {rating: {_gt: 4.8}}
+                                                    // Match against the entire item object
+                                                    filter.matches_json_object(item).unwrap_or(false)
+                                                } else {
+                                                    // Operator-only filter like {_gt: 4.8}
+                                                    // Extract the field value and match against it
+                                                    let val = match field_name {
+                                                        Some(f) => item
+                                                            .as_object()
+                                                            .and_then(|o| o.get(f))
+                                                            .unwrap_or(&JsonValue::Null),
+                                                        None => *item,
+                                                    };
+                                                    filter.matches_scalar_value(val).unwrap_or(false)
+                                                }
                                             })
                                             .collect()
                                     } else {
@@ -947,6 +989,108 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 for relation_name in &aggregate_relation_names {
                     if !selected_relations.contains(relation_name) {
                         obj.remove(relation_name);
+                    }
+                }
+
+                // Clean up extra fields from relation data that were added for aggregate filter evaluation
+                // but weren't in the original selection. For example, if the selection was
+                // `published { name }` but the aggregate filter needed `rating`, we need to remove
+                // `rating` from each item in `published` after aggregate computation.
+                for (relation_name, allowed_fields) in &selected_relation_fields {
+                    if let Some(relation_data) = obj.get_mut(relation_name) {
+                        if let JsonValue::Array(items) = relation_data {
+                            for item in items.iter_mut() {
+                                if let JsonValue::Object(item_obj) = item {
+                                    // Remove fields that weren't in the original selection
+                                    item_obj.retain(|k, _| allowed_fields.contains(k));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply post-aggregate filtering if needed
+        // When filter uses _alias to reference computed aggregates, the SelectNode can't
+        // filter during plan execution since aggregate values don't exist yet.
+        // Example: filter: {_alias: {publishedCount: {_gt: 0}}}
+        if let Some(ref filter) = select.filter {
+            let aggregate_output_names: std::collections::HashSet<&str> = aggregates_info
+                .iter()
+                .map(|(name, _, _)| name.as_str())
+                .collect();
+
+            // Check if filter has _alias conditions referencing aggregate names
+            if let Some(alias_conditions) = filter.conditions().get("_alias") {
+                if let Some(alias_obj) = alias_conditions.as_object() {
+                    let needs_post_filter = alias_obj
+                        .keys()
+                        .any(|k| aggregate_output_names.contains(k.as_str()));
+
+                    if needs_post_filter {
+                        results.retain(|result| {
+                            if let Some(obj) = result.as_object() {
+                                // Evaluate each alias condition
+                                for (alias_name, condition) in alias_obj {
+                                    if let Some(value) = obj.get(alias_name) {
+                                        // Parse and evaluate the operator conditions
+                                        if let Some(cond_obj) = condition.as_object() {
+                                            for (op_str, expected) in cond_obj {
+                                                if let Some(op) = crate::mapper::FilterOp::parse(op_str)
+                                                {
+                                                    match op {
+                                                        crate::mapper::FilterOp::Eq => {
+                                                            if value != expected {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        crate::mapper::FilterOp::Ne => {
+                                                            if value == expected {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        crate::mapper::FilterOp::Gt => {
+                                                            let v = value.as_f64().unwrap_or(0.0);
+                                                            let e = expected.as_f64().unwrap_or(0.0);
+                                                            if v <= e {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        crate::mapper::FilterOp::Gte => {
+                                                            let v = value.as_f64().unwrap_or(0.0);
+                                                            let e = expected.as_f64().unwrap_or(0.0);
+                                                            if v < e {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        crate::mapper::FilterOp::Lt => {
+                                                            let v = value.as_f64().unwrap_or(0.0);
+                                                            let e = expected.as_f64().unwrap_or(0.0);
+                                                            if v >= e {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        crate::mapper::FilterOp::Lte => {
+                                                            let v = value.as_f64().unwrap_or(0.0);
+                                                            let e = expected.as_f64().unwrap_or(0.0);
+                                                            if v > e {
+                                                                return false;
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Alias field not found in result, filter it out
+                                        return false;
+                                    }
+                                }
+                            }
+                            true
+                        });
                     }
                 }
             }

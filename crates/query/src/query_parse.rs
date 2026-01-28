@@ -200,6 +200,9 @@ pub fn parse_query_with_variables(
         ParsedOperation::Subscription { .. } => Err(QueryError::parse(
             "Expected query but got subscription.",
         )),
+        ParsedOperation::Introspection { .. } => Err(QueryError::parse(
+            "Expected query but got introspection.",
+        )),
     }
 }
 

@@ -155,6 +155,13 @@ impl DocumentMapping {
             .and_then(|opt| opt.as_ref().map(|b| b.as_ref()))
     }
 
+    /// Get a mutable reference to a child mapping at the given index
+    pub fn child_at_mut(&mut self, index: usize) -> Option<&mut DocumentMapping> {
+        self.child_mappings
+            .get_mut(index)
+            .and_then(|opt| opt.as_mut().map(|b| b.as_mut()))
+    }
+
     /// Render a document to a JSON object using this mapping's render keys.
     ///
     /// Iterates over render_keys and extracts the corresponding values from the document

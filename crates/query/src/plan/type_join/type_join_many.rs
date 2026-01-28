@@ -2,11 +2,13 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use tracing::warn;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::mapper::{OrderBy, OrderDirection};
 use crate::planner::{Doc, PlanNode};
 
 use super::JoinSide;
@@ -52,6 +54,12 @@ pub struct TypeJoinMany {
     /// Cached child documents indexed by FK field value.
     /// Key is the child's FK value (points to parent's _docID).
     child_cache: HashMap<String, Vec<Doc>>,
+    /// Per-parent limit on children (None = no limit)
+    child_limit: Option<u64>,
+    /// Per-parent offset on children
+    child_offset: u64,
+    /// Order by specification for children
+    child_order_by: Option<OrderBy>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -112,15 +120,81 @@ impl TypeJoinMany {
             child_fk_index,
             initialized: false,
             child_cache: HashMap::new(),
+            child_limit: None,
+            child_offset: 0,
+            child_order_by: None,
         })
     }
 
+    /// Set the per-parent limit on children.
+    pub fn with_limit(mut self, limit: u64) -> Self {
+        self.child_limit = Some(limit);
+        self
+    }
+
+    /// Set the per-parent offset on children.
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.child_offset = offset;
+        self
+    }
+
+    /// Set the order by specification for children.
+    pub fn with_order_by(mut self, order_by: OrderBy) -> Self {
+        self.child_order_by = Some(order_by);
+        self
+    }
+
     /// Find all child documents that match the parent's _docID using the cache.
+    /// Applies ordering, offset, and limit per-parent.
     fn find_child_docs(&self, parent_doc_id: &str) -> Vec<Doc> {
-        self.child_cache
-            .get(parent_doc_id)
-            .map(|docs| docs.iter().map(|d| d.deep_clone()).collect())
-            .unwrap_or_default()
+        let Some(docs) = self.child_cache.get(parent_doc_id) else {
+            return Vec::new();
+        };
+
+        let mut children: Vec<Doc> = docs.iter().map(|d| d.deep_clone()).collect();
+
+        // Apply ordering if specified
+        if let Some(ref order_by) = self.child_order_by {
+            let child_mapping = self.child_plan.document_map();
+            children.sort_by(|a, b| {
+                for condition in &order_by.conditions {
+                    // For nested selections, the order field should be a simple field name
+                    // (not a compound path through relations)
+                    let field_name = condition.fields.first().map(|s| s.as_str()).unwrap_or("");
+                    let field_idx = child_mapping.first_index_of_name(field_name);
+
+                    if let Some(idx) = field_idx {
+                        let val_a = a.get(idx);
+                        let val_b = b.get(idx);
+                        let cmp = compare_json_values(val_a, val_b);
+                        let cmp = match condition.direction {
+                            OrderDirection::Asc => cmp,
+                            OrderDirection::Desc => cmp.reverse(),
+                        };
+                        if cmp != Ordering::Equal {
+                            return cmp;
+                        }
+                    }
+                }
+                Ordering::Equal
+            });
+        }
+
+        // Apply offset
+        if self.child_offset > 0 {
+            let offset = self.child_offset as usize;
+            if offset >= children.len() {
+                return Vec::new();
+            }
+            children = children.into_iter().skip(offset).collect();
+        }
+
+        // Apply limit
+        if let Some(limit) = self.child_limit {
+            children.truncate(limit as usize);
+        }
+
+        children
     }
 
     /// Build the child cache by scanning child_plan once.
@@ -270,5 +344,40 @@ impl PlanNode for TypeJoinMany {
 
     fn kind(&self) -> &'static str {
         "typeJoinMany"
+    }
+}
+
+/// Compare two JSON values for ordering.
+/// Follows SQL-like ordering: NULL < bool < number < string < array < object
+fn compare_json_values(a: Option<&JsonValue>, b: Option<&JsonValue>) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(JsonValue::Null), Some(JsonValue::Null)) => Ordering::Equal,
+        (Some(JsonValue::Null), Some(_)) => Ordering::Less,
+        (Some(_), Some(JsonValue::Null)) => Ordering::Greater,
+        (Some(JsonValue::Bool(a)), Some(JsonValue::Bool(b))) => a.cmp(b),
+        (Some(JsonValue::Number(a)), Some(JsonValue::Number(b))) => {
+            // Compare as f64 for numeric ordering
+            let fa = a.as_f64().unwrap_or(0.0);
+            let fb = b.as_f64().unwrap_or(0.0);
+            fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)
+        }
+        (Some(JsonValue::String(a)), Some(JsonValue::String(b))) => a.cmp(b),
+        // Different types: order by type precedence
+        (Some(a), Some(b)) => type_precedence(a).cmp(&type_precedence(b)),
+    }
+}
+
+/// Get type precedence for ordering (lower = comes first)
+fn type_precedence(v: &JsonValue) -> u8 {
+    match v {
+        JsonValue::Null => 0,
+        JsonValue::Bool(_) => 1,
+        JsonValue::Number(_) => 2,
+        JsonValue::String(_) => 3,
+        JsonValue::Array(_) => 4,
+        JsonValue::Object(_) => 5,
     }
 }
