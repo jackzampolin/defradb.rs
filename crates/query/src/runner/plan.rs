@@ -229,11 +229,13 @@ pub(crate) fn build_plan(
 
     let mut plan: Box<dyn PlanNode> = Box::new(scan);
 
-    // Add SelectNode for filtering
-    if let Some(ref filter) = select.filter {
-        let select_node = SelectNode::new(plan, mapping.clone()).with_filter(filter.clone());
-        plan = Box::new(select_node);
-    }
+    // Add SelectNode (Go always wraps in selectNode, even without a filter)
+    let select_node = if let Some(ref filter) = select.filter {
+        SelectNode::new(plan, mapping.clone()).with_filter(filter.clone())
+    } else {
+        SelectNode::new(plan, mapping.clone())
+    };
+    plan = Box::new(select_node);
 
     // Check if we have GROUP BY
     let has_group_by = select.group_by.is_some();

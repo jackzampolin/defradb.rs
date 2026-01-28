@@ -13,7 +13,9 @@ use crate::document::documents_to_plan_docs;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
-use crate::planner::index_selection::{filter_to_index_scan, select_best_index};
+use crate::planner::index_selection::{
+    can_be_ordered_by_index, filter_to_index_scan, select_best_index,
+};
 use crate::planner::Planner;
 use crate::query_parse::{parse_query_with_variables, ExplainType};
 use crate::txn::TransactionRegistry;
@@ -192,8 +194,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let fetcher = self.fetcher.as_ref();
 
-        // Check if we can use an index (only when not fetching by specific doc_ids)
-        let can_use_index = select.doc_ids.is_none()
+        // Check if we can use an index (filter-based or ordering-based)
+        let can_use_filter_index = select.doc_ids.is_none()
             && select.filter.is_some()
             && !collection.indexes.is_empty()
             && fetcher.supports_index_queries()
@@ -202,6 +204,24 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .as_ref()
                 .map(|f| select_best_index(f, &collection.indexes).is_some())
                 .unwrap_or(false);
+
+        // Also use index when it can provide ordering (even without a filter)
+        let can_use_ordering_index = select.doc_ids.is_none()
+            && select.order_by.is_some()
+            && !collection.indexes.is_empty()
+            && fetcher.supports_index_queries()
+            && select
+                .order_by
+                .as_ref()
+                .map(|o| {
+                    collection
+                        .indexes
+                        .iter()
+                        .any(|idx| can_be_ordered_by_index(o, idx).0)
+                })
+                .unwrap_or(false);
+
+        let can_use_index = can_use_filter_index || can_use_ordering_index;
 
         if can_use_index {
             // Use Planner path for index-based queries (shows indexScanNode in explain)
@@ -384,8 +404,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .any(|f| matches!(f, Requestable::Select(_)));
 
-        if has_nested {
-            // Use the Planner for queries with nested selections
+        // Check if an ordering-only index can be used (planner needed for IndexScanNode)
+        let has_ordering_index = !has_nested
+            && select.order_by.is_some()
+            && !collection.indexes.is_empty()
+            && select
+                .order_by
+                .as_ref()
+                .map(|o| {
+                    collection
+                        .indexes
+                        .iter()
+                        .any(|idx| can_be_ordered_by_index(o, idx).0)
+                })
+                .unwrap_or(false);
+
+        // Check if a filter-based index can be used
+        let has_filter_index = !has_nested
+            && select.filter.is_some()
+            && !collection.indexes.is_empty()
+            && select
+                .filter
+                .as_ref()
+                .map(|f| select_best_index(f, &collection.indexes).is_some())
+                .unwrap_or(false);
+
+        if has_nested || has_ordering_index || has_filter_index {
+            // Use the Planner for queries with nested selections or index usage
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
@@ -597,13 +642,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             false
         });
 
+        // Check if an ordering-only index can be used (planner needed for IndexScanNode)
+        let has_ordering_index = select.order_by.is_some()
+            && fetcher.supports_index_queries()
+            && !collection.indexes.is_empty()
+            && select
+                .order_by
+                .as_ref()
+                .map(|o| {
+                    collection
+                        .indexes
+                        .iter()
+                        .any(|idx| can_be_ordered_by_index(o, idx).0)
+                })
+                .unwrap_or(false);
+
         // Use Planner if there are nested selections, filter through relations,
-        // order through relations, aggregates on relations, or secondary relation ID fields
+        // order through relations, aggregates on relations, secondary relation ID fields,
+        // or when an index can provide ordering
         let needs_planner = has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
-            || has_secondary_relation_id;
+            || has_secondary_relation_id
+            || has_ordering_index;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.

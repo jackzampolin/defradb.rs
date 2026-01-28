@@ -17,7 +17,10 @@ use crate::plan::{
     LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode, SumNode,
     TypeJoinMany, TypeJoinOne,
 };
-use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
+use crate::planner::index_selection::{
+    can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
+    IndexScanType,
+};
 use crate::planner::PlanNode;
 use serde_json::Value as JsonValue;
 
@@ -300,12 +303,14 @@ impl Planner {
             }
         }
 
-        // Check if an index can be used for the filter.
+        // Check if an index can be used for the filter or ordering.
         // Index selection works for both pre-loaded docs and fetcher-based loading.
-        let index_scan = if let Some(ref fetcher) = self.fetcher {
+        let (index_scan, index_provides_ordering) = if let Some(ref fetcher) = self.fetcher {
             // Only use index if fetcher supports index queries
             if fetcher.supports_index_queries() {
                 self.try_select_index(select, &collection)
+                    .map(|(p, o)| (Some(p), o))
+                    .unwrap_or((None, false))
             } else {
                 if select.filter.is_some() && !collection.indexes.is_empty() {
                     debug!(
@@ -314,10 +319,12 @@ impl Planner {
                         "Index selection disabled - fetcher does not support index queries"
                     );
                 }
-                None
+                (None, false)
             }
         } else {
             self.try_select_index(select, &collection)
+                .map(|(p, o)| (Some(p), o))
+                .unwrap_or((None, false))
         };
 
         // Build the plan tree bottom-up:
@@ -656,12 +663,15 @@ impl Planner {
             plan = self.add_aggregate_nodes(plan, select, &scan_mapping)?;
 
             // 6. Apply order by (after grouping/aggregation)
+            // Skip if index already provides the ordering
             if let Some(ref order_by) = select.order_by {
-                plan = Box::new(OrderByNode::new(
-                    plan,
-                    order_by.clone(),
-                    scan_mapping.clone(),
-                ));
+                if !index_provides_ordering {
+                    plan = Box::new(OrderByNode::new(
+                        plan,
+                        order_by.clone(),
+                        scan_mapping.clone(),
+                    ));
+                }
             }
 
             // 7. Apply limit/offset
@@ -678,12 +688,15 @@ impl Planner {
             // WITHOUT GROUP BY: OrderBy → Limit → [AllDocsNode] → Aggregates
 
             // 5. Apply order by (before limit)
+            // Skip if index already provides the ordering
             if let Some(ref order_by) = select.order_by {
-                plan = Box::new(OrderByNode::new(
-                    plan,
-                    order_by.clone(),
-                    scan_mapping.clone(),
-                ));
+                if !index_provides_ordering {
+                    plan = Box::new(OrderByNode::new(
+                        plan,
+                        order_by.clone(),
+                        scan_mapping.clone(),
+                    ));
+                }
             }
 
             // 6. Apply limit/offset
@@ -901,26 +914,53 @@ impl Planner {
 
     /// Try to select an index for the given query.
     ///
-    /// Returns `Some(IndexScanParams)` if an index can be used, `None` otherwise.
+    /// Returns `Some((IndexScanParams, index_provides_ordering))` if an index
+    /// can be used, `None` otherwise. Tries filter-based selection first,
+    /// then falls back to ordering-based selection (matching Go behavior).
     fn try_select_index(
         &self,
         select: &Select,
         collection: &CollectionVersion,
-    ) -> Option<IndexScanParams> {
-        // Only try index selection if there's a filter
-        let filter = select.filter.as_ref()?;
-
-        // Get available indexes for this collection
+    ) -> Option<(IndexScanParams, bool)> {
         if collection.indexes.is_empty() {
             return None;
         }
 
-        // Select the best index for this filter
-        let best_index = select_best_index(filter, &collection.indexes)?;
+        // Try filter-based index selection first
+        if let Some(filter) = select.filter.as_ref() {
+            if let Some(best_index) = select_best_index(filter, &collection.indexes) {
+                if let Some(params) =
+                    filter_to_index_scan(filter, best_index, select.order_by.as_ref())
+                {
+                    // Check if this index also provides ordering
+                    let provides_ordering = select
+                        .order_by
+                        .as_ref()
+                        .map(|o| can_be_ordered_by_index(o, best_index).0)
+                        .unwrap_or(false);
+                    return Some((params, provides_ordering));
+                }
+            }
+        }
 
-        // Convert filter to index scan parameters, passing ordering info
-        // so the scan direction can be set correctly
-        filter_to_index_scan(filter, best_index, select.order_by.as_ref())
+        // Fallback: try ordering-based index selection (no filter needed)
+        if let Some(ref order_by) = select.order_by {
+            for index in &collection.indexes {
+                let (can_order, needs_reverse) = can_be_ordered_by_index(order_by, index);
+                if can_order {
+                    let params = IndexScanParams {
+                        index_name: index.name.clone(),
+                        scan_type: IndexScanType::PrefixScan {
+                            prefix_values: vec![],
+                            reverse: needs_reverse,
+                        },
+                    };
+                    return Some((params, true));
+                }
+            }
+        }
+
+        None
     }
 
     /// Apply join nodes for nested selects (relation fields)
@@ -2498,12 +2538,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plan_no_index_for_ne_filter() {
+    async fn test_plan_uses_index_for_ne_filter() {
         use std::collections::HashMap;
 
         let planner = Planner::new(vec![make_test_collection_with_index()]);
 
-        // _ne is not index-friendly
+        // _ne uses full index scan (matching Go behavior)
         let filter = Filter::from_conditions(HashMap::from([(
             "name".to_string(),
             serde_json::json!({"_ne": "Alice"}),
@@ -2515,8 +2555,8 @@ mod tests {
 
         let result = planner.plan_with_index_info(&select).unwrap();
 
-        // _ne cannot use index efficiently
-        assert!(!result.uses_index());
+        // _ne uses full index scan
+        assert!(result.uses_index());
     }
 
     #[tokio::test]

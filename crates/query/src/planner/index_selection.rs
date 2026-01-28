@@ -665,27 +665,27 @@ mod tests {
     }
 
     #[test]
-    fn test_cannot_use_index_ne() {
-        // _ne is not index-friendly
+    fn test_can_use_index_ne() {
+        // _ne uses full index scan (matching Go behavior)
         let filter = make_filter(HashMap::from([(
             "name".to_string(),
             json!({"_ne": "alice"}),
         )]));
         let index = single_field_index("name");
 
-        assert!(!can_use_index(&filter, &index));
+        assert!(can_use_index(&filter, &index));
     }
 
     #[test]
-    fn test_cannot_use_index_like() {
-        // _like is not always index-friendly
+    fn test_can_use_index_like() {
+        // _like uses full index scan (matching Go behavior)
         let filter = make_filter(HashMap::from([(
             "name".to_string(),
             json!({"_like": "%alice%"}),
         )]));
         let index = single_field_index("name");
 
-        assert!(!can_use_index(&filter, &index));
+        assert!(can_use_index(&filter, &index));
     }
 
     #[test]
