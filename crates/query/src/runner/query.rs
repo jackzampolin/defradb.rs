@@ -433,7 +433,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         // Handle CID-based time-travel queries
-        if select.cid.is_some() {
+        // Note: CID queries with _version selections need to go through the Planner
+        // because _version returns commit objects (nested structure).
+        let has_version_selection = select.fields.iter().any(|f| {
+            if let Requestable::Select(s) = f {
+                s.field.name == "_version"
+            } else {
+                false
+            }
+        });
+
+        if select.cid.is_some() && !has_version_selection {
             return self
                 .execute_cid_query(select, fetcher, caller_identity)
                 .await;
