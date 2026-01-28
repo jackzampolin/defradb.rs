@@ -21,32 +21,14 @@ pub fn from_js<T: DeserializeOwned>(value: JsValue) -> Result<T> {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ClientConfig {
-    /// Storage type: "memory" or "indexeddb"
-    pub storage: StorageType,
-
-    /// Database name (for IndexedDB)
+    /// Database name for storage
     pub db_name: Option<String>,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
-        Self {
-            storage: StorageType::Memory,
-            db_name: None,
-        }
+        Self { db_name: None }
     }
-}
-
-/// Storage backend type.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StorageType {
-    #[default]
-    Memory,
-    IndexedDb,
-    /// LevelDB storage - pure Rust LSM-tree implementation.
-    /// Currently uses in-memory storage; OPFS persistence planned.
-    LevelDb,
 }
 
 /// Collection info returned to JavaScript.

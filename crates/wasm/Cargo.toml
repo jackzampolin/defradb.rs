@@ -19,23 +19,7 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
     "console",
     "Window",
-    # IndexedDB features
-    "IdbDatabase",
-    "IdbFactory",
-    "IdbKeyRange",
-    "IdbObjectStore",
-    "IdbObjectStoreParameters",
-    "IdbOpenDbRequest",
-    "IdbRequest",
-    "IdbTransaction",
-    "IdbTransactionMode",
-    "IdbCursor",
-    "IdbCursorDirection",
-    "IdbCursorWithValue",
 ] }
-
-# IndexedDB wrapper
-idb = "0.6"
 
 # Serialization for JS interop
 serde-wasm-bindgen = "0.6"
@@ -52,9 +36,6 @@ async-trait.workspace = true
 # Debugging
 console_error_panic_hook = "0.1"
 
-# GraphQL parsing (WASM-compatible, no tokio)
-graphql-parser.workspace = true
-
 # Cryptography (for hashing schema IDs)
 sha2.workspace = true
 
@@ -63,15 +44,15 @@ hex.workspace = true
 
 # WASM random number generation
 getrandom = { version = "0.2", features = ["js"] }
-uuid = { version = "1.0", features = ["v4", "js"] }
 
-# Internal crates (WASM-compatible only - no tokio dependencies)
-defra-core = { path = "../defra-core" }
+# Internal crates - use db crate which provides everything
+db = { path = "../db", default-features = false }
+storage = { path = "../storage", default-features = false, features = ["leveldb"] }
 schema = { path = "../schema" }
 document = { path = "../document" }
-crypto = { path = "../crypto" }
-storage = { path = "../storage", default-features = false, features = ["leveldb"] }
 query = { path = "../query" }
+defra-core = { path = "../defra-core" }
+crypto = { path = "../crypto" }
 
 # IPLD
 cid.workspace = true

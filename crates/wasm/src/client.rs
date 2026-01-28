@@ -1,25 +1,22 @@
 //! DefraClient - the main WASM client interface.
 //!
 //! Provides a high-level API for browser applications to interact with DefraDB.
+//! This wraps the `db` crate's `DB` type with a JavaScript-friendly interface.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
-use schema::{validate_schema, CollectionVersion};
+use db::{LensedAutoCommitFetcher, DB};
+use query::runner::QueryRunner;
+use storage::LevelDbStore;
 
 use crate::bindings::{from_js, to_js, ClientConfig, CollectionInfo, FieldInfo};
 use crate::error::{Result, WasmError};
-#[cfg(target_arch = "wasm32")]
-use crate::query_adapter::create_query_runner;
-use crate::sdl::parse_sdl;
-use crate::storage::{create_store, WasmStore};
 
 /// DefraDB client for browser applications.
 ///
-/// This client provides a simplified interface for:
+/// This client wraps the core `db::DB` type and provides a simplified interface for:
 /// - Schema management
 /// - GraphQL queries and mutations
 /// - Document storage with CRDT support
@@ -47,8 +44,7 @@ use crate::storage::{create_store, WasmStore};
 /// ```
 #[wasm_bindgen]
 pub struct DefraClient {
-    store: Option<Arc<WasmStore>>,
-    collections: HashMap<String, CollectionVersion>,
+    db: Option<Arc<DB<LevelDbStore>>>,
     closed: bool,
 }
 
@@ -59,13 +55,13 @@ impl DefraClient {
     /// # Configuration
     ///
     /// Pass a JavaScript object with:
-    /// - `storage`: "memory" (default) or "indexeddb"
-    /// - `db_name`: Database name for IndexedDB (optional)
+    /// - `storage`: "memory" (default) or "leveldb"
+    /// - `db_name`: Database name (optional)
     ///
     /// # Example
     ///
     /// ```javascript
-    /// const client = await DefraClient.create({ storage: 'memory' });
+    /// const client = await DefraClient.create({ storage: 'leveldb' });
     /// ```
     #[wasm_bindgen(js_name = create)]
     pub async fn create(config: JsValue) -> std::result::Result<DefraClient, JsValue> {
@@ -102,9 +98,6 @@ impl DefraClient {
 
     /// Execute a GraphQL query.
     ///
-    /// Note: Full query execution is not yet implemented in the WASM client.
-    /// This currently returns a placeholder response.
-    ///
     /// # Example
     ///
     /// ```javascript
@@ -121,9 +114,6 @@ impl DefraClient {
     }
 
     /// Execute a GraphQL mutation.
-    ///
-    /// Note: Full mutation execution is not yet implemented in the WASM client.
-    /// This currently returns a placeholder response.
     #[wasm_bindgen]
     pub async fn mutate(&mut self, graphql: &str) -> std::result::Result<JsValue, JsValue> {
         self.mutate_impl(graphql).await.map_err(|e| e.into())
@@ -137,79 +127,12 @@ impl DefraClient {
         crate::verification::verify_merkle_proof(proof_json)
     }
 
-    /// Sync documents from an external source (e.g., indexer).
-    ///
-    /// Documents are verified against the provided proofs and merged
-    /// using CRDT conflict resolution.
-    ///
-    /// # Arguments
-    ///
-    /// * `documents_json` - JSON array of documents to sync
-    /// * `proofs_json` - JSON array of Merkle proofs (optional, can be "[]")
-    ///
-    /// # Returns
-    ///
-    /// Object with sync statistics:
-    /// - `synced`: Number of documents successfully synced
-    /// - `failed`: Number of documents that failed verification
-    /// - `merged`: Number of documents that required CRDT merge
-    #[wasm_bindgen]
-    pub async fn sync_documents(
-        &mut self,
-        documents_json: &str,
-        proofs_json: &str,
-    ) -> std::result::Result<JsValue, JsValue> {
-        self.sync_documents_impl(documents_json, proofs_json)
-            .await
-            .map_err(|e| e.into())
-    }
-
     /// Get information about all registered collections.
     ///
     /// Returns an array of collection info objects.
     #[wasm_bindgen]
     pub fn get_collections(&self) -> std::result::Result<JsValue, JsValue> {
         self.get_collections_impl().map_err(|e| e.into())
-    }
-
-    /// Get a single document by collection and document ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `collection` - The collection name
-    /// * `doc_id` - The document ID
-    ///
-    /// # Returns
-    ///
-    /// The document as a JSON object, or null if not found.
-    #[wasm_bindgen]
-    pub async fn get_document(
-        &self,
-        collection: &str,
-        doc_id: &str,
-    ) -> std::result::Result<JsValue, JsValue> {
-        self.get_document_impl(collection, doc_id)
-            .await
-            .map_err(|e| e.into())
-    }
-
-    /// Get all documents in a collection.
-    ///
-    /// # Arguments
-    ///
-    /// * `collection` - The collection name
-    ///
-    /// # Returns
-    ///
-    /// An array of documents in the collection.
-    #[wasm_bindgen]
-    pub async fn get_documents(
-        &self,
-        collection: &str,
-    ) -> std::result::Result<JsValue, JsValue> {
-        self.get_documents_impl(collection)
-            .await
-            .map_err(|e| e.into())
     }
 
     /// Close the client and release resources.
@@ -230,45 +153,50 @@ impl DefraClient {
             from_js(config)?
         };
 
-        let store = create_store(config.storage, config.db_name.as_deref()).await?;
+        // Create LevelDB store
+        let db_name = config.db_name.as_deref().unwrap_or("defradb");
+        let store = LevelDbStore::open(db_name).map_err(|e| {
+            WasmError::Storage(format!("Failed to open LevelDB store: {}", e))
+        })?;
+
+        // Create the database
+        let db = DB::new(store).map_err(|e| {
+            WasmError::Storage(format!("Failed to create database: {}", e))
+        })?;
+
+        // Load existing collections from storage
+        db.load_collections().await.map_err(|e| {
+            WasmError::Storage(format!("Failed to load collections: {}", e))
+        })?;
 
         Ok(Self {
-            store: Some(Arc::new(store)),
-            collections: HashMap::new(),
+            db: Some(Arc::new(db)),
             closed: false,
         })
     }
 
-    fn ensure_open(&self) -> Result<()> {
+    fn ensure_open(&self) -> Result<&Arc<DB<LevelDbStore>>> {
         if self.closed {
             return Err(WasmError::Closed);
         }
-        if self.store.is_none() {
-            return Err(WasmError::NotInitialized);
-        }
-        Ok(())
+        self.db.as_ref().ok_or(WasmError::NotInitialized)
     }
 
     async fn add_schema_impl(&mut self, sdl: &str) -> Result<JsValue> {
-        self.ensure_open()?;
+        let db = self.ensure_open()?;
 
-        // Parse SDL into collection definitions
-        let new_collections = parse_sdl(sdl)?;
+        // Parse SDL into CollectionVersions using the query crate's parser
+        let collections = query::sdl_parse::parse_sdl(sdl)
+            .map_err(|e| WasmError::Schema(format!("Failed to parse SDL: {}", e)))?;
 
-        // Build schema map for validation
-        let mut schema_map: HashMap<String, CollectionVersion> = self.collections.clone();
-        for col in &new_collections {
-            schema_map.insert(col.name.clone(), col.clone());
-        }
-
-        // Validate the complete schema
-        validate_schema(&schema_map)?;
-
-        // Register the new collections
+        // Create each collection in the database
         let mut added = Vec::new();
-        for col in new_collections {
-            added.push(col.name.clone());
-            self.collections.insert(col.name.clone(), col);
+        for collection in collections {
+            let name = collection.name.clone();
+            db.create_collection(collection)
+                .await
+                .map_err(|e| WasmError::Schema(format!("Failed to create collection '{}': {}", name, e)))?;
+            added.push(name);
         }
 
         to_js(&serde_json::json!({
@@ -276,27 +204,28 @@ impl DefraClient {
         }))
     }
 
-    #[cfg(target_arch = "wasm32")]
     async fn query_impl(&self, graphql: &str) -> Result<JsValue> {
-        self.ensure_open()?;
+        let db = self.ensure_open()?;
 
         // Validate that it looks like a query
         if graphql.trim().is_empty() {
             return Err(WasmError::Query("Empty query string".to_string()));
         }
 
-        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
+        // Create fetcher that auto-commits and applies lens migrations
+        let fetcher = LensedAutoCommitFetcher::new(Arc::clone(db));
 
-        // Get collection versions for the query runner
-        let collections: Vec<CollectionVersion> = self.collections.values().cloned().collect();
+        // Get collections for the query runner
+        let collections = db::load_active_collections(db)
+            .await
+            .map_err(|e| WasmError::Query(format!("Failed to load collections: {}", e)))?;
 
-        // Create a query runner with our storage adapter
-        let runner = create_query_runner(Arc::clone(store), collections);
+        // Create query runner
+        let runner = QueryRunner::new(fetcher, collections);
 
-        // Execute the query - returns JSON directly
+        // Execute the query
         match runner.execute_query(graphql).await {
             Ok(result) => {
-                // The result is already the data object
                 let response = serde_json::json!({
                     "data": result,
                     "errors": [],
@@ -307,23 +236,6 @@ impl DefraClient {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn query_impl(&self, graphql: &str) -> Result<JsValue> {
-        self.ensure_open()?;
-
-        // Validate that it looks like a query
-        if graphql.trim().is_empty() {
-            return Err(WasmError::Query("Empty query string".to_string()));
-        }
-
-        // Placeholder for native builds - full query execution only available in WASM
-        to_js(&serde_json::json!({
-            "data": {},
-            "errors": [],
-            "_info": "Full query execution only available in WASM builds"
-        }))
-    }
-
     async fn mutate_impl(&mut self, graphql: &str) -> Result<JsValue> {
         self.ensure_open()?;
 
@@ -332,185 +244,37 @@ impl DefraClient {
             return Err(WasmError::Query("Empty mutation string".to_string()));
         }
 
-        // For MVP, return a placeholder response
-        // Full mutation execution requires the query planner integration
+        // For now, return a placeholder response
+        // Full mutation execution requires the mutator integration
         to_js(&serde_json::json!({
             "data": {},
             "errors": [],
-            "_info": "Full mutation execution not yet implemented in WASM client. Use sync_documents to import data."
+            "_info": "Mutation execution coming soon. Use GraphQL query for reads."
         }))
-    }
-
-    async fn sync_documents_impl(
-        &mut self,
-        documents_json: &str,
-        _proofs_json: &str,
-    ) -> Result<JsValue> {
-        self.ensure_open()?;
-
-        let store = Arc::clone(self.store.as_ref().ok_or(WasmError::NotInitialized)?);
-
-        // Parse the documents
-        let documents: Vec<serde_json::Value> = serde_json::from_str(documents_json)?;
-
-        let mut synced = 0u32;
-        let mut failed = 0u32;
-        let mut merged = 0u32;
-        let mut errors: Vec<String> = Vec::new();
-
-        for doc in documents {
-            match self.sync_single_document(&store, &doc).await {
-                Ok(was_merge) => {
-                    synced += 1;
-                    if was_merge {
-                        merged += 1;
-                    }
-                }
-                Err(e) => {
-                    failed += 1;
-                    errors.push(e.to_string());
-                }
-            }
-        }
-
-        to_js(&serde_json::json!({
-            "synced": synced,
-            "failed": failed,
-            "merged": merged,
-            "errors": errors,
-        }))
-    }
-
-    /// Sync a single document to storage.
-    /// Returns Ok(true) if this was a merge (document already existed), Ok(false) if new.
-    async fn sync_single_document(
-        &self,
-        store: &WasmStore,
-        doc: &serde_json::Value,
-    ) -> Result<bool> {
-        // Extract collection name - required field
-        let collection = doc
-            .get("_collection")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| WasmError::Sync("Document missing '_collection' field".to_string()))?;
-
-        // Validate collection exists in schema
-        if !self.collections.contains_key(collection) {
-            return Err(WasmError::Sync(format!(
-                "Unknown collection '{}'. Add schema first.",
-                collection
-            )));
-        }
-
-        // Extract or generate document ID
-        let doc_id = doc
-            .get("_docID")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                // Generate a UUID-based document ID if not provided
-                Uuid::new_v4().to_string()
-            });
-
-        // Build storage key: docs/{collection}/{docID}
-        let key = format!("docs/{}/{}", collection, doc_id);
-        let key_bytes = key.as_bytes();
-
-        // Check if document already exists
-        let existing = store.get(key_bytes).await?;
-        let was_merge = existing.is_some();
-
-        // If document exists, check if we should merge/update
-        if let Some(existing_bytes) = existing {
-            // Parse existing document
-            if let Ok(existing_doc) = serde_json::from_slice::<serde_json::Value>(&existing_bytes) {
-                // Simple LWW: compare _updatedAt timestamps if available
-                let existing_ts = existing_doc
-                    .get("_updatedAt")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let incoming_ts = doc.get("_updatedAt").and_then(|v| v.as_i64()).unwrap_or(0);
-
-                // If existing is newer or equal, skip update
-                if existing_ts >= incoming_ts && incoming_ts > 0 {
-                    return Ok(true); // Was a merge, but kept existing
-                }
-            }
-        }
-
-        // Serialize and store the document
-        let doc_bytes = serde_json::to_vec(doc)?;
-        store.set(key_bytes, &doc_bytes).await?;
-
-        Ok(was_merge)
-    }
-
-    async fn get_document_impl(&self, collection: &str, doc_id: &str) -> Result<JsValue> {
-        self.ensure_open()?;
-
-        // Validate collection exists
-        if !self.collections.contains_key(collection) {
-            return Err(WasmError::Sync(format!(
-                "Unknown collection '{}'",
-                collection
-            )));
-        }
-
-        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
-
-        // Build storage key
-        let key = format!("docs/{}/{}", collection, doc_id);
-        let key_bytes = key.as_bytes();
-
-        match store.get(key_bytes).await? {
-            Some(bytes) => {
-                let doc: serde_json::Value = serde_json::from_slice(&bytes)?;
-                to_js(&doc)
-            }
-            None => Ok(JsValue::NULL),
-        }
-    }
-
-    async fn get_documents_impl(&self, collection: &str) -> Result<JsValue> {
-        self.ensure_open()?;
-
-        // Validate collection exists
-        if !self.collections.contains_key(collection) {
-            return Err(WasmError::Sync(format!(
-                "Unknown collection '{}'",
-                collection
-            )));
-        }
-
-        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
-
-        // Get all keys with the collection prefix
-        let prefix = format!("docs/{}/", collection);
-        let keys = store.keys_with_prefix(prefix.as_bytes()).await?;
-
-        // Load all documents
-        let mut documents = Vec::new();
-        for key in keys {
-            if let Some(bytes) = store.get(&key).await? {
-                if let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    documents.push(doc);
-                }
-            }
-        }
-
-        to_js(&documents)
     }
 
     fn get_collections_impl(&self) -> Result<JsValue> {
-        let collections: Vec<CollectionInfo> = self
-            .collections
-            .values()
-            .map(|col| CollectionInfo {
-                name: col.name.clone(),
-                schema_version_id: col.version_id.clone(),
-                fields: col.fields.iter().map(FieldInfo::from).collect(),
-            })
-            .collect();
+        let db = self.ensure_open()?;
+
+        // Get collection names from the database
+        let names = db.list_collections().map_err(|e| {
+            WasmError::Storage(format!("Failed to list collections: {}", e))
+        })?;
+
+        // Get each collection's info
+        let mut collections = Vec::new();
+        for name in names {
+            if let Some(col) = db.get_collection(&name).map_err(|e| {
+                WasmError::Storage(format!("Failed to get collection '{}': {}", name, e))
+            })? {
+                let schema = col.schema();
+                collections.push(CollectionInfo {
+                    name: schema.name.clone(),
+                    schema_version_id: schema.version_id.clone(),
+                    fields: schema.fields.iter().map(FieldInfo::from).collect(),
+                });
+            }
+        }
 
         to_js(&collections)
     }
@@ -520,15 +284,16 @@ impl DefraClient {
             return Ok(());
         }
 
-        if let Some(store_arc) = self.store.take() {
-            // Try to get exclusive ownership of the store
-            match Arc::try_unwrap(store_arc) {
-                Ok(mut store) => {
-                    store.close().await?;
+        if let Some(db) = self.db.take() {
+            // Try to get exclusive ownership to close properly
+            match Arc::try_unwrap(db) {
+                Ok(db) => {
+                    db.close().await.map_err(|e| {
+                        WasmError::Storage(format!("Failed to close database: {}", e))
+                    })?;
                 }
                 Err(_arc) => {
                     // Other references exist - this shouldn't happen in normal usage
-                    // Just mark as closed and let the Arc drop naturally
                 }
             }
         }

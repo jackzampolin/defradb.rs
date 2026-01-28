@@ -35,25 +35,13 @@ pub enum WasmError {
     #[error("Client already closed")]
     Closed,
 
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
-
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
-
-    #[error("Sync error: {0}")]
-    Sync(String),
 }
 
 impl From<WasmError> for JsValue {
     fn from(err: WasmError) -> Self {
         JsValue::from_str(&err.to_string())
-    }
-}
-
-impl From<schema::SchemaError> for WasmError {
-    fn from(err: schema::SchemaError) -> Self {
-        WasmError::Schema(err.to_string())
     }
 }
 

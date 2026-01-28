@@ -7,21 +7,20 @@
 //! - **Schema Management**: Define document types using GraphQL SDL
 //! - **GraphQL Queries**: Execute queries against local data
 //! - **Merkle Proof Verification**: Verify data integrity from indexers
-//! - **Document Sync**: Merge incoming documents with CRDT conflict resolution
 //!
 //! # Architecture
 //!
-//! This client is designed for the Shinzo wallet browser extension:
+//! This client wraps the core `db` crate, providing a JavaScript-friendly
+//! interface to DefraDB's full functionality:
 //!
 //! ```text
-//! Shinzo Indexer (Go DefraDB + P2P)
-//!     ↓ HTTP API (Documents + Merkle Proofs)
+//! JavaScript (browser)
+//!     ↓ wasm-bindgen
+//! defra-wasm (this crate)
 //!     ↓
-//! Browser WASM DefraDB (this crate)
-//!     ├── Verify proofs
-//!     ├── CRDT merge
-//!     ├── Store locally (Memory or IndexedDB)
-//!     └── Query locally
+//! db crate (DB, Collection, QueryRunner)
+//!     ↓
+//! storage crate (LevelDbStore)
 //! ```
 //!
 //! # Example
@@ -31,8 +30,8 @@
 //!
 //! await init();
 //!
-//! // Create client with in-memory storage
-//! const client = await new DefraClient({ storage: 'memory' });
+//! // Create client
+//! const client = await DefraClient.create({ storage: 'leveldb' });
 //!
 //! // Add schema
 //! await client.add_schema(`
@@ -52,22 +51,15 @@
 //! // Cleanup
 //! await client.close();
 //! ```
-//!
-//! # Storage Backends
-//!
-//! - **Memory**: Fast, ephemeral storage (data lost on page refresh)
-//! - **IndexedDB**: Persistent browser storage (coming soon)
 
 pub mod bindings;
+#[cfg(target_arch = "wasm32")]
 pub mod client;
 pub mod error;
-#[cfg(target_arch = "wasm32")]
-pub mod query_adapter;
-pub mod sdl;
-pub mod storage;
 pub mod verification;
 
 // Re-export the main client class
+#[cfg(target_arch = "wasm32")]
 pub use client::DefraClient;
 
 // Re-export standalone verification functions
