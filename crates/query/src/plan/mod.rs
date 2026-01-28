@@ -33,4 +33,6 @@ pub use permission_filter::PermissionFilterNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
 pub use sum::SumNode;
-pub use type_join::{JoinDirection, JoinSide, RelationFilter, TypeJoinMany, TypeJoinOne};
+pub use type_join::{
+    compare_json_values, JoinDirection, JoinSide, RelationFilter, TypeJoinMany, TypeJoinOne,
+};

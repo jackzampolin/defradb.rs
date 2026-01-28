@@ -2,14 +2,16 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use tracing::warn;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::mapper::{GroupBy, OrderBy, OrderDirection};
 use crate::planner::{Doc, PlanNode};
 
-use super::JoinSide;
+use super::{JoinSide, RelationFilter};
 
 /// TypeJoinMany implements one-to-many relation joins.
 ///
@@ -52,6 +54,25 @@ pub struct TypeJoinMany {
     /// Cached child documents indexed by FK field value.
     /// Key is the child's FK value (points to parent's _docID).
     child_cache: HashMap<String, Vec<Doc>>,
+    /// Per-parent limit on children (None = no limit)
+    child_limit: Option<u64>,
+    /// Per-parent offset on children
+    child_offset: u64,
+    /// Order by specification for children
+    child_order_by: Option<OrderBy>,
+    /// Optional relation filter to apply during join.
+    /// When set, only include parents that have at least one child passing this filter.
+    /// Example: `Author(filter: {published: {rating: {_gt: 4}}})` means only include
+    /// authors who have at least one book with rating > 4.
+    relation_filter: Option<RelationFilter>,
+    /// Optional groupBy for nested grouping of children.
+    /// When set, children are grouped by the specified fields and output includes
+    /// a `_group` array containing the grouped documents.
+    /// Example: `published(groupBy: [rating]) { rating, _group { name } }`
+    child_group_by: Option<GroupBy>,
+    /// Mapping for rendering documents inside the _group array.
+    /// Only used when child_group_by is set.
+    group_mapping: Option<DocumentMapping>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -112,15 +133,109 @@ impl TypeJoinMany {
             child_fk_index,
             initialized: false,
             child_cache: HashMap::new(),
+            child_limit: None,
+            child_offset: 0,
+            child_order_by: None,
+            relation_filter: None,
+            child_group_by: None,
+            group_mapping: None,
         })
     }
 
+    /// Set the per-parent limit on children.
+    pub fn with_limit(mut self, limit: u64) -> Self {
+        self.child_limit = Some(limit);
+        self
+    }
+
+    /// Set the per-parent offset on children.
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.child_offset = offset;
+        self
+    }
+
+    /// Set the order by specification for children.
+    pub fn with_order_by(mut self, order_by: OrderBy) -> Self {
+        self.child_order_by = Some(order_by);
+        self
+    }
+
+    /// Set a relation filter to apply during the join.
+    ///
+    /// When set, parent documents will only be included if they have at least one
+    /// child document that passes this filter. This is used for queries like
+    /// `Author(filter: {published: {rating: {_gt: 4}}})` - only include authors
+    /// who have published at least one book with rating > 4.
+    pub fn with_relation_filter(mut self, filter: RelationFilter) -> Self {
+        self.relation_filter = Some(filter);
+        self
+    }
+
+    /// Set a groupBy specification for grouping children.
+    ///
+    /// When set, children will be grouped by the specified fields. The output
+    /// will be an array of objects, each containing the groupBy field values
+    /// and a `_group` array of documents in that group.
+    ///
+    /// Example: `published(groupBy: [rating]) { rating, _group { name } }`
+    /// Groups books by rating, outputting: `[{rating: 4.9, _group: [{name: "..."}]}, ...]`
+    pub fn with_group_by(mut self, group_by: GroupBy) -> Self {
+        self.child_group_by = Some(group_by);
+        self
+    }
+
+    /// Set the mapping for rendering documents inside the _group array.
+    ///
+    /// This mapping determines which fields are rendered for documents inside _group.
+    /// Only used when child_group_by is set.
+    pub fn with_group_mapping(mut self, mapping: DocumentMapping) -> Self {
+        self.group_mapping = Some(mapping);
+        self
+    }
+
     /// Find all child documents that match the parent's _docID using the cache.
+    /// Applies ordering, offset, and limit per-parent.
+    /// Find all child docs for a parent, applying ordering but NOT limit/offset.
+    /// Limit/offset are deferred to the runner's post-processing step so that
+    /// relation aggregates (e.g., _count) can see ALL children.
     fn find_child_docs(&self, parent_doc_id: &str) -> Vec<Doc> {
-        self.child_cache
-            .get(parent_doc_id)
-            .map(|docs| docs.iter().map(|d| d.deep_clone()).collect())
-            .unwrap_or_default()
+        let Some(docs) = self.child_cache.get(parent_doc_id) else {
+            return Vec::new();
+        };
+
+        let mut children: Vec<Doc> = docs.iter().map(|d| d.deep_clone()).collect();
+
+        // Apply ordering if specified
+        if let Some(ref order_by) = self.child_order_by {
+            let child_mapping = self.child_plan.document_map();
+            children.sort_by(|a, b| {
+                for condition in &order_by.conditions {
+                    let field_name = condition.fields.first().map(|s| s.as_str()).unwrap_or("");
+                    let field_idx = child_mapping.first_index_of_name(field_name);
+
+                    if let Some(idx) = field_idx {
+                        let val_a = a.get(idx);
+                        let val_b = b.get(idx);
+                        let cmp = compare_json_values(val_a, val_b);
+                        let cmp = match condition.direction {
+                            OrderDirection::Asc => cmp,
+                            OrderDirection::Desc => cmp.reverse(),
+                        };
+                        if cmp != Ordering::Equal {
+                            return cmp;
+                        }
+                    }
+                }
+                Ordering::Equal
+            });
+        }
+
+        // NOTE: Limit/offset are NOT applied here. They are applied in the runner's
+        // apply_relation_limits() after compute_relation_aggregates() has counted
+        // all children. This ensures _count(published: {}) sees all children even
+        // when published(limit: 1) limits the rendered output.
+
+        children
     }
 
     /// Build the child cache by scanning child_plan once.
@@ -178,24 +293,209 @@ impl TypeJoinMany {
     }
 
     /// Merge child documents into parent as an array.
+    ///
+    /// If `child_group_by` is set, groups children by the specified fields and
+    /// outputs an array of group objects with `_group` arrays.
+    /// Otherwise, outputs a simple array of child documents.
     fn merge_children(&self, parent_doc: &mut Doc, children: Vec<Doc>) {
-        // Get child mapping. Falls back to child plan's mapping if not explicitly
-        // set in parent mapping - this happens for simple queries where child
-        // mapping was not pre-configured during planning.
-        let child_mapping = self
-            .document_mapping
-            .child_at(self.parent_side.relation_field_index())
-            .unwrap_or(self.child_plan.document_map());
-
-        let array: Vec<JsonValue> = children
-            .iter()
-            .map(|doc| child_mapping.render_doc_to_json(doc))
-            .collect();
+        let array = if let Some(ref group_by) = self.child_group_by {
+            self.build_grouped_array(&children, group_by)
+        } else {
+            self.build_simple_array(&children)
+        };
 
         parent_doc.set(
             self.parent_side.relation_field_index(),
             JsonValue::Array(array),
         );
+    }
+
+    /// Build a simple array of child documents (no grouping).
+    fn build_simple_array(&self, children: &[Doc]) -> Vec<JsonValue> {
+        let child_mapping = self
+            .document_mapping
+            .child_at(self.parent_side.relation_field_index())
+            .unwrap_or(self.child_plan.document_map());
+
+        children
+            .iter()
+            .map(|doc| child_mapping.render_doc_to_json(doc))
+            .collect()
+    }
+
+    /// Build a grouped array where children are grouped by the specified fields.
+    ///
+    /// Output format for each group:
+    /// `{groupByField1: value1, groupByField2: value2, _group: [doc1, doc2, ...]}`
+    fn build_grouped_array(&self, children: &[Doc], group_by: &GroupBy) -> Vec<JsonValue> {
+        if children.is_empty() {
+            return Vec::new();
+        }
+
+        // Get the child mapping for looking up field indices
+        let child_mapping = self.child_plan.document_map();
+
+        // Group children by the groupBy field values
+        let mut groups: Vec<(String, Vec<&Doc>)> = Vec::new();
+        let mut group_map: HashMap<String, usize> = HashMap::new();
+
+        for child in children {
+            let key = self.generate_group_key(child, group_by, child_mapping);
+            if let Some(&idx) = group_map.get(&key) {
+                groups[idx].1.push(child);
+            } else {
+                let idx = groups.len();
+                group_map.insert(key.clone(), idx);
+                groups.push((key, vec![child]));
+            }
+        }
+
+        // Get the mapping for rendering. Use the child mapping from document_mapping
+        // if available, otherwise fall back to child_plan's mapping.
+        let render_mapping = self
+            .document_mapping
+            .child_at(self.parent_side.relation_field_index())
+            .unwrap_or(child_mapping);
+
+        // Build output array: one object per group
+        let mut result = Vec::with_capacity(groups.len());
+        for (_key, group_docs) in &groups {
+            let mut obj = serde_json::Map::new();
+
+            // Add groupBy field values from the first document in the group
+            if let Some(first_doc) = group_docs.first() {
+                for field_name in &group_by.fields {
+                    if let Some(idx) = child_mapping.first_index_of_name(field_name) {
+                        if let Some(value) = first_doc.get(idx) {
+                            obj.insert(field_name.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+
+            // Build the _group array
+            let group_array: Vec<JsonValue> = if let Some(ref group_mapping) = self.group_mapping {
+                // Use explicit group mapping for rendering _group contents
+                group_docs
+                    .iter()
+                    .map(|doc| group_mapping.render_doc_to_json(doc))
+                    .collect()
+            } else {
+                // Fall back to render mapping, excluding groupBy fields
+                group_docs
+                    .iter()
+                    .map(|doc| {
+                        self.render_doc_excluding_fields(doc, render_mapping, &group_by.fields)
+                    })
+                    .collect()
+            };
+
+            obj.insert("_group".to_string(), JsonValue::Array(group_array));
+            result.push(JsonValue::Object(obj));
+        }
+
+        result
+    }
+
+    /// Generate a group key from a document based on groupBy fields.
+    fn generate_group_key(
+        &self,
+        doc: &Doc,
+        group_by: &GroupBy,
+        mapping: &DocumentMapping,
+    ) -> String {
+        let mut key = String::new();
+        for field_name in &group_by.fields {
+            if let Some(idx) = mapping.first_index_of_name(field_name) {
+                key.push_str(&format!("{}_", idx));
+                let value = doc.get(idx);
+                key.push_str(&format!("{}_", Self::value_to_key(value)));
+            }
+        }
+        key
+    }
+
+    /// Convert a JSON value to a string key component.
+    fn value_to_key(value: Option<&JsonValue>) -> String {
+        match value {
+            None | Some(JsonValue::Null) => "null".to_string(),
+            Some(JsonValue::Bool(b)) => b.to_string(),
+            Some(JsonValue::Number(n)) => n.to_string(),
+            Some(JsonValue::String(s)) => s.clone(),
+            Some(JsonValue::Array(arr)) => {
+                format!(
+                    "[{}]",
+                    arr.iter()
+                        .map(|v| Self::value_to_key(Some(v)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            Some(JsonValue::Object(obj)) => {
+                format!(
+                    "{{{}}}",
+                    obj.iter()
+                        .map(|(k, v)| format!("{}:{}", k, Self::value_to_key(Some(v))))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+        }
+    }
+
+    /// Render a document excluding the specified fields.
+    fn render_doc_excluding_fields(
+        &self,
+        doc: &Doc,
+        mapping: &DocumentMapping,
+        exclude_fields: &[String],
+    ) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+        for rk in &mapping.render_keys {
+            // Skip excluded fields (groupBy fields) and _group pseudo-field
+            if exclude_fields.contains(&rk.key) || rk.key == "_group" {
+                continue;
+            }
+            if let Some(value) = doc.get(rk.index) {
+                obj.insert(rk.key.clone(), value.clone());
+            }
+        }
+        JsonValue::Object(obj)
+    }
+
+    /// Check if at least one child document passes the relation filter.
+    ///
+    /// Returns true if:
+    /// - There's no filter (always pass)
+    /// - At least one child document passes the filter conditions
+    ///
+    /// Returns false if:
+    /// - There are no child documents (empty relation can't pass any filter)
+    /// - No child document passes the filter conditions
+    fn check_relation_filter(&self, children: &[Doc], rel_filter: &RelationFilter) -> Result<bool> {
+        if children.is_empty() {
+            // No children - relation filter cannot pass
+            return Ok(false);
+        }
+
+        // Check if any child passes the filter
+        let child_mapping = self.child_plan.document_map();
+        for child in children {
+            if rel_filter.conditions.matches(child.fields(), child_mapping)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Get all children for a parent (unfiltered, for filter checking).
+    /// This returns all children before limit/offset is applied.
+    fn get_all_children(&self, parent_doc_id: &str) -> Vec<Doc> {
+        self.child_cache
+            .get(parent_doc_id)
+            .map(|docs| docs.iter().map(|d| d.deep_clone()).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -221,31 +521,53 @@ impl PlanNode for TypeJoinMany {
             ));
         }
 
-        if !self.parent_plan.next().await? {
-            return Ok(false);
-        }
-
-        let mut parent_doc = self.parent_plan.value().deep_clone();
-
-        // Get parent's _docID for the lookup (O(1) cache lookup)
-        let children = match parent_doc.doc_id() {
-            Some(id) => self.find_child_docs(id),
-            None => {
-                warn!(
-                    parent_collection = %self.parent_side.collection().name,
-                    relation_field = %self.parent_side.relation_field().name,
-                    "Parent document missing _docID - returning empty children array. \
-                     This may indicate data corruption or a schema mismatch."
-                );
-                Vec::new()
+        // Loop to skip parents that don't pass relation filter
+        loop {
+            if !self.parent_plan.next().await? {
+                return Ok(false);
             }
-        };
 
-        // Merge children array into parent
-        self.merge_children(&mut parent_doc, children);
-        self.current_doc = parent_doc;
+            let mut parent_doc = self.parent_plan.value().deep_clone();
 
-        Ok(true)
+            // Get parent's _docID for the lookup (O(1) cache lookup)
+            let parent_doc_id = match parent_doc.doc_id() {
+                Some(id) => id.to_string(),
+                None => {
+                    warn!(
+                        parent_collection = %self.parent_side.collection().name,
+                        relation_field = %self.parent_side.relation_field().name,
+                        "Parent document missing _docID - returning empty children array. \
+                         This may indicate data corruption or a schema mismatch."
+                    );
+                    // No docID means no children can match - skip if filter is present
+                    if self.relation_filter.is_some() {
+                        continue;
+                    }
+                    // No filter, return with empty children
+                    self.merge_children(&mut parent_doc, Vec::new());
+                    self.current_doc = parent_doc;
+                    return Ok(true);
+                }
+            };
+
+            // Apply relation filter if present (check against ALL children, not just limited)
+            if let Some(ref rel_filter) = self.relation_filter {
+                let all_children = self.get_all_children(&parent_doc_id);
+                if !self.check_relation_filter(&all_children, rel_filter)? {
+                    // No children pass the filter - skip this parent
+                    continue;
+                }
+            }
+
+            // Get children (with ordering, offset, limit applied)
+            let children = self.find_child_docs(&parent_doc_id);
+
+            // Merge children array into parent
+            self.merge_children(&mut parent_doc, children);
+            self.current_doc = parent_doc;
+
+            return Ok(true);
+        }
     }
 
     fn value(&self) -> &Doc {
@@ -270,5 +592,40 @@ impl PlanNode for TypeJoinMany {
 
     fn kind(&self) -> &'static str {
         "typeJoinMany"
+    }
+}
+
+/// Compare two JSON values for ordering.
+/// Follows SQL-like ordering: NULL < bool < number < string < array < object
+pub fn compare_json_values(a: Option<&JsonValue>, b: Option<&JsonValue>) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(JsonValue::Null), Some(JsonValue::Null)) => Ordering::Equal,
+        (Some(JsonValue::Null), Some(_)) => Ordering::Less,
+        (Some(_), Some(JsonValue::Null)) => Ordering::Greater,
+        (Some(JsonValue::Bool(a)), Some(JsonValue::Bool(b))) => a.cmp(b),
+        (Some(JsonValue::Number(a)), Some(JsonValue::Number(b))) => {
+            // Compare as f64 for numeric ordering
+            let fa = a.as_f64().unwrap_or(0.0);
+            let fb = b.as_f64().unwrap_or(0.0);
+            fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)
+        }
+        (Some(JsonValue::String(a)), Some(JsonValue::String(b))) => a.cmp(b),
+        // Different types: order by type precedence
+        (Some(a), Some(b)) => type_precedence(a).cmp(&type_precedence(b)),
+    }
+}
+
+/// Get type precedence for ordering (lower = comes first)
+fn type_precedence(v: &JsonValue) -> u8 {
+    match v {
+        JsonValue::Null => 0,
+        JsonValue::Bool(_) => 1,
+        JsonValue::Number(_) => 2,
+        JsonValue::String(_) => 3,
+        JsonValue::Array(_) => 4,
+        JsonValue::Object(_) => 5,
     }
 }

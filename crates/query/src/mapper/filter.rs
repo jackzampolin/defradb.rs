@@ -172,6 +172,32 @@ impl Filter {
         self.conditions.is_empty()
     }
 
+    /// Check if the filter has field-based conditions (as opposed to operator-only conditions).
+    ///
+    /// Field-based: `{rating: {_gt: 4.8}}` - the key "rating" is a field name
+    /// Operator-only: `{_gt: 4.8}` - the key "_gt" is an operator
+    ///
+    /// This is used to determine whether to use `matches_json_object` (field-based)
+    /// or `matches_scalar_value` (operator-only) when filtering relation aggregates.
+    pub fn has_field_conditions(&self) -> bool {
+        self.conditions.keys().any(|k| FilterOp::parse(k).is_none())
+    }
+
+    /// Combine this filter with another filter using AND logic.
+    ///
+    /// Returns a new filter where both conditions must be satisfied.
+    pub fn and(&self, other: Filter) -> Filter {
+        let mut combined_conditions = HashMap::new();
+        combined_conditions.insert(
+            "_and".to_string(),
+            serde_json::json!([
+                self.conditions,
+                other.conditions
+            ]),
+        );
+        Filter::from_conditions(combined_conditions)
+    }
+
     /// Get a reference to the conditions map
     pub fn conditions(&self) -> &HashMap<String, JsonValue> {
         &self.conditions
@@ -261,6 +287,9 @@ impl Filter {
                     }
                     _ => {}
                 }
+            } else if key == "_alias" {
+                // _alias is a special filter directive, not a relation field
+                continue;
             } else if let JsonValue::Object(obj) = value {
                 // This is a field condition - check if it contains operators or nested fields
                 // If any key in the object is NOT an operator, it's a relation filter
@@ -270,6 +299,24 @@ impl Filter {
                 }
             }
         }
+    }
+
+    /// Get all relation filter conditions.
+    ///
+    /// Returns an iterator over (relation_name, nested_filter) pairs for each relation
+    /// referenced in the filter.
+    ///
+    /// For a filter like `{author: {verified: {_eq: true}}, rating: {_gt: 4}}`:
+    /// - Returns: [("author", Filter({verified: {_eq: true}}))]
+    /// - "rating" is not a relation filter (it has operators, not nested fields)
+    pub fn relation_conditions(&self) -> Vec<(String, Filter)> {
+        let mut result = Vec::new();
+        for name in self.relation_field_names() {
+            if let Some(filter) = self.extract_relation_filter(&name) {
+                result.push((name, filter));
+            }
+        }
+        result
     }
 
     fn check_for_relation_filters(conditions: &HashMap<String, JsonValue>) -> bool {
@@ -301,6 +348,9 @@ impl Filter {
                     }
                     _ => {}
                 }
+            } else if key == "_alias" {
+                // _alias is a special filter directive, not a relation filter
+                continue;
             } else if let JsonValue::Object(obj) = value {
                 // This is a field condition - check if it contains operators or nested fields
                 // If any key in the object is NOT an operator, it's a relation filter
@@ -372,6 +422,11 @@ impl Filter {
                         _ => {}
                     }
                 }
+                continue;
+            }
+
+            // _alias is a special filter directive, not a relation path
+            if key == "_alias" {
                 continue;
             }
 
@@ -480,6 +535,14 @@ impl Filter {
         None
     }
 
+    /// Check if this filter contains an `_alias` directive.
+    ///
+    /// `_alias` filters reference aliased fields/relations and must be evaluated after joins
+    /// because the alias may reference a relation whose data hasn't been joined yet.
+    pub fn has_alias_filter(&self) -> bool {
+        self.conditions.contains_key("_alias")
+    }
+
     /// Check if this filter is "complex" - contains relation conditions inside logical operators.
     ///
     /// A filter is complex when `_and`, `_or`, or `_not` contains a mix of scalar and relation
@@ -581,6 +644,9 @@ impl Filter {
                         scalar_conditions.insert(key.clone(), value.clone());
                     }
                 }
+            } else if key == "_alias" {
+                // _alias is a special filter directive evaluated by eval_conditions, not a relation
+                scalar_conditions.insert(key.clone(), value.clone());
             } else if let JsonValue::Object(obj) = value {
                 // Field condition - check if it's a relation filter
                 let is_relation = obj.keys().any(|k| FilterOp::parse(k).is_none());
@@ -643,6 +709,37 @@ impl Filter {
         };
 
         (non_alias_filter, alias_filter)
+    }
+
+    /// Strip _alias conditions from the filter that reference aggregate field names.
+    ///
+    /// This is used to prevent _alias conditions on computed aggregates from being
+    /// evaluated during plan execution (when aggregate values don't exist yet).
+    /// The stripped conditions should be applied in post-processing after aggregates are computed.
+    ///
+    /// Returns (filtered, has_aggregate_alias) where:
+    /// - filtered: Filter without _alias conditions referencing the given aggregate names
+    /// - has_aggregate_alias: true if any _alias conditions were referencing aggregates
+    pub fn strip_aggregate_alias_conditions(&self, aggregate_names: &[&str]) -> (Filter, bool) {
+        let mut new_conditions = HashMap::new();
+        let mut has_aggregate_alias = false;
+
+        for (key, value) in &self.conditions {
+            if key == "_alias" {
+                // Check if this _alias block references any aggregate names
+                if let Some(alias_obj) = value.as_object() {
+                    let refs_aggregate = alias_obj.keys().any(|k| aggregate_names.contains(&k.as_str()));
+                    if refs_aggregate {
+                        has_aggregate_alias = true;
+                        // Skip this _alias condition - it will be applied in post-processing
+                        continue;
+                    }
+                }
+            }
+            new_conditions.insert(key.clone(), value.clone());
+        }
+
+        (Filter::from_conditions(new_conditions), has_aggregate_alias)
     }
 
     /// Evaluate the filter against document fields
@@ -1383,6 +1480,114 @@ impl Filter {
         Ok(true)
     }
 
+    /// Evaluate the filter against a JSON object (document).
+    ///
+    /// Used for relation aggregate filters where each related document is tested
+    /// against field-based conditions like `{rating: {_gt: 4.8}}`.
+    ///
+    /// Unlike `matches_scalar_value` which only handles operator conditions,
+    /// this method handles:
+    /// - Field-based conditions: `{rating: {_gt: 4.8}}` extracts `rating` from the object
+    /// - Operator-only conditions: `{_gt: 4.8}` (falls back to matches_scalar_value)
+    /// - Compound conditions: `{_and: [...]}`, `{_or: [...]}`, `{_not: {...}}`
+    pub fn matches_json_object(&self, obj: &JsonValue) -> Result<bool> {
+        if self.conditions.is_empty() {
+            return Ok(true);
+        }
+
+        for (key, expected) in &self.conditions {
+            if let Some(op) = FilterOp::parse(key) {
+                // Operator condition
+                match op {
+                    FilterOp::And => {
+                        let arr = expected
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
+                        for item in arr {
+                            let sub: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            let f = Filter::from_conditions(sub);
+                            if !f.matches_json_object(obj)? {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    FilterOp::Or => {
+                        let arr = expected
+                            .as_array()
+                            .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
+                        let mut any_match = false;
+                        for item in arr {
+                            let sub: HashMap<String, JsonValue> =
+                                serde_json::from_value(item.clone())
+                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                            let f = Filter::from_conditions(sub);
+                            if f.matches_json_object(obj)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                        if !any_match {
+                            return Ok(false);
+                        }
+                    }
+                    FilterOp::Not => {
+                        let sub: HashMap<String, JsonValue> =
+                            serde_json::from_value(expected.clone())
+                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
+                        let f = Filter::from_conditions(sub);
+                        if f.matches_json_object(obj)? {
+                            return Ok(false);
+                        }
+                    }
+                    _ => {
+                        // Direct operator on the object itself - use scalar matching
+                        if !self.eval_op(obj, op, expected)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                // Field-based condition: key is a field name
+                let field_value = obj
+                    .as_object()
+                    .and_then(|o| o.get(key))
+                    .unwrap_or(&JsonValue::Null);
+
+                // expected should be an object with operator conditions
+                if let Some(conditions_obj) = expected.as_object() {
+                    // Check if the nested conditions are operators or field-based
+                    // If they're operators, use matches_scalar_value on the field value
+                    // If they're field-based, recursively use matches_json_object
+                    let has_field_conditions = conditions_obj.keys().any(|k| FilterOp::parse(k).is_none());
+                    let sub_conditions: HashMap<String, JsonValue> = conditions_obj
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let f = Filter::from_conditions(sub_conditions);
+                    if has_field_conditions {
+                        // Nested field access - recursively match
+                        if !f.matches_json_object(field_value)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        // Operator conditions on the field value
+                        if !f.matches_scalar_value(field_value)? {
+                            return Ok(false);
+                        }
+                    }
+                } else {
+                    // Direct equality check: {field: value}
+                    if field_value != expected {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Evaluate a filter condition against a single JSON value (used by array element operators).
     ///
     /// For example, when evaluating `{_gt: 70}` against `85`, this method checks if 85 > 70.
@@ -1538,16 +1743,50 @@ impl Filter {
                 QueryError::invalid_filter("alias field condition must be object")
             })?;
 
-            for (op_key, op_value) in ops {
-                if let Some(op) = FilterOp::parse(op_key) {
-                    if !self.eval_op(&field_value, op, op_value)? {
+            // Check if this is a relation filter (nested field conditions) or operator conditions
+            let is_relation_filter = ops.keys().any(|k| FilterOp::parse(k).is_none());
+
+            if is_relation_filter {
+                // Relation-style alias: {_alias: {books: {rating: {_gt: 4.8}}}}
+                // The alias points to a relation field (array or object)
+                if field_value.is_null() {
+                    // Null relation → no match
+                    return Ok(false);
+                } else if let Some(arr) = field_value.as_array() {
+                    // One-to-many: existential semantics (any element matches)
+                    let mut any_match = false;
+                    for elem in arr {
+                        if let Some(obj) = elem.as_object() {
+                            if self.eval_relation_conditions(ops, obj)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !any_match {
+                        return Ok(false);
+                    }
+                } else if let Some(obj) = field_value.as_object() {
+                    // One-to-one: direct match
+                    if !self.eval_relation_conditions(ops, obj)? {
                         return Ok(false);
                     }
                 } else {
-                    return Err(QueryError::invalid_filter(format!(
-                        "unknown operator '{}' in _alias filter",
-                        op_key
-                    )));
+                    return Ok(false);
+                }
+            } else {
+                // Scalar-style alias: {_alias: {myAge: {_gt: 20}}}
+                for (op_key, op_value) in ops {
+                    if let Some(op) = FilterOp::parse(op_key) {
+                        if !self.eval_op(&field_value, op, op_value)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        return Err(QueryError::invalid_filter(format!(
+                            "unknown operator '{}' in _alias filter",
+                            op_key
+                        )));
+                    }
                 }
             }
         }
