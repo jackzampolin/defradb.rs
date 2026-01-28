@@ -97,11 +97,9 @@ pub fn build_introspection_schema(
 
     // If no collections, add a placeholder field to Query (required by GraphQL spec)
     if collections.is_empty() {
-        query_type = query_type.field(Field::new(
-            "_placeholder",
-            TypeRef::named("String"),
-            |_| FieldFuture::new(async { Ok(Some(GqlValue::Null)) }),
-        ));
+        query_type = query_type.field(Field::new("_placeholder", TypeRef::named("String"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
     }
 
     schema_builder = schema_builder.register(query_type);
@@ -152,7 +150,10 @@ fn field_kind_to_type_ref(kind: &FieldKind, id_to_name: &HashMap<String, String>
             let element_type = scalar_to_gql_name(&array.element_kind());
             TypeRef::named_list(element_type)
         }
-        FieldKind::Relation { collection_id, is_array } => {
+        FieldKind::Relation {
+            collection_id,
+            is_array,
+        } => {
             // Resolve collection ID to name
             let type_name = id_to_name
                 .get(collection_id)
@@ -164,7 +165,10 @@ fn field_kind_to_type_ref(kind: &FieldKind, id_to_name: &HashMap<String, String>
                 TypeRef::named(type_name)
             }
         }
-        FieldKind::SelfRef { relative_id, is_array } => {
+        FieldKind::SelfRef {
+            relative_id,
+            is_array,
+        } => {
             // Resolve relative ID to name
             let type_name = id_to_name
                 .get(relative_id)
@@ -178,7 +182,10 @@ fn field_kind_to_type_ref(kind: &FieldKind, id_to_name: &HashMap<String, String>
         }
         FieldKind::Named { name, is_array } => {
             // Named references might also be IDs that need resolution
-            let type_name = id_to_name.get(name).cloned().unwrap_or_else(|| name.clone());
+            let type_name = id_to_name
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.clone());
             if *is_array {
                 TypeRef::named_list(type_name)
             } else {
@@ -345,7 +352,10 @@ fn build_mutation_type(collections: &[CollectionVersion]) -> Object {
             )
             .argument(InputValue::new("docID", TypeRef::named("ID")))
             .argument(InputValue::new("docIDs", TypeRef::named_list("ID")))
-            .argument(InputValue::new("input", TypeRef::named_nn(&update_input_type))),
+            .argument(InputValue::new(
+                "input",
+                TypeRef::named_nn(&update_input_type),
+            )),
         );
 
         // delete_<Collection>
@@ -488,7 +498,10 @@ fn get_filter_type_for_field(kind: &FieldKind, id_to_name: &HashMap<String, Stri
             format!("{}FilterArg", type_name)
         }
         FieldKind::Named { name, .. } => {
-            let type_name = id_to_name.get(name).cloned().unwrap_or_else(|| name.clone());
+            let type_name = id_to_name
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.clone());
             format!("{}FilterArg", type_name)
         }
     }

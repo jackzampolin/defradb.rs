@@ -215,8 +215,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         })?;
 
         // Wrap in Arc<Mutex<Option>> for VersionedFetcher
-        let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> =
-            Arc::new(TokioMutex::new(Some(txn)));
+        let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
 
         let versioned_fetcher = VersionedFetcher::new(txn_holder.clone());
         let result = versioned_fetcher

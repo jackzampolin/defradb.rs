@@ -481,7 +481,10 @@ impl TypeJoinMany {
         // Check if any child passes the filter
         let child_mapping = self.child_plan.document_map();
         for child in children {
-            if rel_filter.conditions.matches(child.fields(), child_mapping)? {
+            if rel_filter
+                .conditions
+                .matches(child.fields(), child_mapping)?
+            {
                 return Ok(true);
             }
         }

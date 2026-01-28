@@ -190,10 +190,7 @@ impl Filter {
         let mut combined_conditions = HashMap::new();
         combined_conditions.insert(
             "_and".to_string(),
-            serde_json::json!([
-                self.conditions,
-                other.conditions
-            ]),
+            serde_json::json!([self.conditions, other.conditions]),
         );
         Filter::from_conditions(combined_conditions)
     }
@@ -728,7 +725,9 @@ impl Filter {
             if key == "_alias" {
                 // Check if this _alias block references any aggregate names
                 if let Some(alias_obj) = value.as_object() {
-                    let refs_aggregate = alias_obj.keys().any(|k| aggregate_names.contains(&k.as_str()));
+                    let refs_aggregate = alias_obj
+                        .keys()
+                        .any(|k| aggregate_names.contains(&k.as_str()));
                     if refs_aggregate {
                         has_aggregate_alias = true;
                         // Skip this _alias condition - it will be applied in post-processing
@@ -1560,7 +1559,8 @@ impl Filter {
                     // Check if the nested conditions are operators or field-based
                     // If they're operators, use matches_scalar_value on the field value
                     // If they're field-based, recursively use matches_json_object
-                    let has_field_conditions = conditions_obj.keys().any(|k| FilterOp::parse(k).is_none());
+                    let has_field_conditions =
+                        conditions_obj.keys().any(|k| FilterOp::parse(k).is_none());
                     let sub_conditions: HashMap<String, JsonValue> = conditions_obj
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))

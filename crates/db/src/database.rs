@@ -1200,7 +1200,9 @@ impl<S: Store> DB<S> {
                 // Strip collection name/version prefix from path if present (Go compatibility)
                 let path = raw_path.map(|p| {
                     let stripped = Self::strip_collection_prefix(
-                        p, &collection_prefix, actual_name_prefix.as_deref(),
+                        p,
+                        &collection_prefix,
+                        actual_name_prefix.as_deref(),
                     );
                     // Go compatibility: substitute field names for indices in /Fields/<name> paths
                     Self::substitute_field_name_in_path(&stripped, &schema_json)
@@ -1273,17 +1275,16 @@ impl<S: Store> DB<S> {
                                 // Include original path for context
                                 let original_path = raw_path.unwrap_or(path);
                                 return Err(Error::InvalidPatch(format!(
-                                    "testing value {} failed: test failed", original_path
+                                    "testing value {} failed: test failed",
+                                    original_path
                                 )));
                             }
                         }
                     }
                     (Some("copy"), Some(path)) => {
                         // RFC 6902 "copy" operation: copy value from "from" to "path"
-                        let from_path = op
-                            .get("from")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
+                        let from_path =
+                            op.get("from").and_then(|v| v.as_str()).ok_or_else(|| {
                                 Error::InvalidPatch(format!(
                                     "missing 'from' for copy operation at {}",
                                     path
@@ -1293,7 +1294,11 @@ impl<S: Store> DB<S> {
                         // Go compatibility: copying collection-level is not supported
                         // This includes copying to root "/" or to paths that would create new collections
                         // Detect by checking if path doesn't contain /Fields (field-level operations)
-                        if path == "/" || (!path.contains("/Fields") && !path.contains("/Name") && !path.contains("/IsActive")) {
+                        if path == "/"
+                            || (!path.contains("/Fields")
+                                && !path.contains("/Name")
+                                && !path.contains("/IsActive"))
+                        {
                             // Extract the target name from the raw path for the error message
                             let target_name = raw_path
                                 .and_then(|p| {
@@ -1308,15 +1313,18 @@ impl<S: Store> DB<S> {
                         }
 
                         // Substitute field names in from path too
-                        let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
+                        let from_path =
+                            Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
                         let from_path = Self::strip_collection_prefix(
-                            &from_path, &collection_prefix, actual_name_prefix.as_deref(),
+                            &from_path,
+                            &collection_prefix,
+                            actual_name_prefix.as_deref(),
                         );
 
                         // Get the value to copy
-                        let value_to_copy =
-                            Self::json_pointer_get(&schema_json, &from_path).ok_or_else(|| {
+                        let value_to_copy = Self::json_pointer_get(&schema_json, &from_path)
+                            .ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
 
@@ -1325,10 +1333,8 @@ impl<S: Store> DB<S> {
                     }
                     (Some("move"), Some(path)) => {
                         // RFC 6902 "move" operation: move value from "from" to "path"
-                        let from_path = op
-                            .get("from")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
+                        let from_path =
+                            op.get("from").and_then(|v| v.as_str()).ok_or_else(|| {
                                 Error::InvalidPatch(format!(
                                     "missing 'from' for move operation at {}",
                                     path
@@ -1338,21 +1344,28 @@ impl<S: Store> DB<S> {
                         // Go compatibility: moving at collection-level is a no-op
                         // This includes moving to root "/" or paths that would move entire collections
                         // Detect by checking if path doesn't contain /Fields (field-level operations)
-                        if path == "/" || (!path.contains("/Fields") && !path.contains("/Name") && !path.contains("/IsActive")) {
+                        if path == "/"
+                            || (!path.contains("/Fields")
+                                && !path.contains("/Name")
+                                && !path.contains("/IsActive"))
+                        {
                             // Skip this operation - collection-level moves are no-ops
                             continue;
                         }
 
                         // Substitute field names in from path too
-                        let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
+                        let from_path =
+                            Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
                         let from_path = Self::strip_collection_prefix(
-                            &from_path, &collection_prefix, actual_name_prefix.as_deref(),
+                            &from_path,
+                            &collection_prefix,
+                            actual_name_prefix.as_deref(),
                         );
 
                         // Get the value to move
-                        let value_to_move =
-                            Self::json_pointer_get(&schema_json, &from_path).ok_or_else(|| {
+                        let value_to_move = Self::json_pointer_get(&schema_json, &from_path)
+                            .ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
 
@@ -1394,7 +1407,9 @@ impl<S: Store> DB<S> {
             let mut next_id = max_field_id + 1;
             for field in fields.iter_mut() {
                 if let serde_json::Value::Object(ref mut map) = field {
-                    if !map.contains_key("FieldID") || map.get("FieldID") == Some(&serde_json::Value::Null) {
+                    if !map.contains_key("FieldID")
+                        || map.get("FieldID") == Some(&serde_json::Value::Null)
+                    {
                         map.insert("FieldID".to_string(), next_id.to_string().into());
                         next_id += 1;
                     }
@@ -1406,10 +1421,14 @@ impl<S: Store> DB<S> {
         let name_value = schema_json.get("Name");
         match name_value {
             None | Some(serde_json::Value::Null) => {
-                return Err(Error::InvalidPatch("collection name can't be empty".to_string()));
+                return Err(Error::InvalidPatch(
+                    "collection name can't be empty".to_string(),
+                ));
             }
             Some(serde_json::Value::String(s)) if s.is_empty() => {
-                return Err(Error::InvalidPatch("collection name can't be empty".to_string()));
+                return Err(Error::InvalidPatch(
+                    "collection name can't be empty".to_string(),
+                ));
             }
             _ => {}
         }
@@ -1703,11 +1722,8 @@ impl<S: Store> DB<S> {
                     Some("move") => {
                         // Collection-level move is a no-op - find source and return unchanged
                         if let Some(from) = from_raw {
-                            let source_name = from
-                                .trim_start_matches('/')
-                                .split('/')
-                                .next()
-                                .unwrap_or("");
+                            let source_name =
+                                from.trim_start_matches('/').split('/').next().unwrap_or("");
                             if let Some(source_col) = self.get_collection(source_name)? {
                                 return Ok(source_col.schema().clone());
                             }
