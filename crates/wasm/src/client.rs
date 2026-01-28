@@ -118,7 +118,7 @@ impl DefraClient {
 
     /// Execute a GraphQL mutation.
     #[wasm_bindgen]
-    pub async fn mutate(&mut self, graphql: &str) -> std::result::Result<JsValue, JsValue> {
+    pub async fn mutate(&self, graphql: &str) -> std::result::Result<JsValue, JsValue> {
         self.mutate_impl(graphql).await.map_err(|e| e.into())
     }
 
@@ -272,7 +272,7 @@ impl DefraClient {
         }
     }
 
-    async fn mutate_impl(&mut self, graphql: &str) -> Result<JsValue> {
+    async fn mutate_impl(&self, graphql: &str) -> Result<JsValue> {
         self.ensure_open()?;
 
         if graphql.trim().is_empty() {
@@ -288,7 +288,6 @@ impl DefraClient {
 
         match result {
             Ok(data) => {
-                self.persist_impl().await?;
                 let response = serde_json::json!({
                     "data": data,
                     "errors": [],
