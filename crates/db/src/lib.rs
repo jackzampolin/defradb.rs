@@ -69,6 +69,7 @@ pub mod schema_loader;
 pub mod txn;
 pub mod txn_context;
 pub mod txn_registry;
+pub mod versioned_fetcher;
 
 // Re-export commonly used types
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
@@ -107,6 +108,7 @@ pub use schema_loader::{
 pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};
+pub use versioned_fetcher::VersionedFetcher;
 
 // NAC exports
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager};

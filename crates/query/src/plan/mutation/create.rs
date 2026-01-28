@@ -55,8 +55,11 @@ impl CreateInput {
     ///
     /// This method uses the collection schema to properly coerce values,
     /// such as parsing RFC 3339 strings as DateTime values when the field
-    /// type is DateTime (matching Go DefraDB behavior).
+    /// type is DateTime (matching Go DefraDB behavior). It also preserves
+    /// the CRDT type from the schema (e.g., PnCounter, PCounter).
     pub fn to_document_with_schema(&self, collection: &CollectionVersion) -> Result<Document> {
+        use schema::CType;
+
         let mut doc = Document::new();
 
         // Set collection on document for proper docID generation.
@@ -64,16 +67,23 @@ impl CreateInput {
         doc.set_collection(collection.clone());
 
         for (field_name, value) in &self.fields {
-            // Look up the field in the schema to get its kind
-            let field_kind = collection
-                .fields
-                .iter()
-                .find(|f| f.name == *field_name)
-                .map(|f| &f.kind);
+            // Look up the field in the schema to get its kind and CRDT type
+            let field_def = collection.fields.iter().find(|f| f.name == *field_name);
+            let field_kind = field_def.map(|f| &f.kind);
+            let crdt_type = field_def.map(|f| f.crdt_type).unwrap_or(CType::LwwRegister);
 
             // Convert JsonValue to appropriate NormalValue, using schema for type coercion
             let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
-            doc.set(field_name.clone(), normal_value);
+
+            // Use set_with_crdt to preserve the CRDT type from the schema
+            // This is critical for Counter fields to generate correct block CIDs
+            doc.set_with_crdt(field_name.clone(), crdt_type, normal_value)
+                .map_err(|e| {
+                    QueryError::execution(format!(
+                        "Failed to set field '{}' with CRDT type {:?}: {}",
+                        field_name, crdt_type, e
+                    ))
+                })?;
         }
 
         Ok(doc)

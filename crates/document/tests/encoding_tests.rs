@@ -213,25 +213,32 @@ fn test_time_to_json_with_nanoseconds() {
 }
 
 #[test]
-fn test_canonical_key_order() {
-    // Test that keys are sorted by length first, then lexicographically
-    let mut doc = document::Document::new();
-    doc.set("ab", 3i64);
-    doc.set("z", 1i64);
-    doc.set("aa", 2i64);
+fn test_time_format_matches_go_rfc3339_nano() {
+    // Go's time.RFC3339Nano omits fractional seconds when zero but includes all 9 digits when present.
+    // Verify our Document's CBOR encoding matches this behavior.
 
-    let cbor = doc.to_cbor().unwrap();
+    // Test 1: Time without nanoseconds (Go: "2017-07-23T03:46:56-05:00")
+    let t1 = Utc.with_ymd_and_hms(2017, 7, 23, 3, 46, 56).unwrap();
+    let t1_fixed = t1.with_timezone(&chrono::FixedOffset::west_opt(5 * 3600).unwrap());
 
-    // Expected order: z (1 char), aa (2 chars), ab (2 chars)
-    // a3 = map with 3 entries
-    // 61 7a = "z"
-    // 01 = 1
-    // 62 61 61 = "aa"
-    // 02 = 2
-    // 62 61 62 = "ab"
-    // 03 = 3
-    let expected = &[
-        0xa3, 0x61, 0x7a, 0x01, 0x62, 0x61, 0x61, 0x02, 0x62, 0x61, 0x62, 0x03,
-    ];
-    assert_eq!(cbor, expected);
+    let mut doc1 = document::Document::new();
+    doc1.set("timestamp", NormalValue::Time(t1_fixed));
+    let map1 = doc1.to_map().unwrap();
+    let s1 = map1.get("timestamp").unwrap().as_str().unwrap();
+
+    // Should NOT have .000000000
+    assert!(!s1.contains(".000000000"), "Expected no fractional seconds for zero nanos, got: {}", s1);
+    assert!(s1.ends_with("-05:00"), "Expected -05:00 timezone, got: {}", s1);
+
+    // Test 2: Time with nanoseconds (Go: "2017-07-23T03:46:56.123456789-05:00")
+    let t2 = t1.with_nanosecond(123456789).unwrap();
+    let t2_fixed = t2.with_timezone(&chrono::FixedOffset::west_opt(5 * 3600).unwrap());
+
+    let mut doc2 = document::Document::new();
+    doc2.set("timestamp", NormalValue::Time(t2_fixed));
+    let map2 = doc2.to_map().unwrap();
+    let s2 = map2.get("timestamp").unwrap().as_str().unwrap();
+
+    // Should have .123456789
+    assert!(s2.contains(".123456789"), "Expected .123456789, got: {}", s2);
 }

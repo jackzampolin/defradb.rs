@@ -10,7 +10,9 @@
 use blockstore::Blockstore;
 use cid::Cid;
 use datastore::NamespaceView;
-use defra_core::block::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+use defra_core::block::{
+    Block, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
+};
 use document::{Document, NormalValue};
 use std::sync::Arc;
 use storage::corekv::Key;
@@ -58,7 +60,7 @@ pub async fn build_blocks_from_document<B: Blockstore>(
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
 
-    // Create an LWW block for each field
+    // Create a block for each field (LWW or Counter depending on CRDT type)
     for (field_name, field_value) in doc.values() {
         // Skip internal fields like _docID
         if field_name.starts_with('_') {
@@ -68,17 +70,35 @@ pub async fn build_blocks_from_document<B: Blockstore>(
         // Encode the field value as CBOR
         let value_bytes = encode_value_as_cbor(field_value.value())?;
 
-        // Create LWW delta payload
-        let lww_payload = LwwDeltaPayload {
-            doc_id: doc_id_bytes.clone(),
-            field_name: field_name.clone(),
-            priority: 1, // Initial priority for new documents
-            schema_version_id: schema_version_id.to_string(),
-            data: value_bytes,
+        // Check if this field is a Counter type
+        let is_counter = doc
+            .fields()
+            .get(field_name)
+            .map(|f| f.crdt_type().is_counter())
+            .unwrap_or(false);
+
+        // Create the appropriate delta based on CRDT type
+        let delta = if is_counter {
+            CrdtDelta::Counter(CounterDeltaPayload {
+                doc_id: doc_id_bytes.clone(),
+                field_name: field_name.clone(),
+                priority: 1, // Initial priority for new documents
+                nonce: 0,    // Go uses nonce=0 for initial creation (deterministic CID)
+                schema_version_id: schema_version_id.to_string(),
+                data: value_bytes,
+            })
+        } else {
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: doc_id_bytes.clone(),
+                field_name: field_name.clone(),
+                priority: 1, // Initial priority for new documents
+                schema_version_id: schema_version_id.to_string(),
+                data: value_bytes,
+            })
         };
 
         // Create the field block
-        let field_block = Block::new(CrdtDelta::Lww(lww_payload), vec![], vec![]);
+        let field_block = Block::new(delta, vec![], vec![]);
 
         // Serialize and generate CID
         let field_block_bytes = field_block
@@ -97,7 +117,8 @@ pub async fn build_blocks_from_document<B: Blockstore>(
         tracing::debug!(
             field_name = %field_name,
             cid = %field_cid,
-            "Stored LWW field block"
+            is_counter = is_counter,
+            "Stored field block"
         );
 
         // Add link to composite
@@ -333,23 +354,51 @@ pub async fn write_document_blocks(
         let field_head = get_field_head(headstore, &doc_id_str, field_name).await?;
 
         if should_create_block {
-            // Create new LWW block for this field
+            // Create new block for this field (LWW or Counter depending on CRDT type)
             let heads: Vec<Cid> = field_head.cid.into_iter().collect();
 
             // Encode the field value as CBOR
             let value_bytes = encode_value_as_cbor(field_value.value())?;
 
-            // Create LWW delta payload
-            let lww_payload = LwwDeltaPayload {
-                doc_id: doc_id_bytes.clone(),
-                field_name: field_name.clone(),
-                priority,
-                schema_version_id: schema_version_id.to_string(),
-                data: value_bytes,
+            // Check if this field is a Counter type
+            let is_counter = doc
+                .fields()
+                .get(field_name)
+                .map(|f| f.crdt_type().is_counter())
+                .unwrap_or(false);
+
+            // For Counter fields, use nonce=0 for initial creation (heads empty),
+            // random nonce for updates (heads non-empty) - matches Go behavior
+            let nonce: i64 = if is_counter && !heads.is_empty() {
+                // Update operation: use random nonce
+                rand::random()
+            } else {
+                // Initial creation: use deterministic nonce=0
+                0
+            };
+
+            // Create the appropriate delta based on CRDT type
+            let delta = if is_counter {
+                CrdtDelta::Counter(CounterDeltaPayload {
+                    doc_id: doc_id_bytes.clone(),
+                    field_name: field_name.clone(),
+                    priority,
+                    nonce,
+                    schema_version_id: schema_version_id.to_string(),
+                    data: value_bytes,
+                })
+            } else {
+                CrdtDelta::Lww(LwwDeltaPayload {
+                    doc_id: doc_id_bytes.clone(),
+                    field_name: field_name.clone(),
+                    priority,
+                    schema_version_id: schema_version_id.to_string(),
+                    data: value_bytes,
+                })
             };
 
             // Create the field block with heads linking to previous version
-            let field_block = Block::new(CrdtDelta::Lww(lww_payload), heads, vec![]);
+            let field_block = Block::new(delta, heads.clone(), vec![]);
 
             // Serialize and generate CID
             let field_block_bytes = field_block
@@ -384,8 +433,9 @@ pub async fn write_document_blocks(
             tracing::debug!(
                 field_name = %field_name,
                 cid = %field_cid,
-                has_prev_head = field_head.cid.is_some(),
-                "Stored LWW field block and head"
+                is_counter = is_counter,
+                has_prev_head = !heads.is_empty(),
+                "Stored field block and head"
             );
 
             // Add link to composite - only new blocks get linked

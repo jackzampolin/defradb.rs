@@ -184,11 +184,43 @@ pub fn parse_query(query: &str) -> Result<Vec<Select>> {
     }
 }
 
+/// Parse a GraphQL query string with variable substitution.
+///
+/// Returns a vector of Select operations, one for each top-level field in the query.
+/// For mutations, use `parse_mutations_with_variables` instead.
+pub fn parse_query_with_variables(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<Select>> {
+    match parse_request_with_variables(query, variables, None)? {
+        ParsedOperation::Query { selects, .. } => Ok(selects),
+        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+            "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
+        )),
+        ParsedOperation::Subscription { .. } => Err(QueryError::parse(
+            "Expected query but got subscription.",
+        )),
+        ParsedOperation::Introspection { .. } => Err(QueryError::parse(
+            "Expected query but got introspection.",
+        )),
+    }
+}
+
 /// Parse a GraphQL mutation string into Mutation operations.
 ///
 /// Returns a vector of Mutation operations, one for each top-level field in the mutation.
 pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
-    match parse_request(query)? {
+    parse_mutations_with_variables(query, None)
+}
+
+/// Parse a GraphQL mutation string with variable substitution.
+///
+/// Returns a vector of Mutation operations, one for each top-level field in the mutation.
+pub fn parse_mutations_with_variables(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<Mutation>> {
+    match parse_request_with_variables(query, variables, None)? {
         ParsedOperation::Mutation(mutations) => Ok(mutations),
         ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
         ParsedOperation::Subscription { .. } => {
@@ -205,7 +237,7 @@ pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
 /// This is the main entry point for parsing GraphQL requests.
 /// For queries with variables, use `parse_request_with_variables` instead.
 pub fn parse_request(query: &str) -> Result<ParsedOperation> {
-    parse_request_with_variables(query, None)
+    parse_request_with_variables(query, None, None)
 }
 
 /// Parse a GraphQL request with variable substitution.
@@ -250,6 +282,7 @@ fn is_introspection_query(doc: &Document<'_, String>) -> bool {
 pub fn parse_request_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
+    operation_name: Option<&str>,
 ) -> Result<ParsedOperation> {
     let doc: Document<'_, String> =
         graphql_parser::parse_query(query).map_err(|e| QueryError::parse(e.to_string()))?;
@@ -270,6 +303,18 @@ pub fn parse_request_with_variables(
         }
     }
 
+    // Count operations (not fragments) to validate operation_name
+    let operation_count = doc
+        .definitions
+        .iter()
+        .filter(|d| matches!(d, Definition::Operation(_)))
+        .count();
+    if operation_count > 1 && operation_name.is_none() {
+        return Err(QueryError::parse(
+            "Must provide operation name if query contains multiple operations.",
+        ));
+    }
+
     let mut selects = Vec::new();
     let mut mutations = Vec::new();
     let mut subscription_selects = Vec::new();
@@ -282,6 +327,19 @@ pub fn parse_request_with_variables(
     for def in &doc.definitions {
         match def {
             Definition::Operation(op) => {
+                // If operation_name is specified, skip operations that don't match
+                if let Some(target_name) = operation_name {
+                    let op_name = match op {
+                        OperationDefinition::Query(q) => q.name.as_deref(),
+                        OperationDefinition::Mutation(m) => m.name.as_deref(),
+                        OperationDefinition::Subscription(s) => s.name.as_deref(),
+                        OperationDefinition::SelectionSet(_) => None,
+                    };
+                    if op_name != Some(target_name) {
+                        continue;
+                    }
+                }
+
                 match op {
                     OperationDefinition::Query(q) => {
                         has_query = true;
@@ -430,6 +488,23 @@ fn parse_field_to_select(
             "filter" => {
                 // Null filter is valid and means "no filter" (operate on all docs)
                 if !matches!(arg_value, Value::Null) {
+                    // Validate _and/_or arrays don't contain null elements
+                    if let Value::Object(obj) = arg_value {
+                        for (key, val) in obj {
+                            if key == "_and" || key == "_or" {
+                                if let Value::List(items) = val {
+                                    for item in items {
+                                        if matches!(item, Value::Null) {
+                                            return Err(QueryError::parse(format!(
+                                                "Expected \"{}FilterArg!\", found null",
+                                                collection_name
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let filter = parse_filter_value(arg_value, variables)?;
                     select.filter = Some(filter);
                 }
@@ -535,6 +610,29 @@ fn parse_field_to_select(
     )?;
     select.fields = fields;
     select.document_mapping = mapping;
+
+    // Validate groupBy field selection: when groupBy is specified, only group-by fields,
+    // their FK counterparts (e.g. _authorID for groupBy [author]), and aggregate fields
+    // are allowed at the group level (nested selects like _group are fine).
+    if let Some(ref group_by) = select.group_by {
+        for field in &select.fields {
+            if let Requestable::Field(f) = field {
+                if group_by.fields.contains(&f.name) {
+                    continue;
+                }
+                // Allow FK fields for relation groupBy fields (e.g. _authorID for author)
+                let is_fk_for_group = group_by.fields.iter().any(|gb_field| {
+                    f.name == format!("_{}ID", gb_field)
+                });
+                if is_fk_for_group {
+                    continue;
+                }
+                return Err(QueryError::parse(
+                    "cannot select a non-group-by field at group-level",
+                ));
+            }
+        }
+    }
 
     Ok(select)
 }
@@ -695,6 +793,24 @@ fn parse_filter_value(
         Value::Object(obj) => {
             let conditions = parse_filter_object(obj, variables)?;
             Ok(Filter::from_conditions(conditions))
+        }
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name.as_str()).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            if let JsonValue::Object(obj) = json_val {
+                let conditions: HashMap<String, JsonValue> =
+                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                Ok(Filter::from_conditions(conditions))
+            } else {
+                Err(QueryError::parse("filter must be an object"))
+            }
         }
         _ => Err(QueryError::parse("filter must be an object")),
     }
@@ -918,6 +1034,11 @@ fn parse_order_value(
             // Array of order objects: [{rating: ASC}, {publisher: {yearOpened: DESC}}]
             for item in items {
                 if let Value::Object(obj) = item {
+                    if obj.len() > 1 {
+                        return Err(QueryError::parse(
+                            "each order argument can only define one field",
+                        ));
+                    }
                     for (field_name, direction_val) in obj {
                         if let Some(condition) =
                             parse_order_condition(field_name.clone(), direction_val, variables)?
@@ -932,9 +1053,54 @@ fn parse_order_value(
                 }
             }
         }
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            return parse_order_from_json(json_val);
+        }
         _ => return Err(QueryError::parse("order must be an object or array")),
     }
 
+    Ok(order_by)
+}
+
+/// Parse order from a resolved JSON variable value.
+fn parse_order_from_json(json: &JsonValue) -> Result<OrderBy> {
+    let mut order_by = OrderBy::new();
+    match json {
+        JsonValue::Object(obj) => {
+            for (field_name, dir_val) in obj {
+                if let Some(dir_str) = dir_val.as_str() {
+                    if let Some(direction) = OrderDirection::parse(dir_str) {
+                        order_by = order_by.with_condition(OrderCondition::new(field_name, direction));
+                    }
+                }
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                if let JsonValue::Object(obj) = item {
+                    for (field_name, dir_val) in obj {
+                        if let Some(dir_str) = dir_val.as_str() {
+                            if let Some(direction) = OrderDirection::parse(dir_str) {
+                                order_by = order_by.with_condition(OrderCondition::new(
+                                    field_name, direction,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => return Err(QueryError::parse("order variable must be an object or array")),
+    }
     Ok(order_by)
 }
 
@@ -1078,6 +1244,108 @@ fn parse_group_by_value(
     }
 }
 
+/// Parse an aggregate target from a GraphQL Object value.
+fn parse_aggregate_target_obj(
+    arg_name: &str,
+    obj: &BTreeMap<String, Value<'_, String>>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<AggregateTarget> {
+    let mut target = AggregateTarget::new(arg_name.to_string());
+    for (key, val) in obj {
+        match key.as_str() {
+            "field" => {
+                let field_name = match val {
+                    Value::String(s) => s.clone(),
+                    Value::Enum(s) => s.clone(),
+                    _ => {
+                        return Err(QueryError::parse(
+                            "field in relation aggregate must be a string",
+                        ))
+                    }
+                };
+                target.field_name = Some(field_name);
+            }
+            "filter" => {
+                let filter = parse_filter_value(val, variables)?;
+                target.filter = Some(filter);
+            }
+            "limit" => {
+                let limit_val = parse_int_value(val, variables)?;
+                target.limit = Some(Limit::new(Some(limit_val as u64), 0));
+            }
+            "offset" => {
+                let offset_val = parse_int_value(val, variables)?;
+                if let Some(ref mut limit) = target.limit {
+                    limit.offset = offset_val as u64;
+                } else {
+                    target.limit = Some(Limit::new(None, offset_val as u64));
+                }
+            }
+            "order" => {
+                let order = match val {
+                    Value::Enum(s) | Value::String(s) => {
+                        let direction = OrderDirection::parse(s).ok_or_else(|| {
+                            QueryError::parse(format!("invalid order direction: {}", s))
+                        })?;
+                        OrderBy::new().with_condition(OrderCondition::new("", direction))
+                    }
+                    _ => parse_order_value(val, variables)?,
+                };
+                target.order = Some(order);
+            }
+            _ => {}
+        }
+    }
+    Ok(target)
+}
+
+/// Parse an aggregate target from a resolved JSON variable value.
+fn parse_aggregate_target_from_json(
+    arg_name: &str,
+    json: &JsonValue,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<AggregateTarget> {
+    let mut target = AggregateTarget::new(arg_name.to_string());
+    if let JsonValue::Object(obj) = json {
+        for (key, val) in obj {
+            match key.as_str() {
+                "field" => {
+                    if let Some(s) = val.as_str() {
+                        target.field_name = Some(s.to_string());
+                    }
+                }
+                "filter" => {
+                    // Convert JSON filter to a Filter
+                    if let JsonValue::Object(filter_obj) = val {
+                        let conditions: HashMap<String, JsonValue> =
+                            filter_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        target.filter = Some(Filter::from_conditions(conditions));
+                    }
+                }
+                "limit" => {
+                    if let Some(n) = val.as_i64() {
+                        target.limit = Some(Limit::new(Some(n as u64), 0));
+                    }
+                }
+                "offset" => {
+                    if let Some(n) = val.as_i64() {
+                        if let Some(ref mut limit) = target.limit {
+                            limit.offset = n as u64;
+                        } else {
+                            target.limit = Some(Limit::new(None, n as u64));
+                        }
+                    }
+                }
+                "order" => {
+                    target.order = Some(parse_order_from_json(val)?);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(target)
+}
+
 /// Parse an aggregate field into an Aggregate.
 ///
 /// Handles aggregate functions like `_count`, `_sum(field: "age")`, etc.
@@ -1122,79 +1390,37 @@ fn parse_aggregate_field(
             }
             _ => {
                 // This might be a relation name argument like `books: {field: score}`
-                // Relation arguments take an object value with optional field, filter, limit, order
-                if let Value::Object(obj) = arg_value {
-                    let relation_name = arg_name.clone();
-                    let mut target = AggregateTarget::new(relation_name);
-
-                    // Parse the object to extract field, filter, limit, order
-                    for (key, val) in obj {
-                        match key.as_str() {
-                            "field" => {
-                                let field_name = match val {
-                                    Value::String(s) => s.clone(),
-                                    Value::Enum(s) => s.clone(),
-                                    _ => {
-                                        return Err(QueryError::parse(
-                                            "field in relation aggregate must be a string",
-                                        ))
-                                    }
-                                };
-                                target.field_name = Some(field_name);
-                            }
-                            "filter" => {
-                                // Parse filter condition
-                                let filter = parse_filter_value(val, variables)?;
-                                target.filter = Some(filter);
-                            }
-                            "limit" => {
-                                let limit_val = parse_int_value(val, variables)?;
-                                target.limit = Some(Limit::new(Some(limit_val as u64), 0));
-                            }
-                            "offset" => {
-                                // Offset is combined with limit
-                                let offset_val = parse_int_value(val, variables)?;
-                                if let Some(ref mut limit) = target.limit {
-                                    limit.offset = offset_val as u64;
-                                } else {
-                                    target.limit = Some(Limit::new(None, offset_val as u64));
-                                }
-                            }
-                            "order" => {
-                                // For inline array aggregates, order can be a bare
-                                // direction enum (e.g., `order: ASC`) rather than
-                                // the structured `order: {field: ASC}` used by queries.
-                                let order = match val {
-                                    Value::Enum(s) | Value::String(s) => {
-                                        let direction =
-                                            OrderDirection::parse(s).ok_or_else(|| {
-                                                QueryError::parse(format!(
-                                                    "invalid order direction: {}",
-                                                    s
-                                                ))
-                                            })?;
-                                        OrderBy::new().with_condition(OrderCondition::new(
-                                            "",
-                                            direction,
-                                        ))
-                                    }
-                                    _ => parse_order_value(val, variables)?,
-                                };
-                                target.order = Some(order);
-                            }
-                            _ => {
-                                // Unknown key in relation aggregate - ignore for compatibility
-                            }
-                        }
+                // Relation arguments take an object value with optional field, filter, limit, order.
+                // Also handle variables that resolve to objects.
+                match arg_value {
+                    Value::Object(obj) => {
+                        let target = parse_aggregate_target_obj(arg_name, obj, variables)?;
+                        relation_targets.push(target);
                     }
-
-                    relation_targets.push(target);
-                } else {
-                    return Err(QueryError::parse(format!(
-                        "unknown argument '{}' on aggregate '{}', expected an object value for relation aggregates",
-                        arg_name,
-                        agg_type.as_str()
-                    )));
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "Variable \"${}\" was not provided",
+                                name
+                            ))
+                        })?;
+                        let target =
+                            parse_aggregate_target_from_json(arg_name, json_val, variables)?;
+                        relation_targets.push(target);
+                    }
+                    _ => {
+                        return Err(QueryError::parse(format!(
+                            "unknown argument '{}' on aggregate '{}', expected an object value for relation aggregates",
+                            arg_name,
+                            agg_type.as_str()
+                        )));
+                    }
                 }
             }
         }
@@ -1262,6 +1488,25 @@ fn parse_top_level_aggregate(
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Select> {
     let mut aggregate = parse_aggregate_field(field, agg_type, variables)?;
+
+    // Top-level numeric aggregates require a field argument on each target.
+    // This matches Go's GraphQL schema validation where collection args require
+    // the "field" key (e.g., _avg(Users: {field: Age}) not _avg(Users: {})).
+    if agg_type != AggregateType::Count {
+        for target in &aggregate.targets {
+            if target.field_name.is_none() {
+                let type_name = format!(
+                    "{}NumericFieldsArg!",
+                    capitalize_first(&target.host_name)
+                );
+                return Err(QueryError::parse(format!(
+                    "Argument \"{}\" has invalid value {{}}.\nIn field \"field\": Expected \"{}\", found null.",
+                    target.host_name,
+                    type_name
+                )));
+            }
+        }
+    }
 
     // Set alias if provided
     if let Some(ref a) = field.alias {
@@ -1677,6 +1922,15 @@ fn parse_document_input(
     Ok(fields)
 }
 
+/// Capitalize the first character of a string.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod mutation_tests {
     use super::*;
@@ -2045,7 +2299,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("name".to_string(), json!("Alice"))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects.len(), 1);
@@ -2070,7 +2324,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("lim".to_string(), json!(10))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(10));
@@ -2092,7 +2346,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("ids".to_string(), json!(["bae-123", "bae-456"]))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(
@@ -2119,7 +2373,7 @@ mod variable_tests {
             ("userAge".to_string(), json!(25)),
         ]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Mutation(mutations) => {
                 assert_eq!(mutations.len(), 1);
@@ -2143,7 +2397,7 @@ mod variable_tests {
 
         let variables = HashMap::from([("id".to_string(), json!("bae-999"))]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Mutation(mutations) => {
                 assert_eq!(mutations[0].doc_ids, Some(vec!["bae-999".to_string()]));
@@ -2163,7 +2417,7 @@ mod variable_tests {
         "#;
 
         let variables = HashMap::new();
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("was not provided"));
     }
@@ -2178,7 +2432,7 @@ mod variable_tests {
             }
         "#;
 
-        let result = parse_request_with_variables(query, None);
+        let result = parse_request_with_variables(query, None, None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2198,7 +2452,7 @@ mod variable_tests {
         "#;
 
         // No variables provided
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects.len(), 1);
@@ -2223,7 +2477,7 @@ mod variable_tests {
 
         // Provide string instead of int
         let variables = HashMap::from([("lim".to_string(), json!("not an int"))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2249,7 +2503,7 @@ mod variable_tests {
             ("lim".to_string(), json!(5)),
         ]);
 
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(5));
@@ -2281,7 +2535,7 @@ mod variable_tests {
 
         // Provide string instead of bool
         let variables = HashMap::from([("deleted".to_string(), json!("true"))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2301,7 +2555,7 @@ mod variable_tests {
 
         // Provide integer instead of string
         let variables = HashMap::from([("c".to_string(), json!(12345))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -2321,7 +2575,7 @@ mod variable_tests {
         "#;
 
         let variables = HashMap::from([("dir".to_string(), json!("DESC"))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let order = selects[0].order_by.as_ref().unwrap();
@@ -2345,7 +2599,7 @@ mod variable_tests {
         "#;
 
         let variables = HashMap::from([("dir".to_string(), json!("INVALID"))]);
-        let result = parse_request_with_variables(query, Some(&variables));
+        let result = parse_request_with_variables(query, Some(&variables), None);
         assert!(result.is_err());
         // Error format matches Go DefraDB
         assert!(result
@@ -2370,7 +2624,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let filter = selects[0].filter.as_ref().unwrap();
@@ -2397,7 +2651,7 @@ mod variable_tests {
 
         // Provide a value - should override default
         let variables = HashMap::from([("name".to_string(), json!("ProvidedName"))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let filter = selects[0].filter.as_ref().unwrap();
@@ -2422,7 +2676,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default 50
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(50));
@@ -2442,7 +2696,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default true
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert!(selects[0].show_deleted);
@@ -2464,7 +2718,7 @@ mod variable_tests {
 
         // Only provide $name, use defaults for $minAge and $lim
         let variables = HashMap::from([("name".to_string(), json!("Alice"))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 assert_eq!(selects[0].limit.as_ref().unwrap().limit, Some(10));
@@ -2491,7 +2745,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Mutation(mutations) => {
                 let input = &mutations[0].create_input;
@@ -2512,7 +2766,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default array
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let doc_ids = selects[0].doc_ids.as_ref().unwrap();
@@ -2535,7 +2789,7 @@ mod variable_tests {
         "#;
 
         // Don't provide the variable - should use default null
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Query { selects, .. } => {
                 let filter = selects[0].filter.as_ref().unwrap();
@@ -2561,7 +2815,7 @@ mod variable_tests {
             }
         "#;
 
-        let result = parse_request_with_variables(query, None);
+        let result = parse_request_with_variables(query, None, None);
         // graphql-parser rejects this at the parse level since variable references
         // aren't allowed in default value position per the GraphQL spec
         assert!(
@@ -2631,7 +2885,7 @@ mod subscription_tests {
         "#;
 
         let variables = HashMap::from([("active".to_string(), serde_json::json!(true))]);
-        let result = parse_request_with_variables(query, Some(&variables)).unwrap();
+        let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
             ParsedOperation::Subscription { select } => {
                 assert_eq!(select.collection_name, "User");
@@ -2752,7 +3006,7 @@ mod subscription_tests {
         "#;
 
         // Don't provide the variable - should use default
-        let result = parse_request_with_variables(query, None).unwrap();
+        let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
             ParsedOperation::Subscription { select } => {
                 assert_eq!(select.limit.as_ref().unwrap().limit, Some(10));
