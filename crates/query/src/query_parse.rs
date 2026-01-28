@@ -57,6 +57,14 @@ pub enum ParsedOperation {
         /// The single select for the subscription.
         select: Select,
     },
+    /// Introspection query (__schema or __type)
+    ///
+    /// Introspection queries are handled separately using the GraphQL schema
+    /// rather than the document storage.
+    Introspection {
+        /// The original query string to be executed against the schema
+        query: String,
+    },
 }
 
 /// Check if a directive list contains @explain and parse its type.
@@ -160,6 +168,7 @@ fn parse_selection_to_selects<'a>(
 ///
 /// Returns a vector of Select operations, one for each top-level field in the query.
 /// For mutations, use `parse_request` instead.
+/// For introspection queries, use `parse_request` and handle the Introspection variant.
 pub fn parse_query(query: &str) -> Result<Vec<Select>> {
     match parse_request(query)? {
         ParsedOperation::Query { selects, .. } => Ok(selects),
@@ -168,6 +177,9 @@ pub fn parse_query(query: &str) -> Result<Vec<Select>> {
         )),
         ParsedOperation::Subscription { .. } => Err(QueryError::parse(
             "Expected query but got subscription. Use parse_request() for subscriptions.",
+        )),
+        ParsedOperation::Introspection { .. } => Err(QueryError::parse(
+            "Expected data query but got introspection query. Use parse_request() for introspection.",
         )),
     }
 }
@@ -182,6 +194,9 @@ pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
         ParsedOperation::Subscription { .. } => {
             Err(QueryError::parse("Expected mutation but got subscription"))
         }
+        ParsedOperation::Introspection { .. } => Err(QueryError::parse(
+            "Expected mutation but got introspection query",
+        )),
     }
 }
 
@@ -208,12 +223,44 @@ pub fn parse_request(query: &str) -> Result<ParsedOperation> {
 ///     Some(&variables)
 /// )?;
 /// ```
+/// Check if a document is an introspection query.
+///
+/// Returns true if any root-level field is `__schema` or `__type`.
+fn is_introspection_query(doc: &Document<'_, String>) -> bool {
+    for def in &doc.definitions {
+        if let Definition::Operation(op) = def {
+            let selections = match op {
+                OperationDefinition::Query(q) => &q.selection_set.items,
+                OperationDefinition::SelectionSet(ss) => &ss.items,
+                _ => continue,
+            };
+
+            for selection in selections {
+                if let Selection::Field(field) = selection {
+                    if field.name == "__schema" || field.name == "__type" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn parse_request_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<ParsedOperation> {
     let doc: Document<'_, String> =
         graphql_parser::parse_query(query).map_err(|e| QueryError::parse(e.to_string()))?;
+
+    // Check for introspection queries (__schema, __type) before normal parsing
+    // These are handled separately by executing against the GraphQL schema
+    if is_introspection_query(&doc) {
+        return Ok(ParsedOperation::Introspection {
+            query: query.to_string(),
+        });
+    }
 
     // First pass: collect all fragment definitions
     let mut fragments: HashMap<String, &FragmentDefinition<'_, String>> = HashMap::new();

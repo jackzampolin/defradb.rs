@@ -22,6 +22,28 @@ use super::directives::{
     KNOWN_FIELD_DIRECTIVES, KNOWN_TYPE_DIRECTIVES,
 };
 use super::warnings::{DirectiveLocation, ParseOutput, ParseWarning};
+use regex::Regex;
+
+/// Placeholder field name used to make empty types parseable.
+/// graphql_parser requires at least one field per type, but Go DefraDB allows empty types.
+const EMPTY_TYPE_PLACEHOLDER: &str = "__defradb_empty_type_placeholder__";
+
+/// Preprocess SDL to handle empty type definitions.
+/// graphql_parser doesn't allow empty types, so we insert a placeholder field.
+fn preprocess_empty_types(sdl: &str) -> String {
+    // Match patterns like `type Name @directive(...)* {}` or `type Name {}`
+    // This regex finds `{` followed by optional whitespace then `}` in type definitions
+    let re = Regex::new(r"(\btype\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
+
+    re.replace_all(sdl, |caps: &regex::Captures| {
+        format!(
+            "{}{{ {}: String }}",
+            &caps[1],
+            EMPTY_TYPE_PLACEHOLDER
+        )
+    })
+    .to_string()
+}
 
 /// Convert a GraphQL schema Value to a serde_json Value
 fn graphql_schema_value_to_json(
@@ -85,12 +107,25 @@ struct ParsedTypeDef {
 }
 
 /// Type-level directives
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ParsedTypeDirectives {
     indexes: Vec<CompositeIndex>,
+    /// Default true for collections (Go compatibility)
     is_materialized: bool,
     is_branchable: bool,
     policy: Option<PolicyConfig>,
+}
+
+impl Default for ParsedTypeDirectives {
+    fn default() -> Self {
+        Self {
+            indexes: Vec::new(),
+            // Go defaults IsMaterialized to true for regular collections
+            is_materialized: true,
+            is_branchable: false,
+            policy: None,
+        }
+    }
 }
 
 /// Policy configuration from @policy directive
@@ -150,8 +185,11 @@ impl<'a> SdlParser<'a> {
             });
         }
 
-        let doc: Document<'_, String> =
-            graphql_parser::parse_schema(self.sdl).map_err(|e| QueryError::parse(e.to_string()))?;
+        // Preprocess SDL to handle empty type definitions (Go compatibility)
+        let preprocessed = preprocess_empty_types(self.sdl);
+
+        let doc: Document<'_, String> = graphql_parser::parse_schema(&preprocessed)
+            .map_err(|e| QueryError::parse(e.to_string()))?;
 
         // First pass: collect all type definitions
         for def in &doc.definitions {
@@ -184,6 +222,10 @@ impl<'a> SdlParser<'a> {
         let mut fields = Vec::new();
 
         for field in &obj.fields {
+            // Skip placeholder fields used for empty type preprocessing
+            if field.name == EMPTY_TYPE_PLACEHOLDER {
+                continue;
+            }
             let parsed_field = self.parse_field(field)?;
             fields.push(parsed_field);
         }

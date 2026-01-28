@@ -72,6 +72,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                      Send the request with Accept: text/event-stream header.",
                 ))
             }
+            ParsedOperation::Introspection { query } => {
+                // Introspection queries are executed against the GraphQL schema
+                self.execute_introspection(&query).await
+            }
         };
 
         match result {
@@ -181,6 +185,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     "Subscriptions must be executed via Server-Sent Events (SSE). \
                      Send the request with Accept: text/event-stream header.",
                 ))
+            }
+            ParsedOperation::Introspection { query } => {
+                // Introspection queries are executed against the GraphQL schema
+                self.execute_introspection(&query).await
             }
         };
 

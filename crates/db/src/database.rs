@@ -1111,7 +1111,7 @@ impl<S: Store> DB<S> {
 
                 // Strip collection name prefix from path if present (Go compatibility)
                 let path = raw_path.map(|p| {
-                    if p.starts_with(&collection_prefix) {
+                    let stripped = if p.starts_with(&collection_prefix) {
                         format!("/{}", &p[collection_prefix.len()..])
                     } else {
                         // Path doesn't have expected prefix - log for debugging
@@ -1121,7 +1121,10 @@ impl<S: Store> DB<S> {
                             "Patch path does not have collection prefix, using as-is"
                         );
                         p.to_string()
-                    }
+                    };
+
+                    // Go compatibility: substitute field names for indices in /Fields/<name> paths
+                    Self::substitute_field_name_in_path(&stripped, &schema_json)
                 });
 
                 match (operation, path.as_deref()) {
@@ -1167,6 +1170,119 @@ impl<S: Store> DB<S> {
                     (Some("remove"), Some(path)) => {
                         Self::json_pointer_remove(&mut schema_json, path)?;
                     }
+                    (Some("test"), Some(path)) => {
+                        // RFC 6902 "test" operation: verify value at path equals expected
+                        let expected_value = value
+                            .ok_or_else(|| {
+                                Error::InvalidPatch(format!(
+                                    "missing 'value' for test operation at {}",
+                                    path
+                                ))
+                            })?
+                            .clone();
+
+                        // Get the actual value at the path
+                        let actual_value = Self::json_pointer_get(&schema_json, path);
+
+                        // Compare: if path doesn't exist or values don't match, test fails
+                        match actual_value {
+                            Some(actual) if actual == expected_value => {
+                                // Test passes - continue to next operation
+                            }
+                            _ => {
+                                // Test fails - return error in Go-compatible format
+                                return Err(Error::InvalidPatch("test failed".to_string()));
+                            }
+                        }
+                    }
+                    (Some("copy"), Some(path)) => {
+                        // RFC 6902 "copy" operation: copy value from "from" to "path"
+                        let from_path = op
+                            .get("from")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                Error::InvalidPatch(format!(
+                                    "missing 'from' for copy operation at {}",
+                                    path
+                                ))
+                            })?;
+
+                        // Go compatibility: copying collection-level is not supported
+                        // This includes copying to root "/" or to paths that would create new collections
+                        // Detect by checking if path doesn't contain /Fields (field-level operations)
+                        if path == "/" || (!path.contains("/Fields") && !path.contains("/Name") && !path.contains("/IsActive")) {
+                            // Extract the target name from the raw path for the error message
+                            let target_name = raw_path
+                                .and_then(|p| {
+                                    let p = p.trim_start_matches('/');
+                                    p.split('/').next()
+                                })
+                                .unwrap_or("Unknown");
+                            return Err(Error::InvalidPatch(format!(
+                                "adding collections via patch is not supported. Name: {}",
+                                target_name
+                            )));
+                        }
+
+                        // Substitute field names in from path too
+                        let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
+                        // Strip collection prefix from "from" path if present
+                        let from_path = if from_path.starts_with(&collection_prefix) {
+                            format!("/{}", &from_path[collection_prefix.len()..])
+                        } else {
+                            from_path
+                        };
+
+                        // Get the value to copy
+                        let value_to_copy =
+                            Self::json_pointer_get(&schema_json, &from_path).ok_or_else(|| {
+                                Error::InvalidPatch(format!("path not found: {}", from_path))
+                            })?;
+
+                        // Set at destination
+                        Self::json_pointer_set(&mut schema_json, path, value_to_copy)?;
+                    }
+                    (Some("move"), Some(path)) => {
+                        // RFC 6902 "move" operation: move value from "from" to "path"
+                        let from_path = op
+                            .get("from")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                Error::InvalidPatch(format!(
+                                    "missing 'from' for move operation at {}",
+                                    path
+                                ))
+                            })?;
+
+                        // Go compatibility: moving at collection-level is a no-op
+                        // This includes moving to root "/" or paths that would move entire collections
+                        // Detect by checking if path doesn't contain /Fields (field-level operations)
+                        if path == "/" || (!path.contains("/Fields") && !path.contains("/Name") && !path.contains("/IsActive")) {
+                            // Skip this operation - collection-level moves are no-ops
+                            continue;
+                        }
+
+                        // Substitute field names in from path too
+                        let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
+                        // Strip collection prefix from "from" path if present
+                        let from_path = if from_path.starts_with(&collection_prefix) {
+                            format!("/{}", &from_path[collection_prefix.len()..])
+                        } else {
+                            from_path
+                        };
+
+                        // Get the value to move
+                        let value_to_move =
+                            Self::json_pointer_get(&schema_json, &from_path).ok_or_else(|| {
+                                Error::InvalidPatch(format!("path not found: {}", from_path))
+                            })?;
+
+                        // Remove from source first
+                        Self::json_pointer_remove(&mut schema_json, &from_path)?;
+
+                        // Set at destination
+                        Self::json_pointer_set(&mut schema_json, path, value_to_move)?;
+                    }
                     _ => {
                         return Err(Error::InvalidPatch(format!(
                             "unsupported or invalid patch operation: {:?}",
@@ -1181,12 +1297,72 @@ impl<S: Store> DB<S> {
             ));
         }
 
+        // Go compatibility: auto-generate FieldID for any fields missing one
+        // This handles cases where FieldID is removed (e.g., after copy operation)
+        if let Some(fields) = schema_json.get_mut("Fields").and_then(|f| f.as_array_mut()) {
+            // Find max existing FieldID
+            let max_field_id: u64 = fields
+                .iter()
+                .filter_map(|f| f.get("FieldID"))
+                .filter_map(|id| {
+                    id.as_str()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .or_else(|| id.as_u64())
+                })
+                .max()
+                .unwrap_or(0);
+
+            let mut next_id = max_field_id + 1;
+            for field in fields.iter_mut() {
+                if let serde_json::Value::Object(ref mut map) = field {
+                    if !map.contains_key("FieldID") || map.get("FieldID") == Some(&serde_json::Value::Null) {
+                        map.insert("FieldID".to_string(), next_id.to_string().into());
+                        next_id += 1;
+                    }
+                }
+            }
+        }
+
         // Deserialize back to CollectionVersion
         let mut new_schema: CollectionVersion = serde_json::from_value(schema_json)
             .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
 
         // Validate the new schema
         new_schema.validate()?;
+
+        // Go compatibility: validate that existing fields haven't moved positions
+        // Build a map of old field names to indices
+        let old_field_indices: std::collections::HashMap<&str, usize> = old_schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.as_str(), i))
+            .collect();
+
+        // Check if any old fields are now at different indices
+        let mut field_move_errors: Vec<String> = Vec::new();
+        for (new_idx, field) in new_schema.fields.iter().enumerate() {
+            if let Some(&old_idx) = old_field_indices.get(field.name.as_str()) {
+                if new_idx != old_idx {
+                    field_move_errors.push(format!(
+                        "moving fields is not currently supported. Name: {}, ProposedIndex: {}, ExistingIndex: {}",
+                        field.name, new_idx, old_idx
+                    ));
+                }
+            }
+        }
+
+        // Check for duplicate fields
+        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for field in &new_schema.fields {
+            if !seen_names.insert(field.name.as_str()) {
+                field_move_errors.push(format!("duplicate field. Name: {}", field.name));
+            }
+        }
+
+        if !field_move_errors.is_empty() {
+            return Err(Error::InvalidPatch(field_move_errors.join("\n")));
+        }
 
         // Generate new version_id from the new schema content (CID)
         let new_version_id = Self::generate_schema_version_id(&new_schema);
@@ -1469,6 +1645,82 @@ impl<S: Store> DB<S> {
         }
 
         Err(Error::InvalidPatch("failed to remove value".to_string()))
+    }
+
+    /// Helper: Get a value at a JSON pointer path (for test operation).
+    fn json_pointer_get(json: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return None;
+        }
+
+        let mut current = json;
+        for segment in segments.iter() {
+            match current {
+                serde_json::Value::Object(map) => {
+                    current = map.get(*segment)?;
+                }
+                serde_json::Value::Array(arr) => {
+                    let idx: usize = segment.parse().ok()?;
+                    current = arr.get(idx)?;
+                }
+                _ => return None,
+            }
+        }
+        Some(current.clone())
+    }
+
+    /// Helper: Substitute field names for indices in paths like /Fields/<name>
+    /// Go DefraDB allows using field names as array indices in patches.
+    fn substitute_field_name_in_path(path: &str, schema_json: &serde_json::Value) -> String {
+        // Check if path contains /Fields/ followed by a non-numeric segment
+        if !path.contains("/Fields/") {
+            return path.to_string();
+        }
+
+        let segments: Vec<&str> = path.split('/').collect();
+        let mut result_segments: Vec<String> = Vec::new();
+
+        let mut i = 0;
+        while i < segments.len() {
+            let segment = segments[i];
+
+            if segment == "Fields" && i + 1 < segments.len() {
+                result_segments.push("Fields".to_string());
+                i += 1;
+
+                let next_segment = segments[i];
+                // Check if next segment is a number (already an index)
+                if next_segment.parse::<usize>().is_ok() || next_segment == "-" {
+                    result_segments.push(next_segment.to_string());
+                } else {
+                    // It's a field name - look up the index
+                    if let Some(fields) = schema_json.get("Fields").and_then(|f| f.as_array()) {
+                        let mut found = false;
+                        for (idx, field) in fields.iter().enumerate() {
+                            if let Some(name) = field.get("Name").and_then(|n| n.as_str()) {
+                                if name == next_segment {
+                                    result_segments.push(idx.to_string());
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !found {
+                            // Field name not found, keep as-is (will error later)
+                            result_segments.push(next_segment.to_string());
+                        }
+                    } else {
+                        result_segments.push(next_segment.to_string());
+                    }
+                }
+            } else {
+                result_segments.push(segment.to_string());
+            }
+            i += 1;
+        }
+
+        result_segments.join("/")
     }
 
     /// Extract a Merkle proof from the blockstore.
