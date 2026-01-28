@@ -204,6 +204,38 @@ impl PlanNode for IndexScanNode {
     }
 
     fn kind(&self) -> &'static str {
-        "indexScanNode"
+        // Use "scanNode" for explain compatibility with Go DefraDB asserter.
+        // The index-specific info (indexName) distinguishes this from a regular scan.
+        "scanNode"
+    }
+
+    fn explain_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // Go DefraDB uses "collectionName" and "collectionID"
+        obj.insert(
+            "collectionName".to_string(),
+            serde_json::Value::String(self.collection.name.clone()),
+        );
+        obj.insert(
+            "collectionID".to_string(),
+            serde_json::Value::String(self.collection.collection_id.clone()),
+        );
+
+        // Index-specific info - presence of indexName indicates this is an index scan
+        obj.insert(
+            "indexName".to_string(),
+            serde_json::Value::String(self.index_params.index_name.clone()),
+        );
+
+        if let Some(ref filter) = self.residual_filter {
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        }
+
+        if self.show_deleted {
+            obj.insert("showDeleted".to_string(), serde_json::Value::Bool(true));
+        }
+
+        serde_json::Value::Object(obj)
     }
 }

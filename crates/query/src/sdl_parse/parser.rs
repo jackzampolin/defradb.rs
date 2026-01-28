@@ -411,7 +411,14 @@ impl<'a> SdlParser<'a> {
 
             match name {
                 "index" => {
-                    let fields = get_directive_string_list(directive, "fields");
+                    // Try "fields" argument first (simple format: ["name", "age"])
+                    let mut fields = get_directive_string_list(directive, "fields");
+
+                    // If "fields" is empty, try "includes" argument (Go format: [{field: "name"}, ...])
+                    if fields.is_empty() {
+                        fields = self.parse_includes_argument(directive);
+                    }
+
                     let idx_name = get_directive_string(directive, "name");
                     let unique = self
                         .get_bool_with_warning(directive, "unique", &type_name, None)
@@ -488,6 +495,37 @@ impl<'a> SdlParser<'a> {
             unique,
             direction,
         })
+    }
+
+    /// Parse the `includes` argument for composite indexes.
+    ///
+    /// Go format: `@index(includes: [{field: "name"}, {field: "numbers"}, {field: "age"}])`
+    /// Returns the list of field names extracted from the objects.
+    fn parse_includes_argument(&self, directive: &Directive<'_, String>) -> Vec<String> {
+        let Some(value) = get_directive_arg(directive, "includes") else {
+            return Vec::new();
+        };
+
+        let graphql_parser::schema::Value::List(items) = value else {
+            return Vec::new();
+        };
+
+        items
+            .iter()
+            .filter_map(|item| {
+                // Each item should be an object like {field: "name"}
+                let graphql_parser::schema::Value::Object(obj) = item else {
+                    return None;
+                };
+
+                // Find the "field" key and extract its string value
+                obj.get("field").and_then(|v| match v {
+                    graphql_parser::schema::Value::String(s)
+                    | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
     }
 
     fn parse_default_directive(

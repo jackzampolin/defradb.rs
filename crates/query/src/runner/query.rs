@@ -113,6 +113,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let selects = parse_query_with_variables(query, variables)?;
 
         let mut explain_result = Map::new();
+        let mut operation_nodes: Vec<JsonValue> = Vec::new();
         let mut total_executions: u64 = 0;
         let mut total_docs: usize = 0;
         let mut execution_success = true;
@@ -125,12 +126,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .await
             {
                 Ok((explanation, doc_count, exec_count)) => {
-                    // Merge the plan tree into explain result (Go format)
+                    // Wrap the plan tree in selectTopNode (Go format)
+                    let mut select_top_node = Map::new();
                     if let Some(obj) = explanation.as_object() {
                         for (key, value) in obj {
-                            explain_result.insert(key.clone(), value.clone());
+                            select_top_node.insert(key.clone(), value.clone());
                         }
                     }
+
+                    let mut operation_node = Map::new();
+                    operation_node.insert(
+                        "selectTopNode".to_string(),
+                        JsonValue::Object(select_top_node),
+                    );
+                    operation_nodes.push(JsonValue::Object(operation_node));
+
                     total_docs += doc_count;
                     total_executions += exec_count;
                 }
@@ -151,6 +161,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             serde_json::json!(total_executions),
         );
         explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
+        explain_result.insert(
+            "operationNode".to_string(),
+            JsonValue::Array(operation_nodes),
+        );
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -228,7 +242,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.close().await?;
 
             let explanation = plan.explain();
-            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+            // fieldCount = user fields accessed per document (exclude _docID)
+            // Go counts only user-defined fields, not the system _docID field
+            let field_count = collection.fields.len().saturating_sub(1);
+            let explanation =
+                Self::add_iterations_to_explain(explanation, iterations, doc_count, field_count);
 
             Ok((explanation, result_count, iterations))
         } else {
@@ -285,29 +303,61 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.close().await?;
 
             let explanation = plan.explain();
-            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+            // fieldCount = user fields accessed per document (exclude _docID)
+            // Go counts only user-defined fields, not the system _docID field
+            let field_count = collection.fields.len().saturating_sub(1);
+            let explanation =
+                Self::add_iterations_to_explain(explanation, iterations, doc_count, field_count);
 
             Ok((explanation, result_count, iterations))
         }
     }
 
     /// Add execution metrics to the explain output (Go format).
+    /// Metrics are added to the scanNode, not the selectNode.
     fn add_iterations_to_explain(
         mut explanation: JsonValue,
         iterations: u64,
         doc_fetches: usize,
+        field_count: usize,
     ) -> JsonValue {
-        // The explanation is { "nodeKind": { ... } }
-        // We need to add iterations to the inner object
-        if let Some(obj) = explanation.as_object_mut() {
-            if let Some((_, inner)) = obj.iter_mut().next() {
-                if let Some(inner_obj) = inner.as_object_mut() {
-                    inner_obj.insert("iterations".to_string(), serde_json::json!(iterations));
-                    inner_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+        // The explanation is { "selectNode": { "scanNode": { ... } } }
+        // We need to add metrics to the scanNode
+        Self::add_metrics_to_scan_node(&mut explanation, iterations, doc_fetches, field_count);
+        explanation
+    }
+
+    /// Recursively find and add metrics to scanNode.
+    /// If the scanNode has an indexName field, it's an index scan and gets indexFetches.
+    fn add_metrics_to_scan_node(
+        value: &mut JsonValue,
+        iterations: u64,
+        doc_fetches: usize,
+        field_count: usize,
+    ) {
+        if let Some(obj) = value.as_object_mut() {
+            // Check if this object contains scanNode
+            if let Some(scan_node) = obj.get_mut("scanNode") {
+                if let Some(scan_obj) = scan_node.as_object_mut() {
+                    scan_obj.insert("iterations".to_string(), serde_json::json!(iterations));
+                    scan_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+                    // fieldFetches = number of fields per doc * number of docs fetched
+                    let field_fetches = field_count * doc_fetches;
+                    scan_obj.insert("fieldFetches".to_string(), serde_json::json!(field_fetches));
+
+                    // If this scanNode has an indexName, it's an index scan - add indexFetches
+                    if scan_obj.contains_key("indexName") {
+                        scan_obj.insert("indexFetches".to_string(), serde_json::json!(iterations));
+                    }
+                    return;
                 }
             }
+
+            // Recurse into child objects
+            for (_, child) in obj.iter_mut() {
+                Self::add_metrics_to_scan_node(child, iterations, doc_fetches, field_count);
+            }
         }
-        explanation
     }
 
     /// Generate an explanation of a single Select operation.
