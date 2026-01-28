@@ -1323,14 +1323,20 @@ impl<S: Store> DB<S> {
             }
         }
 
-        // Deserialize back to CollectionVersion
-        let mut new_schema: CollectionVersion = serde_json::from_value(schema_json)
-            .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
+        // Go compatibility: check for empty collection name before deserialization
+        let name_value = schema_json.get("Name");
+        match name_value {
+            None | Some(serde_json::Value::Null) => {
+                return Err(Error::InvalidPatch("collection name can't be empty".to_string()));
+            }
+            Some(serde_json::Value::String(s)) if s.is_empty() => {
+                return Err(Error::InvalidPatch("collection name can't be empty".to_string()));
+            }
+            _ => {}
+        }
 
-        // Validate the new schema
-        new_schema.validate()?;
-
-        // Go compatibility: validate that existing fields haven't moved positions
+        // Go compatibility: validate field movements and duplicates BEFORE deserialization
+        // This must happen before schema.validate() which would also catch duplicates
         // Build a map of old field names to indices
         let old_field_indices: std::collections::HashMap<&str, usize> = old_schema
             .fields
@@ -1339,30 +1345,44 @@ impl<S: Store> DB<S> {
             .map(|(i, f)| (f.name.as_str(), i))
             .collect();
 
-        // Check if any old fields are now at different indices
+        // Extract field names and indices from the JSON schema
         let mut field_move_errors: Vec<String> = Vec::new();
-        for (new_idx, field) in new_schema.fields.iter().enumerate() {
-            if let Some(&old_idx) = old_field_indices.get(field.name.as_str()) {
-                if new_idx != old_idx {
-                    field_move_errors.push(format!(
-                        "moving fields is not currently supported. Name: {}, ProposedIndex: {}, ExistingIndex: {}",
-                        field.name, new_idx, old_idx
-                    ));
+        if let Some(fields_array) = schema_json.get("Fields").and_then(|f| f.as_array()) {
+            // Check if any old fields are now at different indices
+            for (new_idx, field_json) in fields_array.iter().enumerate() {
+                if let Some(field_name) = field_json.get("Name").and_then(|n| n.as_str()) {
+                    if let Some(&old_idx) = old_field_indices.get(field_name) {
+                        if new_idx != old_idx {
+                            field_move_errors.push(format!(
+                                "moving fields is not currently supported. Name: {}, ProposedIndex: {}, ExistingIndex: {}",
+                                field_name, new_idx, old_idx
+                            ));
+                        }
+                    }
                 }
             }
-        }
 
-        // Check for duplicate fields
-        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for field in &new_schema.fields {
-            if !seen_names.insert(field.name.as_str()) {
-                field_move_errors.push(format!("duplicate field. Name: {}", field.name));
+            // Check for duplicate fields
+            let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for field_json in fields_array {
+                if let Some(field_name) = field_json.get("Name").and_then(|n| n.as_str()) {
+                    if !seen_names.insert(field_name) {
+                        field_move_errors.push(format!("duplicate field. Name: {}", field_name));
+                    }
+                }
             }
         }
 
         if !field_move_errors.is_empty() {
             return Err(Error::InvalidPatch(field_move_errors.join("\n")));
         }
+
+        // Deserialize back to CollectionVersion
+        let mut new_schema: CollectionVersion = serde_json::from_value(schema_json)
+            .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
+
+        // Validate the new schema
+        new_schema.validate()?;
 
         // Generate new version_id from the new schema content (CID)
         let new_version_id = Self::generate_schema_version_id(&new_schema);
