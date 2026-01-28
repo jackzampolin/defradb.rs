@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::Store;
-use tokio::sync::Mutex as TokioMutex;
+use async_lock::Mutex as TokioMutex;
 
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
