@@ -8,12 +8,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cid::Cid;
-use crdt::traits::{Context, ReplicatedData};
-use crdt::{Lww, LwwDelta};
+use crdt::traits::{Context, ReplicatedData, ValueReader};
+use crdt::{Counter, CounterDelta, Lww, LwwDelta, NumericKind};
 use datastore::NamespaceView;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
+use schema;
 use events::{Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
 use storage::corekv::Store;
@@ -55,6 +56,15 @@ struct LwwMergeResult {
     /// Whether the merge was applied (vs rejected/skipped)
     applied: bool,
     /// The winning value for document reconstruction (if applied, use incoming; else read from store)
+    value: Option<NormalValue>,
+}
+
+/// Result of processing a Counter delta, including whether it was applied
+/// and the accumulated value for document reconstruction.
+struct CounterMergeResult {
+    /// Whether the merge was applied (vs skipped due to nonce)
+    applied: bool,
+    /// The accumulated counter value after merge
     value: Option<NormalValue>,
 }
 
@@ -426,12 +436,30 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             }
                         }
                         CrdtDelta::Counter(counter_payload) => {
-                            // Counter deltas are not yet supported - return error
-                            process_error = Some(MergeError::UnsupportedDelta(format!(
-                                "Counter CRDT merge not yet implemented for field '{}'",
-                                counter_payload.field_name
-                            )));
-                            break;
+                            // Process the Counter delta within our transaction
+                            match self
+                                .process_counter_delta_in_txn(
+                                    &mut datastore,
+                                    link_cid,
+                                    counter_payload,
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    if result.applied {
+                                        any_field_applied = true;
+                                    }
+                                    // Collect the accumulated value for document reconstruction
+                                    if let Some(value) = result.value {
+                                        field_values
+                                            .insert(counter_payload.field_name.clone(), value);
+                                    }
+                                }
+                                Err(e) => {
+                                    process_error = Some(e);
+                                    break;
+                                }
+                            }
                         }
                         other => {
                             tracing::error!(
@@ -542,7 +570,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
     }
 
-    /// Process a Counter delta from a block.
+    /// Process a Counter delta from a block (standalone, with its own transaction).
     async fn process_counter_delta(
         &self,
         cid: &Cid,
@@ -551,21 +579,296 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
-        tracing::error!(
+        tracing::debug!(
             cid = %cid,
             field_name = %payload.field_name,
             doc_id = %doc_id_str,
             priority = payload.priority,
             nonce = payload.nonce,
-            "Counter CRDT merge not yet implemented - rejecting block"
+            "Processing Counter delta"
         );
 
-        // Return an error instead of silently skipping
-        // This ensures callers know counter sync is not functional
-        Err(MergeError::UnsupportedDelta(format!(
-            "Counter CRDT merge not yet implemented for field '{}'",
-            payload.field_name
-        )))
+        // Look up the collection to determine field kind and counter type
+        let collection = self
+            .db
+            .find_collection_by_id(&payload.schema_version_id)?
+            .ok_or_else(|| {
+                MergeError::MissingMetadata(format!(
+                    "Collection not found for schema_version_id: {}",
+                    payload.schema_version_id
+                ))
+            })?;
+
+        // Get field definition to determine numeric kind and allow_decrement
+        let field = collection.schema().field_by_name(&payload.field_name).ok_or_else(|| {
+            MergeError::MissingMetadata(format!(
+                "Field '{}' not found in collection",
+                payload.field_name
+            ))
+        })?;
+
+        // Determine numeric kind from field type
+        let numeric_kind = self.get_numeric_kind_from_field(field)?;
+
+        // Determine if decrement is allowed (PnCounter allows, PCounter doesn't)
+        let allow_decrement = field.crdt_type.allows_decrement();
+
+        // Create a new transaction for this merge
+        let txn = self.db.new_txn(false).await?;
+
+        // Create the Counter CRDT
+        let counter = Counter::new(
+            payload.schema_version_id.clone(),
+            &payload.doc_id,
+            payload.field_name.clone(),
+            allow_decrement,
+            numeric_kind,
+        )
+        .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+
+        // Create the CounterDelta from payload
+        let delta = self.create_counter_delta(payload, numeric_kind)?;
+
+        // Create the context
+        let ctx = Context {
+            doc_id: DocId::new(&doc_id_str),
+            schema_version: payload.schema_version_id.clone(),
+        };
+
+        // Perform the merge in a scoped block
+        let result = {
+            let mut datastore = txn.datastore()?;
+            counter.merge(&mut datastore, &ctx, &delta).await
+        };
+
+        match result {
+            Ok(merge_result) => {
+                if merge_result.was_applied() {
+                    txn.force_commit().await?;
+                    tracing::info!(
+                        cid = %cid,
+                        field_name = %payload.field_name,
+                        doc_id = %doc_id_str,
+                        "Counter delta merged successfully"
+                    );
+                    Ok(MergeOutcome::Merged)
+                } else {
+                    // Skipped (nonce already applied)
+                    if let Err(e) = txn.force_discard() {
+                        tracing::error!(
+                            cid = %cid,
+                            error = %e,
+                            "Failed to discard transaction after skip"
+                        );
+                    }
+                    tracing::debug!(
+                        cid = %cid,
+                        field_name = %payload.field_name,
+                        "Counter delta skipped (nonce already applied)"
+                    );
+                    Ok(MergeOutcome::skipped("nonce already applied"))
+                }
+            }
+            Err(e) => {
+                if let Err(discard_err) = txn.force_discard() {
+                    tracing::error!(
+                        cid = %cid,
+                        discard_error = %discard_err,
+                        merge_error = %e,
+                        "Failed to discard transaction after merge error"
+                    );
+                }
+                Err(MergeError::MergeFailed(e.to_string()))
+            }
+        }
+    }
+
+    /// Process a Counter delta within an existing transaction, returning the merge result
+    /// and the accumulated value for document reconstruction.
+    async fn process_counter_delta_in_txn(
+        &self,
+        datastore: &mut NamespaceView,
+        cid: &Cid,
+        payload: &defra_core::block::CounterDeltaPayload,
+    ) -> std::result::Result<CounterMergeResult, MergeError> {
+        tracing::debug!(
+            cid = %cid,
+            field_name = %payload.field_name,
+            priority = payload.priority,
+            nonce = payload.nonce,
+            "Processing Counter delta in transaction"
+        );
+
+        // Look up the collection to determine field kind and counter type
+        let collection = self
+            .db
+            .find_collection_by_id(&payload.schema_version_id)?
+            .ok_or_else(|| {
+                MergeError::MissingMetadata(format!(
+                    "Collection not found for schema_version_id: {}",
+                    payload.schema_version_id
+                ))
+            })?;
+
+        // Get field definition
+        let field = collection.schema().field_by_name(&payload.field_name).ok_or_else(|| {
+            MergeError::MissingMetadata(format!(
+                "Field '{}' not found in collection",
+                payload.field_name
+            ))
+        })?;
+
+        // Determine numeric kind and allow_decrement
+        let numeric_kind = self.get_numeric_kind_from_field(field)?;
+        let allow_decrement = field.crdt_type.allows_decrement();
+
+        // Create the Counter CRDT
+        let counter = Counter::new(
+            payload.schema_version_id.clone(),
+            &payload.doc_id,
+            payload.field_name.clone(),
+            allow_decrement,
+            numeric_kind,
+        )
+        .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+
+        // Create the CounterDelta from payload
+        let delta = self.create_counter_delta(payload, numeric_kind)?;
+
+        // Create the context
+        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let ctx = Context {
+            doc_id: DocId::new(&doc_id_str),
+            schema_version: payload.schema_version_id.clone(),
+        };
+
+        // Perform the merge
+        let merge_result = counter
+            .merge(datastore, &ctx, &delta)
+            .await
+            .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+
+        // Read the accumulated value (counters always accumulate, so we always read current)
+        let value = match ValueReader::value(&counter, datastore).await {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    None
+                } else {
+                    // Convert raw bytes to NormalValue based on kind
+                    match numeric_kind {
+                        NumericKind::Int64 => {
+                            if bytes.len() == 8 {
+                                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                                Some(NormalValue::Int(i64::from_be_bytes(arr)))
+                            } else {
+                                tracing::warn!(
+                                    field_name = %payload.field_name,
+                                    "Invalid counter value length for Int64"
+                                );
+                                None
+                            }
+                        }
+                        NumericKind::Float64 => {
+                            if bytes.len() == 8 {
+                                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                                Some(NormalValue::Float64(f64::from_be_bytes(arr)))
+                            } else {
+                                tracing::warn!(
+                                    field_name = %payload.field_name,
+                                    "Invalid counter value length for Float64"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    field_name = %payload.field_name,
+                    error = %e,
+                    "Could not read counter value"
+                );
+                None
+            }
+        };
+
+        Ok(CounterMergeResult {
+            applied: merge_result.was_applied(),
+            value,
+        })
+    }
+
+    /// Determine numeric kind from field definition
+    fn get_numeric_kind_from_field(
+        &self,
+        field: &schema::FieldDescription,
+    ) -> std::result::Result<NumericKind, MergeError> {
+        use schema::FieldKind;
+
+        match &field.kind {
+            FieldKind::Scalar(scalar_kind) => {
+                use schema::ScalarKind;
+                match scalar_kind {
+                    ScalarKind::Int => Ok(NumericKind::Int64),
+                    ScalarKind::Float64 | ScalarKind::Float32 => Ok(NumericKind::Float64),
+                    other => Err(MergeError::UnsupportedDelta(format!(
+                        "Counter field '{}' has unsupported scalar kind: {:?}",
+                        field.name, other
+                    ))),
+                }
+            }
+            other => Err(MergeError::UnsupportedDelta(format!(
+                "Counter field '{}' has unsupported kind: {:?}",
+                field.name, other
+            ))),
+        }
+    }
+
+    /// Create a CounterDelta from the block payload
+    fn create_counter_delta(
+        &self,
+        payload: &defra_core::block::CounterDeltaPayload,
+        kind: NumericKind,
+    ) -> std::result::Result<CounterDelta, MergeError> {
+        // Go encodes counter data as CBOR. We need to decode it first.
+        // The payload.data contains CBOR-encoded i64 or f64
+        match kind {
+            NumericKind::Int64 => {
+                let increment: i64 = ciborium::from_reader(&payload.data[..]).map_err(|e| {
+                    MergeError::BlockDecode(format!(
+                        "Failed to decode Counter Int64 increment: {}",
+                        e
+                    ))
+                })?;
+                CounterDelta::new_int64(
+                    payload.doc_id.clone(),
+                    payload.field_name.clone(),
+                    payload.priority,
+                    payload.nonce,
+                    payload.schema_version_id.clone(),
+                    increment,
+                )
+                .map_err(|e| MergeError::MergeFailed(e.to_string()))
+            }
+            NumericKind::Float64 => {
+                let increment: f64 = ciborium::from_reader(&payload.data[..]).map_err(|e| {
+                    MergeError::BlockDecode(format!(
+                        "Failed to decode Counter Float64 increment: {}",
+                        e
+                    ))
+                })?;
+                CounterDelta::new_float64(
+                    payload.doc_id.clone(),
+                    payload.field_name.clone(),
+                    payload.priority,
+                    payload.nonce,
+                    payload.schema_version_id.clone(),
+                    increment,
+                )
+                .map_err(|e| MergeError::MergeFailed(e.to_string()))
+            }
+        }
     }
 }
 
