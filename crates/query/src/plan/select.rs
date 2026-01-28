@@ -94,8 +94,15 @@ impl PlanNode for SelectNode {
     fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
+        // Go DefraDB format: always include docID (null if not filtering by specific IDs)
+        // Note: SelectNode doesn't track docIDs directly; they're handled at query parsing level
+        obj.insert("docID".to_string(), serde_json::Value::Null);
+
+        // Go DefraDB format: always include filter (null if none)
         if let Some(ref filter) = self.filter {
             obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        } else {
+            obj.insert("filter".to_string(), serde_json::Value::Null);
         }
 
         // Recursively explain child node - merge their wrapped structure

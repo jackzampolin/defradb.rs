@@ -893,7 +893,53 @@ impl PlanNode for GroupByNode {
     }
 
     fn kind(&self) -> &'static str {
-        "groupByNode"
+        "groupNode"
+    }
+
+    fn explain_debug_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // For GroupBy, Go inserts a pipeNode between selectNode and scanNode
+        // The source chain is: groupNode -> selectNode -> scanNode
+        // But Go expects: groupNode -> selectNode -> pipeNode -> scanNode
+        if let Some(source) = self.source() {
+            let child_explain = source.explain_debug();
+            if let Some(child_obj) = child_explain.as_object() {
+                // Check if child is selectNode
+                if let Some(select_content) = child_obj.get("selectNode") {
+                    // Insert pipeNode wrapper around selectNode's child (scanNode)
+                    let mut modified_select = serde_json::Map::new();
+                    if let Some(select_obj) = select_content.as_object() {
+                        for (key, value) in select_obj {
+                            if key == "scanNode" {
+                                // Wrap scanNode in pipeNode
+                                let pipe_node = serde_json::json!({
+                                    "pipeNode": { "scanNode": value }
+                                });
+                                if let Some(pipe_obj) = pipe_node.as_object() {
+                                    for (pk, pv) in pipe_obj {
+                                        modified_select.insert(pk.clone(), pv.clone());
+                                    }
+                                }
+                            } else {
+                                modified_select.insert(key.clone(), value.clone());
+                            }
+                        }
+                    }
+                    obj.insert(
+                        "selectNode".to_string(),
+                        serde_json::Value::Object(modified_select),
+                    );
+                } else {
+                    // Not selectNode, just merge as-is
+                    for (key, value) in child_obj {
+                        obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+
+        serde_json::Value::Object(obj)
     }
 
     fn current_group_docs(&self) -> Option<&[Doc]> {
