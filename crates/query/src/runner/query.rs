@@ -481,6 +481,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
+        // Handle _commits system collection specially
+        if select.collection_name == "_commits" {
+            return self.explain_commits_select(select, explain_type);
+        }
+
         // Get collection schema
         let collection = self
             .collection_provider
@@ -599,6 +604,46 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For Simple/Execute mode, the SelectNode already has the attributes
         // from its explain_inner method, so return as-is
         explain
+    }
+
+    /// Generate an explanation for a _commits system collection query.
+    ///
+    /// Returns a dagScanNode structure matching Go's explain output for commits queries.
+    fn explain_commits_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
+        // Build the dagScanNode attributes
+        let mut dag_scan_attrs = serde_json::Map::new();
+
+        // cid: the specific commit CID if provided, else null
+        if let Some(ref cid) = select.cid {
+            dag_scan_attrs.insert("cid".to_string(), serde_json::json!(cid));
+        } else {
+            dag_scan_attrs.insert("cid".to_string(), serde_json::Value::Null);
+        }
+
+        // prefixes: array of storage prefixes being scanned
+        // Format: /d/<docID> for document-specific commits
+        let prefixes: Vec<String> = if let Some(ref doc_ids) = select.doc_ids {
+            doc_ids.iter().map(|id| format!("/d/{}", id)).collect()
+        } else {
+            vec![]
+        };
+        dag_scan_attrs.insert("prefixes".to_string(), serde_json::json!(prefixes));
+
+        // Build the selectNode wrapper (Go structure: selectNode -> dagScanNode)
+        let dag_scan_node = serde_json::json!({ "dagScanNode": dag_scan_attrs });
+
+        // For debug mode, include additional structure info
+        if matches!(explain_type, ExplainType::Debug) {
+            // Debug mode typically has more nested structure
+            Ok(serde_json::json!({
+                "selectNode": dag_scan_node
+            }))
+        } else {
+            // Simple mode: selectNode wraps dagScanNode
+            Ok(serde_json::json!({
+                "selectNode": dag_scan_node
+            }))
+        }
     }
 
     /// Execute a GraphQL query with a specific fetcher and identity.
