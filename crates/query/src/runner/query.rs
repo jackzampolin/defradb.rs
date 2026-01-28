@@ -731,6 +731,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                         if let Some(relation_data) = obj.get(relation_name) {
                             if let JsonValue::Array(items) = relation_data {
+                                // Array data: relation or inline array aggregate
                                 // Step 1: Apply filter to array elements
                                 let filtered_items: Vec<&JsonValue> =
                                     if let Some(ref filter) = target.filter {
@@ -837,6 +838,32 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                 }
                                                 total_count += 1;
                                             }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Scalar data: multi-field per-document aggregate
+                                // e.g., _avg(HeightM: {}, Age: {}) where HeightM is a scalar
+                                if let Some(n) = relation_data.as_f64() {
+                                    match agg_type {
+                                        AggregateType::Count => {
+                                            total_count += 1;
+                                        }
+                                        AggregateType::Sum | AggregateType::Average => {
+                                            total_value += n;
+                                            total_count += 1;
+                                        }
+                                        AggregateType::Min => {
+                                            if total_count == 0 || n < total_value {
+                                                total_value = n;
+                                            }
+                                            total_count += 1;
+                                        }
+                                        AggregateType::Max => {
+                                            if total_count == 0 || n > total_value {
+                                                total_value = n;
+                                            }
+                                            total_count += 1;
                                         }
                                     }
                                 }

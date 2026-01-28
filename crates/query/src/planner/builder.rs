@@ -13,9 +13,9 @@ use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupByNode, IndexScanNode, InnerAggregateDef, JoinSide,
-    LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode, SumNode,
-    TypeJoinMany, TypeJoinOne,
+    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode,
+    InnerAggregateDef, JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter,
+    ScanNode, SelectNode, SumNode, TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{filter_to_index_scan, select_best_index, IndexScanParams};
 use crate::planner::PlanNode;
@@ -210,23 +210,25 @@ impl Planner {
             render_mapping.clone()
         };
 
-        // Add _group field to scan_mapping if present in render_mapping.
+        // Add _group fields to scan_mapping if present in render_mapping.
         // _group is a virtual field (not in schema) that needs to be explicitly copied.
-        if let Some(group_index) = render_mapping.first_index_of_name("_group") {
-            let scan_index = scan_mapping.next_index();
-            scan_mapping.add(scan_index, "_group");
-            // Copy render_key from render_mapping
-            for rk in &render_mapping.render_keys {
-                if rk.key == "_group"
-                    || render_mapping.try_find_name_from_index(rk.index) == Some("_group")
-                {
-                    scan_mapping.add_render_key(scan_index, &rk.key);
-                    break;
+        // Multiple _group entries may exist when aliases are used (e.g., G1: _group(...), G2: _group(...)).
+        if let Some(group_indices) = render_mapping.indexes_of_name("_group") {
+            let group_indices = group_indices.to_vec();
+            for render_index in group_indices {
+                let scan_index = scan_mapping.next_index();
+                scan_mapping.add(scan_index, "_group");
+                // Copy the render_key for this specific _group entry
+                for rk in &render_mapping.render_keys {
+                    if rk.index == render_index {
+                        scan_mapping.add_render_key(scan_index, &rk.key);
+                        break;
+                    }
                 }
-            }
-            // Copy child mapping if present (for _group { field1, field2 } syntax)
-            if let Some(child) = render_mapping.child_at(group_index) {
-                scan_mapping.set_child_at(scan_index, child.clone());
+                // Copy child mapping if present (for _group { field1, field2 } syntax)
+                if let Some(child) = render_mapping.child_at(render_index) {
+                    scan_mapping.set_child_at(scan_index, child.clone());
+                }
             }
         }
 
@@ -371,6 +373,14 @@ impl Planner {
             } else {
                 Some(Filter::from_conditions(combined_conditions))
             }
+        };
+
+        // For grouped queries, strip _alias conditions from the pre-aggregation filter.
+        // Alias filters on aggregate fields must be applied AFTER aggregation.
+        let scalar_filter = if select.group_by.is_some() {
+            scalar_filter.and_then(|f| f.split_alias().0)
+        } else {
+            scalar_filter
         };
 
         // 1. Choose between IndexScanNode and ScanNode based on index availability
@@ -577,9 +587,17 @@ impl Planner {
         // that must be evaluated together on the merged document.
         if is_complex_filter {
             if let Some(ref filter) = select.filter {
-                plan = Box::new(
-                    SelectNode::new(plan, scan_mapping.clone()).with_filter(filter.clone()),
-                );
+                // For grouped queries, strip _alias from pre-aggregation filter
+                let pre_agg_filter = if select.group_by.is_some() {
+                    filter.split_alias().0
+                } else {
+                    Some(filter.clone())
+                };
+                if let Some(f) = pre_agg_filter {
+                    plan = Box::new(
+                        SelectNode::new(plan, scan_mapping.clone()).with_filter(f),
+                    );
+                }
             }
         }
 
@@ -595,65 +613,157 @@ impl Planner {
                 let mut group_node = GroupByNode::new(plan, group_by.clone(), scan_mapping.clone())
                     .with_collection_name(select.collection_name.clone());
 
-                // Extract _group child's limit/filter/order from the nested Select
-                // Also extract inner aggregate definitions for nested group rendering
+                // Extract _group alias definitions and inner groupBy/aggregate info.
+                // Each _group reference (including aliases like G1: _group(limit: 1))
+                // gets its own GroupAlias with per-alias filter/limit/order/docIDs.
+                let group_indices = scan_mapping
+                    .indexes_of_name("_group")
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
+                let mut group_aliases = Vec::new();
+                let mut alias_count = 0;
+                let mut inner_extracted = false;
+
                 for field in &select.fields {
                     if let Requestable::Select(nested) = field {
                         if nested.field.name == "_group" {
-                            if let Some(ref limit) = nested.limit {
-                                group_node = group_node.with_group_limit(limit.clone());
-                            }
-                            if let Some(ref filter) = nested.filter {
-                                group_node = group_node.with_group_filter(filter.clone());
-                            }
-                            if let Some(ref order) = nested.order_by {
-                                group_node = group_node.with_group_order(order.clone());
-                            }
+                            let alias_index =
+                                group_indices.get(alias_count).copied().unwrap_or(0);
+                            alias_count += 1;
 
-                            // Extract inner groupBy fields from the nested _group
-                            if let Some(ref inner_group_by) = nested.group_by {
-                                group_node = group_node
-                                    .with_inner_group_by_fields(inner_group_by.fields.clone());
-                            }
+                            group_aliases.push(GroupAlias {
+                                index: alias_index,
+                                filter: nested.filter.clone(),
+                                limit: nested.limit.clone(),
+                                order: nested.order_by.clone(),
+                                doc_ids: nested.doc_ids.clone(),
+                            });
 
-                            // Extract inner aggregate definitions from the nested _group
-                            let mut inner_aggs = Vec::new();
-                            for inner_field in &nested.fields {
-                                if let Requestable::Aggregate(inner_agg) = inner_field {
-                                    // Get the target field index from the scan mapping
-                                    let field_index = if !inner_agg.targets.is_empty() {
-                                        if let Some(ref field_name) =
-                                            inner_agg.targets[0].field_name
-                                        {
-                                            scan_mapping
-                                                .first_index_of_name(field_name)
-                                                .unwrap_or(0)
+                            // Extract inner groupBy/aggregates from the first _group
+                            // that has a groupBy clause (only once)
+                            if !inner_extracted && nested.group_by.is_some() {
+                                inner_extracted = true;
+
+                                if let Some(ref inner_group_by) = nested.group_by {
+                                    group_node = group_node.with_inner_group_by_fields(
+                                        inner_group_by.fields.clone(),
+                                    );
+                                }
+
+                                // Extract inner aggregate definitions
+                                let mut inner_aggs = Vec::new();
+                                for inner_field in &nested.fields {
+                                    if let Requestable::Aggregate(inner_agg) = inner_field {
+                                        let field_index = if !inner_agg.targets.is_empty() {
+                                            if let Some(ref field_name) =
+                                                inner_agg.targets[0].field_name
+                                            {
+                                                scan_mapping
+                                                    .first_index_of_name(field_name)
+                                                    .unwrap_or(0)
+                                            } else {
+                                                0
+                                            }
                                         } else {
                                             0
+                                        };
+                                        inner_aggs.push(InnerAggregateDef {
+                                            aggregate_type: inner_agg.aggregate_type,
+                                            output_key: inner_agg.output_name().to_string(),
+                                            field_index,
+                                        });
+                                    }
+                                }
+                                if !inner_aggs.is_empty() {
+                                    group_node = group_node.with_inner_aggregates(inner_aggs);
+                                }
+
+                                // Extract inner _group filter/order (2nd nesting level)
+                                // and 3rd-level groupBy/aggregates
+                                for inner_field in &nested.fields {
+                                    if let Requestable::Select(inner_nested) = inner_field {
+                                        if inner_nested.field.name == "_group" {
+                                            if let Some(ref inner_filter) = inner_nested.filter {
+                                                group_node = group_node
+                                                    .with_inner_group_filter(inner_filter.clone());
+                                            }
+                                            if let Some(ref inner_order) = inner_nested.order_by {
+                                                group_node = group_node
+                                                    .with_inner_group_order(inner_order.clone());
+                                            }
+
+                                            // 3rd level: extract groupBy fields
+                                            if let Some(ref third_gb) = inner_nested.group_by {
+                                                group_node = group_node
+                                                    .with_third_level_group_by_fields(
+                                                        third_gb.fields.clone(),
+                                                    );
+                                            }
+
+                                            // 3rd level: extract aggregate definitions
+                                            let mut third_aggs = Vec::new();
+                                            for third_field in &inner_nested.fields {
+                                                if let Requestable::Aggregate(third_agg) =
+                                                    third_field
+                                                {
+                                                    let field_index =
+                                                        if !third_agg.targets.is_empty() {
+                                                            if let Some(ref field_name) =
+                                                                third_agg.targets[0].field_name
+                                                            {
+                                                                scan_mapping
+                                                                    .first_index_of_name(
+                                                                        field_name,
+                                                                    )
+                                                                    .unwrap_or(0)
+                                                            } else {
+                                                                0
+                                                            }
+                                                        } else {
+                                                            0
+                                                        };
+                                                    third_aggs.push(InnerAggregateDef {
+                                                        aggregate_type: third_agg.aggregate_type,
+                                                        output_key: third_agg
+                                                            .output_name()
+                                                            .to_string(),
+                                                        field_index,
+                                                    });
+                                                }
+                                            }
+                                            if !third_aggs.is_empty() {
+                                                group_node = group_node
+                                                    .with_third_level_aggregates(third_aggs);
+                                            }
+
+                                            break;
                                         }
-                                    } else {
-                                        0
-                                    };
-                                    inner_aggs.push(InnerAggregateDef {
-                                        aggregate_type: inner_agg.aggregate_type,
-                                        output_key: inner_agg.output_name().to_string(),
-                                        field_index,
-                                    });
+                                    }
                                 }
                             }
-                            if !inner_aggs.is_empty() {
-                                group_node = group_node.with_inner_aggregates(inner_aggs);
-                            }
-
-                            break;
                         }
                     }
+                }
+                if !group_aliases.is_empty() {
+                    group_node = group_node.with_group_aliases(group_aliases);
                 }
                 plan = Box::new(group_node);
             }
 
             // 5. Add aggregate nodes (after grouping)
             plan = self.add_aggregate_nodes(plan, select, &scan_mapping)?;
+
+            // 5b. Apply _alias filter AFTER aggregation
+            // Alias filters on aggregate fields (e.g., filter: {_alias: {Total: {_gt: 100}}})
+            // can only be evaluated after aggregate values have been computed.
+            if let Some(ref filter) = select.filter {
+                let (_non_alias, alias_filter) = filter.split_alias();
+                if let Some(alias_f) = alias_filter {
+                    plan = Box::new(
+                        SelectNode::new(plan, scan_mapping.clone()).with_filter(alias_f),
+                    );
+                }
+            }
 
             // 6. Apply order by (after grouping/aggregation)
             if let Some(ref order_by) = select.order_by {

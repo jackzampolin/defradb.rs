@@ -961,9 +961,54 @@ fn parse_order_value(
                 }
             }
         }
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            return parse_order_from_json(json_val);
+        }
         _ => return Err(QueryError::parse("order must be an object or array")),
     }
 
+    Ok(order_by)
+}
+
+/// Parse order from a resolved JSON variable value.
+fn parse_order_from_json(json: &JsonValue) -> Result<OrderBy> {
+    let mut order_by = OrderBy::new();
+    match json {
+        JsonValue::Object(obj) => {
+            for (field_name, dir_val) in obj {
+                if let Some(dir_str) = dir_val.as_str() {
+                    if let Some(direction) = OrderDirection::parse(dir_str) {
+                        order_by = order_by.with_condition(OrderCondition::new(field_name, direction));
+                    }
+                }
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                if let JsonValue::Object(obj) = item {
+                    for (field_name, dir_val) in obj {
+                        if let Some(dir_str) = dir_val.as_str() {
+                            if let Some(direction) = OrderDirection::parse(dir_str) {
+                                order_by = order_by.with_condition(OrderCondition::new(
+                                    field_name, direction,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => return Err(QueryError::parse("order variable must be an object or array")),
+    }
     Ok(order_by)
 }
 
@@ -1107,6 +1152,108 @@ fn parse_group_by_value(
     }
 }
 
+/// Parse an aggregate target from a GraphQL Object value.
+fn parse_aggregate_target_obj(
+    arg_name: &str,
+    obj: &BTreeMap<String, Value<'_, String>>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<AggregateTarget> {
+    let mut target = AggregateTarget::new(arg_name.to_string());
+    for (key, val) in obj {
+        match key.as_str() {
+            "field" => {
+                let field_name = match val {
+                    Value::String(s) => s.clone(),
+                    Value::Enum(s) => s.clone(),
+                    _ => {
+                        return Err(QueryError::parse(
+                            "field in relation aggregate must be a string",
+                        ))
+                    }
+                };
+                target.field_name = Some(field_name);
+            }
+            "filter" => {
+                let filter = parse_filter_value(val, variables)?;
+                target.filter = Some(filter);
+            }
+            "limit" => {
+                let limit_val = parse_int_value(val, variables)?;
+                target.limit = Some(Limit::new(Some(limit_val as u64), 0));
+            }
+            "offset" => {
+                let offset_val = parse_int_value(val, variables)?;
+                if let Some(ref mut limit) = target.limit {
+                    limit.offset = offset_val as u64;
+                } else {
+                    target.limit = Some(Limit::new(None, offset_val as u64));
+                }
+            }
+            "order" => {
+                let order = match val {
+                    Value::Enum(s) | Value::String(s) => {
+                        let direction = OrderDirection::parse(s).ok_or_else(|| {
+                            QueryError::parse(format!("invalid order direction: {}", s))
+                        })?;
+                        OrderBy::new().with_condition(OrderCondition::new("", direction))
+                    }
+                    _ => parse_order_value(val, variables)?,
+                };
+                target.order = Some(order);
+            }
+            _ => {}
+        }
+    }
+    Ok(target)
+}
+
+/// Parse an aggregate target from a resolved JSON variable value.
+fn parse_aggregate_target_from_json(
+    arg_name: &str,
+    json: &JsonValue,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<AggregateTarget> {
+    let mut target = AggregateTarget::new(arg_name.to_string());
+    if let JsonValue::Object(obj) = json {
+        for (key, val) in obj {
+            match key.as_str() {
+                "field" => {
+                    if let Some(s) = val.as_str() {
+                        target.field_name = Some(s.to_string());
+                    }
+                }
+                "filter" => {
+                    // Convert JSON filter to a Filter
+                    if let JsonValue::Object(filter_obj) = val {
+                        let conditions: HashMap<String, JsonValue> =
+                            filter_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        target.filter = Some(Filter::from_conditions(conditions));
+                    }
+                }
+                "limit" => {
+                    if let Some(n) = val.as_i64() {
+                        target.limit = Some(Limit::new(Some(n as u64), 0));
+                    }
+                }
+                "offset" => {
+                    if let Some(n) = val.as_i64() {
+                        if let Some(ref mut limit) = target.limit {
+                            limit.offset = n as u64;
+                        } else {
+                            target.limit = Some(Limit::new(None, n as u64));
+                        }
+                    }
+                }
+                "order" => {
+                    target.order = Some(parse_order_from_json(val)?);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(target)
+}
+
 /// Parse an aggregate field into an Aggregate.
 ///
 /// Handles aggregate functions like `_count`, `_sum(field: "age")`, etc.
@@ -1151,79 +1298,37 @@ fn parse_aggregate_field(
             }
             _ => {
                 // This might be a relation name argument like `books: {field: score}`
-                // Relation arguments take an object value with optional field, filter, limit, order
-                if let Value::Object(obj) = arg_value {
-                    let relation_name = arg_name.clone();
-                    let mut target = AggregateTarget::new(relation_name);
-
-                    // Parse the object to extract field, filter, limit, order
-                    for (key, val) in obj {
-                        match key.as_str() {
-                            "field" => {
-                                let field_name = match val {
-                                    Value::String(s) => s.clone(),
-                                    Value::Enum(s) => s.clone(),
-                                    _ => {
-                                        return Err(QueryError::parse(
-                                            "field in relation aggregate must be a string",
-                                        ))
-                                    }
-                                };
-                                target.field_name = Some(field_name);
-                            }
-                            "filter" => {
-                                // Parse filter condition
-                                let filter = parse_filter_value(val, variables)?;
-                                target.filter = Some(filter);
-                            }
-                            "limit" => {
-                                let limit_val = parse_int_value(val, variables)?;
-                                target.limit = Some(Limit::new(Some(limit_val as u64), 0));
-                            }
-                            "offset" => {
-                                // Offset is combined with limit
-                                let offset_val = parse_int_value(val, variables)?;
-                                if let Some(ref mut limit) = target.limit {
-                                    limit.offset = offset_val as u64;
-                                } else {
-                                    target.limit = Some(Limit::new(None, offset_val as u64));
-                                }
-                            }
-                            "order" => {
-                                // For inline array aggregates, order can be a bare
-                                // direction enum (e.g., `order: ASC`) rather than
-                                // the structured `order: {field: ASC}` used by queries.
-                                let order = match val {
-                                    Value::Enum(s) | Value::String(s) => {
-                                        let direction =
-                                            OrderDirection::parse(s).ok_or_else(|| {
-                                                QueryError::parse(format!(
-                                                    "invalid order direction: {}",
-                                                    s
-                                                ))
-                                            })?;
-                                        OrderBy::new().with_condition(OrderCondition::new(
-                                            "",
-                                            direction,
-                                        ))
-                                    }
-                                    _ => parse_order_value(val, variables)?,
-                                };
-                                target.order = Some(order);
-                            }
-                            _ => {
-                                // Unknown key in relation aggregate - ignore for compatibility
-                            }
-                        }
+                // Relation arguments take an object value with optional field, filter, limit, order.
+                // Also handle variables that resolve to objects.
+                match arg_value {
+                    Value::Object(obj) => {
+                        let target = parse_aggregate_target_obj(arg_name, obj, variables)?;
+                        relation_targets.push(target);
                     }
-
-                    relation_targets.push(target);
-                } else {
-                    return Err(QueryError::parse(format!(
-                        "unknown argument '{}' on aggregate '{}', expected an object value for relation aggregates",
-                        arg_name,
-                        agg_type.as_str()
-                    )));
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "Variable \"${}\" was not provided",
+                                name
+                            ))
+                        })?;
+                        let target =
+                            parse_aggregate_target_from_json(arg_name, json_val, variables)?;
+                        relation_targets.push(target);
+                    }
+                    _ => {
+                        return Err(QueryError::parse(format!(
+                            "unknown argument '{}' on aggregate '{}', expected an object value for relation aggregates",
+                            arg_name,
+                            agg_type.as_str()
+                        )));
+                    }
                 }
             }
         }
@@ -1291,6 +1396,25 @@ fn parse_top_level_aggregate(
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Select> {
     let mut aggregate = parse_aggregate_field(field, agg_type, variables)?;
+
+    // Top-level numeric aggregates require a field argument on each target.
+    // This matches Go's GraphQL schema validation where collection args require
+    // the "field" key (e.g., _avg(Users: {field: Age}) not _avg(Users: {})).
+    if agg_type != AggregateType::Count {
+        for target in &aggregate.targets {
+            if target.field_name.is_none() {
+                let type_name = format!(
+                    "{}NumericFieldsArg!",
+                    capitalize_first(&target.host_name)
+                );
+                return Err(QueryError::parse(format!(
+                    "Argument \"{}\" has invalid value {{}}.\nIn field \"field\": Expected \"{}\", found null.",
+                    target.host_name,
+                    type_name
+                )));
+            }
+        }
+    }
 
     // Set alias if provided
     if let Some(ref a) = field.alias {
@@ -1704,6 +1828,15 @@ fn parse_document_input(
         fields.insert(key.clone(), json_value);
     }
     Ok(fields)
+}
+
+/// Capitalize the first character of a string.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
