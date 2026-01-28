@@ -62,6 +62,8 @@ pub struct Mutation {
     pub mutation_type: MutationType,
     /// Target collection name
     pub collection_name: String,
+    /// Optional GraphQL alias for the mutation field
+    pub alias: Option<String>,
     /// For CREATE: Array of documents to create (each is a field-value map)
     pub create_input: Vec<HashMap<String, JsonValue>>,
     /// For UPDATE: Fields to update (patch)
@@ -82,6 +84,7 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Create,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
@@ -96,6 +99,7 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Update,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
@@ -110,6 +114,7 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Delete,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
@@ -124,12 +129,29 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Upsert,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
             filter: None,
             fields: Vec::new(),
             document_mapping: DocumentMapping::new(),
+        }
+    }
+
+    /// Get the output key for this mutation in the result JSON.
+    ///
+    /// Uses the alias if present, otherwise falls back to the default
+    /// `{operation}_{collection}` format (e.g., "create_Users").
+    pub fn output_key(&self) -> String {
+        if let Some(ref alias) = self.alias {
+            alias.clone()
+        } else {
+            format!(
+                "{}_{}",
+                self.mutation_type.as_prefix(),
+                self.collection_name
+            )
         }
     }
 
