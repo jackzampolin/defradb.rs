@@ -185,7 +185,9 @@ fn float64_to_json(f: f64) -> Result<serde_json::Value> {
     // Match Go's json.Marshal behavior: float64 values that are whole numbers
     // are serialized without a decimal point (e.g., float64(21.0) → "21").
     if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-        return Ok(serde_json::Value::Number(serde_json::Number::from(f as i64)));
+        return Ok(serde_json::Value::Number(serde_json::Number::from(
+            f as i64,
+        )));
     }
     serde_json::Number::from_f64(f)
         .map(serde_json::Value::Number)

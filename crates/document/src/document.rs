@@ -528,10 +528,14 @@ mod tests {
 
         // Verify the CBOR bytes match Go's JSON-type encoding
         let cbor_bytes = doc.to_cbor().expect("should encode");
-        let expected_cbor = "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
+        let expected_cbor =
+            "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
         let actual_cbor: String = cbor_bytes.iter().map(|b| format!("{:02x}", b)).collect();
 
-        assert_eq!(actual_cbor, expected_cbor, "CBOR should match Go's JSON-type encoding");
+        assert_eq!(
+            actual_cbor, expected_cbor,
+            "CBOR should match Go's JSON-type encoding"
+        );
         assert_eq!(
             cid_str, "bafkreigwbnjspcyc35aenffolbvrfoefk7ponl2mtcy7d7d6gcuyfedarq",
             "CID should match Go"
@@ -560,7 +564,8 @@ mod tests {
         // f9 5bd0            - float16(250.0)
         // 64 74726565        - text(4) "tree"
         // 65 6d61706c65      - text(5) "maple"
-        let expected_hex = "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
+        let expected_hex =
+            "a2646e616d65644a6f686e66637573746f6da263616765f95bd06474726565656d61706c65";
         let expected_bytes: Vec<u8> = (0..expected_hex.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&expected_hex[i..i + 2], 16).unwrap())

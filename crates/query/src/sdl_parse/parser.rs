@@ -990,10 +990,7 @@ impl<'a> SdlParser<'a> {
             std::collections::HashMap::new();
         for type_name in cycle_edges.keys() {
             let root = find_root(type_name, &mut component);
-            components
-                .entry(root)
-                .or_default()
-                .push(type_name.clone());
+            components.entry(root).or_default().push(type_name.clone());
         }
 
         // Build result: each type gets index within its component
