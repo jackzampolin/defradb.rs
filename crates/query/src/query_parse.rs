@@ -51,7 +51,11 @@ pub enum ParsedOperation {
         explain: Option<ExplainType>,
     },
     /// Mutation operations (CREATE, UPDATE, DELETE)
-    Mutation(Vec<Mutation>),
+    Mutation {
+        mutations: Vec<Mutation>,
+        /// Whether @explain directive was used and which type
+        explain: Option<ExplainType>,
+    },
     /// Subscription operations (single root field only per GraphQL spec)
     Subscription {
         /// The single select for the subscription.
@@ -172,7 +176,7 @@ fn parse_selection_to_selects<'a>(
 pub fn parse_query(query: &str) -> Result<Vec<Select>> {
     match parse_request(query)? {
         ParsedOperation::Query { selects, .. } => Ok(selects),
-        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+        ParsedOperation::Mutation { .. } => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_request() for mutations.",
         )),
         ParsedOperation::Subscription { .. } => Err(QueryError::parse(
@@ -221,7 +225,7 @@ pub fn parse_mutations_with_variables(
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Vec<Mutation>> {
     match parse_request_with_variables(query, variables, None)? {
-        ParsedOperation::Mutation(mutations) => Ok(mutations),
+        ParsedOperation::Mutation { mutations, .. } => Ok(mutations),
         ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
         ParsedOperation::Subscription { .. } => {
             Err(QueryError::parse("Expected mutation but got subscription"))
@@ -386,6 +390,10 @@ pub fn parse_request_with_variables(
                     }
                     OperationDefinition::Mutation(m) => {
                         has_mutation = true;
+                        // Check for @explain directive and parse type
+                        if let Some(explain_type) = parse_explain_directive(&m.directives) {
+                            explain = Some(explain_type);
+                        }
 
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&m.variable_definitions)?;
@@ -461,7 +469,7 @@ pub fn parse_request_with_variables(
             select: subscription_selects.into_iter().next().unwrap(),
         })
     } else if has_mutation {
-        Ok(ParsedOperation::Mutation(mutations))
+        Ok(ParsedOperation::Mutation { mutations, explain })
     } else {
         Ok(ParsedOperation::Query { selects, explain })
     }
@@ -2392,7 +2400,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
-            ParsedOperation::Mutation(mutations) => {
+            ParsedOperation::Mutation { mutations, .. } => {
                 assert_eq!(mutations.len(), 1);
                 let input = &mutations[0].create_input[0];
                 assert_eq!(input.get("name"), Some(&json!("Bob")));
@@ -2416,7 +2424,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
-            ParsedOperation::Mutation(mutations) => {
+            ParsedOperation::Mutation { mutations, .. } => {
                 assert_eq!(mutations[0].doc_ids, Some(vec!["bae-999".to_string()]));
             }
             _ => panic!("Expected mutation"),
@@ -2764,7 +2772,7 @@ mod variable_tests {
         // Don't provide the variable - should use default
         let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
-            ParsedOperation::Mutation(mutations) => {
+            ParsedOperation::Mutation { mutations, .. } => {
                 let input = &mutations[0].create_input;
                 assert_eq!(input[0].get("name"), Some(&json!("DefaultUser")));
             }

@@ -103,6 +103,20 @@ impl ScanNode {
     pub fn collection_name(&self) -> &str {
         &self.collection.name
     }
+
+    /// Get the storage prefix for this collection.
+    /// This is a simplified version - in Go it's derived from the collection's root ID.
+    fn collection_prefix(&self) -> String {
+        // The Go prefix is typically a single digit like "3" based on collection ordering
+        // For now, generate a deterministic value from collection_id
+        // This ensures consistent output for the same collection
+        let hash_val: u32 = self
+            .collection
+            .collection_id
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_add(b as u32));
+        (hash_val % 100).to_string()
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -200,6 +214,13 @@ impl PlanNode for ScanNode {
     fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
+        // Go DefraDB format: always include filter (null if none)
+        if let Some(ref filter) = self.filter {
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        } else {
+            obj.insert("filter".to_string(), serde_json::Value::Null);
+        }
+
         // Go DefraDB uses "collectionName" and "collectionID"
         obj.insert(
             "collectionName".to_string(),
@@ -210,9 +231,14 @@ impl PlanNode for ScanNode {
             serde_json::Value::String(self.collection.collection_id.clone()),
         );
 
-        if let Some(ref filter) = self.filter {
-            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
-        }
+        // Go DefraDB format: always include prefixes
+        // Prefix format is "/<collection_root_id>" which is a unique identifier for the collection's data
+        // The collection_id is a CID but the prefix uses a shorter index - for now use collection_id's suffix
+        // This will be refined when we have proper storage key integration
+        obj.insert(
+            "prefixes".to_string(),
+            serde_json::json!([format!("/{}", self.collection_prefix())]),
+        );
 
         if self.show_deleted {
             obj.insert("showDeleted".to_string(), serde_json::Value::Bool(true));

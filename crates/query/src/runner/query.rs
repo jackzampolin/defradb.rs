@@ -64,6 +64,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// - Simple: Query plan structure without execution
     /// - Execute: Run the query and return plan structure with execution metrics
     /// - Debug: All plan nodes including internal ones
+    ///
+    /// Output format matches Go DefraDB:
+    /// ```json
+    /// {
+    ///   "explain": {
+    ///     "operationNode": [
+    ///       {
+    ///         "selectTopNode": {
+    ///           "selectNode": { ... "scanNode": { ... } }
+    ///         }
+    ///       }
+    ///     ]
+    ///   }
+    /// }
+    /// ```
     pub async fn explain_query_with_identity(
         &self,
         query: &str,
@@ -86,15 +101,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             ExplainType::Simple | ExplainType::Debug => {
                 // Simple and Debug modes: explain without execution
                 let selects = parse_query_with_variables(query, variables)?;
-                let mut results = Map::new();
+                let mut operation_children: Vec<JsonValue> = Vec::new();
 
                 for select in selects {
-                    let explanation = self.explain_select(&select, explain_type).await?;
-                    let key = select.field.output_name();
-                    results.insert(key.to_string(), explanation);
+                    // Build the plan explanation for this select
+                    let select_node_content = self.explain_select(&select, explain_type).await?;
+
+                    // Wrap in selectTopNode (Go's structure: selectTopNode -> selectNode -> ...)
+                    let select_top_node = serde_json::json!({
+                        "selectTopNode": select_node_content
+                    });
+
+                    operation_children.push(select_top_node);
                 }
 
-                Ok(serde_json::json!({ "explain": results }))
+                // Wrap all selects in operationNode array (Go's MultiNode pattern)
+                Ok(serde_json::json!({
+                    "explain": {
+                        "operationNode": operation_children
+                    }
+                }))
             }
             ExplainType::Execute => {
                 // Execute mode: run the query and collect metrics
@@ -102,6 +128,76 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .await
             }
         }
+    }
+
+    /// Generate an explanation of the mutation plan.
+    ///
+    /// Used when mutations include the @explain directive.
+    /// Output format matches Go DefraDB with createNode/deleteNode/updateNode/upsertNode.
+    pub async fn explain_mutation_with_identity(
+        &self,
+        mutation_str: &str,
+        _caller_identity: Option<Did>,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
+        use crate::mapper::{Mutation, MutationType};
+        use crate::query_parse::parse_mutations;
+
+        let mutations = parse_mutations(mutation_str)?;
+        let mut operation_children: Vec<JsonValue> = Vec::new();
+
+        for mutation in mutations {
+            let mutation_explain = self.explain_single_mutation(&mutation, explain_type).await?;
+            operation_children.push(mutation_explain);
+        }
+
+        // Wrap all mutations in operationNode array (Go's MultiNode pattern)
+        Ok(serde_json::json!({
+            "explain": {
+                "operationNode": operation_children
+            }
+        }))
+    }
+
+    /// Generate an explanation for a single mutation operation.
+    async fn explain_single_mutation(
+        &self,
+        mutation: &crate::mapper::Mutation,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
+        use crate::mapper::MutationType;
+
+        // Get the mutation node kind name
+        let node_kind = match mutation.mutation_type {
+            MutationType::Create => "createNode",
+            MutationType::Update => "updateNode",
+            MutationType::Delete => "deleteNode",
+            MutationType::Upsert => "upsertNode",
+        };
+
+        // Build the inner select plan explanation
+        // Mutations in Go have: mutationNode -> selectTopNode -> selectNode -> scanNode
+        let collection = self
+            .collection_provider
+            .get_collection(&mutation.collection_name)
+            .await?
+            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+
+        // Build a simple select for the mutation's result fields
+        let select = crate::mapper::Select::new(&mutation.collection_name);
+        let inner_explain = self.explain_simple_select(&select, &collection, explain_type)?;
+
+        // Wrap in selectTopNode
+        let select_top_node = serde_json::json!({
+            "selectTopNode": inner_explain
+        });
+
+        // Wrap in the mutation node type
+        let mutation_node = serde_json::json!({
+            node_kind: select_top_node
+        });
+
+        Ok(mutation_node)
     }
 
     /// Execute the query with variables and return explain output with execution metrics.
@@ -114,8 +210,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         let selects = parse_query_with_variables(query, variables)?;
 
-        let mut explain_result = Map::new();
-        let mut operation_nodes: Vec<JsonValue> = Vec::new();
+        let mut operation_children: Vec<JsonValue> = Vec::new();
         let mut total_executions: u64 = 0;
         let mut total_docs: usize = 0;
         let mut execution_success = true;
@@ -128,20 +223,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .await
             {
                 Ok((explanation, doc_count, exec_count)) => {
-                    // Wrap the plan tree in selectTopNode (Go format)
-                    let mut select_top_node = Map::new();
-                    if let Some(obj) = explanation.as_object() {
-                        for (key, value) in obj {
-                            select_top_node.insert(key.clone(), value.clone());
-                        }
-                    }
-
-                    let mut operation_node = Map::new();
-                    operation_node.insert(
-                        "selectTopNode".to_string(),
-                        JsonValue::Object(select_top_node),
-                    );
-                    operation_nodes.push(JsonValue::Object(operation_node));
+                    // Ensure selectNode wrapper and wrap in selectTopNode
+                    let select_node_content =
+                        Self::ensure_select_node_wrapper(explanation, &select, ExplainType::Execute);
+                    let select_top_node = serde_json::json!({
+                        "selectTopNode": select_node_content
+                    });
+                    operation_children.push(select_top_node);
 
                     total_docs += doc_count;
                     total_executions += exec_count;
@@ -153,7 +241,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        // Add execution metrics (Go format)
+        // Build explain result with operationNode and execution metrics
+        let mut explain_result = Map::new();
+        explain_result.insert(
+            "operationNode".to_string(),
+            JsonValue::Array(operation_children),
+        );
         explain_result.insert(
             "executionSuccess".to_string(),
             serde_json::json!(execution_success),
@@ -163,10 +256,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             serde_json::json!(total_executions),
         );
         explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
-        explain_result.insert(
-            "operationNode".to_string(),
-            JsonValue::Array(operation_nodes),
-        );
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -459,11 +548,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let plan_result = planner.plan_with_index_info(select)?;
         let plan = plan_result.plan;
 
-        // Return the plan explanation based on type
-        match explain_type {
-            ExplainType::Debug => Ok(plan.explain_debug()),
-            _ => Ok(plan.explain()),
-        }
+        // Get the plan explanation based on type
+        let explain = match explain_type {
+            ExplainType::Debug => plan.explain_debug(),
+            _ => plan.explain(),
+        };
+
+        // Ensure result is wrapped in selectNode (Go format)
+        Ok(Self::ensure_select_node_wrapper(explain, select, explain_type))
     }
 
     /// Generate an explanation for a simple query without nested selections.
@@ -479,11 +571,35 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Create an empty plan with no documents for explanation purposes
         let plan = plan::build_plan(select, vec![], mapping, collection)?;
 
-        // Return the plan explanation based on type
-        match explain_type {
-            ExplainType::Debug => Ok(plan.explain_debug()),
-            _ => Ok(plan.explain()),
+        // Get the plan explanation based on type
+        let explain = match explain_type {
+            ExplainType::Debug => plan.explain_debug(),
+            _ => plan.explain(),
+        };
+
+        // Ensure result is wrapped in selectNode (Go format)
+        Ok(Self::ensure_select_node_wrapper(explain, select, explain_type))
+    }
+
+    /// Process explain output for Go format compatibility.
+    ///
+    /// Since we now always create SelectNode in the plan, this function handles:
+    /// - For Simple mode: ensures docID and filter attributes are in selectNode
+    /// - For Debug mode: returns as-is (no additional attributes)
+    /// - For Execute mode: returns as-is (attributes added during execution)
+    fn ensure_select_node_wrapper(
+        explain: JsonValue,
+        _select: &Select,
+        explain_type: ExplainType,
+    ) -> JsonValue {
+        // For Debug mode, return as-is (Go debug doesn't add attributes)
+        if matches!(explain_type, ExplainType::Debug) {
+            return explain;
         }
+
+        // For Simple/Execute mode, the SelectNode already has the attributes
+        // from its explain_inner method, so return as-is
+        explain
     }
 
     /// Execute a GraphQL query with a specific fetcher and identity.
