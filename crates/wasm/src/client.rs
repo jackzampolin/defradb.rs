@@ -135,6 +135,30 @@ impl DefraClient {
         self.get_collections_impl().map_err(|e| e.into())
     }
 
+    /// Persist pending data to OPFS.
+    ///
+    /// Call this to flush in-memory LevelDB data to the browser's
+    /// Origin Private File System. Without calling persist, data only
+    /// lives in memory and will be lost if the tab is closed.
+    ///
+    /// # Example
+    ///
+    /// ```javascript
+    /// // Persist on visibility change (tab going to background)
+    /// document.addEventListener('visibilitychange', () => {
+    ///     if (document.visibilityState === 'hidden') {
+    ///         client.persist();
+    ///     }
+    /// });
+    ///
+    /// // Or on a timer
+    /// setInterval(() => client.persist(), 10000);
+    /// ```
+    #[wasm_bindgen]
+    pub async fn persist(&self) -> std::result::Result<(), JsValue> {
+        self.persist_impl().await.map_err(|e| e.into())
+    }
+
     /// Close the client and release resources.
     ///
     /// After closing, the client cannot be used.
@@ -182,6 +206,14 @@ impl DefraClient {
         self.db.as_ref().ok_or(WasmError::NotInitialized)
     }
 
+    async fn persist_impl(&self) -> Result<()> {
+        let db = self.ensure_open()?;
+        db.store().persist().await.map_err(|e| {
+            WasmError::Storage(format!("Persist failed: {}", e))
+        })?;
+        Ok(())
+    }
+
     async fn add_schema_impl(&mut self, sdl: &str) -> Result<JsValue> {
         let db = self.ensure_open()?;
 
@@ -198,6 +230,9 @@ impl DefraClient {
                 .map_err(|e| WasmError::Schema(format!("Failed to create collection '{}': {}", name, e)))?;
             added.push(name);
         }
+
+        // Persist to OPFS so schema definitions survive page refresh
+        self.persist_impl().await?;
 
         to_js(&serde_json::json!({
             "collections_added": added,

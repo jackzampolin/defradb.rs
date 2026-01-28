@@ -283,6 +283,11 @@ impl<S: Store> DB<S> {
         self.store.close().await.map_err(Error::Storage)
     }
 
+    /// Get a reference to the underlying store.
+    pub fn store(&self) -> &Arc<S> {
+        &self.store
+    }
+
     /// Get the database options.
     pub fn options(&self) -> &DbOptions {
         &self.options
