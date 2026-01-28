@@ -345,19 +345,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut execution_errors: Vec<String> = Vec::new();
 
         for select in selects {
+            let is_top_level_aggregate = Self::is_top_level_aggregate(&select);
+
             // Execute the select and collect metrics
             match self
                 .execute_select_with_metrics(&select, caller_identity.clone())
                 .await
             {
                 Ok((explanation, doc_count, exec_count)) => {
-                    // Ensure selectNode wrapper and wrap in selectTopNode
+                    // Ensure selectNode wrapper
                     let select_node_content =
                         Self::ensure_select_node_wrapper(explanation, &select, ExplainType::Execute);
-                    let select_top_node = serde_json::json!({
-                        "selectTopNode": select_node_content
-                    });
-                    operation_children.push(select_top_node);
+
+                    if is_top_level_aggregate {
+                        // Top-level aggregates use topLevelNode wrapper
+                        let top_level_node = self.build_top_level_aggregate_explain(
+                            &select,
+                            select_node_content,
+                            ExplainType::Execute,
+                        );
+                        operation_children.push(top_level_node);
+                    } else {
+                        // Regular queries use selectTopNode wrapper
+                        let select_top_node = serde_json::json!({
+                            "selectTopNode": select_node_content
+                        });
+                        operation_children.push(select_top_node);
+                    }
 
                     total_docs += doc_count;
                     total_executions += exec_count;
@@ -808,6 +822,48 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         is_agg_name || has_aggregate
     }
 
+    /// Aggregate node kind names that can wrap a selectNode in the plan explain.
+    const AGGREGATE_NODE_KINDS: &'static [&'static str] = &[
+        "countNode",
+        "sumNode",
+        "averageNode",
+        "minNode",
+        "maxNode",
+    ];
+
+    /// Strip aggregate wrapper nodes from explain output for top-level aggregate queries.
+    ///
+    /// The Rust planner wraps the plan in aggregate nodes (e.g., CountNode → SelectNode → ScanNode),
+    /// but Go's explain format puts aggregates as siblings in topLevelNode, not as wrappers.
+    /// This function peels off any top-level aggregate wrappers to expose the inner selectNode.
+    ///
+    /// Example: `{ "countNode": { "selectNode": { "scanNode": {...} } } }`
+    /// becomes: `{ "selectNode": { "scanNode": {...} } }`
+    fn strip_aggregate_wrappers(mut explain: JsonValue) -> JsonValue {
+        loop {
+            let is_aggregate_wrapper = if let Some(obj) = explain.as_object() {
+                obj.len() == 1
+                    && obj
+                        .keys()
+                        .next()
+                        .map(|k| Self::AGGREGATE_NODE_KINDS.contains(&k.as_str()))
+                        .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if is_aggregate_wrapper {
+                // Unwrap: take the inner value from the aggregate node
+                let obj = explain.as_object_mut().unwrap();
+                let key = obj.keys().next().unwrap().clone();
+                explain = obj.remove(&key).unwrap();
+            } else {
+                break;
+            }
+        }
+        explain
+    }
+
     /// Build the explain output for a top-level aggregate query.
     ///
     /// Go's format: { "topLevelNode": [ {selectTopNode: ...}, {sumNode: {}}, {countNode: {}}, ... ] }
@@ -819,11 +875,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> JsonValue {
         use crate::mapper::AggregateType;
 
+        // Strip aggregate wrappers from the plan explain to get the inner selectNode content.
+        // The Rust planner wraps aggregates around the plan, but Go puts them as siblings.
+        let inner_explain = Self::strip_aggregate_wrappers(select_explain);
+
         let mut top_level_children: Vec<JsonValue> = Vec::new();
 
         // First element: the data source (selectTopNode)
         top_level_children.push(serde_json::json!({
-            "selectTopNode": select_explain
+            "selectTopNode": inner_explain
         }));
 
         // Add aggregate nodes based on what's in the fields

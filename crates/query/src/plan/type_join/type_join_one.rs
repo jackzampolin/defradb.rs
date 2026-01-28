@@ -436,40 +436,76 @@ impl PlanNode for TypeJoinOne {
     }
 
     fn explain_inner(&self) -> JsonValue {
-        // Go's structure: typeIndexJoin contains typeJoinOne wrapper
-        // which contains the actual join details
-        let mut inner_obj = serde_json::Map::new();
+        // Simple/Default mode: typeIndexJoin contains both attributes and tree structure
+        let mut obj = serde_json::Map::new();
 
         // direction: primary or secondary (Go uses "secondary" not "inverted")
         let direction = match self.direction {
             JoinDirection::Primary { .. } => "primary",
             JoinDirection::Inverted => "secondary",
         };
-        inner_obj.insert("direction".to_string(), serde_json::json!(direction));
+        obj.insert("direction".to_string(), serde_json::json!(direction));
 
-        // rootName: the parent side's relation field name (optional)
-        // This is the field on the child side that points back to the root
+        // joinType: "typeJoinOne" for one-to-one joins
+        obj.insert("joinType".to_string(), serde_json::json!("typeJoinOne"));
+
+        // rootName: the child side's relation field name (points back to parent)
+        // Go uses immutable.Option[string], but areResultOptionsEqual compares the inner value
         let root_name = self.child_side.relation_field().name.clone();
-        inner_obj.insert(
-            "rootName".to_string(),
-            serde_json::json!(serde_json::json!({ "value": root_name })),
-        );
+        obj.insert("rootName".to_string(), serde_json::json!(root_name));
 
         // subTypeName: the child side's relation field name (from parent perspective)
-        inner_obj.insert(
+        obj.insert(
             "subTypeName".to_string(),
             serde_json::json!(self.parent_side.relation_field().name),
         );
 
         // root: the parent plan's explain (contains scanNode)
         let root_explain = self.parent_plan.explain();
-        inner_obj.insert("root".to_string(), root_explain);
+        obj.insert("root".to_string(), root_explain);
 
-        // subType: the child plan's explain wrapped in selectTopNode
+        // subType: the child plan's explain wrapped in selectTopNode > selectNode
+        // selectNode must include docID and filter attributes (Go always includes these)
         let child_explain = self.child_plan.explain();
+        let mut select_node_inner = serde_json::Map::new();
+        select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
+        select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
+        // Merge child explain (e.g., scanNode) into selectNode
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                select_node_inner.insert(key.clone(), value.clone());
+            }
+        }
         let sub_type = serde_json::json!({
             "selectTopNode": {
-                "selectNode": child_explain
+                "selectNode": serde_json::Value::Object(select_node_inner)
+            }
+        });
+        obj.insert("subType".to_string(), sub_type);
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn explain_debug_inner(&self) -> JsonValue {
+        // Debug mode: typeIndexJoin contains typeJoinOne wrapper with full tree structure
+        let mut inner_obj = serde_json::Map::new();
+
+        // root: the parent plan's explain_debug (contains scanNode)
+        let root_explain = self.parent_plan.explain_debug();
+        inner_obj.insert("root".to_string(), root_explain);
+
+        // subType: the child plan's explain_debug wrapped in selectTopNode > selectNode
+        let child_explain = self.child_plan.explain_debug();
+        let mut select_node_inner = serde_json::Map::new();
+        // Merge child explain into selectNode
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                select_node_inner.insert(key.clone(), value.clone());
+            }
+        }
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": serde_json::Value::Object(select_node_inner)
             }
         });
         inner_obj.insert("subType".to_string(), sub_type);

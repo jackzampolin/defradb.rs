@@ -8,7 +8,7 @@ use std::sync::Arc;
 use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
+use storage::keys::systemstore::{CollectionID, CollectionKey, CollectionNameKey};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, warn};
 
@@ -72,7 +72,7 @@ pub(crate) async fn load_collection_from_systemstore(
             query::error::QueryError::execution(format!("storage error: {}", e))
         })? {
         Some(data) => {
-            let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
+            let mut schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
                 error!(
                     error = ?e,
                     collection_name = %name,
@@ -84,6 +84,15 @@ pub(crate) async fn load_collection_from_systemstore(
                     name, e
                 ))
             })?;
+
+            // Load sequential short ID from /collection/shortID/{collection_id}
+            let short_id_key = CollectionID::new(&schema.collection_id);
+            if let Ok(Some(short_id_bytes)) = systemstore.get(&short_id_key.bytes()).await {
+                if let Ok(short_id_str) = String::from_utf8(short_id_bytes) {
+                    schema.root_id = short_id_str.parse::<u32>().unwrap_or(0);
+                }
+            }
+
             Ok(Some(Collection::new(schema)))
         }
         None => {
@@ -175,7 +184,12 @@ pub(crate) async fn get_collection_with_index_manager<S: Store + 'static>(
     let (collection, datastore) = get_collection_with_lazy_load(txn, collection_name).await?;
 
     // Create an IndexManager from the collection schema
-    let short_id = collection_short_id(collection.collection_id());
+    // Use sequential root_id if available, fall back to hash-based short_id
+    let short_id = if collection.schema().root_id > 0 {
+        collection.schema().root_id
+    } else {
+        collection_short_id(collection.collection_id())
+    };
     let index_manager =
         IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
             query::error::QueryError::execution(format!(

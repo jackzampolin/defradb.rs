@@ -122,11 +122,14 @@ impl ScanNode {
 
     /// Get the storage prefix for this collection.
     ///
-    /// Go uses a sequential monotonic counter stored in the system store.
-    /// Rust uses a hash-based approach for consistency across the codebase.
-    /// Note: This means Rust and Go will produce different prefix values.
+    /// Uses the sequential root_id if available (assigned during collection creation),
+    /// falling back to hash-based short_id for backwards compatibility.
     fn collection_prefix(&self) -> u32 {
-        collection_short_id(&self.collection.collection_id)
+        if self.collection.root_id > 0 {
+            self.collection.root_id
+        } else {
+            collection_short_id(&self.collection.collection_id)
+        }
     }
 }
 

@@ -534,6 +534,7 @@ mod tests {
             is_embedded_only: false,
             is_placeholder: false,
             vector_embeddings: vec![],
+            root_id: 0,
         });
 
         // Generate the docID
