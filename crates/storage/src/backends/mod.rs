@@ -61,11 +61,11 @@ pub mod redb_config;
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub mod leveldb;
 
-// Note: OPFS environment for LevelDB browser persistence is planned for a future PR.
-// The OpfsEnv module will implement rusty-leveldb's Env trait using the browser's
-// Origin Private File System API. This requires solving the async-to-sync bridge
-// issue since rusty-leveldb's Env trait is synchronous but OPFS is async.
-// See: https://github.com/sourcenetwork/defradb.rs/issues/214
+// OPFS environment for LevelDB browser persistence.
+// Implements rusty-leveldb's synchronous Env trait using an in-memory filesystem
+// that loads from and persists to the browser's Origin Private File System (OPFS).
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub mod opfs_env;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test_suite;
@@ -81,3 +81,6 @@ pub use redb_config::RedbStoreOptions;
 
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use leveldb::LevelDbStore;
+
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub use opfs_env::OpfsEnv;

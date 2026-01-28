@@ -28,10 +28,15 @@ use crate::corekv::{
     TxnCallback, Writer,
 };
 
+use super::opfs_env::OpfsEnv;
+
 /// LevelDB-backed key-value store for WASM.
 ///
 /// This store wraps rusty-leveldb's `DB` type and provides the CoreKV
 /// `Store` interface for DefraDB compatibility.
+///
+/// For browser persistence, use `open_with_opfs()` which backs LevelDB
+/// with the Origin Private File System (OPFS).
 pub struct LevelDbStore {
     /// The underlying LevelDB database.
     /// Wrapped in Rc<RefCell> because rusty-leveldb::DB is not Send.
@@ -41,18 +46,16 @@ pub struct LevelDbStore {
     path: String,
     /// Whether the store is closed
     closed: Rc<std::cell::RefCell<bool>>,
+    /// OPFS environment for persistence (None = in-memory only).
+    /// Cloned from the same env given to rusty-leveldb, so they share state.
+    opfs_env: Option<OpfsEnv>,
 }
 
 impl LevelDbStore {
     /// Open or create a LevelDB database at the given path.
     ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the database directory
-    ///
-    /// # Returns
-    ///
-    /// A new `LevelDbStore` instance, or an error if the database could not be opened.
+    /// Uses the default in-memory environment. Data will not persist
+    /// across page refreshes. For browser persistence, use `open_with_opfs()`.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
 
@@ -67,6 +70,36 @@ impl LevelDbStore {
             db: Rc::new(std::cell::RefCell::new(Some(db))),
             path: path_str,
             closed: Rc::new(std::cell::RefCell::new(false)),
+            opfs_env: None,
+        })
+    }
+
+    /// Open or create a LevelDB database with OPFS persistence.
+    ///
+    /// This loads existing data from the browser's Origin Private File System
+    /// at startup and persists changes back on `persist()` and `close()`.
+    pub async fn open_with_opfs(db_name: &str) -> Result<Self> {
+        let env = OpfsEnv::new(db_name);
+
+        // Load existing data from OPFS into the in-memory environment
+        env.load()
+            .await
+            .map_err(|e| Error::Backend(format!("Failed to load from OPFS: {:?}", e)))?;
+
+        // Clone gives rusty-leveldb a view of the same shared state
+        let options = Options {
+            create_if_missing: true,
+            env: Rc::new(Box::new(env.clone())),
+            ..Options::default()
+        };
+
+        let db = DB::open(db_name, options).map_err(|e| Error::Backend(e.to_string()))?;
+
+        Ok(Self {
+            db: Rc::new(std::cell::RefCell::new(Some(db))),
+            path: db_name.to_string(),
+            closed: Rc::new(std::cell::RefCell::new(false)),
+            opfs_env: Some(env),
         })
     }
 
@@ -82,7 +115,27 @@ impl LevelDbStore {
             db: Rc::new(std::cell::RefCell::new(Some(db))),
             path: path_str,
             closed: Rc::new(std::cell::RefCell::new(false)),
+            opfs_env: None,
         })
+    }
+
+    /// Persist pending changes to OPFS.
+    ///
+    /// No-op if the store was not opened with OPFS.
+    /// Call this after important transaction commits to ensure durability.
+    pub async fn persist(&self) -> Result<()> {
+        if let Some(env) = &self.opfs_env {
+            // Flush LevelDB's internal buffers before persisting
+            if let Ok(mut db_ref) = self.get_db_mut() {
+                if let Some(db) = db_ref.as_mut() {
+                    db.flush().map_err(|e| Error::Backend(e.to_string()))?;
+                }
+            }
+            env.persist()
+                .await
+                .map_err(|e| Error::Backend(format!("OPFS persist failed: {:?}", e)))?;
+        }
+        Ok(())
     }
 
     /// Check if the store is closed.
@@ -142,6 +195,16 @@ impl Store for LevelDbStore {
     }
 
     async fn close(&self) -> Result<()> {
+        // Flush and persist to OPFS before closing
+        if let Some(env) = &self.opfs_env {
+            if let Ok(mut db_ref) = self.get_db_mut() {
+                if let Some(db) = db_ref.as_mut() {
+                    let _ = db.flush();
+                }
+            }
+            let _ = env.persist().await;
+        }
+
         *self.closed.borrow_mut() = true;
         // Drop the DB to flush and close
         *self.db.borrow_mut() = None;

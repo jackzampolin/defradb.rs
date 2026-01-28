@@ -153,9 +153,9 @@ impl DefraClient {
             from_js(config)?
         };
 
-        // Create LevelDB store
+        // Create LevelDB store with OPFS persistence
         let db_name = config.db_name.as_deref().unwrap_or("defradb");
-        let store = LevelDbStore::open(db_name).map_err(|e| {
+        let store = LevelDbStore::open_with_opfs(db_name).await.map_err(|e| {
             WasmError::Storage(format!("Failed to open LevelDB store: {}", e))
         })?;
 
