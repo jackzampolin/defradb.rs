@@ -158,6 +158,36 @@ pub trait DocFetcher: Send + Sync {
     fn supports_index_queries(&self) -> bool {
         false
     }
+
+    /// Get a document at a specific historical version (CID-based time-travel query).
+    ///
+    /// This method reconstructs the document as it existed when the commit at `cid`
+    /// was created by walking the merkle DAG backwards and replaying CRDT deltas.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The CID of the commit to reconstruct state at
+    /// * `expected_doc_id` - Optional document ID to validate the CID belongs to
+    ///
+    /// # Returns
+    ///
+    /// The document state at that commit, or an error if:
+    /// - The CID is invalid format: `"invalid cid: {parse_error}"`
+    /// - The CID doesn't exist or doesn't belong to the document:
+    ///   `"cid either does not exist or belong to document"`
+    ///
+    /// Default implementation returns an error - implementations that support
+    /// CID-based queries should override this.
+    async fn get_document_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> Result<Document> {
+        let _ = (cid, expected_doc_id);
+        Err(crate::error::QueryError::execution(
+            "CID-based time-travel queries are not supported by this fetcher".to_string(),
+        ))
+    }
 }
 
 /// Options for _commits queries

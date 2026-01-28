@@ -23,6 +23,24 @@ pub struct InnerAggregateDef {
     pub field_index: usize,
 }
 
+/// Definition of a _group alias with its specific rendering arguments.
+///
+/// Each _group reference in a query (including aliases like `G1: _group(limit: 1)`)
+/// gets its own GroupAlias with its specific filter, limit, order, and docID filter.
+#[derive(Debug, Clone)]
+pub struct GroupAlias {
+    /// Index in the document mapping where this alias's array should be stored
+    pub index: usize,
+    /// Optional filter for this alias
+    pub filter: Option<Filter>,
+    /// Optional limit for this alias
+    pub limit: Option<Limit>,
+    /// Optional order for this alias
+    pub order: Option<OrderBy>,
+    /// Optional docID filter for this alias
+    pub doc_ids: Option<Vec<String>>,
+}
+
 /// A group of documents with the same group key
 #[derive(Debug)]
 pub struct DocumentGroup {
@@ -67,18 +85,22 @@ pub struct GroupByNode {
     current_doc: Doc,
     /// Whether start() has been called
     started: bool,
-    /// Optional limit for _group child rendering
-    group_limit: Option<Limit>,
-    /// Optional filter for _group child rendering
-    group_filter: Option<Filter>,
-    /// Optional order for _group child rendering
-    group_order: Option<OrderBy>,
+    /// Group alias definitions - one per _group reference in the query
+    group_aliases: Vec<GroupAlias>,
     /// Inner aggregate definitions to compute during nested _group rendering
     inner_aggregates: Vec<InnerAggregateDef>,
     /// Collection name (for __typename support in _group rendering)
     collection_name: Option<String>,
     /// Inner group-by field names (from the nested _group Select's groupBy clause)
     inner_group_by_fields: Vec<String>,
+    /// Inner _group filter (for second-level nesting)
+    inner_group_filter: Option<Filter>,
+    /// Inner _group order (for second-level nesting)
+    inner_group_order: Option<OrderBy>,
+    /// Third-level group-by field names (from 3rd-level _group's groupBy clause)
+    third_level_group_by_fields: Vec<String>,
+    /// Third-level aggregate definitions (from 3rd-level _group's aggregates)
+    third_level_aggregates: Vec<InnerAggregateDef>,
 }
 
 impl GroupByNode {
@@ -96,27 +118,29 @@ impl GroupByNode {
             position: 0,
             current_doc: Doc::default(),
             started: false,
-            group_limit: None,
-            group_filter: None,
-            group_order: None,
+            group_aliases: Vec::new(),
             inner_aggregates: Vec::new(),
             collection_name: None,
             inner_group_by_fields: Vec::new(),
+            inner_group_filter: None,
+            inner_group_order: None,
+            third_level_group_by_fields: Vec::new(),
+            third_level_aggregates: Vec::new(),
         }
     }
 
-    pub fn with_group_limit(mut self, limit: Limit) -> Self {
-        self.group_limit = Some(limit);
+    pub fn with_group_aliases(mut self, aliases: Vec<GroupAlias>) -> Self {
+        self.group_aliases = aliases;
         self
     }
 
-    pub fn with_group_filter(mut self, filter: Filter) -> Self {
-        self.group_filter = Some(filter);
+    pub fn with_inner_group_filter(mut self, filter: Filter) -> Self {
+        self.inner_group_filter = Some(filter);
         self
     }
 
-    pub fn with_group_order(mut self, order: OrderBy) -> Self {
-        self.group_order = Some(order);
+    pub fn with_inner_group_order(mut self, order: OrderBy) -> Self {
+        self.inner_group_order = Some(order);
         self
     }
 
@@ -132,6 +156,16 @@ impl GroupByNode {
 
     pub fn with_inner_group_by_fields(mut self, fields: Vec<String>) -> Self {
         self.inner_group_by_fields = fields;
+        self
+    }
+
+    pub fn with_third_level_group_by_fields(mut self, fields: Vec<String>) -> Self {
+        self.third_level_group_by_fields = fields;
+        self
+    }
+
+    pub fn with_third_level_aggregates(mut self, aggregates: Vec<InnerAggregateDef>) -> Self {
+        self.third_level_aggregates = aggregates;
         self
     }
 
@@ -209,13 +243,23 @@ impl GroupByNode {
         }
     }
 
-    /// Build a JSON array of documents for the _group field
-    fn build_group_array(&self, docs: &[Doc], group_index: usize) -> JsonValue {
+    /// Build a JSON array of documents for the _group field.
+    ///
+    /// Each alias can have its own filter, order, limit, and docID filter.
+    fn build_group_array(
+        &self,
+        docs: &[Doc],
+        group_index: usize,
+        alias_filter: Option<&Filter>,
+        alias_order: Option<&OrderBy>,
+        alias_limit: Option<&Limit>,
+        alias_doc_ids: Option<&[String]>,
+    ) -> JsonValue {
         // Get the child mapping for _group to determine which fields to render
         let child_mapping = self.document_mapping.child_at(group_index);
 
         // Apply filter to docs if present
-        let filtered_docs: Vec<&Doc> = if let Some(ref filter) = self.group_filter {
+        let filtered_docs: Vec<&Doc> = if let Some(filter) = alias_filter {
             docs.iter()
                 .filter(|d| {
                     filter
@@ -227,8 +271,29 @@ impl GroupByNode {
             docs.iter().collect()
         };
 
+        // Apply docID/docIDs filter if present
+        let filtered_docs: Vec<&Doc> = if let Some(doc_ids) = alias_doc_ids {
+            // _docID is at index 0 in the document mapping
+            let docid_idx = self
+                .document_mapping
+                .first_index_of_name("_docID")
+                .unwrap_or(0);
+            filtered_docs
+                .into_iter()
+                .filter(|d| {
+                    if let Some(Some(JsonValue::String(id))) = d.fields().get(docid_idx) {
+                        doc_ids.contains(id)
+                    } else {
+                        false
+                    }
+                })
+                .collect()
+        } else {
+            filtered_docs
+        };
+
         // Apply order
-        let ordered_docs: Vec<&Doc> = if let Some(ref order) = self.group_order {
+        let ordered_docs: Vec<&Doc> = if let Some(order) = alias_order {
             let mut sorted = filtered_docs;
             sorted.sort_by(|a, b| {
                 for cond in &order.conditions {
@@ -255,7 +320,7 @@ impl GroupByNode {
         };
 
         // Apply limit and offset
-        let docs_to_render: Vec<&Doc> = if let Some(ref limit) = self.group_limit {
+        let docs_to_render: Vec<&Doc> = if let Some(limit) = alias_limit {
             let offset = limit.offset as usize;
             let effective_limit = limit.limit.map(|l| l as usize);
             match (effective_limit, offset) {
@@ -389,13 +454,142 @@ impl GroupByNode {
                     } else {
                         &mapping.render_keys
                     };
-                    let inner_array = Self::render_docs_with_keys(
-                        sub_group_docs,
-                        inner_render_keys,
-                        self.collection_name.as_deref(),
-                    );
+
+                    // Apply inner _group filter
+                    let inner_filtered: Vec<&Doc> =
+                        if let Some(ref filter) = self.inner_group_filter {
+                            sub_group_docs
+                                .iter()
+                                .filter(|d| {
+                                    filter
+                                        .matches(d.fields(), &self.document_mapping)
+                                        .unwrap_or(false)
+                                })
+                                .copied()
+                                .collect()
+                        } else {
+                            sub_group_docs.clone()
+                        };
+
+                    // Apply inner _group order
+                    let inner_ordered: Vec<&Doc> =
+                        if let Some(ref order) = self.inner_group_order {
+                            let mut sorted = inner_filtered;
+                            sorted.sort_by(|a, b| {
+                                for cond in &order.conditions {
+                                    if let Some(field_name) = cond.fields.first() {
+                                        if let Some(idx) =
+                                            self.document_mapping.first_index_of_name(field_name)
+                                        {
+                                            let cmp = Self::compare_field_values(
+                                                a.get(idx),
+                                                b.get(idx),
+                                            );
+                                            let cmp = match cond.direction {
+                                                OrderDirection::Asc => cmp,
+                                                OrderDirection::Desc => cmp.reverse(),
+                                            };
+                                            if cmp != std::cmp::Ordering::Equal {
+                                                return cmp;
+                                            }
+                                        }
+                                    }
+                                }
+                                std::cmp::Ordering::Equal
+                            });
+                            sorted
+                        } else {
+                            inner_filtered
+                        };
+
+                    let inner_array = if !self.third_level_group_by_fields.is_empty() {
+                        self.build_innermost_group_array(
+                            &inner_ordered,
+                            inner_child_mapping,
+                        )
+                    } else {
+                        Self::render_docs_with_keys(
+                            &inner_ordered,
+                            inner_render_keys,
+                            self.collection_name.as_deref(),
+                        )
+                    };
                     obj.insert("_group".to_string(), inner_array);
                 }
+            }
+
+            array.push(JsonValue::Object(obj));
+        }
+
+        JsonValue::Array(array)
+    }
+
+    /// Build the innermost (3rd-level) _group array with sub-grouping and aggregates.
+    ///
+    /// Sub-groups documents by `third_level_group_by_fields`, computes
+    /// `third_level_aggregates` per sub-group, and renders the result.
+    fn build_innermost_group_array(
+        &self,
+        docs: &[&Doc],
+        child_mapping: Option<&DocumentMapping>,
+    ) -> JsonValue {
+        // Sub-group documents by the third-level groupBy fields
+        let mut sub_groups: Vec<(String, Vec<&Doc>)> = Vec::new();
+        let mut sub_group_map: HashMap<String, usize> = HashMap::new();
+
+        for doc in docs {
+            let mut key = String::new();
+            for field_name in &self.third_level_group_by_fields {
+                if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
+                    key.push_str(&format!("{}_", idx));
+                    let value = doc.get(idx);
+                    key.push_str(&format!("{}_", Self::value_to_key(value)));
+                }
+            }
+
+            if let Some(&idx) = sub_group_map.get(&key) {
+                sub_groups[idx].1.push(doc);
+            } else {
+                let idx = sub_groups.len();
+                sub_group_map.insert(key.clone(), idx);
+                sub_groups.push((key, vec![doc]));
+            }
+        }
+
+        let render_keys = child_mapping.map(|m| &m.render_keys);
+
+        let mut array = Vec::with_capacity(sub_groups.len());
+        for (_key, sub_group_docs) in &sub_groups {
+            let mut obj = serde_json::Map::new();
+
+            // Render field values from the first doc in the sub-group
+            if let Some(first_doc) = sub_group_docs.first() {
+                if let Some(rks) = render_keys {
+                    for rk in rks {
+                        if rk.key == "_group" || rk.key == "__typename" {
+                            continue;
+                        }
+                        let value = first_doc
+                            .get(rk.index)
+                            .cloned()
+                            .unwrap_or(JsonValue::Null);
+                        obj.insert(rk.key.clone(), value);
+                    }
+                } else {
+                    // Fallback: render groupBy fields
+                    for field_name in &self.third_level_group_by_fields {
+                        if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
+                            let value = first_doc.get(idx).cloned().unwrap_or(JsonValue::Null);
+                            obj.insert(field_name.clone(), value);
+                        }
+                    }
+                }
+            }
+
+            // Compute 3rd-level aggregates for this sub-group
+            for agg_def in &self.third_level_aggregates {
+                let value = Self::compute_inline_aggregate(agg_def, sub_group_docs);
+                obj.insert(agg_def.output_key.clone(), value);
             }
 
             array.push(JsonValue::Object(obj));
@@ -673,11 +867,18 @@ impl PlanNode for GroupByNode {
         // Return the representative document for the current group
         self.current_doc = self.groups[self.position].1.representative.deep_clone();
 
-        // Populate _group field if it's in the mapping
-        if let Some(group_index) = self.document_mapping.first_index_of_name("_group") {
-            let group_docs = &self.groups[self.position].1.docs;
-            let group_array = self.build_group_array(group_docs, group_index);
-            self.current_doc.set(group_index, group_array);
+        // Populate _group field(s) — one per alias
+        let group_docs = &self.groups[self.position].1.docs;
+        for alias in &self.group_aliases {
+            let group_array = self.build_group_array(
+                group_docs,
+                alias.index,
+                alias.filter.as_ref(),
+                alias.order.as_ref(),
+                alias.limit.as_ref(),
+                alias.doc_ids.as_deref(),
+            );
+            self.current_doc.set(alias.index, group_array);
         }
 
         self.position += 1;

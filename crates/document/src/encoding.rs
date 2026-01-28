@@ -1,9 +1,28 @@
 //! Encoding helpers for JSON and CBOR conversion
 
-use chrono::SecondsFormat;
+use chrono::{DateTime, FixedOffset, SecondsFormat, Timelike};
 
 use crate::error::{Error, Result};
 use crate::NormalValue;
+
+/// Format a DateTime to RFC3339 matching Go's time.RFC3339Nano behavior.
+///
+/// Go's RFC3339Nano format omits fractional seconds when nanoseconds are zero,
+/// but includes all 9 digits when non-zero. This is critical for docID compatibility
+/// since the time string is embedded in the CBOR encoding used to compute the hash.
+///
+/// Examples:
+/// - No nanoseconds: "2017-07-23T03:46:56-05:00"
+/// - With nanoseconds: "2017-07-23T03:46:56.123456789-05:00"
+pub fn format_time_rfc3339_nano(t: &DateTime<FixedOffset>) -> String {
+    if t.nanosecond() % 1_000_000_000 == 0 {
+        // No fractional seconds - use Secs format
+        t.to_rfc3339_opts(SecondsFormat::Secs, true)
+    } else {
+        // Has fractional seconds - use full nanosecond precision
+        t.to_rfc3339_opts(SecondsFormat::Nanos, true)
+    }
+}
 
 /// Convert a JSON value to a NormalValue.
 ///
@@ -102,9 +121,7 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<serde_json::Value> {
             // Encode bytes as base64
             Ok(serde_json::Value::String(base64_encode(b)))
         }
-        NormalValue::Time(t) => Ok(serde_json::Value::String(
-            t.to_rfc3339_opts(SecondsFormat::Nanos, true),
-        )),
+        NormalValue::Time(t) => Ok(serde_json::Value::String(format_time_rfc3339_nano(t))),
         NormalValue::Json(v) => Ok(v.clone()),
         NormalValue::IntArray(arr) => Ok(serde_json::Value::Array(
             arr.iter()
@@ -168,7 +185,9 @@ fn float64_to_json(f: f64) -> Result<serde_json::Value> {
     // Match Go's json.Marshal behavior: float64 values that are whole numbers
     // are serialized without a decimal point (e.g., float64(21.0) → "21").
     if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-        return Ok(serde_json::Value::Number(serde_json::Number::from(f as i64)));
+        return Ok(serde_json::Value::Number(serde_json::Number::from(
+            f as i64,
+        )));
     }
     serde_json::Number::from_f64(f)
         .map(serde_json::Value::Number)
@@ -192,9 +211,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::Float32(f) => Ok(ciborium::Value::Float(*f as f64)),
         NormalValue::String(s) => Ok(ciborium::Value::Text(s.clone())),
         NormalValue::Bytes(b) => Ok(ciborium::Value::Bytes(b.clone())),
-        NormalValue::Time(t) => Ok(ciborium::Value::Text(
-            t.to_rfc3339_opts(SecondsFormat::Nanos, true),
-        )),
+        NormalValue::Time(t) => Ok(ciborium::Value::Text(format_time_rfc3339_nano(t))),
         NormalValue::Json(v) => json_to_cbor_value(v),
         NormalValue::IntArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
@@ -244,7 +261,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
             .map(|b| ciborium::Value::Bytes(b.clone()))
             .unwrap_or(ciborium::Value::Null)),
         NormalValue::NillableTime(opt) => Ok(opt
-            .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
+            .map(|t| ciborium::Value::Text(format_time_rfc3339_nano(&t)))
             .unwrap_or(ciborium::Value::Null)),
         // Document value - propagate errors instead of silently converting to null
         NormalValue::Document(doc) => {
@@ -268,7 +285,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         )),
         NormalValue::TimeArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
-                .map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
+                .map(|t| ciborium::Value::Text(format_time_rfc3339_nano(t)))
                 .collect(),
         )),
         NormalValue::DocumentArray(arr) => {
@@ -339,9 +356,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
             .map(|arr| {
                 ciborium::Value::Array(
                     arr.iter()
-                        .map(|t| {
-                            ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true))
-                        })
+                        .map(|t| ciborium::Value::Text(format_time_rfc3339_nano(t)))
                         .collect(),
                 )
             })
@@ -400,7 +415,7 @@ pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
         NormalValue::NillableTimeElementArray(arr) => Ok(ciborium::Value::Array(
             arr.iter()
                 .map(|opt| {
-                    opt.map(|t| ciborium::Value::Text(t.to_rfc3339_opts(SecondsFormat::Nanos, true)))
+                    opt.map(|t| ciborium::Value::Text(format_time_rfc3339_nano(&t)))
                         .unwrap_or(ciborium::Value::Null)
                 })
                 .collect(),

@@ -25,6 +25,7 @@ use crate::database::DB;
 use crate::index_manager::IndexManager;
 use crate::schema_loader::get_collections_by_collection_id;
 use crate::txn::DbTxn;
+use crate::versioned_fetcher::VersionedFetcher;
 
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
@@ -559,5 +560,33 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
 
     fn supports_index_queries(&self) -> bool {
         true
+    }
+
+    async fn get_document_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Document> {
+        // Create a read-only transaction for the versioned fetcher
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        // Wrap in Arc<Mutex<Option>> for VersionedFetcher
+        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
+            std::sync::Arc::new(TokioMutex::new(Some(txn)));
+
+        let versioned_fetcher = VersionedFetcher::new(txn_holder.clone());
+        let result = versioned_fetcher
+            .get_document_at_cid(cid, expected_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()));
+
+        // Clean up transaction
+        if let Some(txn) = txn_holder.lock().await.take() {
+            let _ = txn.discard();
+        }
+
+        result
     }
 }

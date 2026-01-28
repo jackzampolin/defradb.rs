@@ -13,7 +13,7 @@ use crate::plan::{
     CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertInput, UpsertNode,
 };
 use crate::planner::PlanNode;
-use crate::query_parse::parse_mutations;
+use crate::query_parse::parse_mutations_with_variables;
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
@@ -54,22 +54,39 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutation_str: &str,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
+        self.execute_mutation_with_identity_and_vars(mutation_str, caller_identity, None)
+            .await
+    }
+
+    /// Execute a GraphQL mutation with identity and variables.
+    pub async fn execute_mutation_with_identity_and_vars(
+        &self,
+        mutation_str: &str,
+        caller_identity: Option<Did>,
+        variables: Option<&std::collections::HashMap<String, JsonValue>>,
+    ) -> Result<JsonValue> {
         let mutator = self.mutator.as_ref().ok_or_else(|| {
             QueryError::execution("mutations require a mutator; call with_mutator() first")
         })?;
 
-        self.execute_mutation_internal(mutation_str, mutator.clone(), caller_identity)
-            .await
+        self.execute_mutation_internal_with_vars(
+            mutation_str,
+            mutator.clone(),
+            caller_identity,
+            variables,
+        )
+        .await
     }
 
-    /// Execute a GraphQL mutation with a specific mutator and caller_identity.
-    pub(crate) async fn execute_mutation_internal(
+    /// Execute a GraphQL mutation with a specific mutator, caller_identity, and variables.
+    pub(crate) async fn execute_mutation_internal_with_vars(
         &self,
         mutation_str: &str,
         mutator: Arc<dyn DocMutator>,
         caller_identity: Option<Did>,
+        variables: Option<&std::collections::HashMap<String, JsonValue>>,
     ) -> Result<JsonValue> {
-        let mutations = parse_mutations(mutation_str)?;
+        let mutations = parse_mutations_with_variables(mutation_str, variables)?;
 
         let mut results = Map::new();
 

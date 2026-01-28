@@ -25,8 +25,9 @@ use crate::keys::IndexDataStoreKey;
 pub struct RangeIterator {
     /// The underlying KV iterator
     inner: Box<dyn Iterator>,
-    /// The base key prefix (collection/index prefix, possibly with some field values)
-    key_prefix: Vec<u8>,
+    /// Length of the index prefix (collection_id + index_id only, without field values).
+    /// Used to find where encoded field values start in a key.
+    index_prefix_len: usize,
     /// Index description for decoding field values
     desc: IndexDescription,
     /// Whether this is a unique index
@@ -57,6 +58,7 @@ impl RangeIterator {
         reverse: bool,
     ) -> Result<Self> {
         let key_prefix = IndexDataStoreKey::index_prefix(collection_short_id, desc.id);
+        let index_prefix_len = key_prefix.len();
 
         let opts = IterOptions::default()
             .with_prefix(key_prefix.clone())
@@ -65,7 +67,7 @@ impl RangeIterator {
 
         Ok(Self {
             inner,
-            key_prefix,
+            index_prefix_len,
             desc: desc.clone(),
             is_unique,
             lower_bound_key: None,
@@ -91,6 +93,7 @@ impl RangeIterator {
     ) -> Result<Self> {
         // Build key prefix with the exact field values
         let mut key_prefix = IndexDataStoreKey::index_prefix(collection_short_id, desc.id);
+        let index_prefix_len = key_prefix.len();
 
         // Encode prefix field values
         for (i, value) in prefix_values.iter().enumerate() {
@@ -105,7 +108,7 @@ impl RangeIterator {
 
         Ok(Self {
             inner,
-            key_prefix,
+            index_prefix_len,
             desc: desc.clone(),
             is_unique,
             lower_bound_key: None,
@@ -134,6 +137,7 @@ impl RangeIterator {
     ) -> Result<Self> {
         // Build base key prefix with collection/index and prefix values
         let mut key_prefix = IndexDataStoreKey::index_prefix(collection_short_id, desc.id);
+        let index_prefix_len = key_prefix.len();
 
         // Encode prefix field values
         for (i, value) in prefix_values.iter().enumerate() {
@@ -199,7 +203,7 @@ impl RangeIterator {
 
         Ok(Self {
             inner,
-            key_prefix,
+            index_prefix_len,
             desc: desc.clone(),
             is_unique,
             lower_bound_key,
@@ -213,8 +217,8 @@ impl RangeIterator {
 
     /// Extract document ID and field values from an index key.
     fn extract_entry(&self, key: &[u8], value: &[u8]) -> Result<IndexEntry> {
-        // First, decode the field values from the key
-        let values = self.decode_field_values(key)?;
+        // Decode field values and get remaining bytes (doc_id suffix)
+        let (values, doc_id_bytes) = self.decode_field_values(key)?;
 
         // Determine if this is a NULL entry (doc_id in key suffix)
         let has_nil = values.iter().any(|v| v.is_nil());
@@ -225,21 +229,17 @@ impl RangeIterator {
                 .map_err(|e| crate::corekv::Error::Other(format!("invalid doc_id: {}", e)))?
         } else {
             // Simple index or unique with NULL: doc_id is in key suffix
-            self.extract_doc_id_from_key(key, &values)?
+            self.extract_doc_id_from_key(doc_id_bytes)?
         };
 
         Ok(IndexEntry::new(doc_id, values))
     }
 
-    /// Decode field values from an index key.
-    fn decode_field_values(&self, key: &[u8]) -> Result<Vec<NormalValue>> {
-        // Get the index prefix to know where field values start
-        let index_prefix = IndexDataStoreKey::index_prefix(
-            extract_collection_id(&self.key_prefix)?,
-            extract_index_id(&self.key_prefix)?,
-        );
-
-        let mut buf = &key[index_prefix.len()..];
+    /// Decode field values from an index key, returning values and remaining bytes.
+    ///
+    /// The remaining bytes after decoding all field values contain the doc_id suffix.
+    fn decode_field_values<'a>(&self, key: &'a [u8]) -> Result<(Vec<NormalValue>, &'a [u8])> {
+        let mut buf = &key[self.index_prefix_len..];
         let mut values = Vec::with_capacity(self.desc.fields.len());
 
         for field_desc in &self.desc.fields {
@@ -247,9 +247,6 @@ impl RangeIterator {
                 break;
             }
             // Use blob kind as default - the encoded type marker determines the actual type.
-            // Note: String values will be decoded as Bytes since we don't have field type
-            // information at decode time. This is acceptable for index operations where
-            // we primarily need byte-level comparison semantics.
             let kind = FieldKind::blob();
             let (rest, value) = decode_field_value(buf, field_desc.descending, &kind)?;
             values.push(value);
@@ -268,36 +265,18 @@ impl RangeIterator {
             )));
         }
 
-        Ok(values)
+        // Return values and remaining bytes (the doc_id suffix)
+        Ok((values, buf))
     }
 
-    /// Extract doc_id from key suffix (after encoded field values).
-    fn extract_doc_id_from_key(&self, key: &[u8], values: &[NormalValue]) -> Result<String> {
-        // Rebuild the key without doc_id to find where doc_id starts
-        let index_prefix = IndexDataStoreKey::index_prefix(
-            extract_collection_id(&self.key_prefix)?,
-            extract_index_id(&self.key_prefix)?,
-        );
-
-        let mut encoded_values = index_prefix;
-        for (i, value) in values.iter().enumerate() {
-            let descending = self
-                .desc
-                .fields
-                .get(i)
-                .map(|f| f.descending)
-                .unwrap_or(false);
-            encoded_values = encode_field_value(encoded_values, value, descending)?;
-        }
-
-        if key.len() <= encoded_values.len() {
-            // No doc_id suffix - this shouldn't happen for simple index
+    /// Extract doc_id from key suffix (the remaining bytes after field values).
+    fn extract_doc_id_from_key(&self, doc_id_bytes: &[u8]) -> Result<String> {
+        if doc_id_bytes.is_empty() {
             return Err(crate::corekv::Error::Other(
                 "index key missing doc_id suffix".to_string(),
             ));
         }
 
-        let doc_id_bytes = &key[encoded_values.len()..];
         String::from_utf8(doc_id_bytes.to_vec())
             .map_err(|e| crate::corekv::Error::Other(format!("invalid doc_id: {}", e)))
     }
@@ -435,80 +414,6 @@ impl IndexIterator for RangeIterator {
         self.exhausted = false;
         Ok(())
     }
-}
-
-/// Extract collection_short_id from the key prefix.
-fn extract_collection_id(prefix: &[u8]) -> Result<u32> {
-    if prefix.is_empty() {
-        return Err(crate::corekv::Error::Other(
-            "cannot extract collection_id: prefix is empty".to_string(),
-        ));
-    }
-    if prefix.len() < 2 {
-        return Err(crate::corekv::Error::Other(format!(
-            "cannot extract collection_id: prefix too short ({} bytes)",
-            prefix.len()
-        )));
-    }
-
-    let pos = 1; // Skip initial separator
-    let (val, _) = decode_varint(&prefix[pos..]);
-    if val > u32::MAX as u64 {
-        return Err(crate::corekv::Error::Other(format!(
-            "collection_id {} exceeds maximum u32 value",
-            val
-        )));
-    }
-    Ok(val as u32)
-}
-
-/// Extract index_id from the key prefix.
-fn extract_index_id(prefix: &[u8]) -> Result<u32> {
-    if prefix.is_empty() {
-        return Err(crate::corekv::Error::Other(
-            "cannot extract index_id: prefix is empty".to_string(),
-        ));
-    }
-
-    let mut pos = 1; // Skip initial separator
-    let (_col_id, bytes_read) = decode_varint(&prefix[pos..]);
-    pos += bytes_read;
-    pos += 1; // Skip separator after col_id
-
-    if pos >= prefix.len() {
-        return Err(crate::corekv::Error::Other(format!(
-            "cannot extract index_id: prefix too short (pos {} >= len {})",
-            pos,
-            prefix.len()
-        )));
-    }
-
-    let (idx_id, _) = decode_varint(&prefix[pos..]);
-    if idx_id > u32::MAX as u64 {
-        return Err(crate::corekv::Error::Other(format!(
-            "index_id {} exceeds maximum u32 value",
-            idx_id
-        )));
-    }
-    Ok(idx_id as u32)
-}
-
-/// Decode a varint from bytes.
-fn decode_varint(buf: &[u8]) -> (u64, usize) {
-    let mut result: u64 = 0;
-    let mut shift = 0;
-    let mut bytes_read = 0;
-
-    for &byte in buf {
-        bytes_read += 1;
-        result |= ((byte & 0x7F) as u64) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-
-    (result, bytes_read)
 }
 
 #[cfg(test)]

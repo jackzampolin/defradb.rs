@@ -19,7 +19,7 @@ mod type_join;
 pub use alldocs::AllDocsNode;
 pub use average::AverageNode;
 pub use count::CountNode;
-pub use groupby::{DocumentGroup, GroupByNode, InnerAggregateDef};
+pub use groupby::{DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;
 pub use limit::LimitNode;
 pub use max::MaxNode;
@@ -33,4 +33,6 @@ pub use permission_filter::PermissionFilterNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
 pub use sum::SumNode;
-pub use type_join::{JoinDirection, JoinSide, RelationFilter, TypeJoinMany, TypeJoinOne};
+pub use type_join::{
+    compare_json_values, JoinDirection, JoinSide, RelationFilter, TypeJoinMany, TypeJoinOne,
+};

@@ -22,6 +22,28 @@ use super::directives::{
     KNOWN_FIELD_DIRECTIVES, KNOWN_TYPE_DIRECTIVES,
 };
 use super::warnings::{DirectiveLocation, ParseOutput, ParseWarning};
+use regex::Regex;
+
+/// Placeholder field name used to make empty types parseable.
+/// graphql_parser requires at least one field per type, but Go DefraDB allows empty types.
+const EMPTY_TYPE_PLACEHOLDER: &str = "__defradb_empty_type_placeholder__";
+
+/// Preprocess SDL to handle empty type definitions.
+/// graphql_parser doesn't allow empty types, so we insert a placeholder field.
+fn preprocess_empty_types(sdl: &str) -> String {
+    // Match patterns like `type Name @directive(...)* {}` or `type Name {}`
+    // This regex finds `{` followed by optional whitespace then `}` in type definitions
+    let re = Regex::new(r"(\btype\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
+
+    re.replace_all(sdl, |caps: &regex::Captures| {
+        format!(
+            "{}{{ {}: String }}",
+            &caps[1],
+            EMPTY_TYPE_PLACEHOLDER
+        )
+    })
+    .to_string()
+}
 
 /// Convert a GraphQL schema Value to a serde_json Value
 fn graphql_schema_value_to_json(
@@ -85,12 +107,25 @@ struct ParsedTypeDef {
 }
 
 /// Type-level directives
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ParsedTypeDirectives {
     indexes: Vec<CompositeIndex>,
+    /// Default true for collections (Go compatibility)
     is_materialized: bool,
     is_branchable: bool,
     policy: Option<PolicyConfig>,
+}
+
+impl Default for ParsedTypeDirectives {
+    fn default() -> Self {
+        Self {
+            indexes: Vec::new(),
+            // Go defaults IsMaterialized to true for regular collections
+            is_materialized: true,
+            is_branchable: false,
+            policy: None,
+        }
+    }
 }
 
 /// Policy configuration from @policy directive
@@ -104,7 +139,7 @@ struct PolicyConfig {
 
 #[derive(Debug)]
 struct CompositeIndex {
-    fields: Vec<String>,
+    fields: Vec<(String, bool)>, // (field_name, descending)
     name: Option<String>,
     unique: bool,
 }
@@ -150,8 +185,11 @@ impl<'a> SdlParser<'a> {
             });
         }
 
-        let doc: Document<'_, String> =
-            graphql_parser::parse_schema(self.sdl).map_err(|e| QueryError::parse(e.to_string()))?;
+        // Preprocess SDL to handle empty type definitions (Go compatibility)
+        let preprocessed = preprocess_empty_types(self.sdl);
+
+        let doc: Document<'_, String> = graphql_parser::parse_schema(&preprocessed)
+            .map_err(|e| QueryError::parse(e.to_string()))?;
 
         // First pass: collect all type definitions
         for def in &doc.definitions {
@@ -184,6 +222,10 @@ impl<'a> SdlParser<'a> {
         let mut fields = Vec::new();
 
         for field in &obj.fields {
+            // Skip placeholder fields used for empty type preprocessing
+            if field.name == EMPTY_TYPE_PLACEHOLDER {
+                continue;
+            }
             let parsed_field = self.parse_field(field)?;
             fields.push(parsed_field);
         }
@@ -411,7 +453,15 @@ impl<'a> SdlParser<'a> {
 
             match name {
                 "index" => {
-                    let fields = get_directive_string_list(directive, "fields");
+                    // Try "fields" argument first (simple format: ["name", "age"])
+                    let simple_fields = get_directive_string_list(directive, "fields");
+                    let fields: Vec<(String, bool)> = if !simple_fields.is_empty() {
+                        simple_fields.into_iter().map(|f| (f, false)).collect()
+                    } else {
+                        // Try "includes" argument (Go format: [{field: "name", direction: DESC}, ...])
+                        self.parse_includes_argument(directive)
+                    };
+
                     let idx_name = get_directive_string(directive, "name");
                     let unique = self
                         .get_bool_with_warning(directive, "unique", &type_name, None)
@@ -488,6 +538,54 @@ impl<'a> SdlParser<'a> {
             unique,
             direction,
         })
+    }
+
+    /// Parse the `includes` argument for composite indexes.
+    ///
+    /// Go format: `@index(includes: [{field: "name"}, {field: "age", direction: DESC}])`
+    /// Returns (field_name, descending) tuples extracted from the objects.
+    fn parse_includes_argument(
+        &self,
+        directive: &Directive<'_, String>,
+    ) -> Vec<(String, bool)> {
+        let Some(value) = get_directive_arg(directive, "includes") else {
+            return Vec::new();
+        };
+
+        let graphql_parser::schema::Value::List(items) = value else {
+            return Vec::new();
+        };
+
+        items
+            .iter()
+            .filter_map(|item| {
+                // Each item should be an object like {field: "name", direction: DESC}
+                let graphql_parser::schema::Value::Object(obj) = item else {
+                    return None;
+                };
+
+                // Extract field name
+                let field_name = obj.get("field").and_then(|v| match v {
+                    graphql_parser::schema::Value::String(s)
+                    | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                    _ => None,
+                })?;
+
+                // Extract direction (defaults to ASC)
+                let descending = obj
+                    .get("direction")
+                    .map(|v| match v {
+                        graphql_parser::schema::Value::String(s)
+                        | graphql_parser::schema::Value::Enum(s) => {
+                            matches!(s.as_str(), "DESC" | "desc" | "Descending")
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+
+                Some((field_name, descending))
+            })
+            .collect()
     }
 
     fn parse_default_directive(
@@ -952,10 +1050,7 @@ impl<'a> SdlParser<'a> {
             std::collections::HashMap::new();
         for type_name in cycle_edges.keys() {
             let root = find_root(type_name, &mut component);
-            components
-                .entry(root)
-                .or_insert_with(Vec::new)
-                .push(type_name.clone());
+            components.entry(root).or_default().push(type_name.clone());
         }
 
         // Build result: each type gets index within its component
@@ -1160,7 +1255,7 @@ impl<'a> SdlParser<'a> {
 
         for composite_idx in &type_def.directives.indexes {
             // Validate that all referenced fields exist
-            for field_ref in &composite_idx.fields {
+            for (field_ref, _) in &composite_idx.fields {
                 if !valid_field_names.contains(field_ref.as_str()) {
                     return Err(QueryError::parse(format!(
                         "@index on type {} references unknown field '{}'",
@@ -1170,15 +1265,17 @@ impl<'a> SdlParser<'a> {
             }
 
             let idx_name = composite_idx.name.clone().unwrap_or_else(|| {
-                format!("{}_{}_idx", type_def.name, composite_idx.fields.join("_"))
+                let field_names: Vec<&str> =
+                    composite_idx.fields.iter().map(|(n, _)| n.as_str()).collect();
+                format!("{}_{}_idx", type_def.name, field_names.join("_"))
             });
 
             let indexed_fields: Vec<IndexedFieldDescription> = composite_idx
                 .fields
                 .iter()
-                .map(|f| IndexedFieldDescription {
-                    name: f.clone(),
-                    descending: false,
+                .map(|(name, descending)| IndexedFieldDescription {
+                    name: name.clone(),
+                    descending: *descending,
                 })
                 .collect();
 
@@ -1262,7 +1359,7 @@ impl<'a> SdlParser<'a> {
             // use SelfRef with the target's relative index
             if let Some(&target_idx) = collection_set.get(base) {
                 return Ok(FieldKind::self_ref(
-                    &target_idx.to_string(),
+                    target_idx.to_string(),
                     parsed_type.is_list,
                 ));
             }

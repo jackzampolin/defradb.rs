@@ -8,7 +8,7 @@ pub type Result<T> = std::result::Result<T, SchemaError>;
 /// Schema-specific errors
 #[derive(Debug, Error)]
 pub enum SchemaError {
-    #[error("duplicate field name: {0}")]
+    #[error("duplicate field. Name: {0}")]
     DuplicateFieldName(String),
 
     #[error("invalid CRDT type for field kind: {field_name} cannot use {crdt_type} (only numeric fields support counters)")]
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = SchemaError::DuplicateFieldName("name".into());
-        assert_eq!(err.to_string(), "duplicate field name: name");
+        assert_eq!(err.to_string(), "duplicate field. Name: name");
     }
 
     #[test]
