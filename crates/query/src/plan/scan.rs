@@ -1,6 +1,7 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use schema::CollectionVersion;
@@ -10,6 +11,14 @@ use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::planner::{Doc, PlanNode};
+
+/// Derive a short u32 ID from a collection_id string.
+/// Uses the same hash as db::collection_short_id for consistency.
+fn collection_short_id(collection_id: &str) -> u32 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    collection_id.hash(&mut hasher);
+    hasher.finish() as u32
+}
 
 /// ScanNode scans documents from a collection.
 ///
@@ -105,17 +114,12 @@ impl ScanNode {
     }
 
     /// Get the storage prefix for this collection.
-    /// This is a simplified version - in Go it's derived from the collection's root ID.
-    fn collection_prefix(&self) -> String {
-        // The Go prefix is typically a single digit like "3" based on collection ordering
-        // For now, generate a deterministic value from collection_id
-        // This ensures consistent output for the same collection
-        let hash_val: u32 = self
-            .collection
-            .collection_id
-            .bytes()
-            .fold(0u32, |acc, b| acc.wrapping_add(b as u32));
-        (hash_val % 100).to_string()
+    ///
+    /// Go uses a sequential monotonic counter stored in the system store.
+    /// Rust uses a hash-based approach for consistency across the codebase.
+    /// Note: This means Rust and Go will produce different prefix values.
+    fn collection_prefix(&self) -> u32 {
+        collection_short_id(&self.collection.collection_id)
     }
 }
 
@@ -221,13 +225,14 @@ impl PlanNode for ScanNode {
         }
 
         // Go DefraDB uses "collectionName" and "collectionID"
+        // Note: Go's explain uses VersionID (not CollectionID) for the collectionID field
         obj.insert(
             "collectionName".to_string(),
             serde_json::Value::String(self.collection.name.clone()),
         );
         obj.insert(
             "collectionID".to_string(),
-            serde_json::Value::String(self.collection.collection_id.clone()),
+            serde_json::Value::String(self.collection.version_id.clone()),
         );
 
         // Go DefraDB format: always include prefixes
