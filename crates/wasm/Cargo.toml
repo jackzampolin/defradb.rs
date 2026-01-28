@@ -71,6 +71,7 @@ schema = { path = "../schema" }
 document = { path = "../document" }
 crypto = { path = "../crypto" }
 storage = { path = "../storage", default-features = false, features = ["leveldb"] }
+query = { path = "../query" }
 
 # IPLD
 cid.workspace = true

@@ -3,6 +3,7 @@
 //! Provides a high-level API for browser applications to interact with DefraDB.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
@@ -11,6 +12,8 @@ use schema::{validate_schema, CollectionVersion};
 
 use crate::bindings::{from_js, to_js, ClientConfig, CollectionInfo, FieldInfo};
 use crate::error::{Result, WasmError};
+#[cfg(target_arch = "wasm32")]
+use crate::query_adapter::create_query_runner;
 use crate::sdl::parse_sdl;
 use crate::storage::{create_store, WasmStore};
 
@@ -44,7 +47,7 @@ use crate::storage::{create_store, WasmStore};
 /// ```
 #[wasm_bindgen]
 pub struct DefraClient {
-    store: Option<WasmStore>,
+    store: Option<Arc<WasmStore>>,
     collections: HashMap<String, CollectionVersion>,
     closed: bool,
 }
@@ -230,7 +233,7 @@ impl DefraClient {
         let store = create_store(config.storage, config.db_name.as_deref()).await?;
 
         Ok(Self {
-            store: Some(store),
+            store: Some(Arc::new(store)),
             collections: HashMap::new(),
             closed: false,
         })
@@ -273,6 +276,7 @@ impl DefraClient {
         }))
     }
 
+    #[cfg(target_arch = "wasm32")]
     async fn query_impl(&self, graphql: &str) -> Result<JsValue> {
         self.ensure_open()?;
 
@@ -281,12 +285,42 @@ impl DefraClient {
             return Err(WasmError::Query("Empty query string".to_string()));
         }
 
-        // For MVP, return a placeholder response
-        // Full query execution requires the query planner integration
+        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
+
+        // Get collection versions for the query runner
+        let collections: Vec<CollectionVersion> = self.collections.values().cloned().collect();
+
+        // Create a query runner with our storage adapter
+        let runner = create_query_runner(Arc::clone(store), collections);
+
+        // Execute the query - returns JSON directly
+        match runner.execute_query(graphql).await {
+            Ok(result) => {
+                // The result is already the data object
+                let response = serde_json::json!({
+                    "data": result,
+                    "errors": [],
+                });
+                to_js(&response)
+            }
+            Err(e) => Err(WasmError::Query(e.to_string())),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn query_impl(&self, graphql: &str) -> Result<JsValue> {
+        self.ensure_open()?;
+
+        // Validate that it looks like a query
+        if graphql.trim().is_empty() {
+            return Err(WasmError::Query("Empty query string".to_string()));
+        }
+
+        // Placeholder for native builds - full query execution only available in WASM
         to_js(&serde_json::json!({
             "data": {},
             "errors": [],
-            "_info": "Full query execution not yet implemented in WASM client. Schema validation and document storage are available."
+            "_info": "Full query execution only available in WASM builds"
         }))
     }
 
@@ -314,7 +348,7 @@ impl DefraClient {
     ) -> Result<JsValue> {
         self.ensure_open()?;
 
-        let store = self.store.as_ref().ok_or(WasmError::NotInitialized)?;
+        let store = Arc::clone(self.store.as_ref().ok_or(WasmError::NotInitialized)?);
 
         // Parse the documents
         let documents: Vec<serde_json::Value> = serde_json::from_str(documents_json)?;
@@ -325,7 +359,7 @@ impl DefraClient {
         let mut errors: Vec<String> = Vec::new();
 
         for doc in documents {
-            match self.sync_single_document(store, &doc).await {
+            match self.sync_single_document(&store, &doc).await {
                 Ok(was_merge) => {
                     synced += 1;
                     if was_merge {
@@ -486,8 +520,17 @@ impl DefraClient {
             return Ok(());
         }
 
-        if let Some(mut store) = self.store.take() {
-            store.close().await?;
+        if let Some(store_arc) = self.store.take() {
+            // Try to get exclusive ownership of the store
+            match Arc::try_unwrap(store_arc) {
+                Ok(mut store) => {
+                    store.close().await?;
+                }
+                Err(_arc) => {
+                    // Other references exist - this shouldn't happen in normal usage
+                    // Just mark as closed and let the Arc drop naturally
+                }
+            }
         }
 
         self.closed = true;

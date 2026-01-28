@@ -18,7 +18,7 @@ pub fn from_js<T: DeserializeOwned>(value: JsValue) -> Result<T> {
 }
 
 /// Client configuration passed from JavaScript.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ClientConfig {
     /// Storage type: "memory" or "indexeddb"
@@ -38,7 +38,7 @@ impl Default for ClientConfig {
 }
 
 /// Storage backend type.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageType {
     #[default]

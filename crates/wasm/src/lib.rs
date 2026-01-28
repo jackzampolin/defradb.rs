@@ -61,6 +61,8 @@
 pub mod bindings;
 pub mod client;
 pub mod error;
+#[cfg(target_arch = "wasm32")]
+pub mod query_adapter;
 pub mod sdl;
 pub mod storage;
 pub mod verification;
