@@ -432,6 +432,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             return self.execute_commits_query(select).await;
         }
 
+        // Handle CID-based time-travel queries
+        if select.cid.is_some() {
+            return self
+                .execute_cid_query(select, fetcher, caller_identity)
+                .await;
+        }
+
         // Get collection schema on-demand from provider
         let collection = self.get_collection(&select.collection_name).await?;
 
@@ -1034,6 +1041,66 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         plan.close().await?;
 
         Ok(JsonValue::Array(results))
+    }
+
+    /// Execute a CID-based time-travel query.
+    ///
+    /// Reconstructs the document as it existed at the specified commit CID
+    /// by walking the merkle DAG backwards and replaying CRDT deltas.
+    ///
+    /// CID queries require `cid` argument and optionally `docID` for validation.
+    /// Returns a single-element array containing the document at that version.
+    async fn execute_cid_query(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+        _caller_identity: Option<Did>,
+    ) -> Result<JsonValue> {
+        let cid = select.cid.as_ref().ok_or_else(|| {
+            QueryError::internal("execute_cid_query called without CID - this is a bug")
+        })?;
+
+        // Get expected docID from select.doc_ids (optional validation)
+        let expected_doc_id = select.doc_ids.as_ref().and_then(|ids| ids.first());
+
+        // Fetch document at the specified CID
+        let document = fetcher
+            .get_document_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
+            .await?;
+
+        // Get collection schema for building the mapping
+        let collection = self.get_collection(&select.collection_name).await?;
+
+        // Build mapping for the requested fields
+        let mapping = plan::build_mapping(select, &collection)?;
+
+        // Convert the document to JSON with only the requested fields
+        let mut obj = serde_json::Map::new();
+
+        for render_key in &mapping.render_keys {
+            let field_name = mapping
+                .try_find_name_from_index(render_key.index)
+                .unwrap_or("");
+
+            let value = if field_name == "__typename" {
+                JsonValue::String(select.collection_name.clone())
+            } else if field_name == "_docID" {
+                document
+                    .id()
+                    .map(|id| JsonValue::String(id.to_string()))
+                    .unwrap_or(JsonValue::Null)
+            } else if let Some(nv) = document.get(field_name) {
+                crate::json_convert::normal_value_to_json(nv)
+                    .unwrap_or(JsonValue::Null)
+            } else {
+                JsonValue::Null
+            };
+
+            obj.insert(render_key.key.clone(), value);
+        }
+
+        // Return as single-element array (Go compatibility)
+        Ok(JsonValue::Array(vec![JsonValue::Object(obj)]))
     }
 
     /// Execute a top-level aggregate query (e.g., `{ _avg(Users: {field: Age}) }`).
