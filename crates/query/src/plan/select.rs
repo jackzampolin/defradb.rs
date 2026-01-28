@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::mapper::Filter;
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, ExecInfo, PlanNode};
 
 /// SelectNode selects specific fields from documents.
 ///
@@ -20,6 +20,10 @@ pub struct SelectNode {
     filter: Option<Filter>,
     /// Current document
     current_doc: Doc,
+    /// Execution statistics for explain execute mode
+    exec_info: ExecInfo,
+    /// Count of documents that matched the filter
+    filter_matches: u64,
 }
 
 impl SelectNode {
@@ -30,6 +34,8 @@ impl SelectNode {
             document_mapping,
             filter: None,
             current_doc: Doc::default(),
+            exec_info: ExecInfo::default(),
+            filter_matches: 0,
         }
     }
 
@@ -44,6 +50,9 @@ impl SelectNode {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PlanNode for SelectNode {
     async fn init(&mut self) -> Result<()> {
+        // Reset execution stats
+        self.exec_info = ExecInfo::default();
+        self.filter_matches = 0;
         self.source.init().await
     }
 
@@ -52,6 +61,9 @@ impl PlanNode for SelectNode {
     }
 
     async fn next(&mut self) -> Result<bool> {
+        // Track iteration (Go counts each call to next, including final false)
+        self.exec_info.iterations += 1;
+
         loop {
             if !self.source.next().await? {
                 return Ok(false);
@@ -65,6 +77,9 @@ impl PlanNode for SelectNode {
                     continue;
                 }
             }
+
+            // Track filter match
+            self.filter_matches += 1;
 
             // Copy the document (field projection happens at render time)
             self.current_doc = doc.deep_clone();
@@ -108,6 +123,34 @@ impl PlanNode for SelectNode {
 
         // Recursively explain child node - merge their wrapped structure
         let child_explain = self.source.explain();
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn exec_info(&self) -> ExecInfo {
+        self.exec_info.clone()
+    }
+
+    fn explain_execute_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // Go DefraDB execute format: iterations, filterMatches
+        obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.exec_info.iterations),
+        );
+        obj.insert(
+            "filterMatches".to_string(),
+            serde_json::json!(self.filter_matches),
+        );
+
+        // Recursively explain child node with execution info
+        let child_explain = self.source.explain_execute();
         if let Some(child_obj) = child_explain.as_object() {
             for (key, value) in child_obj {
                 obj.insert(key.clone(), value.clone());

@@ -76,6 +76,11 @@ impl DocumentMapping {
         self.next_index
     }
 
+    /// Get the number of fields in this mapping
+    pub fn field_count(&self) -> usize {
+        self.next_index
+    }
+
     /// Add a field index with the given name
     pub fn add(&mut self, index: usize, name: impl Into<String>) {
         let name = name.into();
