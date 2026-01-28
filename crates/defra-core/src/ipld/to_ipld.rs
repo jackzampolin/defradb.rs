@@ -133,8 +133,9 @@ impl From<&CounterDeltaPayload> for Ipld {
             Ipld::Integer(payload.priority as i128),
         );
         map.insert("nonce".to_string(), Ipld::Integer(payload.nonce as i128));
+        // Go's CounterDelta uses "collectionVersionID" (not "schemaVersionID")
         map.insert(
-            "schemaVersionID".to_string(),
+            "collectionVersionID".to_string(),
             Ipld::String(payload.schema_version_id.clone()),
         );
         map.insert("data".to_string(), Ipld::Bytes(payload.data.clone()));
