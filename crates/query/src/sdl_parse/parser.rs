@@ -139,7 +139,7 @@ struct PolicyConfig {
 
 #[derive(Debug)]
 struct CompositeIndex {
-    fields: Vec<String>,
+    fields: Vec<(String, bool)>, // (field_name, descending)
     name: Option<String>,
     unique: bool,
 }
@@ -453,7 +453,15 @@ impl<'a> SdlParser<'a> {
 
             match name {
                 "index" => {
-                    let fields = get_directive_string_list(directive, "fields");
+                    // Try "fields" argument first (simple format: ["name", "age"])
+                    let simple_fields = get_directive_string_list(directive, "fields");
+                    let fields: Vec<(String, bool)> = if !simple_fields.is_empty() {
+                        simple_fields.into_iter().map(|f| (f, false)).collect()
+                    } else {
+                        // Try "includes" argument (Go format: [{field: "name", direction: DESC}, ...])
+                        self.parse_includes_argument(directive)
+                    };
+
                     let idx_name = get_directive_string(directive, "name");
                     let unique = self
                         .get_bool_with_warning(directive, "unique", &type_name, None)
@@ -530,6 +538,54 @@ impl<'a> SdlParser<'a> {
             unique,
             direction,
         })
+    }
+
+    /// Parse the `includes` argument for composite indexes.
+    ///
+    /// Go format: `@index(includes: [{field: "name"}, {field: "age", direction: DESC}])`
+    /// Returns (field_name, descending) tuples extracted from the objects.
+    fn parse_includes_argument(
+        &self,
+        directive: &Directive<'_, String>,
+    ) -> Vec<(String, bool)> {
+        let Some(value) = get_directive_arg(directive, "includes") else {
+            return Vec::new();
+        };
+
+        let graphql_parser::schema::Value::List(items) = value else {
+            return Vec::new();
+        };
+
+        items
+            .iter()
+            .filter_map(|item| {
+                // Each item should be an object like {field: "name", direction: DESC}
+                let graphql_parser::schema::Value::Object(obj) = item else {
+                    return None;
+                };
+
+                // Extract field name
+                let field_name = obj.get("field").and_then(|v| match v {
+                    graphql_parser::schema::Value::String(s)
+                    | graphql_parser::schema::Value::Enum(s) => Some(s.clone()),
+                    _ => None,
+                })?;
+
+                // Extract direction (defaults to ASC)
+                let descending = obj
+                    .get("direction")
+                    .map(|v| match v {
+                        graphql_parser::schema::Value::String(s)
+                        | graphql_parser::schema::Value::Enum(s) => {
+                            matches!(s.as_str(), "DESC" | "desc" | "Descending")
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+
+                Some((field_name, descending))
+            })
+            .collect()
     }
 
     fn parse_default_directive(
@@ -994,10 +1050,7 @@ impl<'a> SdlParser<'a> {
             std::collections::HashMap::new();
         for type_name in cycle_edges.keys() {
             let root = find_root(type_name, &mut component);
-            components
-                .entry(root)
-                .or_insert_with(Vec::new)
-                .push(type_name.clone());
+            components.entry(root).or_default().push(type_name.clone());
         }
 
         // Build result: each type gets index within its component
@@ -1202,7 +1255,7 @@ impl<'a> SdlParser<'a> {
 
         for composite_idx in &type_def.directives.indexes {
             // Validate that all referenced fields exist
-            for field_ref in &composite_idx.fields {
+            for (field_ref, _) in &composite_idx.fields {
                 if !valid_field_names.contains(field_ref.as_str()) {
                     return Err(QueryError::parse(format!(
                         "@index on type {} references unknown field '{}'",
@@ -1212,15 +1265,17 @@ impl<'a> SdlParser<'a> {
             }
 
             let idx_name = composite_idx.name.clone().unwrap_or_else(|| {
-                format!("{}_{}_idx", type_def.name, composite_idx.fields.join("_"))
+                let field_names: Vec<&str> =
+                    composite_idx.fields.iter().map(|(n, _)| n.as_str()).collect();
+                format!("{}_{}_idx", type_def.name, field_names.join("_"))
             });
 
             let indexed_fields: Vec<IndexedFieldDescription> = composite_idx
                 .fields
                 .iter()
-                .map(|f| IndexedFieldDescription {
-                    name: f.clone(),
-                    descending: false,
+                .map(|(name, descending)| IndexedFieldDescription {
+                    name: name.clone(),
+                    descending: *descending,
                 })
                 .collect();
 
@@ -1304,7 +1359,7 @@ impl<'a> SdlParser<'a> {
             // use SelfRef with the target's relative index
             if let Some(&target_idx) = collection_set.get(base) {
                 return Ok(FieldKind::self_ref(
-                    &target_idx.to_string(),
+                    target_idx.to_string(),
                     parsed_type.is_list,
                 ));
             }

@@ -13,7 +13,9 @@ use crate::document::documents_to_plan_docs;
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
-use crate::planner::index_selection::{filter_to_index_scan, select_best_index};
+use crate::planner::index_selection::{
+    can_be_ordered_by_index, filter_to_index_scan, select_best_index,
+};
 use crate::planner::Planner;
 use crate::query_parse::{parse_query_with_variables, ExplainType};
 use crate::txn::TransactionRegistry;
@@ -113,6 +115,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let selects = parse_query_with_variables(query, variables)?;
 
         let mut explain_result = Map::new();
+        let mut operation_nodes: Vec<JsonValue> = Vec::new();
         let mut total_executions: u64 = 0;
         let mut total_docs: usize = 0;
         let mut execution_success = true;
@@ -125,12 +128,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .await
             {
                 Ok((explanation, doc_count, exec_count)) => {
-                    // Merge the plan tree into explain result (Go format)
+                    // Wrap the plan tree in selectTopNode (Go format)
+                    let mut select_top_node = Map::new();
                     if let Some(obj) = explanation.as_object() {
                         for (key, value) in obj {
-                            explain_result.insert(key.clone(), value.clone());
+                            select_top_node.insert(key.clone(), value.clone());
                         }
                     }
+
+                    let mut operation_node = Map::new();
+                    operation_node.insert(
+                        "selectTopNode".to_string(),
+                        JsonValue::Object(select_top_node),
+                    );
+                    operation_nodes.push(JsonValue::Object(operation_node));
+
                     total_docs += doc_count;
                     total_executions += exec_count;
                 }
@@ -151,6 +163,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             serde_json::json!(total_executions),
         );
         explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
+        explain_result.insert(
+            "operationNode".to_string(),
+            JsonValue::Array(operation_nodes),
+        );
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -178,8 +194,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let fetcher = self.fetcher.as_ref();
 
-        // Check if we can use an index (only when not fetching by specific doc_ids)
-        let can_use_index = select.doc_ids.is_none()
+        // Check if we can use an index (filter-based or ordering-based)
+        let can_use_filter_index = select.doc_ids.is_none()
             && select.filter.is_some()
             && !collection.indexes.is_empty()
             && fetcher.supports_index_queries()
@@ -188,6 +204,24 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .as_ref()
                 .map(|f| select_best_index(f, &collection.indexes).is_some())
                 .unwrap_or(false);
+
+        // Also use index when it can provide ordering (even without a filter)
+        let can_use_ordering_index = select.doc_ids.is_none()
+            && select.order_by.is_some()
+            && !collection.indexes.is_empty()
+            && fetcher.supports_index_queries()
+            && select
+                .order_by
+                .as_ref()
+                .map(|o| {
+                    collection
+                        .indexes
+                        .iter()
+                        .any(|idx| can_be_ordered_by_index(o, idx).0)
+                })
+                .unwrap_or(false);
+
+        let can_use_index = can_use_filter_index || can_use_ordering_index;
 
         if can_use_index {
             // Use Planner path for index-based queries (shows indexScanNode in explain)
@@ -228,7 +262,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.close().await?;
 
             let explanation = plan.explain();
-            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+            // fieldCount = user fields accessed per document (exclude _docID)
+            // Go counts only user-defined fields, not the system _docID field
+            let field_count = collection.fields.len().saturating_sub(1);
+            let explanation =
+                Self::add_iterations_to_explain(explanation, iterations, doc_count, field_count);
 
             Ok((explanation, result_count, iterations))
         } else {
@@ -285,29 +323,66 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.close().await?;
 
             let explanation = plan.explain();
-            let explanation = Self::add_iterations_to_explain(explanation, iterations, doc_count);
+            // fieldCount = user fields accessed per document (exclude _docID)
+            // Go counts only user-defined fields, not the system _docID field
+            let field_count = collection.fields.len().saturating_sub(1);
+            let explanation =
+                Self::add_iterations_to_explain(explanation, iterations, doc_count, field_count);
 
             Ok((explanation, result_count, iterations))
         }
     }
 
     /// Add execution metrics to the explain output (Go format).
+    /// Metrics are added to the scanNode, not the selectNode.
     fn add_iterations_to_explain(
         mut explanation: JsonValue,
         iterations: u64,
         doc_fetches: usize,
+        field_count: usize,
     ) -> JsonValue {
-        // The explanation is { "nodeKind": { ... } }
-        // We need to add iterations to the inner object
-        if let Some(obj) = explanation.as_object_mut() {
-            if let Some((_, inner)) = obj.iter_mut().next() {
-                if let Some(inner_obj) = inner.as_object_mut() {
-                    inner_obj.insert("iterations".to_string(), serde_json::json!(iterations));
-                    inner_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+        // The explanation is { "selectNode": { "scanNode": { ... } } }
+        // We need to add metrics to the scanNode
+        Self::add_metrics_to_scan_node(&mut explanation, iterations, doc_fetches, field_count);
+        explanation
+    }
+
+    /// Recursively find and add metrics to scanNode.
+    /// If the scanNode has an indexName field, it's an index scan and gets indexFetches.
+    fn add_metrics_to_scan_node(
+        value: &mut JsonValue,
+        iterations: u64,
+        doc_fetches: usize,
+        field_count: usize,
+    ) {
+        if let Some(obj) = value.as_object_mut() {
+            // Check if this object contains scanNode
+            if let Some(scan_node) = obj.get_mut("scanNode") {
+                if let Some(scan_obj) = scan_node.as_object_mut() {
+                    scan_obj.insert("iterations".to_string(), serde_json::json!(iterations));
+                    scan_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+                    // fieldFetches = number of fields per doc * number of docs fetched
+                    let field_fetches = field_count * doc_fetches;
+                    scan_obj.insert("fieldFetches".to_string(), serde_json::json!(field_fetches));
+
+                    // indexFetches is set by IndexScanNode::explain_inner() with
+                    // the actual index key lookup count. For regular scans without an
+                    // index, default to 0 (Go always includes this property).
+                    if !scan_obj.contains_key("indexFetches") {
+                        scan_obj.insert(
+                            "indexFetches".to_string(),
+                            serde_json::json!(0u64),
+                        );
+                    }
+                    return;
                 }
             }
+
+            // Recurse into child objects
+            for (_, child) in obj.iter_mut() {
+                Self::add_metrics_to_scan_node(child, iterations, doc_fetches, field_count);
+            }
         }
-        explanation
     }
 
     /// Generate an explanation of a single Select operation.
@@ -329,8 +404,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .any(|f| matches!(f, Requestable::Select(_)));
 
-        if has_nested {
-            // Use the Planner for queries with nested selections
+        // Check if an ordering-only index can be used (planner needed for IndexScanNode)
+        let has_ordering_index = !has_nested
+            && select.order_by.is_some()
+            && !collection.indexes.is_empty()
+            && select
+                .order_by
+                .as_ref()
+                .map(|o| {
+                    collection
+                        .indexes
+                        .iter()
+                        .any(|idx| can_be_ordered_by_index(o, idx).0)
+                })
+                .unwrap_or(false);
+
+        // Check if a filter-based index can be used
+        let has_filter_index = !has_nested
+            && select.filter.is_some()
+            && !collection.indexes.is_empty()
+            && select
+                .filter
+                .as_ref()
+                .map(|f| select_best_index(f, &collection.indexes).is_some())
+                .unwrap_or(false);
+
+        if has_nested || has_ordering_index || has_filter_index {
+            // Use the Planner for queries with nested selections or index usage
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
@@ -562,13 +662,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             false
         });
 
+        // Check if an ordering-only index can be used (planner needed for IndexScanNode)
+        let has_ordering_index = select.order_by.is_some()
+            && fetcher.supports_index_queries()
+            && !collection.indexes.is_empty()
+            && select
+                .order_by
+                .as_ref()
+                .map(|o| {
+                    collection
+                        .indexes
+                        .iter()
+                        .any(|idx| can_be_ordered_by_index(o, idx).0)
+                })
+                .unwrap_or(false);
+
         // Use Planner if there are nested selections, filter through relations,
-        // order through relations, aggregates on relations, or secondary relation ID fields
+        // order through relations, aggregates on relations, secondary relation ID fields,
+        // or when an index can provide ordering
         let needs_planner = has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
-            || has_secondary_relation_id;
+            || has_secondary_relation_id
+            || has_ordering_index;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
@@ -1246,7 +1363,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Try to use an index if available
             if fetcher.supports_index_queries() && !collection.indexes.is_empty() {
                 if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                    if let Some(params) = filter_to_index_scan(filter, best_index) {
+                    if let Some(params) =
+                        filter_to_index_scan(filter, best_index, select.order_by.as_ref())
+                    {
                         debug!(
                             collection = %select.collection_name,
                             index = %params.index_name,
@@ -2455,7 +2574,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .map(|name| {
                 commit
-                    .get(*name)
+                    .get(name)
                     .and_then(|v| crate::json_convert::normal_value_to_json(v).ok())
             })
             .collect()
