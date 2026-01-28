@@ -104,15 +104,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut operation_children: Vec<JsonValue> = Vec::new();
 
                 for select in selects {
+                    // Check if this is a top-level aggregate query (e.g., _avg, _count, _sum)
+                    let is_top_level_aggregate = Self::is_top_level_aggregate(&select);
+
                     // Build the plan explanation for this select
                     let select_node_content = self.explain_select(&select, explain_type).await?;
 
-                    // Wrap in selectTopNode (Go's structure: selectTopNode -> selectNode -> ...)
-                    let select_top_node = serde_json::json!({
-                        "selectTopNode": select_node_content
-                    });
-
-                    operation_children.push(select_top_node);
+                    if is_top_level_aggregate {
+                        // Top-level aggregates use topLevelNode wrapper
+                        let top_level_node = self.build_top_level_aggregate_explain(
+                            &select,
+                            select_node_content,
+                            explain_type,
+                        );
+                        operation_children.push(top_level_node);
+                    } else {
+                        // Regular queries use selectTopNode wrapper
+                        let select_top_node = serde_json::json!({
+                            "selectTopNode": select_node_content
+                        });
+                        operation_children.push(select_top_node);
+                    }
                 }
 
                 // Wrap all selects in operationNode array (Go's MultiNode pattern)
@@ -644,6 +656,62 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 "selectNode": dag_scan_node
             }))
         }
+    }
+
+    /// Check if a select represents a top-level aggregate query (e.g., _avg, _count, _sum).
+    ///
+    /// Top-level aggregates are queries like `_avg(Users: {field: age})` where the
+    /// aggregate function is the root query field.
+    fn is_top_level_aggregate(select: &Select) -> bool {
+        // Check if the field name is an aggregate function
+        let field_name = select.field.name.as_str();
+        let is_agg_name = field_name.starts_with('_')
+            && ["_count", "_sum", "_avg", "_min", "_max"].contains(&field_name);
+
+        // Also check if there's an Aggregate in the fields
+        let has_aggregate = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Aggregate(_)));
+
+        is_agg_name || has_aggregate
+    }
+
+    /// Build the explain output for a top-level aggregate query.
+    ///
+    /// Go's format: { "topLevelNode": [ {selectTopNode: ...}, {sumNode: {}}, {countNode: {}}, ... ] }
+    fn build_top_level_aggregate_explain(
+        &self,
+        select: &Select,
+        select_explain: JsonValue,
+        _explain_type: ExplainType,
+    ) -> JsonValue {
+        use crate::mapper::AggregateType;
+
+        let mut top_level_children: Vec<JsonValue> = Vec::new();
+
+        // First element: the data source (selectTopNode)
+        top_level_children.push(serde_json::json!({
+            "selectTopNode": select_explain
+        }));
+
+        // Add aggregate nodes based on what's in the fields
+        for field in &select.fields {
+            if let Requestable::Aggregate(agg) = field {
+                let node_name = match agg.aggregate_type {
+                    AggregateType::Sum => "sumNode",
+                    AggregateType::Count => "countNode",
+                    AggregateType::Average => "averageNode",
+                    AggregateType::Min => "minNode",
+                    AggregateType::Max => "maxNode",
+                };
+                top_level_children.push(serde_json::json!({ node_name: {} }));
+            }
+        }
+
+        serde_json::json!({
+            "topLevelNode": top_level_children
+        })
     }
 
     /// Execute a GraphQL query with a specific fetcher and identity.
