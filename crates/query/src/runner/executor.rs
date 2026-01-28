@@ -49,21 +49,34 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let identity = self.resolve_identity(request.identity);
 
         // Route to appropriate handler based on operation type
-        // Pass identity through for ACP permission checks
+        // Pass identity and variables through for ACP permission checks and variable substitution
         let result = match parsed {
             ParsedOperation::Query { explain, .. } => {
                 if let Some(explain_type) = explain {
                     // Return query plan instead of executing
-                    self.explain_query_with_identity(&request.query, identity, explain_type)
-                        .await
+                    self.explain_query_with_identity_and_vars(
+                        &request.query,
+                        identity,
+                        explain_type,
+                        variables.as_ref(),
+                    )
+                    .await
                 } else {
-                    self.execute_query_with_identity(&request.query, identity)
-                        .await
+                    self.execute_query_with_identity_and_vars(
+                        &request.query,
+                        identity,
+                        variables.as_ref(),
+                    )
+                    .await
                 }
             }
             ParsedOperation::Mutation(_) => {
-                self.execute_mutation_with_identity(&request.query, identity)
-                    .await
+                self.execute_mutation_with_identity_and_vars(
+                    &request.query,
+                    identity,
+                    variables.as_ref(),
+                )
+                .await
             }
             ParsedOperation::Subscription { .. } => {
                 // Subscriptions require SSE transport - they cannot be executed via regular request/response
@@ -147,11 +160,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 let fetcher = txn_ctx.doc_fetcher();
                 if let Some(explain_type) = explain {
                     // Return query plan instead of executing
-                    self.explain_query_with_identity(&request.query, identity, explain_type)
-                        .await
+                    self.explain_query_with_identity_and_vars(
+                        &request.query,
+                        identity,
+                        explain_type,
+                        variables.as_ref(),
+                    )
+                    .await
                 } else {
-                    self.execute_query_internal(&request.query, fetcher.as_ref(), identity)
-                        .await
+                    self.execute_query_internal_with_vars(
+                        &request.query,
+                        fetcher.as_ref(),
+                        identity,
+                        variables.as_ref(),
+                    )
+                    .await
                 }
             }
             ParsedOperation::Mutation(_) => {
@@ -172,8 +195,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     }
                 };
 
-                self.execute_mutation_internal(&request.query, mutator, identity)
-                    .await
+                self.execute_mutation_internal_with_vars(
+                    &request.query,
+                    mutator,
+                    identity,
+                    variables.as_ref(),
+                )
+                .await
             }
             ParsedOperation::Subscription { .. } => {
                 // Subscriptions require SSE transport

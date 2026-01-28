@@ -172,11 +172,40 @@ pub fn parse_query(query: &str) -> Result<Vec<Select>> {
     }
 }
 
+/// Parse a GraphQL query string with variable substitution.
+///
+/// Returns a vector of Select operations, one for each top-level field in the query.
+/// For mutations, use `parse_mutations_with_variables` instead.
+pub fn parse_query_with_variables(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<Select>> {
+    match parse_request_with_variables(query, variables)? {
+        ParsedOperation::Query { selects, .. } => Ok(selects),
+        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+            "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
+        )),
+        ParsedOperation::Subscription { .. } => Err(QueryError::parse(
+            "Expected query but got subscription.",
+        )),
+    }
+}
+
 /// Parse a GraphQL mutation string into Mutation operations.
 ///
 /// Returns a vector of Mutation operations, one for each top-level field in the mutation.
 pub fn parse_mutations(query: &str) -> Result<Vec<Mutation>> {
-    match parse_request(query)? {
+    parse_mutations_with_variables(query, None)
+}
+
+/// Parse a GraphQL mutation string with variable substitution.
+///
+/// Returns a vector of Mutation operations, one for each top-level field in the mutation.
+pub fn parse_mutations_with_variables(
+    query: &str,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<Mutation>> {
+    match parse_request_with_variables(query, variables)? {
         ParsedOperation::Mutation(mutations) => Ok(mutations),
         ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
         ParsedOperation::Subscription { .. } => {
