@@ -1191,7 +1191,7 @@ impl<S: Store> DB<S> {
                             }
                             _ => {
                                 // Test fails - return error in Go-compatible format
-                                return Err(Error::InvalidPatch("test failed".to_string()));
+                                return Err(Error::InvalidPatch("failed: test failed".to_string()));
                             }
                         }
                     }
