@@ -298,6 +298,24 @@ impl Filter {
         }
     }
 
+    /// Get all relation filter conditions.
+    ///
+    /// Returns an iterator over (relation_name, nested_filter) pairs for each relation
+    /// referenced in the filter.
+    ///
+    /// For a filter like `{author: {verified: {_eq: true}}, rating: {_gt: 4}}`:
+    /// - Returns: [("author", Filter({verified: {_eq: true}}))]
+    /// - "rating" is not a relation filter (it has operators, not nested fields)
+    pub fn relation_conditions(&self) -> Vec<(String, Filter)> {
+        let mut result = Vec::new();
+        for name in self.relation_field_names() {
+            if let Some(filter) = self.extract_relation_filter(&name) {
+                result.push((name, filter));
+            }
+        }
+        result
+    }
+
     fn check_for_relation_filters(conditions: &HashMap<String, JsonValue>) -> bool {
         for (key, value) in conditions {
             // Check logical operators recursively

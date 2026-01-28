@@ -11,7 +11,7 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{OrderBy, OrderDirection};
 use crate::planner::{Doc, PlanNode};
 
-use super::JoinSide;
+use super::{JoinSide, RelationFilter};
 
 /// TypeJoinMany implements one-to-many relation joins.
 ///
@@ -60,6 +60,11 @@ pub struct TypeJoinMany {
     child_offset: u64,
     /// Order by specification for children
     child_order_by: Option<OrderBy>,
+    /// Optional relation filter to apply during join.
+    /// When set, only include parents that have at least one child passing this filter.
+    /// Example: `Author(filter: {published: {rating: {_gt: 4}}})` means only include
+    /// authors who have at least one book with rating > 4.
+    relation_filter: Option<RelationFilter>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -123,6 +128,7 @@ impl TypeJoinMany {
             child_limit: None,
             child_offset: 0,
             child_order_by: None,
+            relation_filter: None,
         })
     }
 
@@ -141,6 +147,17 @@ impl TypeJoinMany {
     /// Set the order by specification for children.
     pub fn with_order_by(mut self, order_by: OrderBy) -> Self {
         self.child_order_by = Some(order_by);
+        self
+    }
+
+    /// Set a relation filter to apply during the join.
+    ///
+    /// When set, parent documents will only be included if they have at least one
+    /// child document that passes this filter. This is used for queries like
+    /// `Author(filter: {published: {rating: {_gt: 4}}})` - only include authors
+    /// who have published at least one book with rating > 4.
+    pub fn with_relation_filter(mut self, filter: RelationFilter) -> Self {
+        self.relation_filter = Some(filter);
         self
     }
 
@@ -271,6 +288,41 @@ impl TypeJoinMany {
             JsonValue::Array(array),
         );
     }
+
+    /// Check if at least one child document passes the relation filter.
+    ///
+    /// Returns true if:
+    /// - There's no filter (always pass)
+    /// - At least one child document passes the filter conditions
+    ///
+    /// Returns false if:
+    /// - There are no child documents (empty relation can't pass any filter)
+    /// - No child document passes the filter conditions
+    fn check_relation_filter(&self, children: &[Doc], rel_filter: &RelationFilter) -> Result<bool> {
+        if children.is_empty() {
+            // No children - relation filter cannot pass
+            return Ok(false);
+        }
+
+        // Check if any child passes the filter
+        let child_mapping = self.child_plan.document_map();
+        for child in children {
+            if rel_filter.conditions.matches(child.fields(), child_mapping)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Get all children for a parent (unfiltered, for filter checking).
+    /// This returns all children before limit/offset is applied.
+    fn get_all_children(&self, parent_doc_id: &str) -> Vec<Doc> {
+        self.child_cache
+            .get(parent_doc_id)
+            .map(|docs| docs.iter().map(|d| d.deep_clone()).collect())
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
@@ -295,31 +347,53 @@ impl PlanNode for TypeJoinMany {
             ));
         }
 
-        if !self.parent_plan.next().await? {
-            return Ok(false);
-        }
-
-        let mut parent_doc = self.parent_plan.value().deep_clone();
-
-        // Get parent's _docID for the lookup (O(1) cache lookup)
-        let children = match parent_doc.doc_id() {
-            Some(id) => self.find_child_docs(id),
-            None => {
-                warn!(
-                    parent_collection = %self.parent_side.collection().name,
-                    relation_field = %self.parent_side.relation_field().name,
-                    "Parent document missing _docID - returning empty children array. \
-                     This may indicate data corruption or a schema mismatch."
-                );
-                Vec::new()
+        // Loop to skip parents that don't pass relation filter
+        loop {
+            if !self.parent_plan.next().await? {
+                return Ok(false);
             }
-        };
 
-        // Merge children array into parent
-        self.merge_children(&mut parent_doc, children);
-        self.current_doc = parent_doc;
+            let mut parent_doc = self.parent_plan.value().deep_clone();
 
-        Ok(true)
+            // Get parent's _docID for the lookup (O(1) cache lookup)
+            let parent_doc_id = match parent_doc.doc_id() {
+                Some(id) => id.to_string(),
+                None => {
+                    warn!(
+                        parent_collection = %self.parent_side.collection().name,
+                        relation_field = %self.parent_side.relation_field().name,
+                        "Parent document missing _docID - returning empty children array. \
+                         This may indicate data corruption or a schema mismatch."
+                    );
+                    // No docID means no children can match - skip if filter is present
+                    if self.relation_filter.is_some() {
+                        continue;
+                    }
+                    // No filter, return with empty children
+                    self.merge_children(&mut parent_doc, Vec::new());
+                    self.current_doc = parent_doc;
+                    return Ok(true);
+                }
+            };
+
+            // Apply relation filter if present (check against ALL children, not just limited)
+            if let Some(ref rel_filter) = self.relation_filter {
+                let all_children = self.get_all_children(&parent_doc_id);
+                if !self.check_relation_filter(&all_children, rel_filter)? {
+                    // No children pass the filter - skip this parent
+                    continue;
+                }
+            }
+
+            // Get children (with ordering, offset, limit applied)
+            let children = self.find_child_docs(&parent_doc_id);
+
+            // Merge children array into parent
+            self.merge_children(&mut parent_doc, children);
+            self.current_doc = parent_doc;
+
+            return Ok(true);
+        }
     }
 
     fn value(&self) -> &Doc {
