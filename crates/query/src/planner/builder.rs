@@ -200,10 +200,46 @@ impl Planner {
             })
             .unwrap_or_default();
 
-        // Build scan mapping: for queries with nested selections, relation filters, or relation ordering,
-        // use full schema mapping so that FK fields are available for TypeJoin lookups.
+        // Check if GROUP BY references relation fields (needs full schema mapping for joins)
+        let group_by_has_relations = select
+            .group_by
+            .as_ref()
+            .map(|gb| {
+                gb.fields.iter().any(|field_name| {
+                    collection
+                        .field_by_name(field_name)
+                        .map(|f| f.kind.is_relation())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        // Check if aggregates reference relation fields (needs full schema mapping for joins)
+        let aggregates_have_relations = select.fields.iter().any(|f| {
+            if let Requestable::Aggregate(agg) = f {
+                agg.targets.iter().any(|t| {
+                    if t.host_name.is_empty() || t.host_name == "_group" {
+                        return false;
+                    }
+                    collection
+                        .field_by_name(&t.host_name)
+                        .map(|f| f.kind.is_relation())
+                        .unwrap_or(false)
+                })
+            } else {
+                false
+            }
+        });
+
+        // Build scan mapping: for queries with nested selections, relation filters, relation ordering,
+        // relation aggregates, or relation groupBy fields, use full schema mapping so that FK fields
+        // are available for TypeJoin lookups and schema indices don't collide with sequential render indices.
         // For simple queries, use the render_mapping directly.
-        let needs_joins = has_nested || filter_has_relations || order_has_relations;
+        let needs_joins = has_nested
+            || filter_has_relations
+            || order_has_relations
+            || aggregates_have_relations
+            || group_by_has_relations;
         let mut scan_mapping = if needs_joins {
             self.build_scan_mapping_for_join(&collection, &render_mapping)
         } else {
@@ -1964,19 +2000,15 @@ impl Planner {
                     if already_joined {
                         if let Some(ref filter) = target.filter {
                             for filter_field in filter.referenced_fields() {
-                                // Skip special fields
                                 if filter_field.starts_with('_') {
                                     continue;
                                 }
-                                // Find the field index in the target collection
                                 if let Some(idx) = target_collection
                                     .fields
                                     .iter()
                                     .position(|f| f.name == filter_field)
                                 {
-                                    // Get the existing child mapping from the parent's mapping
                                     if let Some(child_mapping) = mapping.child_at_mut(relation_field_index) {
-                                        // Add the filter field to child mapping if not present
                                         if child_mapping.first_index_of_name(&filter_field).is_none() {
                                             child_mapping.add(idx, &filter_field);
                                             child_mapping.add_render_key(idx, &filter_field);
@@ -1985,7 +2017,29 @@ impl Planner {
                                 }
                             }
                         }
-                        continue; // Don't create a new join, just added filter fields to existing
+                        // Add order fields from aggregate target to existing child mapping
+                        if let Some(ref order) = target.order {
+                            for condition in &order.conditions {
+                                if let Some(order_field) = condition.fields.first() {
+                                    if order_field.starts_with('_') {
+                                        continue;
+                                    }
+                                    if let Some(idx) = target_collection
+                                        .fields
+                                        .iter()
+                                        .position(|f| f.name == *order_field)
+                                    {
+                                        if let Some(child_mapping) = mapping.child_at_mut(relation_field_index) {
+                                            if child_mapping.first_index_of_name(order_field).is_none() {
+                                                child_mapping.add(idx, order_field);
+                                                child_mapping.add_render_key(idx, order_field);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
                     }
 
                     // Build a minimal child mapping for the aggregate
@@ -2025,6 +2079,28 @@ impl Planner {
                                 if child_mapping.first_index_of_name(&filter_field).is_none() {
                                     child_mapping.add(idx, &filter_field);
                                     child_mapping.add_render_key(idx, &filter_field);
+                                }
+                            }
+                        }
+                    }
+
+                    // Add fields referenced by the order so they appear in the output
+                    // for post-processing sort before limit/offset
+                    if let Some(ref order) = target.order {
+                        for condition in &order.conditions {
+                            if let Some(order_field) = condition.fields.first() {
+                                if order_field.starts_with('_') {
+                                    continue;
+                                }
+                                if let Some(idx) = target_collection
+                                    .fields
+                                    .iter()
+                                    .position(|f| f.name == *order_field)
+                                {
+                                    if child_mapping.first_index_of_name(order_field).is_none() {
+                                        child_mapping.add(idx, order_field);
+                                        child_mapping.add_render_key(idx, order_field);
+                                    }
                                 }
                             }
                         }
@@ -2305,11 +2381,18 @@ impl Planner {
             child_relation_index,
         )?;
 
-        // Create TypeJoinOne (filter relations are typically one-to-one)
-        // No relation filter here - the complex filter is applied after all joins
-        let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
-
-        Ok((Box::new(join), mapping))
+        // Create the appropriate join type based on the relation cardinality.
+        // One-to-many relations need TypeJoinMany to collect all children into an array,
+        // one-to-one relations use TypeJoinOne.
+        if relation_field.kind.is_array() {
+            let join_many =
+                TypeJoinMany::new(plan, child_plan, parent_side, child_side, mapping.clone())?;
+            Ok((Box::new(join_many), mapping))
+        } else {
+            let join =
+                TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
+            Ok((Box::new(join), mapping))
+        }
     }
 
     /// Apply sub-joins for remaining elements of a multi-level filter path.

@@ -820,36 +820,38 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     };
 
                                 // Step 2: Apply order (sort array elements before limit/offset)
+                                // The order field may differ from the aggregate field (e.g., order by "name", sum "rating")
                                 let mut ordered_items = filtered_items;
                                 if let Some(ref order) = target.order {
                                     if let Some(condition) = order.conditions.first() {
+                                        let order_field = condition.fields.first().map(|s| s.as_str());
                                         let desc = matches!(
                                             condition.direction,
                                             crate::mapper::OrderDirection::Desc
                                         );
                                         ordered_items.sort_by(|a, b| {
-                                            let a_val = match field_name {
+                                            let a_val = match order_field {
                                                 Some(f) => a
                                                     .as_object()
                                                     .and_then(|o| o.get(f))
                                                     .unwrap_or(&JsonValue::Null),
                                                 None => *a,
                                             };
-                                            let b_val = match field_name {
+                                            let b_val = match order_field {
                                                 Some(f) => b
                                                     .as_object()
                                                     .and_then(|o| o.get(f))
                                                     .unwrap_or(&JsonValue::Null),
                                                 None => *b,
                                             };
-                                            let a_f = a_val.as_f64().unwrap_or(0.0);
-                                            let b_f = b_val.as_f64().unwrap_or(0.0);
+                                            let cmp = crate::plan::compare_json_values(
+                                                Some(a_val),
+                                                Some(b_val),
+                                            );
                                             if desc {
-                                                b_f.partial_cmp(&a_f)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                                cmp.reverse()
                                             } else {
-                                                a_f.partial_cmp(&b_f)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                                cmp
                                             }
                                         });
                                     }
@@ -1361,28 +1363,34 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get collection schema for building the mapping
         let collection = self.get_collection(&select.collection_name).await?;
 
-        // Build a modified select without _version for the mapping
-        // (build_mapping doesn't handle nested selects like _version)
-        let select_without_version = Select {
-            fields: select
-                .fields
-                .iter()
-                .filter(|f| {
-                    if let Requestable::Select(s) = f {
-                        s.field.name != "_version"
-                    } else {
-                        true
+        // Separate nested selects (relation fields) from scalar fields.
+        // build_mapping can't handle nested selects, so we strip them and resolve relations separately.
+        let mut nested_selects: Vec<&Select> = Vec::new();
+        let scalar_fields: Vec<Requestable> = select
+            .fields
+            .iter()
+            .filter(|f| {
+                if let Requestable::Select(s) = f {
+                    if s.field.name == "_version" {
+                        return false;
                     }
-                })
-                .cloned()
-                .collect(),
+                    nested_selects.push(s);
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        let select_for_mapping = Select {
+            fields: scalar_fields,
             ..select.clone()
         };
 
-        // Build mapping for the requested fields (excluding _version)
-        let mapping = plan::build_mapping(&select_without_version, &collection)?;
+        // Build mapping for scalar fields only
+        let mapping = plan::build_mapping(&select_for_mapping, &collection)?;
 
-        // Convert the document to JSON with only the requested fields
+        // Convert the document to JSON with only the requested scalar fields
         let mut obj = serde_json::Map::new();
 
         for render_key in &mapping.render_keys {
@@ -1405,6 +1413,41 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             };
 
             obj.insert(render_key.key.clone(), value);
+        }
+
+        // Resolve nested selects (relation fields like `author { name }`)
+        for nested_select in &nested_selects {
+            let relation_name = &nested_select.field.name;
+            let output_name = nested_select.field.output_name();
+            let related_collection = &nested_select.collection_name;
+
+            // Many-to-one: parent has FK field (e.g., Book._authorID → Author)
+            let fk_field_name = CollectionVersion::relation_id_field_name(relation_name);
+            if let Some(fk_value) = document.get(&fk_field_name) {
+                let fk_doc_id = crate::json_convert::normal_value_to_json(fk_value)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+
+                if !fk_doc_id.is_empty() {
+                    let result = fetcher
+                        .get_by_ids(related_collection, &[fk_doc_id])
+                        .await?;
+
+                    if let Some(related_doc) = result.docs().first() {
+                        let related_obj =
+                            self.render_document_fields(related_doc, nested_select);
+                        obj.insert(output_name.to_string(), JsonValue::Object(related_obj));
+                    } else {
+                        obj.insert(output_name.to_string(), JsonValue::Null);
+                    }
+                } else {
+                    obj.insert(output_name.to_string(), JsonValue::Null);
+                }
+            } else {
+                // One-to-many or no FK found: return null for now
+                obj.insert(output_name.to_string(), JsonValue::Null);
+            }
         }
 
         // Add _version data if requested
@@ -1546,6 +1589,36 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(JsonValue::Array(enriched_results))
+    }
+
+    /// Render a Document's fields as a JSON object using only the fields requested by a Select.
+    fn render_document_fields(&self, doc: &Document, select: &Select) -> serde_json::Map<String, JsonValue> {
+        let mut obj = serde_json::Map::new();
+        for field in &select.fields {
+            if let Requestable::Field(f) = field {
+                let fname = &f.name;
+                let output = f.output_name();
+                if fname == "_docID" {
+                    if let Some(id) = doc.id() {
+                        obj.insert(output.to_string(), JsonValue::String(id.to_string()));
+                    } else {
+                        obj.insert(output.to_string(), JsonValue::Null);
+                    }
+                } else if fname == "__typename" {
+                    obj.insert(
+                        output.to_string(),
+                        JsonValue::String(select.collection_name.clone()),
+                    );
+                } else if let Some(nv) = doc.get(fname) {
+                    let json_val = crate::json_convert::normal_value_to_json(nv)
+                        .unwrap_or(JsonValue::Null);
+                    obj.insert(output.to_string(), json_val);
+                } else {
+                    obj.insert(output.to_string(), JsonValue::Null);
+                }
+            }
+        }
+        obj
     }
 
     /// Fetch version (commit) data for a document.

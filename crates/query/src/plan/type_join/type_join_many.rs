@@ -597,7 +597,7 @@ impl PlanNode for TypeJoinMany {
 
 /// Compare two JSON values for ordering.
 /// Follows SQL-like ordering: NULL < bool < number < string < array < object
-fn compare_json_values(a: Option<&JsonValue>, b: Option<&JsonValue>) -> Ordering {
+pub fn compare_json_values(a: Option<&JsonValue>, b: Option<&JsonValue>) -> Ordering {
     match (a, b) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Less,

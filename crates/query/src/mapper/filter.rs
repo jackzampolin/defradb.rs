@@ -287,6 +287,9 @@ impl Filter {
                     }
                     _ => {}
                 }
+            } else if key == "_alias" {
+                // _alias is a special filter directive, not a relation field
+                continue;
             } else if let JsonValue::Object(obj) = value {
                 // This is a field condition - check if it contains operators or nested fields
                 // If any key in the object is NOT an operator, it's a relation filter
@@ -345,6 +348,9 @@ impl Filter {
                     }
                     _ => {}
                 }
+            } else if key == "_alias" {
+                // _alias is a special filter directive, not a relation filter
+                continue;
             } else if let JsonValue::Object(obj) = value {
                 // This is a field condition - check if it contains operators or nested fields
                 // If any key in the object is NOT an operator, it's a relation filter
@@ -416,6 +422,11 @@ impl Filter {
                         _ => {}
                     }
                 }
+                continue;
+            }
+
+            // _alias is a special filter directive, not a relation path
+            if key == "_alias" {
                 continue;
             }
 
@@ -633,6 +644,9 @@ impl Filter {
                         scalar_conditions.insert(key.clone(), value.clone());
                     }
                 }
+            } else if key == "_alias" {
+                // _alias is a special filter directive evaluated by eval_conditions, not a relation
+                scalar_conditions.insert(key.clone(), value.clone());
             } else if let JsonValue::Object(obj) = value {
                 // Field condition - check if it's a relation filter
                 let is_relation = obj.keys().any(|k| FilterOp::parse(k).is_none());
@@ -1729,16 +1743,50 @@ impl Filter {
                 QueryError::invalid_filter("alias field condition must be object")
             })?;
 
-            for (op_key, op_value) in ops {
-                if let Some(op) = FilterOp::parse(op_key) {
-                    if !self.eval_op(&field_value, op, op_value)? {
+            // Check if this is a relation filter (nested field conditions) or operator conditions
+            let is_relation_filter = ops.keys().any(|k| FilterOp::parse(k).is_none());
+
+            if is_relation_filter {
+                // Relation-style alias: {_alias: {books: {rating: {_gt: 4.8}}}}
+                // The alias points to a relation field (array or object)
+                if field_value.is_null() {
+                    // Null relation → no match
+                    return Ok(false);
+                } else if let Some(arr) = field_value.as_array() {
+                    // One-to-many: existential semantics (any element matches)
+                    let mut any_match = false;
+                    for elem in arr {
+                        if let Some(obj) = elem.as_object() {
+                            if self.eval_relation_conditions(ops, obj)? {
+                                any_match = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !any_match {
+                        return Ok(false);
+                    }
+                } else if let Some(obj) = field_value.as_object() {
+                    // One-to-one: direct match
+                    if !self.eval_relation_conditions(ops, obj)? {
                         return Ok(false);
                     }
                 } else {
-                    return Err(QueryError::invalid_filter(format!(
-                        "unknown operator '{}' in _alias filter",
-                        op_key
-                    )));
+                    return Ok(false);
+                }
+            } else {
+                // Scalar-style alias: {_alias: {myAge: {_gt: 20}}}
+                for (op_key, op_value) in ops {
+                    if let Some(op) = FilterOp::parse(op_key) {
+                        if !self.eval_op(&field_value, op, op_value)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        return Err(QueryError::invalid_filter(format!(
+                            "unknown operator '{}' in _alias filter",
+                            op_key
+                        )));
+                    }
                 }
             }
         }
