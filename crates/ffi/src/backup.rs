@@ -200,8 +200,21 @@ pub unsafe extern "C" fn basic_export(
             config.collections.clone()
         };
 
-        let mut export_data = Map::new();
+        // Two-pass export:
+        // Pass 1: Query all collections, compute _docIDNew, build _docID → _docIDNew map
+        // Pass 2: Rewrite FK values to use _docIDNew (cross-collection references)
 
+        struct CollectionExport {
+            name: String,
+            docs: Vec<Map<String, JsonValue>>,
+            relation_field_names: Vec<String>,
+            self_ref_fk_names: Vec<String>,
+        }
+
+        let mut collection_exports: Vec<CollectionExport> = Vec::new();
+        let mut doc_id_map: HashMap<String, String> = HashMap::new();
+
+        // Pass 1: Query docs and compute _docIDNew for each
         for name in &collection_names {
             let collection = database
                 .get_collection(name)
@@ -214,22 +227,18 @@ pub unsafe extern "C" fn basic_export(
             // Build GraphQL query field list
             let mut query_parts = vec!["_docID".to_string()];
             let mut relation_field_names: Vec<String> = Vec::new();
-            let mut self_ref_field_names: Vec<String> = Vec::new();
             let mut self_ref_fk_names: Vec<String> = Vec::new();
 
             for field in &fields {
                 if field.is_relation {
                     if !field.is_array {
-                        // Single relation: query nested _docID
                         query_parts.push(format!("{} {{ _docID }}", field.name));
                         relation_field_names.push(field.name.clone());
 
                         if field.is_self_ref {
-                            self_ref_field_names.push(field.name.clone());
                             self_ref_fk_names.push(format!("_{}ID", field.name));
                         }
                     }
-                    // Skip array relations (computed, not stored in backup)
                 } else {
                     query_parts.push(field.name.clone());
                 }
@@ -237,7 +246,6 @@ pub unsafe extern "C" fn basic_export(
 
             let query = format!("{{ {} {{ {} }} }}", name, query_parts.join(" "));
 
-            // Execute query
             let request = query::QueryRequest::new(query);
             let response = runner.execute(request).await;
 
@@ -251,7 +259,6 @@ pub unsafe extern "C" fn basic_export(
                 ));
             }
 
-            // Extract documents from response
             let response_json = serde_json::to_value(&response.data)
                 .map_err(|e| format!("failed to serialize response: {}", e))?;
 
@@ -261,8 +268,7 @@ pub unsafe extern "C" fn basic_export(
                 .cloned()
                 .unwrap_or_default();
 
-            // Transform documents for export format
-            let mut export_docs = Vec::new();
+            let mut processed_docs = Vec::new();
             for doc in docs {
                 let mut doc_map = match doc.as_object() {
                     Some(m) => m.clone(),
@@ -270,6 +276,7 @@ pub unsafe extern "C" fn basic_export(
                 };
 
                 // Transform relation fields: {author: {_docID: "..."}} → {_authorID: "..."}
+                // Store the raw _docID for now; Pass 2 will map to _docIDNew
                 for rel_name in &relation_field_names {
                     if let Some(related) = doc_map.remove(rel_name) {
                         if related.is_null() {
@@ -285,12 +292,52 @@ pub unsafe extern "C" fn basic_export(
                 // Compute _docIDNew from current field values (minus self-ref FK fields)
                 let doc_id_new =
                     compute_doc_id_new(&doc_map, &self_ref_fk_names, &schema)?;
-                doc_map.insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
 
+                // Build _docID → _docIDNew mapping
+                if let Some(doc_id) = doc_map.get("_docID").and_then(|v| v.as_str()) {
+                    doc_id_map.insert(doc_id.to_string(), doc_id_new.clone());
+                }
+
+                doc_map.insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
+                processed_docs.push(doc_map);
+            }
+
+            collection_exports.push(CollectionExport {
+                name: name.clone(),
+                docs: processed_docs,
+                relation_field_names,
+                self_ref_fk_names,
+            });
+        }
+
+        // Pass 2: Rewrite FK values from _docID to _docIDNew
+        let mut export_data = Map::new();
+        for col_export in collection_exports {
+            let mut export_docs = Vec::new();
+
+            // Collect all FK field names for this collection
+            let fk_field_names: Vec<String> = col_export
+                .relation_field_names
+                .iter()
+                .map(|n| format!("_{}ID", n))
+                .collect();
+
+            for mut doc_map in col_export.docs {
+                // Map FK values from _docID to _docIDNew
+                for fk_name in &fk_field_names {
+                    if let Some(fk_value) = doc_map.get(fk_name).and_then(|v| v.as_str()) {
+                        if let Some(new_id) = doc_id_map.get(fk_value) {
+                            doc_map.insert(
+                                fk_name.clone(),
+                                JsonValue::String(new_id.clone()),
+                            );
+                        }
+                    }
+                }
                 export_docs.push(JsonValue::Object(doc_map));
             }
 
-            export_data.insert(name.clone(), JsonValue::Array(export_docs));
+            export_data.insert(col_export.name, JsonValue::Array(export_docs));
         }
 
         // Serialize to JSON
