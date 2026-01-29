@@ -499,6 +499,10 @@ impl Planner {
             if let Some(ref fetcher) = self.fetcher {
                 scan = scan.with_fetcher(fetcher.clone());
             }
+            // Pass doc_ids to ScanNode for explain prefixes
+            if let Some(ref doc_ids) = select.doc_ids {
+                scan = scan.with_doc_ids(doc_ids.clone());
+            }
             Box::new(scan)
         };
 
