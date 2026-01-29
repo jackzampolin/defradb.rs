@@ -18,7 +18,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 ///
 /// GraphQL uses bare identifiers for object keys (not quoted strings like JSON).
 /// This converts: {"name": "Alice", "age": 30} to {name: "Alice", age: 30}
-fn json_to_graphql_input(value: &JsonValue) -> String {
+pub(crate) fn json_to_graphql_input(value: &JsonValue) -> String {
     match value {
         JsonValue::Null => "null".to_string(),
         JsonValue::Bool(b) => b.to_string(),
