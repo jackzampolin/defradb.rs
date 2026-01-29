@@ -1261,21 +1261,35 @@ impl<'a> SdlParser<'a> {
                     if is_primary {
                         id_field = id_field.as_primary();
 
-                        // Go DefraDB automatically creates a unique index on the _*ID field
-                        // for primary one-to-one relations. This enforces that each target
-                        // document can only be linked to once (one-to-one constraint).
+                        // Only create a unique index for true one-to-one relations.
+                        // A relation is one-to-one when both sides are non-array.
+                        // For one-to-many (counterpart is array), the FK allows duplicates.
                         // See Go's ensureOneToOneUniqueIndex() in collection_define.go
-                        let idx_name = format!("{}_{}_unique", type_def.name, id_field_name);
-                        indexes.push(IndexDescription {
-                            name: idx_name,
-                            id: field_id_counter,
-                            fields: vec![IndexedFieldDescription {
-                                name: id_field_name.clone(),
-                                descending: false,
-                            }],
-                            unique: true,
-                        });
-                        field_id_counter += 1;
+                        let counterpart_is_array = self
+                            .type_defs
+                            .get(&parsed_field.field_type.base_type)
+                            .map(|target_def| {
+                                target_def.fields.iter().any(|f| {
+                                    f.field_type.base_type == type_def.name
+                                        && f.field_type.is_list
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        if !counterpart_is_array {
+                            let idx_name =
+                                format!("{}_{}_unique", type_def.name, id_field_name);
+                            indexes.push(IndexDescription {
+                                name: idx_name,
+                                id: field_id_counter,
+                                fields: vec![IndexedFieldDescription {
+                                    name: id_field_name.clone(),
+                                    descending: false,
+                                }],
+                                unique: true,
+                            });
+                            field_id_counter += 1;
+                        }
                     }
                     fields.push(id_field);
                     field_id_counter += 1;

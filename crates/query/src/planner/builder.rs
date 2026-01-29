@@ -302,14 +302,17 @@ impl Planner {
 
         // Add aggregate fields to scan_mapping if present in render_mapping.
         // Aggregates are virtual fields (not in schema) that need explicit copying.
+        // Each aliased aggregate gets its own index/render_key, even if they share
+        // the same type (e.g., sum1: _sum(...) and sum2: _sum(...) need separate slots).
         for field in &select.fields {
             if let Requestable::Aggregate(agg) = field {
                 let agg_type_name = agg.aggregate_type.as_str();
-                // Add the aggregate type name if not already in scan_mapping
-                if scan_mapping.first_index_of_name(agg_type_name).is_none() {
+                let output_name = agg.output_name();
+                // Add a new index if this specific output name isn't already registered
+                if scan_mapping.try_find_index_from_render_key(&output_name).is_none() {
                     let scan_index = scan_mapping.next_index();
                     scan_mapping.add(scan_index, agg_type_name);
-                    scan_mapping.add_render_key(scan_index, agg.output_name());
+                    scan_mapping.add_render_key(scan_index, output_name);
                 }
 
                 // Always add aggregate target fields if present (even if aggregate type exists)
