@@ -6,6 +6,7 @@
 pub mod block;
 pub mod collection;
 pub mod document;
+pub mod encryption;
 pub mod error;
 pub mod ipld;
 pub mod store;

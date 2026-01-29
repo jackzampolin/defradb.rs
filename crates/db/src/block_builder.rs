@@ -13,10 +13,17 @@ use datastore::NamespaceView;
 use defra_core::block::{
     Block, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
 };
+use defra_core::encryption::EncryptionConfig;
 use document::{Document, NormalValue};
 use std::sync::Arc;
 use storage::corekv::Key;
 use storage::keys::headstore::HeadstoreDocKey;
+
+fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let (ciphertext, _nonce) = crypto::encryption::aes::encrypt_aes(plaintext, key, &[], true)
+        .map_err(|e| format!("encryption failed: {}", e))?;
+    Ok(ciphertext)
+}
 
 /// Result of building blocks from a document mutation.
 #[derive(Debug, Clone)]
@@ -319,6 +326,7 @@ pub async fn write_document_blocks(
     doc: &Document,
     schema_version_id: &str,
     modified_fields: Option<&std::collections::HashSet<String>>,
+    encryption_config: Option<&EncryptionConfig>,
 ) -> Result<BlockResult, String> {
     let doc_id = doc
         .id()
@@ -357,8 +365,28 @@ pub async fn write_document_blocks(
             // Create new block for this field (LWW or Counter depending on CRDT type)
             let heads: Vec<Cid> = field_head.cid.into_iter().collect();
 
+            // For counter fields during updates, use the raw increment delta
+            // (not the accumulated value) to match Go behavior.
+            let cbor_value = if let Some(delta) = doc.get_counter_delta(field_name) {
+                delta
+            } else {
+                field_value.value()
+            };
+
             // Encode the field value as CBOR
-            let value_bytes = encode_value_as_cbor(field_value.value())?;
+            let value_bytes = encode_value_as_cbor(cbor_value)?;
+
+            // Encrypt delta if encryption is configured for this field
+            let value_bytes = if let Some(enc) = encryption_config {
+                if enc.should_encrypt_field(field_name) {
+                    let key = enc.derive_key(field_name, &doc_id_str);
+                    encrypt_delta(&value_bytes, &key)?
+                } else {
+                    value_bytes
+                }
+            } else {
+                value_bytes
+            };
 
             // Check if this field is a Counter type
             let is_counter = doc

@@ -76,6 +76,10 @@ pub struct Mutation {
     pub fields: Vec<Requestable>,
     /// Document mapping for result fields
     pub document_mapping: DocumentMapping,
+    /// Whether to encrypt the entire document
+    pub encrypt_doc: bool,
+    /// Specific field names to encrypt (field-level encryption)
+    pub encrypt_fields: Vec<String>,
 }
 
 impl Mutation {
@@ -91,6 +95,8 @@ impl Mutation {
             filter: None,
             fields: Vec::new(),
             document_mapping: DocumentMapping::new(),
+            encrypt_doc: false,
+            encrypt_fields: Vec::new(),
         }
     }
 
@@ -106,6 +112,8 @@ impl Mutation {
             filter: None,
             fields: Vec::new(),
             document_mapping: DocumentMapping::new(),
+            encrypt_doc: false,
+            encrypt_fields: Vec::new(),
         }
     }
 
@@ -121,6 +129,8 @@ impl Mutation {
             filter: None,
             fields: Vec::new(),
             document_mapping: DocumentMapping::new(),
+            encrypt_doc: false,
+            encrypt_fields: Vec::new(),
         }
     }
 
@@ -136,6 +146,8 @@ impl Mutation {
             filter: None,
             fields: Vec::new(),
             document_mapping: DocumentMapping::new(),
+            encrypt_doc: false,
+            encrypt_fields: Vec::new(),
         }
     }
 
