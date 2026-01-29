@@ -382,11 +382,15 @@ pub(crate) fn build_plan(
 
     // Add SelectNode (Go always wraps in selectNode, even without a filter)
     // Use the same filter we used for scanNode
-    let select_node = if let Some(ref filter) = filter_for_scan {
+    let mut select_node = if let Some(ref filter) = filter_for_scan {
         SelectNode::new(plan, mapping.clone()).with_filter(filter.clone())
     } else {
         SelectNode::new(plan, mapping.clone())
     };
+    // Pass doc_ids to SelectNode for explain output
+    if let Some(ref doc_ids) = select.doc_ids {
+        select_node = select_node.with_doc_ids(doc_ids.clone());
+    }
     plan = Box::new(select_node);
 
     // Check if we have GROUP BY

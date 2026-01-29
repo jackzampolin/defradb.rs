@@ -656,12 +656,14 @@ impl PlanNode for TypeJoinMany {
         if has_limit {
             // Wrap selectNode in limitNode
             let mut limit_node = serde_json::Map::new();
-            if let Some(limit) = self.child_limit {
-                limit_node.insert(
-                    "limit".to_string(),
-                    serde_json::Value::Number(limit.into()),
-                );
-            }
+            // Go always includes limit field, even when null
+            limit_node.insert(
+                "limit".to_string(),
+                match self.child_limit {
+                    Some(limit) => serde_json::Value::Number(limit.into()),
+                    None => serde_json::Value::Null,
+                },
+            );
             // Go always includes offset
             limit_node.insert(
                 "offset".to_string(),
