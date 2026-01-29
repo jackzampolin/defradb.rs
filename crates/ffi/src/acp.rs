@@ -592,6 +592,50 @@ pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
     }
 }
 
+/// Create a new identity (Ed25519 keypair).
+///
+/// Generates a fresh Ed25519 keypair and returns the DID and private key.
+/// This is stateless — no node is required.
+///
+/// Returns a JSON object:
+/// ```json
+/// {
+///   "did": "did:key:z6Mk...",
+///   "privateKeyHex": "abcd...",
+///   "keyType": "ed25519"
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn create_identity() -> FfiResult {
+    let result = (|| {
+        let private_key = crypto::generate_ed25519()
+            .map_err(|e| format!("failed to generate Ed25519 key: {}", e))?;
+
+        let identity = identity::RawIdentity::from_ed25519(private_key)
+            .map_err(|e| format!("failed to create identity: {}", e))?;
+
+        let did = identity
+            .did()
+            .map_err(|e| format!("failed to derive DID: {}", e))?;
+
+        let private_key_hex = hex::encode(identity.private_key_bytes());
+
+        let json = serde_json::json!({
+            "did": did.to_string(),
+            "privateKeyHex": private_key_hex,
+            "keyType": "ed25519"
+        })
+        .to_string();
+
+        Ok::<String, String>(json)
+    })();
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,5 +888,45 @@ mod tests {
 
         unsafe { crate::types::defra_free_string(result.error) };
         node_close(node);
+    }
+
+    #[test]
+    fn test_create_identity() {
+        let result = create_identity();
+        assert_eq!(result.status, 0, "create_identity should succeed");
+        assert!(!result.value.is_null());
+
+        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
+        let parsed: serde_json::Value = serde_json::from_str(&value).unwrap();
+
+        // DID should start with did:key:z6Mk (Ed25519 multicodec prefix)
+        let did = parsed["did"].as_str().unwrap();
+        assert!(
+            did.starts_with("did:key:z6Mk"),
+            "DID should start with did:key:z6Mk, got: {}",
+            did
+        );
+
+        // Private key hex should be non-empty
+        let private_key_hex = parsed["privateKeyHex"].as_str().unwrap();
+        assert!(
+            !private_key_hex.is_empty(),
+            "privateKeyHex should be non-empty"
+        );
+
+        // Key type should be ed25519
+        assert_eq!(parsed["keyType"].as_str().unwrap(), "ed25519");
+
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Call twice and verify different DIDs (randomness check)
+        let result2 = create_identity();
+        assert_eq!(result2.status, 0);
+        let value2 = unsafe { CStr::from_ptr(result2.value).to_string_lossy() };
+        let parsed2: serde_json::Value = serde_json::from_str(&value2).unwrap();
+        let did2 = parsed2["did"].as_str().unwrap();
+
+        assert_ne!(did, did2, "two calls should produce different DIDs");
+        unsafe { crate::types::defra_free_string(result2.value) };
     }
 }
