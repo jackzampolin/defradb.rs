@@ -815,7 +815,9 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
                 NormalValue::Bytes(_) | NormalValue::NillableBytes(_) | NormalValue::String(_)
             )
         }
-        ScalarKind::Json => matches!(value, NormalValue::Json(_)),
+        // Accept both NormalValue::Json and NormalValue::String for JSON fields
+        // String values are used for @default JSON values (stored as serialized strings)
+        ScalarKind::Json => matches!(value, NormalValue::Json(_) | NormalValue::String(_)),
     }
 }
 
