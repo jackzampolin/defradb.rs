@@ -1268,21 +1268,22 @@ impl<'a> SdlParser<'a> {
                         id_field = id_field.as_primary();
 
                         // Only create a unique index for true one-to-one relations.
-                        // A relation is one-to-one when both sides are non-array.
-                        // For one-to-many (counterpart is array), the FK allows duplicates.
+                        // One-to-one means the counterpart type has a non-array field
+                        // pointing back to this type. No back-reference (join tables)
+                        // or array back-reference (one-to-many) means no unique index.
                         // See Go's ensureOneToOneUniqueIndex() in collection_define.go
-                        let counterpart_is_array = self
+                        let is_one_to_one = self
                             .type_defs
                             .get(&parsed_field.field_type.base_type)
                             .map(|target_def| {
                                 target_def.fields.iter().any(|f| {
                                     f.field_type.base_type == type_def.name
-                                        && f.field_type.is_list
+                                        && !f.field_type.is_list
                                 })
                             })
                             .unwrap_or(false);
 
-                        if !counterpart_is_array {
+                        if is_one_to_one {
                             let idx_name =
                                 format!("{}_{}_unique", type_def.name, id_field_name);
                             indexes.push(IndexDescription {

@@ -1047,16 +1047,27 @@ impl Planner {
                 }
             }
 
-            // 7. Count aggregates to determine if we need AllDocsNode
-            let aggregate_count = select
+            // 7. Count simple (non-per-row) aggregates to determine if we need AllDocsNode.
+            // Relation-based and inline-array aggregates use child_aggregate_source and
+            // operate per-row (each parent gets its own aggregate). They do NOT need
+            // AllDocsNode. Only simple field aggregates (e.g., _sum(Age: {})) need it
+            // because they accumulate across all documents.
+            let simple_aggregate_count = select
                 .fields
                 .iter()
-                .filter(|f| matches!(f, Requestable::Aggregate(_)))
+                .filter(|f| {
+                    if let Requestable::Aggregate(agg) = f {
+                        // Simple aggregate: all targets have empty host_name
+                        agg.targets.iter().all(|t| t.host_name.is_empty())
+                    } else {
+                        false
+                    }
+                })
                 .count();
 
-            // If there are multiple aggregates, wrap in AllDocsNode so they all
+            // If there are multiple simple aggregates, wrap in AllDocsNode so they all
             // can access the original documents via current_group_docs()
-            if aggregate_count > 1 {
+            if simple_aggregate_count > 1 {
                 plan = Box::new(AllDocsNode::new(plan, scan_mapping.clone()));
             }
 
@@ -2185,6 +2196,8 @@ impl Planner {
         // Relation aggregates (e.g., _count(books: {})) need joins to fetch data.
         // Inline array aggregates (e.g., _count(favouriteIntegers: {})) need the
         // array field added to the render mapping so the data appears in output.
+        let mut aggregate_joined_relations: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
                 for target in &agg.targets {
@@ -2195,14 +2208,19 @@ impl Planner {
 
                     let relation_field_name = &target.host_name;
 
-                    // Check if this field is already being selected
-                    let already_joined = select.fields.iter().any(|f| {
-                        if let Requestable::Select(s) = f {
-                            s.field.name == *relation_field_name
-                        } else {
-                            false
-                        }
-                    });
+                    // Check if this field is already being selected or joined by a
+                    // prior aggregate. Multiple aggregates on the same relation share
+                    // one TypeJoinMany; compute_relation_aggregates() handles per-aggregate
+                    // limit/offset/order in post-processing.
+                    let already_joined = aggregate_joined_relations
+                        .contains(relation_field_name.as_str())
+                        || select.fields.iter().any(|f| {
+                            if let Requestable::Select(s) = f {
+                                s.field.name == *relation_field_name
+                            } else {
+                                false
+                            }
+                        });
 
                     // Find the field in the parent collection
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
@@ -2468,6 +2486,8 @@ impl Planner {
                         child_side,
                         mapping.clone(),
                     )?);
+
+                    aggregate_joined_relations.insert(relation_field_name.to_string());
                 }
             }
         }
