@@ -52,6 +52,9 @@ pub enum SchemaError {
 
     #[error("invalid policy: {0}")]
     InvalidPolicy(String),
+
+    #[error("one-to-one relation must have a unique index. Object: {object}, Field: {field}")]
+    OneToOneRequiresUniqueIndex { object: String, field: String },
 }
 
 impl From<serde_json::Error> for SchemaError {

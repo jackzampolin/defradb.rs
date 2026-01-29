@@ -566,7 +566,7 @@ impl<S: Store> DB<S> {
             )));
         }
 
-        // Finalize relations: auto-generate _id fields and set primary sides
+        // Finalize relations: auto-generate _id fields, set primary sides, and create unique indexes
         // Create a field ID generator that starts after the max existing field ID
         let max_field_id = schemas
             .values()
@@ -576,10 +576,26 @@ impl<S: Store> DB<S> {
             .unwrap_or(0);
         let mut field_id_counter = max_field_id + 1000; // Start well above existing IDs
 
-        CollectionVersion::finalize_relations_hashmap(&mut schemas, || {
-            field_id_counter += 1;
-            format!("gen-{}", field_id_counter)
-        })
+        // Create an index ID generator that starts after the max existing index ID
+        let max_index_id = schemas
+            .values()
+            .flat_map(|s| s.indexes.iter())
+            .map(|idx| idx.id)
+            .max()
+            .unwrap_or(0);
+        let mut index_id_counter = max_index_id.max(10000); // Start at least at 10000
+
+        CollectionVersion::finalize_relations_hashmap(
+            &mut schemas,
+            || {
+                field_id_counter += 1;
+                format!("gen-{}", field_id_counter)
+            },
+            || {
+                index_id_counter += 1;
+                index_id_counter
+            },
+        )
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to finalize relations during collection load");
             Error::Other(format!("failed to finalize relations: {}", e))

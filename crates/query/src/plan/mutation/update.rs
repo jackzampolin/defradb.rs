@@ -367,7 +367,8 @@ impl PlanNode for UpdateNode {
 
                 if let Some(mut doc) = doc_opt {
                     // Apply update input with schema-aware coercion
-                    self.input.apply_to(&mut doc, self.collection.as_deref(), utc_now)?;
+                    self.input
+                        .apply_to(&mut doc, self.collection.as_deref(), utc_now)?;
 
                     // Collect the modified field names for block creation
                     let modified_fields: std::collections::HashSet<String> =
