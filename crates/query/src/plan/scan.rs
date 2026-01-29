@@ -40,6 +40,8 @@ pub struct ScanNode {
     document_mapping: DocumentMapping,
     /// Optional filter to apply during scan
     filter: Option<Filter>,
+    /// Optional document IDs to scan (for explain prefixes)
+    doc_ids: Option<Vec<String>>,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -68,6 +70,7 @@ impl ScanNode {
             collection,
             document_mapping,
             filter: None,
+            doc_ids: None,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -83,6 +86,12 @@ impl ScanNode {
     /// Set the filter for this scan
     pub fn with_filter(mut self, filter: Filter) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Set the document IDs for this scan (used in explain prefixes)
+    pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
+        self.doc_ids = Some(doc_ids);
         self
     }
 
@@ -237,9 +246,15 @@ impl PlanNode for ScanNode {
     fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB format: always include filter (null if none)
+        // Go DefraDB format: always include filter (null if none or empty)
+        // When filter has empty conditions, treat it as null to match Go behavior
         if let Some(ref filter) = self.filter {
-            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+            let conditions = filter.conditions();
+            if conditions.is_empty() {
+                obj.insert("filter".to_string(), serde_json::Value::Null);
+            } else {
+                obj.insert("filter".to_string(), serde_json::json!(conditions));
+            }
         } else {
             obj.insert("filter".to_string(), serde_json::Value::Null);
         }
@@ -256,13 +271,17 @@ impl PlanNode for ScanNode {
         );
 
         // Go DefraDB format: always include prefixes
-        // Prefix format is "/<collection_root_id>" which is a unique identifier for the collection's data
-        // The collection_id is a CID but the prefix uses a shorter index - for now use collection_id's suffix
-        // This will be refined when we have proper storage key integration
-        obj.insert(
-            "prefixes".to_string(),
-            serde_json::json!([format!("/{}", self.collection_prefix())]),
-        );
+        // When docIDs are provided, each prefix is "/<collection_prefix>/<docID>"
+        // Otherwise just "/<collection_prefix>"
+        let prefixes: Vec<String> = if let Some(ref doc_ids) = self.doc_ids {
+            doc_ids
+                .iter()
+                .map(|id| format!("/{}/{}", self.collection_prefix(), id))
+                .collect()
+        } else {
+            vec![format!("/{}", self.collection_prefix())]
+        };
+        obj.insert("prefixes".to_string(), serde_json::json!(prefixes));
 
         if self.show_deleted {
             obj.insert("showDeleted".to_string(), serde_json::Value::Bool(true));
