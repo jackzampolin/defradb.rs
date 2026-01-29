@@ -8,5 +8,5 @@ mod parser;
 mod warnings;
 
 pub use directives::ParsedDirectives;
-pub use parser::{parse_sdl, parse_sdl_with_warnings, SdlParser};
+pub use parser::{parse_sdl, parse_sdl_with_known_types, parse_sdl_with_warnings, SdlParser};
 pub use warnings::{DirectiveLocation, ParseOutput, ParseWarning};
