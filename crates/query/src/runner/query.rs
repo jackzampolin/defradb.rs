@@ -911,21 +911,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Check if a select represents a top-level aggregate query (e.g., _avg, _count, _sum).
     ///
-    /// Top-level aggregates are queries like `_avg(Users: {field: age})` where the
-    /// aggregate function is the root query field.
+    /// Top-level aggregates are queries like `_count(Author)` where the aggregate function
+    /// is the root query field name itself.
+    ///
+    /// This does NOT include queries like `Author { _count(books) }` - those are regular
+    /// queries with aggregate sub-fields, not top-level aggregates.
     fn is_top_level_aggregate(select: &Select) -> bool {
-        // Check if the field name is an aggregate function
+        // Only true when the query field name itself is an aggregate function
         let field_name = select.field.name.as_str();
-        let is_agg_name = field_name.starts_with('_')
-            && ["_count", "_sum", "_avg", "_min", "_max"].contains(&field_name);
-
-        // Also check if there's an Aggregate in the fields
-        let has_aggregate = select
-            .fields
-            .iter()
-            .any(|f| matches!(f, Requestable::Aggregate(_)));
-
-        is_agg_name || has_aggregate
+        field_name.starts_with('_')
+            && ["_count", "_sum", "_avg", "_min", "_max"].contains(&field_name)
     }
 
     /// Aggregate node kind names that can wrap a selectNode in the plan explain.
