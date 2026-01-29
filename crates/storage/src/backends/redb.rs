@@ -71,11 +71,14 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use redb::{Database, ReadTransaction, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use super::memory::ConflictTracker;
 
 use crate::corekv::{
     AsyncTxnCallback, Dropable, Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn,
@@ -107,6 +110,8 @@ pub struct RedbStore {
     db_path: std::path::PathBuf,
     /// Maximum keys allowed in a snapshot (OOM safeguard)
     max_snapshot_keys: Option<usize>,
+    /// Conflict tracker for write-write conflict detection
+    conflict_tracker: Arc<ConflictTracker>,
 }
 
 impl RedbStore {
@@ -221,6 +226,7 @@ impl RedbStore {
             close_timeout: opts.close_timeout(),
             db_path,
             max_snapshot_keys: opts.max_snapshot_keys(),
+            conflict_tracker: Arc::new(ConflictTracker::new()),
         })
     }
 
@@ -355,6 +361,9 @@ impl Store for RedbStore {
         }
         let mut guard = NewTxnGuard(&self.active_txn_count, false);
 
+        // Record version before taking snapshot for conflict detection
+        let read_version = self.conflict_tracker.current_version();
+
         // Capture a snapshot for read isolation
         let read_txn = self.db.begin_read()?;
         let snapshot = capture_snapshot(&read_txn, self.max_snapshot_keys)?;
@@ -365,6 +374,8 @@ impl Store for RedbStore {
         Ok(Box::new(RedbTxn {
             db: Arc::clone(&self.db),
             active_txn_count: Arc::clone(&self.active_txn_count),
+            conflict_tracker: Arc::clone(&self.conflict_tracker),
+            read_version,
             snapshot,
             pending: Mutex::new(BTreeMap::new()),
             readonly,
@@ -620,6 +631,12 @@ struct RedbTxn {
 
     /// Reference to the active transaction counter (for decrement on complete)
     active_txn_count: Arc<AtomicUsize>,
+
+    /// Conflict tracker for write-write conflict detection
+    conflict_tracker: Arc<ConflictTracker>,
+
+    /// Version at which this transaction's snapshot was taken
+    read_version: u64,
 
     /// Snapshot of store at transaction start (for reads)
     snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -997,6 +1014,18 @@ impl Txn for RedbTxn {
 
         // Clone pending changes before any async operations
         let pending = self.pending.lock().clone();
+
+        // Check for write-write conflicts before applying
+        if !pending.is_empty() {
+            let write_set: HashSet<Vec<u8>> = pending.keys().cloned().collect();
+            if let Err(e) = self.conflict_tracker.check_and_record(self.read_version, write_set) {
+                let on_error = std::mem::take(&mut *self.on_error.lock());
+                let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
+                Self::execute_callbacks(on_error);
+                Self::execute_async_callbacks(on_error_async).await;
+                return Err(e);
+            }
+        }
 
         // Apply pending changes to the database if there are any
         if !pending.is_empty() {
