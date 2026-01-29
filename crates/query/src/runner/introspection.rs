@@ -125,6 +125,11 @@ fn build_collection_type(
         FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
     }));
 
+    // Add _deleted field (always present, used with showDeleted queries)
+    obj = obj.field(Field::new("_deleted", TypeRef::named("Boolean"), |_| {
+        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+    }));
+
     // Add fields from collection definition
     for field in &collection.fields {
         // Skip _docID since we add it explicitly above

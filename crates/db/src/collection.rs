@@ -31,6 +31,13 @@ pub fn collection_short_id(collection_id: &str) -> u32 {
 /// Key prefix for document data in datastore.
 const DOC_KEY_PREFIX: &[u8] = b"/d/";
 
+/// Key prefix for document deletion markers in datastore.
+/// Deleted documents have their data stored at /d/ and a marker at /del/
+const DELETED_KEY_PREFIX: &[u8] = b"/del/";
+
+/// Marker byte indicating a document is deleted (matches Go's DeletedObjectMarker).
+const DELETED_MARKER: u8 = 0x01;
+
 /// A collection of documents with a shared schema.
 #[derive(Debug, Clone)]
 pub struct Collection {
@@ -174,7 +181,9 @@ impl Collection {
 
     /// Delete a document and update all indexes.
     ///
-    /// This method wraps the standard delete operation with index maintenance.
+    /// This uses logical deletion: the document data remains in storage but a
+    /// deletion marker is set. This allows `showDeleted: true` queries to still
+    /// return the document with `_deleted: true`.
     pub async fn delete_with_indexes(
         &self,
         datastore: &NamespaceView,
@@ -182,6 +191,12 @@ impl Collection {
         index_manager: &IndexManager,
     ) -> Result<bool> {
         let key = self.doc_key(doc_id);
+        let deleted_key = self.deleted_key(doc_id);
+
+        // Check if already deleted
+        if datastore.has(&deleted_key).await.map_err(Error::Storage)? {
+            return Ok(false); // Already deleted
+        }
 
         // Get the document for index cleanup
         let doc = match datastore.get(&key).await.map_err(Error::Storage)? {
@@ -194,15 +209,24 @@ impl Collection {
             None => return Ok(false),
         };
 
-        // Delete document
-        datastore.delete(&key).await.map_err(Error::Storage)?;
+        // Set deletion marker (logical delete, keep document data)
+        datastore
+            .set(&deleted_key, &[DELETED_MARKER])
+            .await
+            .map_err(Error::Storage)?;
 
-        // Update indexes
+        // Update indexes (remove from indexes since doc is now "deleted")
         index_manager
             .on_document_delete(datastore, &doc, &self.def)
             .await?;
 
         Ok(true)
+    }
+
+    /// Check if a document is marked as deleted.
+    pub async fn is_deleted(&self, datastore: &NamespaceView, doc_id: &DocID) -> Result<bool> {
+        let deleted_key = self.deleted_key(doc_id);
+        datastore.has(&deleted_key).await.map_err(Error::Storage)
     }
 
     // =========================================================================
@@ -425,11 +449,32 @@ impl Collection {
     /// This method takes `NamespaceView` instead of `&DbTxn` to allow
     /// use in async contexts where `Send` futures are required.
     /// The returned document will have its schema version set if stored.
+    /// Get a document by ID, returning None if it doesn't exist or is deleted.
     pub async fn get_with_datastore(
         &self,
         datastore: &NamespaceView,
         doc_id: &DocID,
     ) -> Result<Option<Document>> {
+        // Check if document is deleted
+        let deleted_key = self.deleted_key(doc_id);
+        if datastore.has(&deleted_key).await.map_err(Error::Storage)? {
+            return Ok(None);
+        }
+
+        self.get_with_datastore_include_deleted(datastore, doc_id, false)
+            .await
+            .map(|opt| opt.map(|(doc, _)| doc))
+    }
+
+    /// Get a document by ID with its deletion status.
+    ///
+    /// Returns (Document, is_deleted) if document exists, None otherwise.
+    pub async fn get_with_datastore_include_deleted(
+        &self,
+        datastore: &NamespaceView,
+        doc_id: &DocID,
+        check_deleted: bool,
+    ) -> Result<Option<(Document, bool)>> {
         let key = self.doc_key(doc_id);
         let data = datastore.get(&key).await.map_err(Error::Storage)?;
 
@@ -445,7 +490,15 @@ impl Collection {
                     doc.set_schema_version_id(version);
                 }
 
-                Ok(Some(doc))
+                // Check deletion status if requested
+                let is_deleted = if check_deleted {
+                    let deleted_key = self.deleted_key(doc_id);
+                    datastore.has(&deleted_key).await.map_err(Error::Storage)?
+                } else {
+                    false
+                };
+
+                Ok(Some((doc, is_deleted)))
             }
             None => Ok(None),
         }
@@ -456,7 +509,24 @@ impl Collection {
     /// This method takes `NamespaceView` instead of `&DbTxn` to allow
     /// use in async contexts where `Send` futures are required.
     /// Each returned document will have its schema version set if stored.
+    /// Excludes deleted documents.
     pub async fn get_all_with_datastore(&self, datastore: &NamespaceView) -> Result<Vec<Document>> {
+        let result = self
+            .get_all_with_datastore_include_deleted(datastore, false)
+            .await?;
+        Ok(result.into_iter().map(|(doc, _)| doc).collect())
+    }
+
+    /// Get all documents in the collection with deletion status.
+    ///
+    /// If `show_deleted` is true, returns all documents including deleted ones.
+    /// If `show_deleted` is false, returns only non-deleted documents.
+    /// Returns tuples of (Document, is_deleted).
+    pub async fn get_all_with_datastore_include_deleted(
+        &self,
+        datastore: &NamespaceView,
+        show_deleted: bool,
+    ) -> Result<Vec<(Document, bool)>> {
         let prefix = self.collection_key_prefix();
         let opts = IterOptions::new().with_prefix(prefix);
 
@@ -484,14 +554,22 @@ impl Collection {
                 if let Ok(doc_id) = doc_id_str.parse::<DocID>() {
                     doc.set_id(doc_id.clone());
 
+                    // Check if document is deleted
+                    let is_deleted = self.is_deleted(datastore, &doc_id).await?;
+
+                    // Skip deleted documents unless show_deleted is true
+                    if is_deleted && !show_deleted {
+                        continue;
+                    }
+
                     // Load and set the schema version
                     if let Some(version) = self.load_version(datastore, &doc_id).await? {
                         doc.set_schema_version_id(version);
                     }
+
+                    docs.push((doc, is_deleted));
                 }
             }
-
-            docs.push(doc);
         }
 
         iter.close().await.map_err(Error::Storage)?;
@@ -603,7 +681,24 @@ impl Collection {
     ///
     /// This method takes `NamespaceView` instead of `&DbTxn` to allow
     /// use in async contexts where `Send` futures are required.
+    /// Check if a document exists and is not deleted.
     pub async fn exists_with_datastore(
+        &self,
+        datastore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<bool> {
+        let key = self.doc_key(doc_id);
+        if !datastore.has(&key).await.map_err(Error::Storage)? {
+            return Ok(false);
+        }
+        // Document exists, check if it's deleted
+        let deleted_key = self.deleted_key(doc_id);
+        let is_deleted = datastore.has(&deleted_key).await.map_err(Error::Storage)?;
+        Ok(!is_deleted)
+    }
+
+    /// Check if a document exists (regardless of deletion status).
+    pub async fn exists_with_datastore_include_deleted(
         &self,
         datastore: &NamespaceView,
         doc_id: &DocID,
@@ -661,6 +756,25 @@ impl Collection {
         key.push(b'/');
         key.extend_from_slice(doc_id.to_string().as_bytes());
         key
+    }
+
+    /// Generate the storage key for a document's deletion marker.
+    fn deleted_key(&self, doc_id: &DocID) -> Vec<u8> {
+        let mut key = Vec::new();
+        key.extend_from_slice(DELETED_KEY_PREFIX);
+        key.extend_from_slice(self.def.collection_id.as_bytes());
+        key.push(b'/');
+        key.extend_from_slice(doc_id.to_string().as_bytes());
+        key
+    }
+
+    /// Generate the key prefix for all deletion markers in this collection.
+    fn deleted_key_prefix(&self) -> Vec<u8> {
+        let mut prefix = Vec::new();
+        prefix.extend_from_slice(DELETED_KEY_PREFIX);
+        prefix.extend_from_slice(self.def.collection_id.as_bytes());
+        prefix.push(b'/');
+        prefix
     }
 
     /// Generate the storage key for a document's schema version.
