@@ -76,6 +76,8 @@ impl UpdateInput {
                     if fd.crdt_type == CType::PCounter {
                         validate_pcounter_increment(&normal_value)?;
                     }
+                    // Store the raw increment for block builder (delta encoding)
+                    doc.set_counter_delta(field_name.clone(), normal_value.clone());
                     let current = doc.get(field_name);
                     let new_value = increment_value(current, &normal_value)?;
                     doc.set(field_name.clone(), new_value);

@@ -104,6 +104,9 @@ pub use types::defra_free_string;
 pub extern "C" fn defra_init() {
     // Ignore return value - errors will surface when operations are attempted
     let _ = runtime::init_runtime();
+    // Enable deterministic nonce for testing (matches Go's init() detection)
+    crypto::encryption::nonce::USE_DETERMINISTIC_NONCE
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Get the library version.
