@@ -14,7 +14,7 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{
     parse_mutation_name, Aggregate, AggregateTarget, AggregateType, Field as SelectField, Filter,
     GroupBy, Limit, Mutation, MutationType, OrderBy, OrderCondition, OrderDirection, Requestable,
-    Select,
+    Select, Similarity,
 };
 
 /// Type of explain output requested.
@@ -667,6 +667,23 @@ fn parse_selection_set(
                 let field_name = field.name.clone();
                 let alias = field.alias.clone();
 
+                // Check if this is a _similarity field
+                if field_name == "_similarity" {
+                    let similarity = parse_similarity_field(field, variables)?;
+                    let sim = if let Some(ref a) = alias {
+                        similarity.with_alias(a.clone())
+                    } else {
+                        similarity
+                    };
+
+                    let index = mapping.next_index();
+                    mapping.add(index, "_similarity");
+                    mapping.add_render_key(index, sim.output_name());
+
+                    fields.push(Requestable::Similarity(sim));
+                    continue;
+                }
+
                 // Check if this is an aggregate field (_count, _sum, _avg, _min, _max)
                 if let Some(agg_type) = AggregateType::parse(&field_name) {
                     let mut aggregate = parse_aggregate_field(field, agg_type, variables)?;
@@ -755,6 +772,10 @@ fn parse_selection_set(
                             mapping.add(index, &s.field.name);
                             mapping.add_render_key(index, s.field.output_name());
                         }
+                        Requestable::Similarity(sim) => {
+                            mapping.add(index, "_similarity");
+                            mapping.add_render_key(index, sim.output_name());
+                        }
                     }
                     fields.push(frag_field);
                 }
@@ -786,6 +807,10 @@ fn parse_selection_set(
                         Requestable::Select(s) => {
                             mapping.add(index, &s.field.name);
                             mapping.add_render_key(index, s.field.output_name());
+                        }
+                        Requestable::Similarity(sim) => {
+                            mapping.add(index, "_similarity");
+                            mapping.add_render_key(index, sim.output_name());
                         }
                     }
                     fields.push(inline_field);
@@ -1967,6 +1992,115 @@ fn capitalize_first(s: &str) -> String {
     match chars.next() {
         Some(c) => c.to_uppercase().to_string() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// Parse a _similarity field from a GraphQL query.
+///
+/// Format: `_similarity(fieldName: {vector: [1, 2, 3]})`
+/// The argument name is the target field containing the document's vector.
+/// The value is an object with a `vector` key containing the query vector.
+fn parse_similarity_field(
+    field: &Field<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Similarity> {
+    if field.arguments.is_empty() {
+        return Err(QueryError::parse(
+            "_similarity requires a field argument",
+        ));
+    }
+
+    let (target_field, value) = &field.arguments[0];
+
+    // Parse the value: {vector: [1, 2, 3]}
+    let vector = match value {
+        Value::Object(obj) => {
+            let vec_value = obj.get("vector").ok_or_else(|| {
+                QueryError::parse("_similarity argument must contain a 'vector' key")
+            })?;
+            parse_vector_value(vec_value, variables)?
+        }
+        Value::Variable(var_name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    var_name
+                ))
+            })?;
+            let json_val = vars.get(var_name.as_str()).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", var_name))
+            })?;
+            if let JsonValue::Object(obj) = json_val {
+                let vec_val = obj.get("vector").ok_or_else(|| {
+                    QueryError::parse("_similarity variable must contain a 'vector' key")
+                })?;
+                parse_json_vector(vec_val)?
+            } else {
+                return Err(QueryError::parse("_similarity variable must be an object"));
+            }
+        }
+        _ => {
+            return Err(QueryError::parse(
+                "_similarity argument must be an object with 'vector' key",
+            ));
+        }
+    };
+
+    Ok(Similarity::new(target_field.clone(), vector))
+}
+
+/// Parse a vector value from a GraphQL list literal.
+fn parse_vector_value(
+    value: &Value<'_, String>,
+    _variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<f64>> {
+    match value {
+        Value::List(items) => {
+            let mut vec = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Int(n) => {
+                        vec.push(
+                            n.as_i64()
+                                .ok_or_else(|| QueryError::parse("integer out of range"))?
+                                as f64,
+                        );
+                    }
+                    Value::Float(f) => {
+                        vec.push(*f);
+                    }
+                    _ => {
+                        return Err(QueryError::parse("vector values must be numeric"));
+                    }
+                }
+            }
+            Ok(vec)
+        }
+        _ => Err(QueryError::parse("vector must be an array")),
+    }
+}
+
+/// Parse a vector from a JSON array value.
+fn parse_json_vector(value: &JsonValue) -> Result<Vec<f64>> {
+    match value {
+        JsonValue::Array(items) => {
+            let mut vec = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    JsonValue::Number(n) => {
+                        vec.push(
+                            n.as_f64()
+                                .ok_or_else(|| QueryError::parse("invalid number in vector"))?,
+                        );
+                    }
+                    _ => {
+                        return Err(QueryError::parse("vector values must be numeric"));
+                    }
+                }
+            }
+            Ok(vec)
+        }
+        _ => Err(QueryError::parse("vector must be an array")),
     }
 }
 

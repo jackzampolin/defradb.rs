@@ -1264,15 +1264,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 })
                 .unwrap_or(false);
 
+        // Check if any similarity fields are present (require SimilarityNode in planner)
+        let has_similarity = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Similarity(_)));
+
         // Use Planner if there are nested selections, filter through relations,
         // order through relations, aggregates on relations, secondary relation ID fields,
-        // or when an index can provide ordering
+        // similarity computations, or when an index can provide ordering
         let needs_planner = has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
             || has_secondary_relation_id
-            || has_ordering_index;
+            || has_ordering_index
+            || has_similarity;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
@@ -1464,6 +1471,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
                             Requestable::Aggregate(agg) => {
                                 fields.insert(agg.output_name().to_string());
+                            }
+                            Requestable::Similarity(sim) => {
+                                fields.insert(sim.output_name().to_string());
                             }
                         }
                     }
@@ -2527,6 +2537,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         obj.insert(output_name.to_string(), JsonValue::Number(1.into()));
                     }
                 }
+                Requestable::Similarity(_) => {
+                    // Similarity is not applicable in commit context
+                }
             }
         }
 
@@ -3092,6 +3105,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         } else {
                             obj.insert(output_name.to_string(), JsonValue::Array(vec![]));
                         }
+                    }
+                    Requestable::Similarity(_) => {
+                        // Similarity is not applicable in commit context
                     }
                 }
             }

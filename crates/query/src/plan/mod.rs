@@ -13,6 +13,7 @@ mod orderby;
 mod permission_filter;
 mod scan;
 mod select;
+mod similarity;
 mod sum;
 mod type_join;
 
@@ -32,6 +33,7 @@ pub use orderby::OrderByNode;
 pub use permission_filter::PermissionFilterNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
+pub use similarity::SimilarityNode;
 pub use sum::SumNode;
 pub use type_join::{
     compare_json_values, JoinDirection, JoinSide, RelationFilter, TypeJoinMany, TypeJoinOne,
