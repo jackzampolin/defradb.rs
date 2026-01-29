@@ -937,17 +937,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         "maxNode",
     ];
 
+    /// Aggregate-specific explain fields that should be stripped when unwrapping aggregate nodes.
+    const AGGREGATE_EXPLAIN_FIELDS: [&'static str; 1] = ["sources"];
+
     /// Strip aggregate wrapper nodes from explain output for top-level aggregate queries.
     ///
     /// The Rust planner wraps the plan in aggregate nodes (e.g., CountNode → SelectNode → ScanNode),
     /// but Go's explain format puts aggregates as siblings in topLevelNode, not as wrappers.
     /// This function peels off any top-level aggregate wrappers to expose the inner selectNode.
     ///
-    /// Example: `{ "countNode": { "selectNode": { "scanNode": {...} } } }`
+    /// Example: `{ "countNode": { "sources": [...], "selectNode": { "scanNode": {...} } } }`
     /// becomes: `{ "selectNode": { "scanNode": {...} } }`
     fn strip_aggregate_wrappers(mut explain: JsonValue) -> JsonValue {
         loop {
+            // Check if this is an aggregate wrapper node
             let is_aggregate_wrapper = if let Some(obj) = explain.as_object() {
+                // An aggregate wrapper has the aggregate node kind as the only top-level key
                 obj.len() == 1
                     && obj
                         .keys()
@@ -963,6 +968,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let obj = explain.as_object_mut().unwrap();
                 let key = obj.keys().next().unwrap().clone();
                 explain = obj.remove(&key).unwrap();
+
+                // Remove aggregate-specific fields from the inner content
+                if let Some(inner_obj) = explain.as_object_mut() {
+                    for field in &Self::AGGREGATE_EXPLAIN_FIELDS {
+                        inner_obj.remove(*field);
+                    }
+                }
             } else {
                 break;
             }
@@ -1002,7 +1014,36 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     AggregateType::Min => "minNode",
                     AggregateType::Max => "maxNode",
                 };
-                top_level_children.push(serde_json::json!({ node_name: {} }));
+
+                // Build sources for explain output
+                // For top-level aggregates, the source is the collection
+                let target_filter = if !agg.targets.is_empty() {
+                    agg.targets[0].filter.as_ref()
+                } else {
+                    None
+                };
+
+                let filter_value = if let Some(filter) = target_filter {
+                    let conditions = filter.conditions();
+                    if conditions.is_empty() {
+                        JsonValue::Null
+                    } else {
+                        serde_json::json!(conditions)
+                    }
+                } else {
+                    JsonValue::Null
+                };
+
+                let sources = serde_json::json!([{
+                    "fieldName": select.collection_name,
+                    "filter": filter_value
+                }]);
+
+                top_level_children.push(serde_json::json!({
+                    node_name: {
+                        "sources": sources
+                    }
+                }));
             }
         }
 

@@ -7,8 +7,8 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, LimitNode, MaxNode, MinNode,
-    OrderByNode, ScanNode, SelectNode, SumNode,
+    AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, LimitNode,
+    MaxNode, MinNode, OrderByNode, ScanNode, SelectNode, SumNode,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -519,12 +519,18 @@ fn add_aggregate_nodes(
             match agg.aggregate_type {
                 AggregateType::Count => {
                     let mut node = CountNode::new(plan, mapping.clone(), agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    // Add sources for explain output
+                    let sources = vec![CountSourceMeta {
+                        field_name: select.collection_name.clone(),
+                        filter: target_filter.clone(),
+                    }];
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
                 AggregateType::Sum => {
