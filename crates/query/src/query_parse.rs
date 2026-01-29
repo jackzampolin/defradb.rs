@@ -1303,7 +1303,7 @@ fn parse_aggregate_target_obj(
 fn parse_aggregate_target_from_json(
     arg_name: &str,
     json: &JsonValue,
-    variables: Option<&HashMap<String, JsonValue>>,
+    _variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<AggregateTarget> {
     let mut target = AggregateTarget::new(arg_name.to_string());
     if let JsonValue::Object(obj) = json {
