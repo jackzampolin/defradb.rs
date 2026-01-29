@@ -270,6 +270,10 @@ pub fn generate_schema(
     // Add _docID field to object type
     object_type = object_type.with_field(GqlField::new("_docID", GqlType::non_null(GqlType::id())));
 
+    // Add _deleted field to object type (soft-delete status)
+    object_type =
+        object_type.with_field(GqlField::new("_deleted", GqlType::non_null(GqlType::boolean())));
+
     // Process each field
     for field in &collection.fields {
         // Skip internal fields

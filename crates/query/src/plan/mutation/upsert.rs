@@ -19,7 +19,7 @@ use crate::error::{QueryError, Result};
 use crate::mutator::DocMutator;
 use crate::planner::{Doc, PlanNode};
 
-use super::create::{json_to_normal_value_with_kind, normal_value_to_json, CreateInput};
+use super::create::{json_to_normal_value_with_kind_and_time, normal_value_to_json, CreateInput};
 
 /// Input for an upsert mutation - field values for create or update.
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ impl UpsertInput {
                     .find(|f| f.name == *field_name)
                     .map(|f| &f.kind)
             });
-            let normal_value = json_to_normal_value_with_kind(value, field_kind, utc_now)?;
+            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
             doc.set(field_name.clone(), normal_value);
             modified_count += 1;
         }
@@ -282,7 +282,7 @@ impl UpsertNode {
             // Create document with the specified ID
             let mut doc = Document::with_id(doc_id);
             for (field_name, value) in &input.fields {
-                let normal_value = json_to_normal_value_with_kind(value, None, utc_now)?;
+                let normal_value = json_to_normal_value_with_kind_and_time(value, None, Some(utc_now))?;
                 doc.set(field_name.clone(), normal_value);
             }
 

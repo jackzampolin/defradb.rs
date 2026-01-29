@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, FixedOffset, Utc};
 use document::{DocID, Document, NormalValue};
 use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
@@ -19,7 +18,8 @@ use crate::mapper::Filter;
 use crate::mutator::{DocMutator, UpdateResult};
 use crate::planner::{Doc, PlanNode};
 
-use super::create::{json_to_normal_value_with_kind, normal_value_to_json};
+use super::create::{json_to_normal_value_with_kind_and_time, normal_value_to_json};
+use chrono::{DateTime, FixedOffset};
 
 /// Input for an update mutation - field values to patch on existing documents.
 #[derive(Debug, Clone)]
@@ -46,13 +46,20 @@ impl UpdateInput {
     ///
     /// For counter CRDT fields (PCounter/PNCounter), the input value is treated as an
     /// increment rather than a replacement, matching Go DefraDB behavior.
-    ///
-    /// The `utc_now` parameter is used for `UTC_NOW` values to ensure consistent timestamps.
     pub fn apply_to(
         &self,
         doc: &mut Document,
         collection: Option<&CollectionVersion>,
-        utc_now: DateTime<FixedOffset>,
+    ) -> Result<usize> {
+        self.apply_to_with_time(doc, collection, None)
+    }
+
+    /// Apply this update to a document with an optional pre-computed request time for UTC_NOW.
+    pub fn apply_to_with_time(
+        &self,
+        doc: &mut Document,
+        collection: Option<&CollectionVersion>,
+        request_time: Option<DateTime<FixedOffset>>,
     ) -> Result<usize> {
         let mut modified_count = 0;
 
@@ -60,7 +67,7 @@ impl UpdateInput {
             let field_def =
                 collection.and_then(|c| c.fields.iter().find(|f| f.name == *field_name));
             let field_kind = field_def.map(|f| &f.kind);
-            let normal_value = json_to_normal_value_with_kind(value, field_kind, utc_now)?;
+            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
 
             // Counter CRDT fields use increment semantics
             if let Some(fd) = field_def {
@@ -178,8 +185,8 @@ pub struct UpdateNode {
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
     collection: Option<Arc<CollectionVersion>>,
-    /// Pre-computed timestamp for UTC_NOW resolution (ensures consistency within a request)
-    utc_now: Option<DateTime<FixedOffset>>,
+    /// Pre-computed request time for UTC_NOW resolution (ensures consistency within a request)
+    request_time: Option<DateTime<FixedOffset>>,
     /// Document IDs to update (mutually exclusive with filter)
     doc_ids: Option<Vec<String>>,
     /// Filter to find documents to update (mutually exclusive with doc_ids)
@@ -221,7 +228,7 @@ impl UpdateNode {
             fetcher,
             document_mapping,
             collection: None,
-            utc_now: None,
+            request_time: None,
             doc_ids: None,
             filter: None,
             input: UpdateInput::new(),
@@ -258,13 +265,12 @@ impl UpdateNode {
         self
     }
 
-    /// Set the shared UTC timestamp for all UTC_NOW values.
+    /// Set the pre-computed request time for UTC_NOW resolution.
     ///
-    /// When multiple mutations are executed in the same GraphQL request,
-    /// they should share the same timestamp for UTC_NOW values. This method
-    /// allows the runner to set a shared timestamp captured at request time.
-    pub fn with_utc_now(mut self, utc_now: DateTime<FixedOffset>) -> Self {
-        self.utc_now = Some(utc_now);
+    /// When set, all `UTC_NOW` values in this node's inputs will resolve
+    /// to the same timestamp, matching Go DefraDB's behavior.
+    pub fn with_request_time(mut self, request_time: DateTime<FixedOffset>) -> Self {
+        self.request_time = Some(request_time);
         self
     }
 
@@ -353,12 +359,6 @@ impl PlanNode for UpdateNode {
                 matching_ids
             };
 
-            // Use pre-computed timestamp if available, otherwise compute now
-            let utc_now = self.utc_now.unwrap_or_else(|| {
-                let utc_offset = FixedOffset::east_opt(0).unwrap();
-                Utc::now().with_timezone(&utc_offset)
-            });
-
             // Update each document
             for doc_id_str in doc_ids_to_update {
                 let doc_id = match DocID::from_string(&doc_id_str) {
@@ -382,9 +382,8 @@ impl PlanNode for UpdateNode {
                     .await?;
 
                 if let Some(mut doc) = doc_opt {
-                    // Apply update input with schema-aware coercion
-                    self.input
-                        .apply_to(&mut doc, self.collection.as_deref(), utc_now)?;
+                    // Apply update input with schema-aware coercion and request time
+                    self.input.apply_to_with_time(&mut doc, self.collection.as_deref(), self.request_time)?;
 
                     // Collect the modified field names for block creation
                     let modified_fields: std::collections::HashSet<String> =

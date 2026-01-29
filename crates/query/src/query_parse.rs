@@ -1821,7 +1821,6 @@ fn parse_field_to_mutation(
 
     // Parse selection set (fields to return after mutation)
     // For mutations, we don't support fragments in return fields
-    // For mutations, we don't support fragments in return fields
     let empty_fragments: FragmentMap<'_> = HashMap::new();
     let mut empty_visiting = HashSet::new();
     let (fields, mapping) = parse_selection_set(
@@ -1831,6 +1830,15 @@ fn parse_field_to_mutation(
         &empty_fragments,
         &mut empty_visiting,
     )?;
+
+    // All mutations return [TypeName], which is an object type requiring a sub selection.
+    if fields.is_empty() {
+        return Err(QueryError::parse(format!(
+            "Field \"{}\" of type \"[{}]\" must have a sub selection.",
+            field_name, collection_name
+        )));
+    }
+
     mutation.fields = fields;
     mutation.document_mapping = mapping;
 
