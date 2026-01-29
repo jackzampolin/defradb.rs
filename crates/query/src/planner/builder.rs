@@ -667,6 +667,9 @@ impl Planner {
         //   - Conditions not covered by the index
         if !is_complex_filter && (scalar_filter.is_some() || !select.fields.is_empty()) {
             let mut select_node = SelectNode::new(plan, scan_mapping.clone());
+            if let Some(ref doc_ids) = select.doc_ids {
+                select_node = select_node.with_doc_ids(doc_ids.clone());
+            }
             if let Some(filter) = scalar_filter {
                 select_node = select_node.with_filter(filter);
             }
@@ -675,7 +678,11 @@ impl Planner {
             // For complex filters where there are no join-related fields,
             // still need SelectNode for field projection (filter applied below)
             if !needs_joins {
-                plan = Box::new(SelectNode::new(plan, scan_mapping.clone()));
+                let mut select_node = SelectNode::new(plan, scan_mapping.clone());
+                if let Some(ref doc_ids) = select.doc_ids {
+                    select_node = select_node.with_doc_ids(doc_ids.clone());
+                }
+                plan = Box::new(select_node);
             }
         }
 
@@ -691,7 +698,11 @@ impl Planner {
                     Some(filter.clone())
                 };
                 if let Some(f) = pre_agg_filter {
-                    plan = Box::new(SelectNode::new(plan, scan_mapping.clone()).with_filter(f));
+                    let mut select_node = SelectNode::new(plan, scan_mapping.clone()).with_filter(f);
+                    if let Some(ref doc_ids) = select.doc_ids {
+                        select_node = select_node.with_doc_ids(doc_ids.clone());
+                    }
+                    plan = Box::new(select_node);
                 }
             }
         }

@@ -18,6 +18,8 @@ pub struct SelectNode {
     document_mapping: DocumentMapping,
     /// Optional additional filter
     filter: Option<Filter>,
+    /// Optional document IDs for filtering (used in explain output)
+    doc_ids: Option<Vec<String>>,
     /// Current document
     current_doc: Doc,
     /// Execution statistics for explain execute mode
@@ -33,6 +35,7 @@ impl SelectNode {
             source,
             document_mapping,
             filter: None,
+            doc_ids: None,
             current_doc: Doc::default(),
             exec_info: ExecInfo::default(),
             filter_matches: 0,
@@ -42,6 +45,14 @@ impl SelectNode {
     /// Set an additional filter
     pub fn with_filter(mut self, filter: Filter) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Set document IDs for explain output
+    pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
+        if !doc_ids.is_empty() {
+            self.doc_ids = Some(doc_ids);
+        }
         self
     }
 }
@@ -110,13 +121,23 @@ impl PlanNode for SelectNode {
     fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB format: always include docID (null if not filtering by specific IDs)
-        // Note: SelectNode doesn't track docIDs directly; they're handled at query parsing level
-        obj.insert("docID".to_string(), serde_json::Value::Null);
+        // Go DefraDB format: docID is array of IDs if filtering, null otherwise
+        obj.insert(
+            "docID".to_string(),
+            match &self.doc_ids {
+                Some(ids) => serde_json::json!(ids),
+                None => serde_json::Value::Null,
+            },
+        );
 
         // Go DefraDB format: always include filter (null if none)
         if let Some(ref filter) = self.filter {
-            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+            let conditions = filter.conditions();
+            if conditions.is_empty() {
+                obj.insert("filter".to_string(), serde_json::Value::Null);
+            } else {
+                obj.insert("filter".to_string(), serde_json::json!(conditions));
+            }
         } else {
             obj.insert("filter".to_string(), serde_json::Value::Null);
         }

@@ -91,7 +91,10 @@ impl ScanNode {
 
     /// Set the document IDs for this scan (used in explain prefixes)
     pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
-        self.doc_ids = Some(doc_ids);
+        // Only set if non-empty; empty means scan entire collection
+        if !doc_ids.is_empty() {
+            self.doc_ids = Some(doc_ids);
+        }
         self
     }
 
