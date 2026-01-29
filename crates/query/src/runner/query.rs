@@ -2200,6 +2200,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .id()
                     .map(|id| JsonValue::String(id.to_string()))
                     .unwrap_or(JsonValue::Null)
+            } else if field_name == "_deleted" {
+                JsonValue::Bool(document.is_deleted())
             } else if let Some(nv) = document.get(field_name) {
                 crate::json_convert::normal_value_to_json(nv).unwrap_or(JsonValue::Null)
             } else {
