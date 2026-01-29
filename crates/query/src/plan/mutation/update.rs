@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, FixedOffset, Utc};
 use document::{DocID, Document, NormalValue};
 use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
@@ -45,10 +46,13 @@ impl UpdateInput {
     ///
     /// For counter CRDT fields (PCounter/PNCounter), the input value is treated as an
     /// increment rather than a replacement, matching Go DefraDB behavior.
+    ///
+    /// The `utc_now` parameter is used for `UTC_NOW` values to ensure consistent timestamps.
     pub fn apply_to(
         &self,
         doc: &mut Document,
         collection: Option<&CollectionVersion>,
+        utc_now: DateTime<FixedOffset>,
     ) -> Result<usize> {
         let mut modified_count = 0;
 
@@ -56,7 +60,7 @@ impl UpdateInput {
             let field_def =
                 collection.and_then(|c| c.fields.iter().find(|f| f.name == *field_name));
             let field_kind = field_def.map(|f| &f.kind);
-            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
+            let normal_value = json_to_normal_value_with_kind(value, field_kind, utc_now)?;
 
             // Counter CRDT fields use increment semantics
             if let Some(fd) = field_def {
@@ -336,6 +340,10 @@ impl PlanNode for UpdateNode {
                 matching_ids
             };
 
+            // Capture a single timestamp for all UTC_NOW values in this update
+            let utc_offset = FixedOffset::east_opt(0).unwrap();
+            let utc_now = Utc::now().with_timezone(&utc_offset);
+
             // Update each document
             for doc_id_str in doc_ids_to_update {
                 let doc_id = match DocID::from_string(&doc_id_str) {
@@ -360,7 +368,7 @@ impl PlanNode for UpdateNode {
 
                 if let Some(mut doc) = doc_opt {
                     // Apply update input with schema-aware coercion
-                    self.input.apply_to(&mut doc, self.collection.as_deref())?;
+                    self.input.apply_to(&mut doc, self.collection.as_deref(), utc_now)?;
 
                     // Collect the modified field names for block creation
                     let modified_fields: std::collections::HashSet<String> =

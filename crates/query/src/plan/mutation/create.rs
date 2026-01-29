@@ -57,7 +57,14 @@ impl CreateInput {
     /// such as parsing RFC 3339 strings as DateTime values when the field
     /// type is DateTime (matching Go DefraDB behavior). It also preserves
     /// the CRDT type from the schema (e.g., PnCounter, PCounter).
-    pub fn to_document_with_schema(&self, collection: &CollectionVersion) -> Result<Document> {
+    ///
+    /// The `utc_now` parameter is used for all `UTC_NOW` default values to ensure
+    /// they receive the same timestamp within a single mutation operation.
+    pub fn to_document_with_schema(
+        &self,
+        collection: &CollectionVersion,
+        utc_now: DateTime<FixedOffset>,
+    ) -> Result<Document> {
         use schema::CType;
 
         let mut doc = Document::new();
@@ -73,7 +80,7 @@ impl CreateInput {
             let crdt_type = field_def.map(|f| f.crdt_type).unwrap_or(CType::LwwRegister);
 
             // Convert JsonValue to appropriate NormalValue, using schema for type coercion
-            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
+            let normal_value = json_to_normal_value_with_kind(value, field_kind, utc_now)?;
 
             // Use set_with_crdt to preserve the CRDT type from the schema
             // This is critical for Counter fields to generate correct block CIDs
@@ -93,7 +100,7 @@ impl CreateInput {
             }
             if let Some(ref default_val) = field_def.default_value {
                 let normal_value =
-                    json_to_normal_value_with_kind(default_val, Some(&field_def.kind))?;
+                    json_to_normal_value_with_kind(default_val, Some(&field_def.kind), utc_now)?;
                 doc.set_with_crdt(field_def.name.clone(), field_def.crdt_type, normal_value)
                     .map_err(|e| {
                         QueryError::execution(format!(
@@ -228,9 +235,13 @@ pub fn json_to_normal_value(value: &JsonValue) -> Result<document::NormalValue> 
 /// This function uses the field kind to properly coerce values. For example,
 /// when the field kind is DateTime, it parses RFC 3339 strings as DateTime values.
 /// This matches Go DefraDB's `validateFieldSchema` behavior.
+///
+/// The `utc_now` parameter is used for `UTC_NOW` special values to ensure all
+/// such values in a single mutation get the same timestamp.
 pub fn json_to_normal_value_with_kind(
     value: &JsonValue,
     field_kind: Option<&FieldKind>,
+    utc_now: DateTime<FixedOffset>,
 ) -> Result<document::NormalValue> {
     use document::NormalValue;
 
@@ -259,11 +270,10 @@ pub fn json_to_normal_value_with_kind(
             FieldKind::Scalar(ScalarKind::DateTime) => {
                 match value {
                     JsonValue::String(s) => {
-                        // Handle special value UTC_NOW - return current time in UTC
+                        // Handle special value UTC_NOW - use the provided timestamp
+                        // This ensures all UTC_NOW values in a single mutation get the same time
                         if s == "UTC_NOW" {
-                            // Convert to FixedOffset for consistent type
-                            let utc_offset = FixedOffset::east_opt(0).unwrap();
-                            return Ok(NormalValue::Time(Utc::now().with_timezone(&utc_offset)));
+                            return Ok(NormalValue::Time(utc_now));
                         }
                         // Parse RFC 3339 string to DateTime, preserving original timezone
                         // Go's time.Parse(time.RFC3339, s) preserves the original timezone
@@ -574,6 +584,10 @@ pub struct CreateNode {
     did_create: bool,
     /// Whether the node has been initialized
     initialized: bool,
+    /// Shared UTC timestamp for all UTC_NOW values in this mutation batch.
+    /// If set externally (from the request level), all mutations in the same
+    /// request will share this timestamp. If None, captures on first use.
+    utc_now: Option<DateTime<FixedOffset>>,
 }
 
 impl CreateNode {
@@ -600,6 +614,7 @@ impl CreateNode {
             current_doc: Doc::default(),
             did_create: false,
             initialized: false,
+            utc_now: None,
         }
     }
 
@@ -621,6 +636,16 @@ impl CreateNode {
     /// document creation (e.g., parsing RFC 3339 strings as DateTime values).
     pub fn with_collection(mut self, collection: Arc<CollectionVersion>) -> Self {
         self.collection = Some(collection);
+        self
+    }
+
+    /// Set the shared UTC timestamp for all UTC_NOW values.
+    ///
+    /// When multiple mutations are executed in the same GraphQL request,
+    /// they should share the same timestamp for UTC_NOW values. This method
+    /// allows the runner to set a shared timestamp captured at request time.
+    pub fn with_utc_now(mut self, utc_now: DateTime<FixedOffset>) -> Self {
+        self.utc_now = Some(utc_now);
         self
     }
 
@@ -646,7 +671,87 @@ impl CreateNode {
             }
         }
 
+        // Handle _version field if requested
+        // Go returns _version as an array of commit objects, even for newly created docs
+        if let Some(version_index) = self.document_mapping.first_index_of_name("_version") {
+            let version_json = self.build_version_json(result, version_index);
+            doc.set(version_index, version_json);
+        }
+
         Ok(doc)
+    }
+
+    /// Build the _version JSON array for a mutation result.
+    ///
+    /// Returns an array with a single commit object containing the requested fields.
+    /// Go DefraDB returns _version as a list (can have multiple heads in concurrent scenarios).
+    fn build_version_json(&self, result: &CreateResult, version_index: usize) -> JsonValue {
+        use serde_json::Map;
+
+        // Get the commit CID (the dag-cbor encoded Block CID, not the document data CID)
+        // This matches Go DefraDB's _version behavior where the CID is for the commit block
+        let cid_str = result
+            .commit_cid
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| {
+                // Fallback to document CID if commit CID not available
+                result
+                    .doc_id
+                    .cid()
+                    .map(|c| c.to_string())
+                    .unwrap_or_default()
+            });
+
+        // Get the child mapping for _version to see which fields were requested
+        let child_mapping = self
+            .document_mapping
+            .child_mappings
+            .get(version_index)
+            .and_then(|m| m.as_ref());
+
+        // Build the commit object with requested fields
+        let mut commit_obj = Map::new();
+
+        if let Some(mapping) = child_mapping {
+            // Only include fields that were requested (in the child mapping's render_keys)
+            for render_key in &mapping.render_keys {
+                match render_key.key.as_str() {
+                    "cid" => {
+                        commit_obj.insert("cid".to_string(), JsonValue::String(cid_str.clone()));
+                    }
+                    "height" => {
+                        // For newly created documents, height is 1
+                        commit_obj.insert("height".to_string(), JsonValue::Number(1.into()));
+                    }
+                    "docID" => {
+                        commit_obj.insert(
+                            "docID".to_string(),
+                            JsonValue::String(result.doc_id.to_string()),
+                        );
+                    }
+                    "collectionID" => {
+                        // Include collection ID if available
+                        if let Some(ref collection) = self.collection {
+                            commit_obj.insert(
+                                "collectionID".to_string(),
+                                JsonValue::String(collection.collection_id.clone()),
+                            );
+                        }
+                    }
+                    // Additional commit fields can be added here as needed
+                    _ => {
+                        // Unknown fields are ignored
+                    }
+                }
+            }
+        } else {
+            // No child mapping - include default fields (at minimum, cid)
+            commit_obj.insert("cid".to_string(), JsonValue::String(cid_str));
+        }
+
+        // Return as an array with single commit (Go returns array even for single head)
+        JsonValue::Array(vec![JsonValue::Object(commit_obj)])
     }
 }
 
@@ -834,10 +939,17 @@ impl PlanNode for CreateNode {
 
         // On first call, create all documents
         if !self.did_create {
+            // Use the shared timestamp if set (from request level), otherwise capture a new one.
+            // This ensures all mutations in the same GraphQL request share the same UTC_NOW value.
+            let utc_now = self.utc_now.unwrap_or_else(|| {
+                let utc_offset = FixedOffset::east_opt(0).unwrap();
+                Utc::now().with_timezone(&utc_offset)
+            });
+
             for input in &self.inputs {
                 // Convert input to Document (using schema-aware conversion if available)
                 let doc = if let Some(ref collection) = self.collection {
-                    input.to_document_with_schema(collection)?
+                    input.to_document_with_schema(collection, utc_now)?
                 } else {
                     input.to_document()?
                 };

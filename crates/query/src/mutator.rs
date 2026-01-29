@@ -4,6 +4,7 @@
 //! operations for mutation execution, following the same pattern as `DocFetcher`.
 
 use async_trait::async_trait;
+use cid::Cid;
 use document::{DocID, Document};
 use storage::corekv::MaybeSendSync;
 
@@ -53,6 +54,9 @@ pub struct CreateResult {
     pub document: Document,
     /// Status of P2P broadcast (if applicable)
     pub broadcast_status: BroadcastStatus,
+    /// The CID of the commit block (for _version queries)
+    /// This is the dag-cbor encoded Block CID, not the document data CID.
+    pub commit_cid: Option<Cid>,
 }
 
 impl CreateResult {
@@ -62,6 +66,17 @@ impl CreateResult {
             doc_id,
             document,
             broadcast_status: BroadcastStatus::NotAttempted,
+            commit_cid: None,
+        }
+    }
+
+    /// Create a result with commit CID (for _version support).
+    pub fn with_commit_cid(doc_id: DocID, document: Document, commit_cid: Cid) -> Self {
+        Self {
+            doc_id,
+            document,
+            broadcast_status: BroadcastStatus::NotAttempted,
+            commit_cid: Some(commit_cid),
         }
     }
 
@@ -75,6 +90,22 @@ impl CreateResult {
             doc_id,
             document,
             broadcast_status,
+            commit_cid: None,
+        }
+    }
+
+    /// Create a result with commit CID and broadcast status.
+    pub fn with_commit_and_broadcast(
+        doc_id: DocID,
+        document: Document,
+        commit_cid: Cid,
+        broadcast_status: BroadcastStatus,
+    ) -> Self {
+        Self {
+            doc_id,
+            document,
+            broadcast_status,
+            commit_cid: Some(commit_cid),
         }
     }
 }
