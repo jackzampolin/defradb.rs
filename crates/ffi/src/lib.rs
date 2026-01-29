@@ -81,7 +81,10 @@ pub use collection::{
     get_collection_by_version_id, has_collection, patch_collection, refresh_views,
     set_active_collection_version, set_migration,
 };
-pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
+pub use document::{
+    basic_export, basic_import, collection_create, is_json_array, parse_duration,
+    parse_string_array,
+};
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use lens::{lens_add, lens_list};
 pub use node::{basic_export, basic_import, new_node, node_close};
