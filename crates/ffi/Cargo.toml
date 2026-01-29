@@ -39,6 +39,7 @@ hex.workspace = true
 # Internal crates
 crypto = { path = "../crypto" }
 db = { path = "../db" }
+document = { path = "../document" }
 events = { path = "../events" }
 storage = { path = "../storage" }
 query = { path = "../query" }
