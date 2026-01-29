@@ -894,4 +894,35 @@ impl PlanNode for CreateNode {
     fn kind(&self) -> &'static str {
         "createNode"
     }
+
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Convert inputs to JSON array of objects
+        let input_array: Vec<JsonValue> = self
+            .inputs
+            .iter()
+            .map(|input| {
+                let mut input_obj = serde_json::Map::new();
+                for (field_name, value) in &input.fields {
+                    input_obj.insert(field_name.clone(), value.clone());
+                }
+                JsonValue::Object(input_obj)
+            })
+            .collect();
+
+        obj.insert("input".to_string(), JsonValue::Array(input_array));
+
+        // Include child node (selectTopNode) if present
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        JsonValue::Object(obj)
+    }
 }
