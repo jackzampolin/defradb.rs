@@ -242,9 +242,18 @@ pub fn json_to_normal_value_with_kind(
     // If we have schema information, use it for type coercion
     if let Some(kind) = field_kind {
         match kind {
-            // JSON fields: wrap ALL values as JSON (primitives, objects, arrays)
-            // This matches Go DefraDB behavior where JSON fields accept any value type
-            FieldKind::Scalar(ScalarKind::Json) => Ok(NormalValue::Json(value.clone())),
+            // JSON fields: handle different input formats
+            FieldKind::Scalar(ScalarKind::Json) => {
+                match value {
+                    // String containing JSON (from @default) - store as NormalValue::String
+                    // Go returns JSON defaults as serialized strings
+                    JsonValue::String(s) if s.starts_with('{') || s.starts_with('[') => {
+                        Ok(NormalValue::String(s.clone()))
+                    }
+                    // All other values: wrap as NormalValue::Json
+                    _ => Ok(NormalValue::Json(value.clone())),
+                }
+            }
             // DateTime fields: parse RFC 3339 strings or special values like UTC_NOW
             // CRITICAL: Must preserve original timezone to match Go's CID calculation
             FieldKind::Scalar(ScalarKind::DateTime) => {

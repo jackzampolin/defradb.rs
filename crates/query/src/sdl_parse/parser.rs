@@ -661,11 +661,15 @@ impl<'a> SdlParser<'a> {
             "json" => {
                 // JSON @default accepts various value types
                 match value {
-                    // String must be valid JSON
+                    // String containing JSON - validate but store as string literal
+                    // Go stores JSON defaults as strings and returns them as strings
                     graphql_parser::schema::Value::String(s) => {
-                        serde_json::from_str(s).map_err(|e| {
+                        // Validate the JSON is parseable
+                        let _: serde_json::Value = serde_json::from_str(s).map_err(|e| {
                             QueryError::parse(format!("@default json contains invalid JSON: {}", e))
-                        })
+                        })?;
+                        // Store as string literal to match Go behavior
+                        Ok(serde_json::Value::String(s.clone()))
                     }
                     // Primitives and structured types are converted directly
                     graphql_parser::schema::Value::Int(n) => {
@@ -680,19 +684,22 @@ impl<'a> SdlParser<'a> {
                         Err(QueryError::parse("default value is invalid for type JSON"))
                     }
                     graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
+                    // JSON array/object defaults are stored as serialized strings to match Go behavior
                     graphql_parser::schema::Value::List(arr) => {
                         let items: Vec<serde_json::Value> = arr
                             .iter()
                             .map(|v| graphql_schema_value_to_json(v))
                             .collect();
-                        Ok(serde_json::Value::Array(items))
+                        let json_array = serde_json::Value::Array(items);
+                        Ok(serde_json::Value::String(serde_json::to_string(&json_array).unwrap_or_default()))
                     }
                     graphql_parser::schema::Value::Object(obj) => {
                         let items: serde_json::Map<String, serde_json::Value> = obj
                             .iter()
                             .map(|(k, v)| (k.clone(), graphql_schema_value_to_json(v)))
                             .collect();
-                        Ok(serde_json::Value::Object(items))
+                        let json_obj = serde_json::Value::Object(items);
+                        Ok(serde_json::Value::String(serde_json::to_string(&json_obj).unwrap_or_default()))
                     }
                     graphql_parser::schema::Value::Variable(v) => Ok(serde_json::Value::String(format!("${}", v))),
                 }
