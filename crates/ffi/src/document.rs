@@ -249,9 +249,7 @@ fn parse_go_duration(s: &str) -> Result<i64, String> {
 
     // Check if it's a plain integer (backwards compatibility: treat as seconds)
     if s.chars().all(|c| c.is_ascii_digit()) {
-        let secs: i64 = s
-            .parse()
-            .map_err(|_| format!("invalid number: {}", s))?;
+        let secs: i64 = s.parse().map_err(|_| format!("invalid number: {}", s))?;
         let nanos = secs * 1_000_000_000;
         return Ok(if negative { -nanos } else { nanos });
     }
@@ -572,7 +570,10 @@ mod tests {
 
     #[test]
     fn test_parse_go_duration_float() {
-        assert_eq!(parse_go_duration("1.5h").unwrap(), (1.5 * 3600.0 * 1e9) as i64);
+        assert_eq!(
+            parse_go_duration("1.5h").unwrap(),
+            (1.5 * 3600.0 * 1e9) as i64
+        );
         assert_eq!(parse_go_duration("0.5s").unwrap(), 500_000_000);
     }
 

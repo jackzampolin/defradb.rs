@@ -400,18 +400,66 @@ pub unsafe extern "C" fn get_collection_by_version_id(
 /// # Safety
 ///
 /// All string pointers must be valid null-terminated UTF-8 strings or null.
-///
-/// # Note
-///
-/// Not yet implemented. See issue #178.
 #[no_mangle]
 pub unsafe extern "C" fn add_view(
-    _node_ptr: usize,
-    _gql_query: *const c_char,
-    _sdl: *const c_char,
-    _transform: *const c_char,
+    node_ptr: usize,
+    gql_query: *const c_char,
+    sdl: *const c_char,
+    transform: *const c_char,
 ) -> FfiResult {
-    FfiResult::error("add_view is not yet implemented - see issue #178")
+    let rt = get_runtime!(FfiResult);
+
+    let query_str = match c_str_to_string(gql_query) {
+        Some(s) => s,
+        None => return FfiResult::error("gql_query is null"),
+    };
+
+    let sdl_str = match c_str_to_string(sdl) {
+        Some(s) => s,
+        None => return FfiResult::error("sdl is null"),
+    };
+
+    let transform_opt = c_str_to_string(transform);
+
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        // Parse the SDL into collection versions
+        let collections =
+            query::parse_sdl(&sdl_str).map_err(|e| format!("failed to parse view SDL: {}", e))?;
+
+        // Build the query source
+        let mut query_source = schema::QuerySource::new(serde_json::Value::String(query_str));
+        if let Some(ref t) = transform_opt {
+            query_source = query_source.with_transform(t);
+        }
+
+        // Create each collection with the query source attached
+        let mut created_versions = Vec::new();
+        for mut col_version in collections {
+            col_version.query = Some(query_source.clone());
+            let version = col_version.clone();
+            database
+                .create_collection(col_version)
+                .await
+                .map_err(|e| format!("failed to create view collection: {}", e))?;
+            created_versions.push(version);
+        }
+
+        let json = serde_json::to_string(&created_versions)
+            .map_err(|e| format!("failed to serialize result: {}", e))?;
+
+        Ok::<String, String>(json)
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
 }
 
 /// Refresh view caches.
@@ -859,6 +907,60 @@ mod tests {
         let name = CString::new("PatchTest").unwrap();
         let result = unsafe { patch_collection(node, name.as_ptr(), patch.as_ptr()) };
         assert_eq!(result.status, 1, "should fail for invalid patch");
+
+        unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_add_view() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add base schema first
+        let sdl = CString::new("type User { name: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Add a view
+        let gql_query = CString::new("{ User { name } }").unwrap();
+        let view_sdl = CString::new("type UserView { name: String }").unwrap();
+        let result = unsafe {
+            add_view(
+                node,
+                gql_query.as_ptr(),
+                view_sdl.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(result.status, 0, "add_view should succeed");
+        assert!(!result.value.is_null());
+
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.contains("UserView"), "should contain view name");
+
+        unsafe { crate::types::defra_free_string(result.value) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_add_view_null_query() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let view_sdl = CString::new("type V { name: String }").unwrap();
+        let result =
+            unsafe { add_view(node, std::ptr::null(), view_sdl.as_ptr(), std::ptr::null()) };
+        assert_eq!(result.status, 1, "should fail with null query");
 
         unsafe { crate::types::defra_free_string(result.error) };
         node_close(node);
