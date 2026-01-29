@@ -625,6 +625,10 @@ fn parse_field_to_select(
     if let Some(ref group_by) = select.group_by {
         for field in &select.fields {
             if let Requestable::Field(f) = field {
+                // Allow special meta-fields at group level
+                if f.name == "_docID" || f.name == "_group" || f.name == "__typename" {
+                    continue;
+                }
                 if group_by.fields.contains(&f.name) {
                     continue;
                 }
