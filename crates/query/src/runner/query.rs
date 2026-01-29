@@ -1270,6 +1270,71 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .any(|f| matches!(f, Requestable::Similarity(_)));
 
+        // Validate similarity fields against the collection schema
+        if has_similarity {
+            for field in &select.fields {
+                if let Requestable::Similarity(sim) = field {
+                    let target = &sim.target_field;
+                    let schema_field = collection.field_by_name(target);
+                    // Check that the target field exists and is a numeric array
+                    let element_kind = schema_field.and_then(|f| {
+                        if let schema::FieldKind::ScalarArray(arr) = &f.kind {
+                            let ek = arr.element_kind();
+                            match ek {
+                                schema::ScalarKind::Int
+                                | schema::ScalarKind::Float32
+                                | schema::ScalarKind::Float64 => Some(ek),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    });
+
+                    let element_kind = match element_kind {
+                        Some(ek) => ek,
+                        None => {
+                            return Err(QueryError::execution(format!(
+                                "Unknown argument \"{}\" on field \"_similarity\" of type \"{}\".",
+                                target, collection.name
+                            )));
+                        }
+                    };
+
+                    // For Int fields, validate that vector values are integers
+                    if element_kind == schema::ScalarKind::Int {
+                        let non_int_values: Vec<String> = sim
+                            .vector
+                            .iter()
+                            .filter(|v| v.fract() != 0.0)
+                            .map(|v| format!("{}", v))
+                            .collect();
+                        if !non_int_values.is_empty() {
+                            let vector_repr = format!(
+                                "[{}]",
+                                sim.vector
+                                    .iter()
+                                    .map(|v| format!("{}", v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            let mut msg = format!(
+                                "Argument \"{}\" has invalid value {{vector: {}}}.",
+                                target, vector_repr
+                            );
+                            for v in &non_int_values {
+                                msg.push_str(&format!(
+                                    "\nIn field \"vector\": In element #1: Expected type \"Int\", found {}.",
+                                    v
+                                ));
+                            }
+                            return Err(QueryError::execution(msg));
+                        }
+                    }
+                }
+            }
+        }
+
         // Use Planner if there are nested selections, filter through relations,
         // order through relations, aggregates on relations, secondary relation ID fields,
         // similarity computations, or when an index can provide ordering
