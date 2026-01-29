@@ -254,7 +254,7 @@ pub trait NodeAcpOperations: Send + Sync {
 /// NAC status information for HTTP responses.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NacStatusInfo {
-    /// Current NAC status (not_configured, enabled, disabled_temporarily)
+    /// Current NAC status (not configured, enabled, disabled temporarily)
     pub status: String,
     /// Owner DID if NAC is enabled
     #[serde(skip_serializing_if = "Option::is_none")]
