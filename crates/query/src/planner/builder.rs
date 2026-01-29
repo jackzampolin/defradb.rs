@@ -242,14 +242,31 @@ impl Planner {
             }
         });
 
+        // Check if any secondary relation ID fields are selected (e.g., `_authorID`).
+        // These require a TypeJoinOne to reverse-lookup the FK, which needs full schema mapping.
+        let has_secondary_id_field = select.fields.iter().any(|f| {
+            if let Requestable::Field(field) = f {
+                let name = &field.name;
+                if name.starts_with('_') && name.ends_with("ID") && name.len() > 3 {
+                    let rel_name = &name[1..name.len() - 2];
+                    if let Some(rel_field) = collection.field_by_name(rel_name) {
+                        return rel_field.kind.is_relation() && !rel_field.is_primary;
+                    }
+                }
+            }
+            false
+        });
+
         // Build scan mapping: for queries with nested selections, relation filters, relation ordering,
-        // relation aggregates, or relation groupBy fields, use full schema mapping so that FK fields
-        // are available for TypeJoin lookups and schema indices don't collide with sequential render indices.
+        // relation aggregates, relation groupBy fields, or secondary relation ID fields, use full
+        // schema mapping so that FK fields are available for TypeJoin lookups and schema indices
+        // don't collide with sequential render indices.
         let needs_joins = has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
-            || group_by_has_relations;
+            || group_by_has_relations
+            || has_secondary_id_field;
         let mut scan_mapping = if needs_joins {
             self.build_scan_mapping_for_join(&collection, &render_mapping)
         } else {
