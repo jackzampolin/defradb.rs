@@ -145,11 +145,8 @@ impl Mutation {
         self
     }
 
-    /// Get the output key for this mutation in the result JSON.
-    ///
-    /// Uses the alias if present, otherwise falls back to the default
-    /// `{operation}_{collection}` format (e.g., "create_Users").
-    pub fn output_key(&self) -> String {
+    /// Get the response key: alias if set, otherwise "{operation}_{collection}".
+    pub fn output_name(&self) -> String {
         if let Some(ref alias) = self.alias {
             alias.clone()
         } else {

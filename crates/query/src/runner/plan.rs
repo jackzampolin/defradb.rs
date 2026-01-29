@@ -23,6 +23,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
     // _version (CRDT version metadata), _deleted (document deletion status)
     let field_exists = |name: &str| -> bool {
         name == "_docID"
+            || name == "_deleted"
             || name == "_group"
             || name == "__typename"
             || name == "_version"
