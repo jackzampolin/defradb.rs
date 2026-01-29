@@ -1,6 +1,7 @@
 //! Mutation execution methods for QueryRunner.
 
 use acp::DocumentPermission;
+use chrono::{DateTime, FixedOffset, Utc};
 use identity::Did;
 use serde_json::{Map, Value as JsonValue};
 use std::sync::Arc;
@@ -88,11 +89,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_variables(mutation_str, variables)?;
 
+        // Capture a single timestamp for all UTC_NOW values in this request.
+        // All mutations in the same GraphQL request should share this timestamp.
+        let utc_offset = FixedOffset::east_opt(0).unwrap();
+        let request_utc_now = Utc::now().with_timezone(&utc_offset);
+
         let mut results = Map::new();
 
         for mutation in mutations {
             let result = self
-                .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone())
+                .execute_single_mutation(
+                    &mutation,
+                    mutator.clone(),
+                    caller_identity.clone(),
+                    request_utc_now,
+                )
                 .await?;
             // Use alias if present, otherwise default to "create_Users" format
             let key = mutation.output_key();
@@ -108,6 +119,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutation: &Mutation,
         mutator: Arc<dyn DocMutator>,
         caller_identity: Option<Did>,
+        request_utc_now: DateTime<FixedOffset>,
     ) -> Result<JsonValue> {
         use acp::Identity;
 
@@ -222,7 +234,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(
                     CreateNode::new(&mutation.collection_name, mutator, mapping.clone())
                         .with_collection(collection.clone())
-                        .with_inputs(inputs),
+                        .with_inputs(inputs)
+                        .with_utc_now(request_utc_now),
                 )
             }
             MutationType::Update => {
@@ -437,13 +450,45 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Build document mapping for mutation result fields.
     fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
+        use crate::mapper::Requestable;
+
         let mut mapping = DocumentMapping::new();
 
-        // Add requested fields
-        for field in mutation.requested_fields() {
-            let index = mapping.next_index();
-            mapping.add(index, &field.name);
-            mapping.add_render_key(index, field.output_name());
+        // Add requested fields (both simple fields and nested selects)
+        for requestable in &mutation.fields {
+            match requestable {
+                Requestable::Field(field) => {
+                    let index = mapping.next_index();
+                    mapping.add(index, &field.name);
+                    mapping.add_render_key(index, field.output_name());
+                }
+                Requestable::Select(select) => {
+                    // Handle nested selections like _version { cid }
+                    let index = mapping.next_index();
+                    let field_name = &select.field.name;
+                    mapping.add(index, field_name);
+                    mapping.add_render_key(index, select.field.output_name());
+
+                    // Build child mapping for the nested select's fields
+                    let mut child_mapping = DocumentMapping::new();
+                    for child_requestable in &select.fields {
+                        if let Requestable::Field(child_field) = child_requestable {
+                            let child_index = child_mapping.next_index();
+                            child_mapping.add(child_index, &child_field.name);
+                            child_mapping.add_render_key(child_index, child_field.output_name());
+                        }
+                    }
+
+                    // Ensure child_mappings vector is large enough
+                    while mapping.child_mappings.len() <= index {
+                        mapping.child_mappings.push(None);
+                    }
+                    mapping.child_mappings[index] = Some(Box::new(child_mapping));
+                }
+                Requestable::Aggregate(_) => {
+                    // Aggregates not commonly used in mutations, skip for now
+                }
+            }
         }
 
         // If no fields specified, at minimum return _docID
