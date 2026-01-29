@@ -300,6 +300,48 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         Ok(processed_docs)
     }
 
+    async fn get_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Vec<(Document, bool)>> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        let has_migrations = Self::collection_has_migrations(&collection);
+        let target_version_id = &collection.schema().version_id;
+
+        // Create read-only transaction
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get datastore: {}", e))
+        })?;
+
+        let docs_with_status = collection
+            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        let _ = txn.discard();
+
+        // Process each document (apply migrations if needed)
+        let mut processed_docs = Vec::with_capacity(docs_with_status.len());
+        for (doc, is_deleted) in docs_with_status {
+            let processed = self
+                .process_document(doc, &collection, has_migrations)
+                .await?;
+            processed_docs.push((processed, is_deleted));
+        }
+
+        Ok(processed_docs)
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,

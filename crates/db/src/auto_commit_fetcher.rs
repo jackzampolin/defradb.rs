@@ -74,6 +74,49 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         result
     }
 
+    async fn get_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Vec<(Document, bool)>> {
+        // Get collection from DB cache
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+
+        // Create a read-only transaction
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        // Get the datastore
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to get datastore for collection '{}': {}",
+                collection_name, e
+            ))
+        })?;
+
+        // Execute the query with deletion status
+        let result = collection
+            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)));
+
+        // Discard the read-only transaction (no changes to commit)
+        if let Err(e) = txn.discard() {
+            warn!(
+                collection = %collection_name,
+                error = %e,
+                "Failed to discard read-only transaction after get_all_with_deleted"
+            );
+        }
+
+        result
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,

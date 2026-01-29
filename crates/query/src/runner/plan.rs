@@ -20,12 +20,13 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 
     // Helper to check if a field exists in the collection schema
     // Special fields: _docID (document ID), _group (groupBy results), __typename (GraphQL introspection),
-    // _version (CRDT version metadata)
+    // _version (CRDT version metadata), _deleted (document deletion status)
     let field_exists = |name: &str| -> bool {
         name == "_docID"
             || name == "_group"
             || name == "__typename"
             || name == "_version"
+            || name == "_deleted"
             || collection.fields.iter().any(|f| f.name == name)
     };
 

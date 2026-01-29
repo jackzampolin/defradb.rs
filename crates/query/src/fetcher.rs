@@ -67,8 +67,24 @@ impl FetchByIdsResult {
 /// Storage abstraction for fetching documents.
 #[async_trait]
 pub trait DocFetcher: Send + Sync {
-    /// Get all documents from a collection.
+    /// Get all documents from a collection (excludes deleted documents).
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
+
+    /// Get all documents from a collection with their deletion status.
+    ///
+    /// If `show_deleted` is true, returns all documents including deleted ones.
+    /// If `show_deleted` is false, returns only non-deleted documents.
+    /// Each document is paired with a boolean indicating if it's deleted.
+    ///
+    /// Default implementation calls `get_all` and returns all docs as non-deleted.
+    async fn get_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> Result<Vec<(Document, bool)>> {
+        let docs = self.get_all(collection_name).await?;
+        Ok(docs.into_iter().map(|d| (d, false)).collect())
+    }
 
     /// Get documents by their IDs.
     ///
