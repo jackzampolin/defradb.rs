@@ -356,7 +356,22 @@ pub(crate) fn build_plan(
         .with_show_deleted(select.show_deleted);
 
     // Pass filter and docIDs to ScanNode for explain output
-    if let Some(ref filter) = select.filter {
+    // First check select.filter, then fall back to aggregate target filter
+    let filter_for_scan = select.filter.clone().or_else(|| {
+        // For top-level aggregates, the filter might be on the aggregate target
+        select
+            .fields
+            .iter()
+            .find_map(|f| {
+                if let Requestable::Aggregate(agg) = f {
+                    if !agg.targets.is_empty() {
+                        return agg.targets[0].filter.clone();
+                    }
+                }
+                None
+            })
+    });
+    if let Some(ref filter) = filter_for_scan {
         scan = scan.with_filter(filter.clone());
     }
     if let Some(ref doc_ids) = select.doc_ids {
@@ -366,7 +381,8 @@ pub(crate) fn build_plan(
     let mut plan: Box<dyn PlanNode> = Box::new(scan);
 
     // Add SelectNode (Go always wraps in selectNode, even without a filter)
-    let select_node = if let Some(ref filter) = select.filter {
+    // Use the same filter we used for scanNode
+    let select_node = if let Some(ref filter) = filter_for_scan {
         SelectNode::new(plan, mapping.clone()).with_filter(filter.clone())
     } else {
         SelectNode::new(plan, mapping.clone())
