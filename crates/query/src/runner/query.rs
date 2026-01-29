@@ -315,14 +315,103 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let select = crate::mapper::Select::new(&mutation.collection_name);
         let inner_explain = self.explain_simple_select(&select, &collection, explain_type)?;
 
-        // Wrap in selectTopNode
-        let select_top_node = serde_json::json!({
-            "selectTopNode": inner_explain
-        });
+        // Build mutation-specific attributes
+        let mut mutation_attrs = serde_json::Map::new();
+
+        match mutation.mutation_type {
+            MutationType::Create => {
+                // input: array of input objects
+                let input_array: Vec<JsonValue> = mutation
+                    .create_input
+                    .iter()
+                    .map(|input| {
+                        let mut input_obj = serde_json::Map::new();
+                        for (field_name, value) in input {
+                            input_obj.insert(field_name.clone(), value.clone());
+                        }
+                        JsonValue::Object(input_obj)
+                    })
+                    .collect();
+                mutation_attrs.insert("input".to_string(), JsonValue::Array(input_array));
+            }
+            MutationType::Update => {
+                // docID: array of doc IDs (or null)
+                if let Some(ref doc_ids) = mutation.doc_ids {
+                    mutation_attrs.insert(
+                        "docID".to_string(),
+                        JsonValue::Array(
+                            doc_ids
+                                .iter()
+                                .map(|id| JsonValue::String(id.clone()))
+                                .collect(),
+                        ),
+                    );
+                } else {
+                    mutation_attrs.insert("docID".to_string(), JsonValue::Null);
+                }
+
+                // filter: filter expression (or null)
+                if let Some(ref filter) = mutation.filter {
+                    mutation_attrs
+                        .insert("filter".to_string(), serde_json::json!(filter.conditions()));
+                } else {
+                    mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                }
+
+                // input: map of update values
+                let mut input_obj = serde_json::Map::new();
+                for (field_name, value) in &mutation.update_input {
+                    input_obj.insert(field_name.clone(), value.clone());
+                }
+                mutation_attrs.insert("input".to_string(), JsonValue::Object(input_obj));
+            }
+            MutationType::Delete => {
+                // docID: array of doc IDs (or null)
+                if let Some(ref doc_ids) = mutation.doc_ids {
+                    mutation_attrs.insert(
+                        "docID".to_string(),
+                        JsonValue::Array(
+                            doc_ids
+                                .iter()
+                                .map(|id| JsonValue::String(id.clone()))
+                                .collect(),
+                        ),
+                    );
+                } else {
+                    mutation_attrs.insert("docID".to_string(), JsonValue::Null);
+                }
+
+                // filter: filter expression (or null)
+                if let Some(ref filter) = mutation.filter {
+                    mutation_attrs
+                        .insert("filter".to_string(), serde_json::json!(filter.conditions()));
+                } else {
+                    mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                }
+            }
+            MutationType::Upsert => {
+                // Upsert combines create and update semantics
+                let input_array: Vec<JsonValue> = mutation
+                    .create_input
+                    .iter()
+                    .map(|input| {
+                        let mut input_obj = serde_json::Map::new();
+                        for (field_name, value) in input {
+                            input_obj.insert(field_name.clone(), value.clone());
+                        }
+                        JsonValue::Object(input_obj)
+                    })
+                    .collect();
+                mutation_attrs.insert("input".to_string(), JsonValue::Array(input_array));
+            }
+        }
+
+        // Add selectTopNode containing the inner select explanation
+        mutation_attrs.insert("selectTopNode".to_string(), inner_explain);
 
         // Wrap in the mutation node type
         let mutation_node = serde_json::json!({
-            node_kind: select_top_node
+            node_kind: JsonValue::Object(mutation_attrs)
         });
 
         Ok(mutation_node)

@@ -463,4 +463,44 @@ impl PlanNode for UpdateNode {
     fn kind(&self) -> &'static str {
         "updateNode"
     }
+
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // docID: array of doc IDs to update (null if using filter)
+        if let Some(ref doc_ids) = self.doc_ids {
+            obj.insert(
+                "docID".to_string(),
+                JsonValue::Array(doc_ids.iter().map(|id| JsonValue::String(id.clone())).collect()),
+            );
+        } else {
+            obj.insert("docID".to_string(), JsonValue::Null);
+        }
+
+        // filter: the filter expression (null if using doc IDs)
+        if let Some(ref filter) = self.filter {
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        } else {
+            obj.insert("filter".to_string(), JsonValue::Null);
+        }
+
+        // input: the update values as a map
+        let mut input_obj = serde_json::Map::new();
+        for (field_name, value) in &self.input.fields {
+            input_obj.insert(field_name.clone(), value.clone());
+        }
+        obj.insert("input".to_string(), JsonValue::Object(input_obj));
+
+        // Include child node if present
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        JsonValue::Object(obj)
+    }
 }
