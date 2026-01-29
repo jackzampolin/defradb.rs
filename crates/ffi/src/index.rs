@@ -8,9 +8,10 @@ use std::ffi::c_char;
 use db::collection_short_id;
 use storage::corekv::Key;
 
-use crate::runtime::RUNTIME;
+use crate::get_runtime;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Create a new index on a collection.
 ///
@@ -46,10 +47,7 @@ pub unsafe extern "C" fn create_index(
     collection_name: *const c_char,
     index_json: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let collection_name_str = match c_str_to_string(collection_name) {
         Some(s) => s,
@@ -67,12 +65,13 @@ pub unsafe extern "C" fn create_index(
         Err(e) => return FfiResult::error(format!("failed to parse index JSON: {}", e)),
     };
 
-    let result = rt.block_on(async {
-        // Get database from node state
-        let database = NODES
-            .get(node_ptr, |state| state.database.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -206,10 +205,7 @@ pub unsafe extern "C" fn drop_index(
     collection_name: *const c_char,
     index_name: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let collection_name_str = match c_str_to_string(collection_name) {
         Some(s) => s,
@@ -221,12 +217,13 @@ pub unsafe extern "C" fn drop_index(
         None => return FfiResult::error("index_name is null"),
     };
 
-    let result = rt.block_on(async {
-        // Get database from node state
-        let database = NODES
-            .get(node_ptr, |state| state.database.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -327,22 +324,20 @@ pub unsafe extern "C" fn drop_index(
 /// `collection_name` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn get_indexes(node_ptr: usize, collection_name: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let collection_name_str = match c_str_to_string(collection_name) {
         Some(s) => s,
         None => return FfiResult::error("collection_name is null"),
     };
 
-    let result = rt.block_on(async {
-        // Get database from node state
-        let database = NODES
-            .get(node_ptr, |state| state.database.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -383,17 +378,15 @@ pub unsafe extern "C" fn get_indexes(node_ptr: usize, collection_name: *const c_
 /// ```
 #[no_mangle]
 pub extern "C" fn get_all_indexes(node_ptr: usize) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
+    let rt = get_runtime!(FfiResult);
+
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        // Get database from node state
-        let database = NODES
-            .get(node_ptr, |state| state.database.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
-
         // Get all collection names
         let names = database
             .list_collections()

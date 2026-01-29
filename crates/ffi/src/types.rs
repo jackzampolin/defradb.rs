@@ -25,19 +25,10 @@ impl FfiResult {
     /// If the value contains null bytes, they are replaced with the Unicode
     /// replacement character to avoid panicking at the FFI boundary.
     pub fn success(value: impl Into<String>) -> Self {
-        let value_str = value.into();
-        let value_cstring = match CString::new(value_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                // Value contains null bytes - replace them to avoid panic
-                let sanitized = value_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("{}").unwrap())
-            }
-        };
         Self {
             status: 0,
             error: ptr::null_mut(),
-            value: value_cstring.into_raw(),
+            value: sanitize_to_cstring(value, "{}").into_raw(),
         }
     }
 
@@ -46,18 +37,9 @@ impl FfiResult {
     /// If the message contains null bytes, they are replaced with the Unicode
     /// replacement character to avoid panicking at the FFI boundary.
     pub fn error(message: impl Into<String>) -> Self {
-        let msg_str = message.into();
-        let error_cstring = match CString::new(msg_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                // Message contains null bytes - replace them to avoid panic
-                let sanitized = msg_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
-            }
-        };
         Self {
             status: 1,
-            error: error_cstring.into_raw(),
+            error: sanitize_to_cstring(message, "unknown error").into_raw(),
             value: ptr::null_mut(),
         }
     }
@@ -100,18 +82,9 @@ impl NewNodeResult {
     /// If the message contains null bytes, they are replaced with the Unicode
     /// replacement character to avoid panicking at the FFI boundary.
     pub fn error(message: impl Into<String>) -> Self {
-        let msg_str = message.into();
-        let error_cstring = match CString::new(msg_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                // Message contains null bytes - replace them to avoid panic
-                let sanitized = msg_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
-            }
-        };
         Self {
             status: 1,
-            error: error_cstring.into_raw(),
+            error: sanitize_to_cstring(message, "unknown error").into_raw(),
             node_ptr: 0,
         }
     }
@@ -131,34 +104,18 @@ pub struct NewTxnResult {
 impl NewTxnResult {
     /// Create a success result with a transaction ID.
     pub fn success(txn_id: impl Into<String>) -> Self {
-        let txn_str = txn_id.into();
-        let txn_cstring = match CString::new(txn_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                let sanitized = txn_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown").unwrap())
-            }
-        };
         Self {
             status: 0,
             error: ptr::null_mut(),
-            txn_id: txn_cstring.into_raw(),
+            txn_id: sanitize_to_cstring(txn_id, "unknown").into_raw(),
         }
     }
 
     /// Create an error result.
     pub fn error(message: impl Into<String>) -> Self {
-        let msg_str = message.into();
-        let error_cstring = match CString::new(msg_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                let sanitized = msg_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
-            }
-        };
         Self {
             status: 1,
-            error: error_cstring.into_raw(),
+            error: sanitize_to_cstring(message, "unknown error").into_raw(),
             txn_id: ptr::null_mut(),
         }
     }
@@ -180,6 +137,29 @@ impl Default for NodeInitOptions {
         Self {
             db_path: ptr::null(),
             in_memory: 1, // Default to in-memory
+        }
+    }
+}
+
+/// Convert a string to a CString, sanitizing null bytes.
+///
+/// If the string contains embedded null bytes, they are replaced with the
+/// Unicode replacement character (`\u{FFFD}`) to avoid panicking at the FFI
+/// boundary. If sanitization fails, the fallback string is used.
+///
+/// # Arguments
+///
+/// * `value` - The string to convert
+/// * `fallback` - Fallback string if conversion fails entirely
+pub fn sanitize_to_cstring(value: impl Into<String>, fallback: &str) -> CString {
+    let s = value.into();
+    match CString::new(s.clone()) {
+        Ok(cstring) => cstring,
+        Err(_) => {
+            let sanitized = s.replace('\0', "\u{FFFD}");
+            CString::new(sanitized).unwrap_or_else(|_| {
+                CString::new(fallback).unwrap_or_else(|_| CString::new("error").unwrap())
+            })
         }
     }
 }

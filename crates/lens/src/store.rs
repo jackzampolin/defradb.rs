@@ -54,6 +54,11 @@ pub trait TransformStore: Send + Sync {
     /// Returns the unique ID for the registered transform.
     async fn add(&self, config: LensConfig) -> Result<TransformId>;
 
+    /// List all registered transforms.
+    ///
+    /// Returns a map of transform IDs to their lens modules.
+    async fn list(&self) -> Result<std::collections::HashMap<String, crate::LensModule>>;
+
     /// Transform documents using a registered lens.
     ///
     /// Applies the forward transformation (source -> destination schema version).
@@ -101,6 +106,20 @@ impl TransformStore for MemoryTransformStore {
         transforms.insert(id.clone(), config);
 
         Ok(id)
+    }
+
+    async fn list(&self) -> Result<std::collections::HashMap<String, crate::LensModule>> {
+        let transforms = self
+            .transforms
+            .read()
+            .map_err(|e| Error::Pipeline(format!("failed to acquire read lock: {}", e)))?;
+
+        let result = transforms
+            .iter()
+            .map(|(id, config)| (id.to_string(), config.lens.clone()))
+            .collect();
+
+        Ok(result)
     }
 
     fn transform(&self, id: &TransformId, docs: LensDocStream) -> Result<LensDocResultStream> {

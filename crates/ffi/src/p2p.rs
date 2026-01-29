@@ -8,13 +8,64 @@
 use std::ffi::c_char;
 use std::sync::Arc;
 
-use crate::runtime::RUNTIME;
+use crate::get_runtime;
 use crate::state::{NodeState, P2PState, PolicyStore, NODES};
 use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 use blockstore::DefraBlockstore;
 use p2p::bitswap::BitswapStoreAdapter;
 use p2p::P2PHost;
+
+/// Parsed multiaddr containing peer ID and transport address.
+struct ParsedMultiaddr {
+    /// The peer ID extracted from the multiaddr.
+    peer_id: libp2p::PeerId,
+    /// The transport address (multiaddr without the /p2p component).
+    transport_addr: libp2p::Multiaddr,
+}
+
+/// Parse a full multiaddr string that includes a peer ID.
+///
+/// Expects format like: `/ip4/127.0.0.1/tcp/9171/p2p/12D3KooW...`
+///
+/// Returns the peer ID and the transport address (without /p2p component).
+fn parse_multiaddr_with_peer_id(addr_str: &str) -> Result<ParsedMultiaddr, String> {
+    // Parse the multiaddr
+    let full_addr: libp2p::Multiaddr = addr_str
+        .parse()
+        .map_err(|e| format!("invalid multiaddr '{}': {}", addr_str, e))?;
+
+    // Extract peer ID from the multiaddr
+    let peer_id = full_addr
+        .iter()
+        .find_map(|p| {
+            if let libp2p::multiaddr::Protocol::P2p(peer_id) = p {
+                Some(peer_id)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| format!("multiaddr '{}' does not contain peer ID", addr_str))?;
+
+    // Remove the p2p component to get the transport address
+    let transport_addr: libp2p::Multiaddr = full_addr
+        .iter()
+        .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+        .collect();
+
+    Ok(ParsedMultiaddr {
+        peer_id,
+        transport_addr,
+    })
+}
+
+/// Parse a JSON array of collection names.
+///
+/// Expects format like: `["collection1", "collection2"]`
+fn parse_collections_json(json_str: &str) -> Result<Vec<String>, String> {
+    serde_json::from_str(json_str).map_err(|e| format!("invalid collections JSON: {}", e))
+}
 
 /// Create a new DefraDB node with P2P enabled.
 ///
@@ -35,10 +86,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
     _options: NodeInitOptions,
     listen_addr: *const c_char,
 ) -> NewNodeResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(NewNodeResult);
 
     let listen_addr_str = match c_str_to_string(listen_addr) {
         Some(s) => s,
@@ -156,10 +204,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub extern "C" fn p2p_peer_info(node_ptr: usize) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -187,10 +232,11 @@ pub extern "C" fn p2p_peer_info(node_ptr: usize) -> FfiResult {
                     .map(|addr| format!("{}/p2p/{}", addr, peer_id))
                     .collect();
 
-                Ok(serde_json::to_string(&full_addrs).unwrap())
+                serde_json::to_string(&full_addrs)
+                    .map_err(|e| format!("failed to serialize peer info: {}", e))
             })
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -208,10 +254,7 @@ pub extern "C" fn p2p_peer_info(node_ptr: usize) -> FfiResult {
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -229,10 +272,11 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
 
                 let peer_ids: Vec<String> = peers.into_iter().map(|p| p.to_string()).collect();
 
-                Ok(serde_json::to_string(&peer_ids).unwrap())
+                serde_json::to_string(&peer_ids)
+                    .map_err(|e| format!("failed to serialize peer list: {}", e))
             })
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -253,10 +297,7 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
 /// `addr` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_connect(node_ptr: usize, addr: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let addr_str = match c_str_to_string(addr) {
         Some(s) => s,
@@ -271,39 +312,19 @@ pub unsafe extern "C" fn p2p_connect(node_ptr: usize, addr: *const c_char) -> Ff
             };
 
             rt.block_on(async {
-                // Parse the multiaddr
-                let full_addr: libp2p::Multiaddr = addr_str
-                    .parse()
-                    .map_err(|e| format!("invalid multiaddr '{}': {}", addr_str, e))?;
-
-                // Extract peer ID from the multiaddr
-                let peer_id = full_addr
-                    .iter()
-                    .find_map(|p| {
-                        if let libp2p::multiaddr::Protocol::P2p(peer_id) = p {
-                            Some(peer_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| format!("multiaddr '{}' does not contain peer ID", addr_str))?;
-
-                // Remove the p2p component to get the transport address
-                let transport_addr: libp2p::Multiaddr = full_addr
-                    .iter()
-                    .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-                    .collect();
+                // Parse the multiaddr and extract peer ID + transport address
+                let parsed = parse_multiaddr_with_peer_id(&addr_str)?;
 
                 // Dial the peer
                 p2p.handle
-                    .dial(peer_id, vec![transport_addr])
+                    .dial(parsed.peer_id, vec![parsed.transport_addr])
                     .await
                     .map_err(|e| format!("failed to connect: {}", e))?;
 
                 Ok(())
             })
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -329,10 +350,7 @@ pub unsafe extern "C" fn p2p_set_replicator(
     peer_addr: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let addr_str = match c_str_to_string(peer_addr) {
         Some(s) => s,
@@ -344,9 +362,9 @@ pub unsafe extern "C" fn p2p_set_replicator(
         None => return FfiResult::error("collections_json is null"),
     };
 
-    let collections: Vec<String> = match serde_json::from_str(&collections_str) {
+    let collections = match parse_collections_json(&collections_str) {
         Ok(c) => c,
-        Err(e) => return FfiResult::error(format!("invalid collections JSON: {}", e)),
+        Err(e) => return FfiResult::error(e),
     };
 
     let result = NODES
@@ -358,31 +376,18 @@ pub unsafe extern "C" fn p2p_set_replicator(
 
             rt.block_on(async {
                 // Parse the multiaddr and extract peer ID
-                let full_addr: libp2p::Multiaddr = addr_str
-                    .parse()
-                    .map_err(|e| format!("invalid multiaddr '{}': {}", addr_str, e))?;
-
-                let peer_id = full_addr
-                    .iter()
-                    .find_map(|p| {
-                        if let libp2p::multiaddr::Protocol::P2p(peer_id) = p {
-                            Some(peer_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| format!("multiaddr '{}' does not contain peer ID", addr_str))?;
+                let parsed = parse_multiaddr_with_peer_id(&addr_str)?;
 
                 // Set the replicator
                 p2p.handle
-                    .set_replicator(peer_id, collections)
+                    .set_replicator(parsed.peer_id, collections)
                     .await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;
 
                 Ok(())
             })
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -406,10 +411,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
     node_ptr: usize,
     peer_id_str: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let peer_str = match c_str_to_string(peer_id_str) {
         Some(s) => s,
@@ -436,7 +438,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                 Ok(())
             })
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -463,10 +465,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub extern "C" fn p2p_get_all_replicators(node_ptr: usize) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -501,10 +500,11 @@ pub extern "C" fn p2p_get_all_replicators(node_ptr: usize) -> FfiResult {
                     })
                     .collect();
 
-                Ok(serde_json::to_string(&response).unwrap())
+                serde_json::to_string(&response)
+                    .map_err(|e| format!("failed to serialize replicators: {}", e))
             })
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -533,9 +533,9 @@ pub unsafe extern "C" fn p2p_add_collections(
         None => return FfiResult::error("collections_json is null"),
     };
 
-    let collections: Vec<String> = match serde_json::from_str(&collections_str) {
+    let collections = match parse_collections_json(&collections_str) {
         Ok(c) => c,
-        Err(e) => return FfiResult::error(format!("invalid collections JSON: {}", e)),
+        Err(e) => return FfiResult::error(e),
     };
 
     let result = NODES
@@ -551,7 +551,7 @@ pub unsafe extern "C" fn p2p_add_collections(
 
             Ok(())
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -580,9 +580,9 @@ pub unsafe extern "C" fn p2p_remove_collections(
         None => return FfiResult::error("collections_json is null"),
     };
 
-    let collections: Vec<String> = match serde_json::from_str(&collections_str) {
+    let collections = match parse_collections_json(&collections_str) {
         Ok(c) => c,
-        Err(e) => return FfiResult::error(format!("invalid collections JSON: {}", e)),
+        Err(e) => return FfiResult::error(e),
     };
 
     let result = NODES
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn p2p_remove_collections(
 
             Ok(())
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {
@@ -624,9 +624,10 @@ pub extern "C" fn p2p_get_all_collections(node_ptr: usize) -> FfiResult {
             };
 
             let collections = p2p.get_collections();
-            Ok(serde_json::to_string(&collections).unwrap())
+            serde_json::to_string(&collections)
+                .map_err(|e| format!("failed to serialize collections: {}", e))
         })
-        .ok_or_else(|| "invalid node handle".to_string())
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
     match result {

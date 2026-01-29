@@ -7,11 +7,12 @@
 //! 2. `poll_subscription` - Non-blocking poll for next event
 //! 3. `close_subscription` - Stop listening and cleanup
 
-use std::ffi::{c_char, c_int, CString};
+use std::ffi::{c_char, c_int};
 use std::ptr;
 
 use crate::state::{SubscriptionState, NODES, SUBSCRIPTIONS};
-use crate::types::c_str_to_string;
+use crate::types::{c_str_to_string, sanitize_to_cstring};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Result type for subscription creation.
 #[repr(C)]
@@ -34,17 +35,9 @@ impl CreateSubscriptionResult {
     }
 
     fn error(message: impl Into<String>) -> Self {
-        let msg_str = message.into();
-        let error_cstring = match CString::new(msg_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                let sanitized = msg_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
-            }
-        };
         Self {
             status: 1,
-            error: error_cstring.into_raw(),
+            error: sanitize_to_cstring(message, "unknown error").into_raw(),
             subscription_handle: 0,
         }
     }
@@ -72,33 +65,18 @@ pub struct PollSubscriptionResult {
 
 impl PollSubscriptionResult {
     fn event(json: String, dropped: u64) -> Self {
-        let value_cstring = match CString::new(json.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                let sanitized = json.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("{}").unwrap())
-            }
-        };
         Self {
             status: 0,
             error: ptr::null_mut(),
-            value: value_cstring.into_raw(),
+            value: sanitize_to_cstring(json, "{}").into_raw(),
             dropped_count: dropped,
         }
     }
 
     fn error(message: impl Into<String>) -> Self {
-        let msg_str = message.into();
-        let error_cstring = match CString::new(msg_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                let sanitized = msg_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
-            }
-        };
         Self {
             status: 1,
-            error: error_cstring.into_raw(),
+            error: sanitize_to_cstring(message, "unknown error").into_raw(),
             value: ptr::null_mut(),
             dropped_count: 0,
         }
@@ -141,17 +119,9 @@ impl CloseSubscriptionResult {
     }
 
     fn error(message: impl Into<String>) -> Self {
-        let msg_str = message.into();
-        let error_cstring = match CString::new(msg_str.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                let sanitized = msg_str.replace('\0', "\u{FFFD}");
-                CString::new(sanitized).unwrap_or_else(|_| CString::new("unknown error").unwrap())
-            }
-        };
         Self {
             status: 1,
-            error: error_cstring.into_raw(),
+            error: sanitize_to_cstring(message, "unknown error").into_raw(),
         }
     }
 }
@@ -183,7 +153,7 @@ pub unsafe extern "C" fn create_subscription(
         state.event_bus.subscribe(&[events::EventName::Update])
     }) {
         Some(sub) => sub,
-        None => return CreateSubscriptionResult::error("invalid node handle"),
+        None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     // Create subscription state with optional collection filter

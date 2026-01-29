@@ -8,9 +8,10 @@ use std::ffi::c_char;
 
 use identity::Identity;
 
-use crate::runtime::RUNTIME;
+use crate::get_runtime;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 // ============================================================================
 // NAC (Node Access Control) Functions
@@ -29,16 +30,15 @@ use crate::types::{c_str_to_string, FfiResult};
 /// ```
 #[no_mangle]
 pub extern "C" fn get_nac_status(node_ptr: usize) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
+    let rt = get_runtime!(FfiResult);
+
+    // Validate node handle before entering async block
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let nac_manager = NODES
-            .get(node_ptr, |state| state.nac_manager.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
-
         let info = nac_manager.info().await;
         let json = serde_json::to_string(&info)
             .map_err(|e| format!("failed to serialize NAC info: {}", e))?;
@@ -61,21 +61,20 @@ pub extern "C" fn get_nac_status(node_ptr: usize) -> FfiResult {
 /// `requestor_did` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
         None => return FfiResult::error("requestor_did is null"),
     };
 
-    let result = rt.block_on(async {
-        let nac_manager = NODES
-            .get(node_ptr, |state| state.nac_manager.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid DID '{}': {}", requestor_str, e))?;
 
@@ -102,21 +101,20 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
 /// `requestor_did` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
         None => return FfiResult::error("requestor_did is null"),
     };
 
-    let result = rt.block_on(async {
-        let nac_manager = NODES
-            .get(node_ptr, |state| state.nac_manager.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid DID '{}': {}", requestor_str, e))?;
 
@@ -144,21 +142,20 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
 /// `owner_did` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let owner_str = match c_str_to_string(owner_did) {
         Some(s) => s,
         None => return FfiResult::error("owner_did is null"),
     };
 
-    let result = rt.block_on(async {
-        let nac_manager = NODES
-            .get(node_ptr, |state| state.nac_manager.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let owner = identity::Did::new(&owner_str)
             .map_err(|e| format!("invalid DID '{}': {}", owner_str, e))?;
 
@@ -192,10 +189,7 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
     requestor_did: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
@@ -207,11 +201,13 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
         None => return FfiResult::error("target_did is null"),
     };
 
-    let result = rt.block_on(async {
-        let nac_manager = NODES
-            .get(node_ptr, |state| state.nac_manager.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
         let target = identity::Did::new(&target_str)
@@ -249,10 +245,7 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
     requestor_did: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
@@ -264,11 +257,13 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
         None => return FfiResult::error("target_did is null"),
     };
 
-    let result = rt.block_on(async {
-        let nac_manager = NODES
-            .get(node_ptr, |state| state.nac_manager.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
         let target = identity::Did::new(&target_str)
@@ -328,7 +323,7 @@ pub unsafe extern "C" fn add_dac_policy(
             })
             .to_string()
         })
-        .ok_or_else(|| "invalid node handle".to_string());
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
 
     match result {
         Ok(json) => FfiResult::success(json),
@@ -361,7 +356,7 @@ pub unsafe extern "C" fn get_dac_policy(node_ptr: usize, policy_id: *const c_cha
                 None => serde_json::json!(null).to_string(),
             }
         })
-        .ok_or_else(|| "invalid node handle".to_string());
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
 
     match result {
         Ok(json) => FfiResult::success(json),
@@ -383,7 +378,7 @@ pub extern "C" fn list_dac_policies(node_ptr: usize) -> FfiResult {
             let ids = state.policy_store.list_policies();
             serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
         })
-        .ok_or_else(|| "invalid node handle".to_string());
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
 
     match result {
         Ok(json) => FfiResult::success(json),
@@ -415,10 +410,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     doc_id: *const c_char,
     relation: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
@@ -445,11 +437,13 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         None => return FfiResult::error("relation is null"),
     };
 
-    let result = rt.block_on(async {
-        let document_acp = NODES
-            .get(node_ptr, |state| state.document_acp.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
+        Some(acp) => acp,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
         let target = identity::Did::new(&target_str)
@@ -497,10 +491,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
     doc_id: *const c_char,
     relation: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
@@ -527,11 +518,13 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
         None => return FfiResult::error("relation is null"),
     };
 
-    let result = rt.block_on(async {
-        let document_acp = NODES
-            .get(node_ptr, |state| state.document_acp.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
+        Some(acp) => acp,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
         let target = identity::Did::new(&target_str)
@@ -572,16 +565,15 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
 /// Returns an error if no node identity is configured.
 #[no_mangle]
 pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
+    let rt = get_runtime!(FfiResult);
+
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let database = NODES
-            .get(node_ptr, |state| state.database.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
-
         let identity = database
             .node_identity()
             .ok_or_else(|| "node identity not configured".to_string())?;

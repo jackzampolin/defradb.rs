@@ -36,6 +36,7 @@
 pub mod acp;
 pub mod collection;
 pub mod index;
+pub mod lens;
 pub mod node;
 pub mod p2p;
 pub mod query;
@@ -47,6 +48,26 @@ pub mod txn;
 pub mod types;
 
 use std::ffi::{c_char, CString};
+
+/// Error message for invalid node handle.
+pub const ERR_INVALID_NODE_HANDLE: &str = "invalid node handle";
+
+/// Gets the tokio runtime, returning early with an error if not initialized.
+///
+/// Usage: `let rt = get_runtime!(FfiResult);`
+///
+/// The result type must have an `error(msg: impl Into<String>)` constructor.
+#[macro_export]
+macro_rules! get_runtime {
+    ($result_type:ty) => {
+        match $crate::runtime::RUNTIME.get() {
+            Some(rt) => rt,
+            None => {
+                return <$result_type>::error("runtime not initialized - call defra_init() first")
+            }
+        }
+    };
+}
 
 // Re-export FFI functions at crate root
 pub use acp::{
@@ -60,6 +81,7 @@ pub use collection::{
     set_active_collection_version, set_migration,
 };
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
+pub use lens::{lens_add, lens_list};
 pub use node::{new_node, node_close};
 pub use p2p::{
     new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_connect, p2p_delete_replicator,

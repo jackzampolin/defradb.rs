@@ -195,6 +195,15 @@ impl TransformStore for WasmTransformStore {
         Ok(id)
     }
 
+    async fn list(&self) -> Result<std::collections::HashMap<String, crate::LensModule>> {
+        let configs = self.configs.read();
+        let result = configs
+            .iter()
+            .map(|(id, config)| (id.to_string(), config.lens.clone()))
+            .collect();
+        Ok(result)
+    }
+
     fn transform(&self, id: &TransformId, docs: LensDocStream) -> Result<LensDocResultStream> {
         let modules = self.modules.read();
         let compiled = modules

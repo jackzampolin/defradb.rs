@@ -5,9 +5,10 @@
 
 use std::ffi::c_char;
 
-use crate::runtime::RUNTIME;
+use crate::get_runtime;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Add a schema to the database.
 ///
@@ -29,22 +30,20 @@ use crate::types::{c_str_to_string, FfiResult};
 /// `schema_sdl` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let schema_str = match c_str_to_string(schema_sdl) {
         Some(s) => s,
         None => return FfiResult::error("schema_sdl is null"),
     };
 
-    let result = rt.block_on(async {
-        // Get node state
-        let database = NODES
-            .get(node_ptr, |state| state.database.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         // Parse the SDL into collection versions
         let collections =
             query::parse_sdl(&schema_str).map_err(|e| format!("failed to parse schema: {}", e))?;
@@ -78,17 +77,15 @@ pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) 
 /// Returns a JSON array of collection descriptions.
 #[no_mangle]
 pub extern "C" fn get_collections(node_ptr: usize) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
+    let rt = get_runtime!(FfiResult);
+
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        // Get node state
-        let database = NODES
-            .get(node_ptr, |state| state.database.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
-
         // Get collection names
         let names = database
             .list_collections()

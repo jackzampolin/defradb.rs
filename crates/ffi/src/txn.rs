@@ -5,9 +5,10 @@
 
 use std::ffi::c_char;
 
-use crate::runtime::RUNTIME;
+use crate::get_runtime;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult, NewTxnResult};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Begin a new transaction.
 ///
@@ -24,16 +25,15 @@ use crate::types::{c_str_to_string, FfiResult, NewTxnResult};
 /// A `NewTxnResult` containing the transaction ID on success.
 #[no_mangle]
 pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return NewTxnResult::error("runtime not initialized - call defra_init() first"),
+    let rt = get_runtime!(NewTxnResult);
+
+    // Validate node handle before entering async block
+    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
+        Some(r) => r,
+        None => return NewTxnResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let runner = NODES
-            .get(node_ptr, |state| state.query_runner.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
-
         let handle = runner
             .begin_txn(readonly != 0)
             .await
@@ -63,21 +63,20 @@ pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
 /// `txn_id` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let txn_str = match c_str_to_string(txn_id) {
         Some(s) => s,
         None => return FfiResult::error("txn_id is null"),
     };
 
-    let result = rt.block_on(async {
-        let runner = NODES
-            .get(node_ptr, |state| state.query_runner.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
+        Some(r) => r,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let handle: query::txn::TransactionHandle = txn_str
             .parse()
             .map_err(|e| format!("invalid transaction ID: {}", e))?;
@@ -111,21 +110,20 @@ pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> F
 /// `txn_id` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let txn_str = match c_str_to_string(txn_id) {
         Some(s) => s,
         None => return FfiResult::error("txn_id is null"),
     };
 
-    let result = rt.block_on(async {
-        let runner = NODES
-            .get(node_ptr, |state| state.query_runner.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
+        Some(r) => r,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let handle: query::txn::TransactionHandle = txn_str
             .parse()
             .map_err(|e| format!("invalid transaction ID: {}", e))?;
@@ -168,10 +166,7 @@ pub unsafe extern "C" fn exec_request_in_txn(
     operation_name: *const c_char,
     variables: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let txn_str = match c_str_to_string(txn_id) {
         Some(s) => s,
@@ -186,11 +181,13 @@ pub unsafe extern "C" fn exec_request_in_txn(
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
 
-    let result = rt.block_on(async {
-        let runner = NODES
-            .get(node_ptr, |state| state.query_runner.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
+        Some(r) => r,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         let handle: query::txn::TransactionHandle = txn_str
             .parse()
             .map_err(|e| format!("invalid transaction ID: {}", e))?;

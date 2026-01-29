@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
-use crate::runtime::RUNTIME;
+use crate::get_runtime;
 use crate::state::{NodeState, PolicyStore, NODES};
 use crate::types::{FfiResult, NewNodeResult, NodeInitOptions};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Create a new DefraDB node.
 ///
@@ -19,10 +20,7 @@ use crate::types::{FfiResult, NewNodeResult, NodeInitOptions};
 /// The returned `node_ptr` must be freed by calling `node_close`.
 #[no_mangle]
 pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(NewNodeResult);
 
     let result = rt.block_on(async {
         // Create in-memory storage (for MVP)
@@ -111,10 +109,7 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
 pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
     use crate::state::SUBSCRIPTIONS;
 
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     // Remove all subscriptions for this node
     let removed_subs = SUBSCRIPTIONS.remove_for_node(node_ptr);
@@ -128,7 +123,7 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
     // Remove from registry
     let state = match NODES.remove(node_ptr) {
         Some(state) => state,
-        None => return FfiResult::error("invalid node handle"),
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     // Close the event bus

@@ -5,9 +5,10 @@
 
 use std::ffi::c_char;
 
-use crate::runtime::RUNTIME;
+use crate::get_runtime;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
+use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Execute a GraphQL query or mutation.
 ///
@@ -36,10 +37,7 @@ pub unsafe extern "C" fn exec_request(
     operation_name: *const c_char,
     variables: *const c_char,
 ) -> FfiResult {
-    let rt = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => return FfiResult::error("runtime not initialized - call defra_init() first"),
-    };
+    let rt = get_runtime!(FfiResult);
 
     let query_str = match c_str_to_string(request_query) {
         Some(s) => s,
@@ -48,12 +46,13 @@ pub unsafe extern "C" fn exec_request(
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
 
-    let result = rt.block_on(async {
-        // Get query runner
-        let runner = NODES
-            .get(node_ptr, |state| state.query_runner.clone())
-            .ok_or_else(|| "invalid node handle".to_string())?;
+    // Validate node handle before entering async block
+    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
+        Some(r) => r,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
+    let result = rt.block_on(async {
         // Build request
         let mut request = query::QueryRequest::new(query_str);
         if let Some(op) = op_name {
