@@ -311,8 +311,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
 
-        // Build a simple select for the mutation's result fields
-        let select = crate::mapper::Select::new(&mutation.collection_name);
+        // Build a select for the mutation's result fields, including filter and docIDs
+        // These are passed through to the scanNode for proper explain output
+        let mut select = crate::mapper::Select::new(&mutation.collection_name);
+        if let Some(ref filter) = mutation.filter {
+            select = select.with_filter(filter.clone());
+        }
+        if let Some(ref doc_ids) = mutation.doc_ids {
+            select = select.with_doc_ids(doc_ids.clone());
+        }
         let inner_explain = self.explain_simple_select(&select, &collection, explain_type)?;
 
         // Build mutation-specific attributes
@@ -350,10 +357,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     mutation_attrs.insert("docID".to_string(), JsonValue::Null);
                 }
 
-                // filter: filter expression (or null)
+                // filter: filter expression (or null, including empty filter)
                 if let Some(ref filter) = mutation.filter {
-                    mutation_attrs
-                        .insert("filter".to_string(), serde_json::json!(filter.conditions()));
+                    let conditions = filter.conditions();
+                    if conditions.is_empty() {
+                        mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                    } else {
+                        mutation_attrs
+                            .insert("filter".to_string(), serde_json::json!(conditions));
+                    }
                 } else {
                     mutation_attrs.insert("filter".to_string(), JsonValue::Null);
                 }
@@ -381,10 +393,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     mutation_attrs.insert("docID".to_string(), JsonValue::Null);
                 }
 
-                // filter: filter expression (or null)
+                // filter: filter expression (or null, including empty filter)
                 if let Some(ref filter) = mutation.filter {
-                    mutation_attrs
-                        .insert("filter".to_string(), serde_json::json!(filter.conditions()));
+                    let conditions = filter.conditions();
+                    if conditions.is_empty() {
+                        mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                    } else {
+                        mutation_attrs
+                            .insert("filter".to_string(), serde_json::json!(conditions));
+                    }
                 } else {
                     mutation_attrs.insert("filter".to_string(), JsonValue::Null);
                 }

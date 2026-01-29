@@ -350,10 +350,18 @@ pub(crate) fn build_plan(
     mapping: DocumentMapping,
     collection: &CollectionVersion,
 ) -> Result<Box<dyn PlanNode>> {
-    // Create ScanNode with preloaded documents
-    let scan = ScanNode::new(collection.clone(), mapping.clone())
+    // Create ScanNode with preloaded documents, filter, and docIDs
+    let mut scan = ScanNode::new(collection.clone(), mapping.clone())
         .with_docs(docs)
         .with_show_deleted(select.show_deleted);
+
+    // Pass filter and docIDs to ScanNode for explain output
+    if let Some(ref filter) = select.filter {
+        scan = scan.with_filter(filter.clone());
+    }
+    if let Some(ref doc_ids) = select.doc_ids {
+        scan = scan.with_doc_ids(doc_ids.clone());
+    }
 
     let mut plan: Box<dyn PlanNode> = Box::new(scan);
 
