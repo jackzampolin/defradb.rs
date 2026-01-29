@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::{IterOptions, Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};
+use storage::keys::systemstore::{
+    CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
+};
 
 /// Database options.
 #[derive(Clone, Default)]
@@ -553,7 +555,7 @@ impl<S: Store> DB<S> {
                         ))
                     })?;
 
-                let schema: CollectionVersion =
+                let mut schema: CollectionVersion =
                     serde_json::from_slice(&collection_json).map_err(|e| {
                         tracing::error!(
                             error = ?e,
@@ -566,6 +568,17 @@ impl<S: Store> DB<S> {
                             name, e
                         ))
                     })?;
+
+                // Load root_id from /collection/shortID/{collection_id}
+                // (root_id is #[serde(skip)] so it's not in the JSON)
+                let short_id_key = CollectionID::new(&schema.collection_id);
+                if let Some(short_id_bytes) =
+                    systemstore.get(&short_id_key.bytes()).await.map_err(Error::Storage)?
+                {
+                    if let Ok(short_id_str) = String::from_utf8(short_id_bytes) {
+                        schema.root_id = short_id_str.parse::<u32>().unwrap_or(0);
+                    }
+                }
 
                 schemas.insert(name, schema);
             }
@@ -587,7 +600,7 @@ impl<S: Store> DB<S> {
             )));
         }
 
-        // Finalize relations: auto-generate _id fields and set primary sides
+        // Finalize relations: auto-generate _id fields, set primary sides, and create unique indexes
         // Create a field ID generator that starts after the max existing field ID
         let max_field_id = schemas
             .values()
@@ -597,10 +610,26 @@ impl<S: Store> DB<S> {
             .unwrap_or(0);
         let mut field_id_counter = max_field_id + 1000; // Start well above existing IDs
 
-        CollectionVersion::finalize_relations_hashmap(&mut schemas, || {
-            field_id_counter += 1;
-            format!("gen-{}", field_id_counter)
-        })
+        // Create an index ID generator that starts after the max existing index ID
+        let max_index_id = schemas
+            .values()
+            .flat_map(|s| s.indexes.iter())
+            .map(|idx| idx.id)
+            .max()
+            .unwrap_or(0);
+        let mut index_id_counter = max_index_id.max(10000); // Start at least at 10000
+
+        CollectionVersion::finalize_relations_hashmap(
+            &mut schemas,
+            || {
+                field_id_counter += 1;
+                format!("gen-{}", field_id_counter)
+            },
+            || {
+                index_id_counter += 1;
+                index_id_counter
+            },
+        )
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to finalize relations during collection load");
             Error::Other(format!("failed to finalize relations: {}", e))
@@ -662,16 +691,16 @@ impl<S: Store> DB<S> {
     pub async fn create_collection_with_txn(
         &self,
         txn: &mut DbTxn<S>,
-        schema: CollectionVersion,
-    ) -> Result<()> {
+        mut schema: CollectionVersion,
+    ) -> Result<CollectionVersion> {
         // Validate collection name
         let collection_name = CollectionName::new(&schema.name)?;
 
         // Validate schema (includes policy validation for path traversal prevention)
         schema.validate()?;
         let name = collection_name.as_str().to_string();
-        let version_id = &schema.version_id;
-        let collection_id = &schema.collection_id;
+        let version_id = &schema.version_id.clone();
+        let collection_id = &schema.collection_id.clone();
 
         // Check if collection exists in txn cache or store
         if txn.get_collection(&name).await?.is_some() {
@@ -680,8 +709,22 @@ impl<S: Store> DB<S> {
 
         let systemstore = txn.systemstore()?;
 
+        // Assign sequential short ID (matches Go's monotonic counter)
+        let short_id = Self::next_collection_short_id(&systemstore).await?;
+        schema.root_id = short_id;
+
+        // Store short ID mapping at /collection/shortID/{collection_id}
+        let short_id_key = CollectionID::new(collection_id.as_str());
+        systemstore
+            .set(
+                &short_id_key.bytes(),
+                short_id.to_string().as_bytes(),
+            )
+            .await
+            .map_err(Error::Storage)?;
+
         // 1. Store full schema at /collection/id/{version_id}
-        let collection_key = CollectionKey::new(version_id);
+        let collection_key = CollectionKey::new(version_id.as_str());
         let data = serde_json::to_vec(&schema).map_err(|e| {
             Error::Serialization(format!(
                 "failed to serialize schema for collection '{}': {}",
@@ -701,16 +744,53 @@ impl<S: Store> DB<S> {
             .map_err(Error::Storage)?;
 
         // 3. Store version index at /collection/version/{collection_id}/{version_id}
-        let version_key = CollectionVersionKey::new(collection_id, version_id);
+        let version_key = CollectionVersionKey::new(collection_id.as_str(), version_id.as_str());
         systemstore
             .set(&version_key.bytes(), b"1")
             .await
             .map_err(Error::Storage)?;
 
         // Update txn-local cache
+        let returned_schema = schema.clone();
         txn.cache_collection(Collection::new(schema));
 
-        Ok(())
+        Ok(returned_schema)
+    }
+
+    /// Get the next sequential collection short ID from the system store.
+    ///
+    /// Reads the current value from `/seq/collection`, increments it, and stores
+    /// the updated value. Returns the new ID. Matches Go's sequence.Next() pattern.
+    async fn next_collection_short_id(
+        systemstore: &datastore::NamespaceView,
+    ) -> Result<u32> {
+        let seq_key = CollectionIDSequenceKey::new();
+        let current: u32 = match systemstore
+            .get(&seq_key.bytes())
+            .await
+            .map_err(Error::Storage)?
+        {
+            Some(bytes) => {
+                // Go stores as big-endian u64
+                if bytes.len() == 8 {
+                    let arr: [u8; 8] = bytes[..8].try_into().unwrap_or([0; 8]);
+                    u64::from_be_bytes(arr) as u32
+                } else {
+                    // Try as string for backwards compat
+                    String::from_utf8_lossy(&bytes)
+                        .parse::<u32>()
+                        .unwrap_or(0)
+                }
+            }
+            None => 0,
+        };
+        let next_id = current + 1;
+        // Store as big-endian u64 (matches Go's binary.BigEndian.PutUint64)
+        systemstore
+            .set(&seq_key.bytes(), &(next_id as u64).to_be_bytes())
+            .await
+            .map_err(Error::Storage)?;
+        Ok(next_id)
     }
 
     /// Create a new collection with schema persistence.
@@ -724,14 +804,13 @@ impl<S: Store> DB<S> {
     /// - `CollectionAlreadyExists` if a collection with this name already exists
     pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
         let name = schema.name.clone();
-        let collection = Collection::new(schema.clone());
 
         let mut txn = self.new_txn(false).await?;
         match self.create_collection_with_txn(&mut txn, schema).await {
-            Ok(()) => {
+            Ok(updated_schema) => {
                 txn.commit().await?;
 
-                // Update process-wide cache for callers not using transaction-scoped caching
+                // Update process-wide cache with the schema that has root_id assigned
                 let mut cache = self.collections.write().map_err(|e| {
                     tracing::error!(
                         error = ?e,
@@ -740,7 +819,7 @@ impl<S: Store> DB<S> {
                     );
                     Error::CacheUpdateFailedAfterCommit(name.clone())
                 })?;
-                cache.insert(name, collection);
+                cache.insert(name, Collection::new(updated_schema));
                 Ok(())
             }
             Err(e) => {
@@ -1200,7 +1279,9 @@ impl<S: Store> DB<S> {
                 // Strip collection name/version prefix from path if present (Go compatibility)
                 let path = raw_path.map(|p| {
                     let stripped = Self::strip_collection_prefix(
-                        p, &collection_prefix, actual_name_prefix.as_deref(),
+                        p,
+                        &collection_prefix,
+                        actual_name_prefix.as_deref(),
                     );
                     // Go compatibility: substitute field names for indices in /Fields/<name> paths
                     Self::substitute_field_name_in_path(&stripped, &schema_json)
@@ -1273,17 +1354,16 @@ impl<S: Store> DB<S> {
                                 // Include original path for context
                                 let original_path = raw_path.unwrap_or(path);
                                 return Err(Error::InvalidPatch(format!(
-                                    "testing value {} failed: test failed", original_path
+                                    "testing value {} failed: test failed",
+                                    original_path
                                 )));
                             }
                         }
                     }
                     (Some("copy"), Some(path)) => {
                         // RFC 6902 "copy" operation: copy value from "from" to "path"
-                        let from_path = op
-                            .get("from")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
+                        let from_path =
+                            op.get("from").and_then(|v| v.as_str()).ok_or_else(|| {
                                 Error::InvalidPatch(format!(
                                     "missing 'from' for copy operation at {}",
                                     path
@@ -1293,7 +1373,11 @@ impl<S: Store> DB<S> {
                         // Go compatibility: copying collection-level is not supported
                         // This includes copying to root "/" or to paths that would create new collections
                         // Detect by checking if path doesn't contain /Fields (field-level operations)
-                        if path == "/" || (!path.contains("/Fields") && !path.contains("/Name") && !path.contains("/IsActive")) {
+                        if path == "/"
+                            || (!path.contains("/Fields")
+                                && !path.contains("/Name")
+                                && !path.contains("/IsActive"))
+                        {
                             // Extract the target name from the raw path for the error message
                             let target_name = raw_path
                                 .and_then(|p| {
@@ -1308,15 +1392,18 @@ impl<S: Store> DB<S> {
                         }
 
                         // Substitute field names in from path too
-                        let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
+                        let from_path =
+                            Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
                         let from_path = Self::strip_collection_prefix(
-                            &from_path, &collection_prefix, actual_name_prefix.as_deref(),
+                            &from_path,
+                            &collection_prefix,
+                            actual_name_prefix.as_deref(),
                         );
 
                         // Get the value to copy
-                        let value_to_copy =
-                            Self::json_pointer_get(&schema_json, &from_path).ok_or_else(|| {
+                        let value_to_copy = Self::json_pointer_get(&schema_json, &from_path)
+                            .ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
 
@@ -1325,10 +1412,8 @@ impl<S: Store> DB<S> {
                     }
                     (Some("move"), Some(path)) => {
                         // RFC 6902 "move" operation: move value from "from" to "path"
-                        let from_path = op
-                            .get("from")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
+                        let from_path =
+                            op.get("from").and_then(|v| v.as_str()).ok_or_else(|| {
                                 Error::InvalidPatch(format!(
                                     "missing 'from' for move operation at {}",
                                     path
@@ -1338,21 +1423,28 @@ impl<S: Store> DB<S> {
                         // Go compatibility: moving at collection-level is a no-op
                         // This includes moving to root "/" or paths that would move entire collections
                         // Detect by checking if path doesn't contain /Fields (field-level operations)
-                        if path == "/" || (!path.contains("/Fields") && !path.contains("/Name") && !path.contains("/IsActive")) {
+                        if path == "/"
+                            || (!path.contains("/Fields")
+                                && !path.contains("/Name")
+                                && !path.contains("/IsActive"))
+                        {
                             // Skip this operation - collection-level moves are no-ops
                             continue;
                         }
 
                         // Substitute field names in from path too
-                        let from_path = Self::substitute_field_name_in_path(from_path, &schema_json);
+                        let from_path =
+                            Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
                         let from_path = Self::strip_collection_prefix(
-                            &from_path, &collection_prefix, actual_name_prefix.as_deref(),
+                            &from_path,
+                            &collection_prefix,
+                            actual_name_prefix.as_deref(),
                         );
 
                         // Get the value to move
-                        let value_to_move =
-                            Self::json_pointer_get(&schema_json, &from_path).ok_or_else(|| {
+                        let value_to_move = Self::json_pointer_get(&schema_json, &from_path)
+                            .ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
 
@@ -1394,7 +1486,9 @@ impl<S: Store> DB<S> {
             let mut next_id = max_field_id + 1;
             for field in fields.iter_mut() {
                 if let serde_json::Value::Object(ref mut map) = field {
-                    if !map.contains_key("FieldID") || map.get("FieldID") == Some(&serde_json::Value::Null) {
+                    if !map.contains_key("FieldID")
+                        || map.get("FieldID") == Some(&serde_json::Value::Null)
+                    {
                         map.insert("FieldID".to_string(), next_id.to_string().into());
                         next_id += 1;
                     }
@@ -1406,10 +1500,14 @@ impl<S: Store> DB<S> {
         let name_value = schema_json.get("Name");
         match name_value {
             None | Some(serde_json::Value::Null) => {
-                return Err(Error::InvalidPatch("collection name can't be empty".to_string()));
+                return Err(Error::InvalidPatch(
+                    "collection name can't be empty".to_string(),
+                ));
             }
             Some(serde_json::Value::String(s)) if s.is_empty() => {
-                return Err(Error::InvalidPatch("collection name can't be empty".to_string()));
+                return Err(Error::InvalidPatch(
+                    "collection name can't be empty".to_string(),
+                ));
             }
             _ => {}
         }
@@ -1703,11 +1801,8 @@ impl<S: Store> DB<S> {
                     Some("move") => {
                         // Collection-level move is a no-op - find source and return unchanged
                         if let Some(from) = from_raw {
-                            let source_name = from
-                                .trim_start_matches('/')
-                                .split('/')
-                                .next()
-                                .unwrap_or("");
+                            let source_name =
+                                from.trim_start_matches('/').split('/').next().unwrap_or("");
                             if let Some(source_col) = self.get_collection(source_name)? {
                                 return Ok(source_col.schema().clone());
                             }

@@ -33,6 +33,8 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -41,14 +43,85 @@ use crate::corekv::{
     TxnCallback, Writer,
 };
 
+/// Tracks committed write sets for optimistic conflict detection.
+///
+/// Each committed transaction's write set is recorded along with the version
+/// at which it was committed. When a new transaction commits, it checks whether
+/// any of its written keys were also written by transactions that committed
+/// after this transaction's snapshot was taken.
+pub(crate) struct ConflictTracker {
+    /// Monotonically increasing version counter.
+    version: AtomicU64,
+    /// Write sets from committed transactions: (commit_version, keys_written).
+    /// Protected by a mutex since we only access it during commit (not hot path).
+    committed_writes: Mutex<Vec<(u64, HashSet<Vec<u8>>)>>,
+}
+
+impl ConflictTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            version: AtomicU64::new(0),
+            committed_writes: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Get the current version for a new transaction's snapshot.
+    pub(crate) fn current_version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
+
+    /// Check for conflicts and record the write set if no conflict.
+    /// Returns Err(TxnConflict) if any key in `write_set` was written by a
+    /// transaction that committed after `read_version`.
+    pub(crate) fn check_and_record(
+        &self,
+        read_version: u64,
+        write_set: HashSet<Vec<u8>>,
+    ) -> std::result::Result<(), Error> {
+        if write_set.is_empty() {
+            return Ok(());
+        }
+
+        let mut committed = self.committed_writes.lock();
+
+        // Check for conflicts: any key we wrote was also written by a
+        // transaction committed after our snapshot
+        for (commit_ver, keys) in committed.iter() {
+            if *commit_ver > read_version {
+                for key in &write_set {
+                    if keys.contains(key) {
+                        return Err(Error::TxnConflict);
+                    }
+                }
+            }
+        }
+
+        // No conflict - record our write set
+        let new_version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
+        committed.push((new_version, write_set));
+
+        // Prune old entries that can no longer conflict (optional GC).
+        // Keep entries that are newer than the oldest possible active transaction.
+        // For simplicity, keep last 1000 entries.
+        if committed.len() > 1000 {
+            let drain_count = committed.len() - 1000;
+            committed.drain(..drain_count);
+        }
+
+        Ok(())
+    }
+}
+
 /// In-memory key-value store using BTreeMap.
 ///
 /// Data is stored in a BTreeMap wrapped in Arc<RwLock<>> for thread-safe
-/// concurrent access. The store provides snapshot isolation for transactions.
+/// concurrent access. The store provides snapshot isolation for transactions
+/// with optimistic write-write conflict detection.
 #[derive(Clone)]
 pub struct MemoryStore {
     data: Arc<RwLock<BTreeMap<Vec<u8>, Vec<u8>>>>,
     closed: Arc<RwLock<bool>>,
+    conflict_tracker: Arc<ConflictTracker>,
 }
 
 impl MemoryStore {
@@ -57,6 +130,7 @@ impl MemoryStore {
         Self {
             data: Arc::new(RwLock::new(BTreeMap::new())),
             closed: Arc::new(RwLock::new(false)),
+            conflict_tracker: Arc::new(ConflictTracker::new()),
         }
     }
 
@@ -79,11 +153,16 @@ impl Store for MemoryStore {
             return Err(Error::DBClosed);
         }
 
+        // Record version before taking snapshot for conflict detection
+        let read_version = self.conflict_tracker.current_version();
+
         // Take a snapshot of current data for isolation
         let snapshot = self.data.read().await.clone();
 
         Ok(Box::new(MemoryTxn {
             store: Arc::clone(&self.data),
+            conflict_tracker: Arc::clone(&self.conflict_tracker),
+            read_version,
             snapshot,
             pending: Mutex::new(BTreeMap::new()),
             readonly,
@@ -119,13 +198,20 @@ impl Dropable for MemoryStore {
     }
 }
 
-/// In-memory transaction with snapshot isolation.
+/// In-memory transaction with snapshot isolation and conflict detection.
 ///
 /// Transactions maintain a snapshot of the store at creation time and track
-/// pending changes. Changes are applied atomically on commit.
+/// pending changes. On commit, write-write conflicts are detected using
+/// optimistic concurrency control.
 struct MemoryTxn {
     /// Reference to the store's data
     store: Arc<RwLock<BTreeMap<Vec<u8>, Vec<u8>>>>,
+
+    /// Conflict tracker for write-write conflict detection
+    conflict_tracker: Arc<ConflictTracker>,
+
+    /// Version at which this transaction's snapshot was taken
+    read_version: u64,
 
     /// Snapshot of store at transaction start (for reads)
     snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -337,11 +423,23 @@ impl Txn for MemoryTxn {
             return Err(Error::Other("Transaction already committed".into()));
         }
 
-        // Mark as committed
-        *self.committed.lock() = true;
-
         // Clone pending changes before awaiting (can't hold MutexGuard across await)
         let pending = self.pending.lock().clone();
+
+        // Check for write-write conflicts before applying
+        if !pending.is_empty() {
+            let write_set: HashSet<Vec<u8>> = pending.keys().cloned().collect();
+            if let Err(e) = self.conflict_tracker.check_and_record(self.read_version, write_set) {
+                let on_error = std::mem::take(&mut *self.on_error.lock());
+                let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
+                Self::execute_callbacks(on_error);
+                Self::execute_async_callbacks(on_error_async).await;
+                return Err(e);
+            }
+        }
+
+        // Mark as committed
+        *self.committed.lock() = true;
 
         // Apply pending changes to store
         if !pending.is_empty() {

@@ -7,8 +7,8 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, LimitNode, MaxNode, MinNode,
-    OrderByNode, ScanNode, SelectNode, SumNode,
+    AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, LimitNode,
+    MaxNode, MinNode, OrderByNode, ScanNode, SelectNode, SumNode,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -20,12 +20,14 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 
     // Helper to check if a field exists in the collection schema
     // Special fields: _docID (document ID), _group (groupBy results), __typename (GraphQL introspection),
-    // _version (CRDT version metadata)
+    // _version (CRDT version metadata), _deleted (document deletion status)
     let field_exists = |name: &str| -> bool {
         name == "_docID"
+            || name == "_deleted"
             || name == "_group"
             || name == "__typename"
             || name == "_version"
+            || name == "_deleted"
             || collection.fields.iter().any(|f| f.name == name)
     };
 
@@ -98,9 +100,9 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                         continue;
                     }
                     // Allow FK fields for relation groupBy fields (e.g. _authorID for author)
-                    let is_fk_for_group = group_fields.iter().any(|gb_field| {
-                        name == format!("_{}ID", gb_field)
-                    });
+                    let is_fk_for_group = group_fields
+                        .iter()
+                        .any(|gb_field| name == format!("_{}ID", gb_field));
                     if is_fk_for_group {
                         continue;
                     }
@@ -185,9 +187,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 }
 
 /// Format filter conditions in Go graphql-go style (unquoted keys).
-fn format_graphql_conditions(
-    conditions: &std::collections::HashMap<String, JsonValue>,
-) -> String {
+fn format_graphql_conditions(conditions: &std::collections::HashMap<String, JsonValue>) -> String {
     let entries: Vec<String> = conditions
         .iter()
         .map(|(k, v)| format!("{}: {}", k, format_graphql_value(v)))
@@ -350,19 +350,47 @@ pub(crate) fn build_plan(
     mapping: DocumentMapping,
     collection: &CollectionVersion,
 ) -> Result<Box<dyn PlanNode>> {
-    // Create ScanNode with preloaded documents
-    let scan = ScanNode::new(collection.clone(), mapping.clone())
+    // Create ScanNode with preloaded documents, filter, and docIDs
+    let mut scan = ScanNode::new(collection.clone(), mapping.clone())
         .with_docs(docs)
         .with_show_deleted(select.show_deleted);
+
+    // Pass filter and docIDs to ScanNode for explain output
+    // First check select.filter, then fall back to aggregate target filter
+    let filter_for_scan = select.filter.clone().or_else(|| {
+        // For top-level aggregates, the filter might be on the aggregate target
+        select
+            .fields
+            .iter()
+            .find_map(|f| {
+                if let Requestable::Aggregate(agg) = f {
+                    if !agg.targets.is_empty() {
+                        return agg.targets[0].filter.clone();
+                    }
+                }
+                None
+            })
+    });
+    if let Some(ref filter) = filter_for_scan {
+        scan = scan.with_filter(filter.clone());
+    }
+    if let Some(ref doc_ids) = select.doc_ids {
+        scan = scan.with_doc_ids(doc_ids.clone());
+    }
 
     let mut plan: Box<dyn PlanNode> = Box::new(scan);
 
     // Add SelectNode (Go always wraps in selectNode, even without a filter)
-    let select_node = if let Some(ref filter) = select.filter {
+    // Use the same filter we used for scanNode
+    let mut select_node = if let Some(ref filter) = filter_for_scan {
         SelectNode::new(plan, mapping.clone()).with_filter(filter.clone())
     } else {
         SelectNode::new(plan, mapping.clone())
     };
+    // Pass doc_ids to SelectNode for explain output
+    if let Some(ref doc_ids) = select.doc_ids {
+        select_node = select_node.with_doc_ids(doc_ids.clone());
+    }
     plan = Box::new(select_node);
 
     // Check if we have GROUP BY
@@ -384,8 +412,7 @@ pub(crate) fn build_plan(
             for field in &select.fields {
                 if let Requestable::Select(nested) = field {
                     if nested.field.name == "_group" {
-                        let alias_index =
-                            group_indices.get(alias_count).copied().unwrap_or(0);
+                        let alias_index = group_indices.get(alias_count).copied().unwrap_or(0);
                         alias_count += 1;
                         group_aliases.push(GroupAlias {
                             index: alias_index,
@@ -512,12 +539,18 @@ fn add_aggregate_nodes(
             match agg.aggregate_type {
                 AggregateType::Count => {
                     let mut node = CountNode::new(plan, mapping.clone(), agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    // Add sources for explain output
+                    let sources = vec![CountSourceMeta {
+                        field_name: select.collection_name.clone(),
+                        filter: target_filter.clone(),
+                    }];
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
                 AggregateType::Sum => {

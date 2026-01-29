@@ -1,6 +1,7 @@
 //! Mutation execution methods for QueryRunner.
 
 use acp::DocumentPermission;
+use chrono::{DateTime, FixedOffset, Utc};
 use identity::Did;
 use serde_json::{Map, Value as JsonValue};
 use std::sync::Arc;
@@ -88,18 +89,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_variables(mutation_str, variables)?;
 
+        // Compute request time once for all mutations in this request.
+        // This ensures UTC_NOW resolves to the same timestamp across all mutations,
+        // matching Go DefraDB's behavior.
+        let utc_offset = FixedOffset::east_opt(0).unwrap();
+        let request_time = Utc::now().with_timezone(&utc_offset);
+
         let mut results = Map::new();
 
         for mutation in mutations {
             let result = self
-                .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone())
+                .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone(), request_time)
                 .await?;
-            // Use full mutation name as key (e.g., "create_Users")
-            let key = format!(
-                "{}_{}",
-                mutation.mutation_type.as_prefix(),
-                mutation.collection_name
-            );
+            // Use alias if provided, otherwise full mutation name (e.g., "create_Users")
+            let key = mutation.output_name();
             results.insert(key, result);
         }
 
@@ -112,6 +115,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutation: &Mutation,
         mutator: Arc<dyn DocMutator>,
         caller_identity: Option<Did>,
+        request_time: DateTime<FixedOffset>,
     ) -> Result<JsonValue> {
         use acp::Identity;
 
@@ -226,6 +230,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(
                     CreateNode::new(&mutation.collection_name, mutator, mapping.clone())
                         .with_collection(collection.clone())
+                        .with_request_time(request_time)
                         .with_inputs(inputs),
                 )
             }
@@ -235,6 +240,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut node =
                     UpdateNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone())
                         .with_collection(collection.clone())
+                        .with_request_time(request_time)
                         .with_input(input);
 
                 // Use resolved doc_ids (from filter) or original doc_ids

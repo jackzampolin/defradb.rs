@@ -104,7 +104,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // The stores must be dropped before commit, so scope them
-                {
+                let commit_cid: Option<Cid> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -122,7 +122,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let schema_version_id = collection.collection_id();
 
                     // For create operations, all fields are new - pass None for modified_fields
-                    if let Err(e) = write_document_blocks(
+                    match write_document_blocks(
                         &blockstore,
                         &headstore,
                         &doc,
@@ -131,15 +131,19 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     )
                     .await
                     {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write document blocks - commits queries may not work"
-                        );
-                        // Don't fail the mutation, just log the warning
-                        // The document was stored successfully, blocks are for commit history
+                        Ok(block_result) => Some(block_result.cid),
+                        Err(e) => {
+                            warn!(
+                                collection = %collection_name,
+                                error = %e,
+                                "Failed to write document blocks - commits queries may not work"
+                            );
+                            // Don't fail the mutation, just log the warning
+                            // The document was stored successfully, blocks are for commit history
+                            None
+                        }
                     }
-                } // blockstore and headstore dropped here
+                }; // blockstore and headstore dropped here
 
                 // Commit the transaction (all store references now dropped)
                 if let Err(e) = txn.commit().await {
@@ -158,7 +162,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 if let Some(bus) = self.db.event_bus() {
                     let update = Update::new(
                         doc_id.to_string(),
-                        Cid::default(), // CID not available at this layer
+                        commit_cid.unwrap_or_default(),
                         collection.name().to_string(),
                         vec![], // Block data not available at this layer
                         false,  // is_retry
@@ -167,7 +171,11 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     bus.publish(Message::update(update));
                 }
 
-                Ok(CreateResult::new(doc_id, doc))
+                // Return result with commit CID if available
+                match commit_cid {
+                    Some(cid) => Ok(CreateResult::with_commit_cid(doc_id, doc, cid)),
+                    None => Ok(CreateResult::new(doc_id, doc)),
+                }
             }
             Err(e) => {
                 // Discard the transaction on error

@@ -1,15 +1,24 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use schema::CollectionVersion;
 
-use crate::document::{documents_to_plan_docs, DocumentMapping};
+use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs, DocumentMapping};
 use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, ExecInfo, PlanNode};
+
+/// Derive a short u32 ID from a collection_id string.
+/// Uses the same hash as db::collection_short_id for consistency.
+fn collection_short_id(collection_id: &str) -> u32 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    collection_id.hash(&mut hasher);
+    hasher.finish() as u32
+}
 
 /// ScanNode scans documents from a collection.
 ///
@@ -31,6 +40,8 @@ pub struct ScanNode {
     document_mapping: DocumentMapping,
     /// Optional filter to apply during scan
     filter: Option<Filter>,
+    /// Optional document IDs to scan (for explain prefixes)
+    doc_ids: Option<Vec<String>>,
     /// Whether to show deleted documents
     show_deleted: bool,
     /// Current document
@@ -45,15 +56,21 @@ pub struct ScanNode {
     fetcher: Option<Arc<dyn DocFetcher>>,
     /// Whether docs were explicitly provided (even if empty)
     docs_provided: bool,
+    /// Execution statistics for explain execute mode
+    exec_info: ExecInfo,
+    /// Number of fields per document (for fieldFetches calculation)
+    fields_per_doc: usize,
 }
 
 impl ScanNode {
     /// Create a new scan node for a collection
     pub fn new(collection: CollectionVersion, document_mapping: DocumentMapping) -> Self {
+        let fields_per_doc = document_mapping.field_count();
         Self {
             collection,
             document_mapping,
             filter: None,
+            doc_ids: None,
             show_deleted: false,
             current_doc: Doc::default(),
             docs: Vec::new(),
@@ -61,12 +78,23 @@ impl ScanNode {
             initialized: false,
             fetcher: None,
             docs_provided: false,
+            exec_info: ExecInfo::default(),
+            fields_per_doc,
         }
     }
 
     /// Set the filter for this scan
     pub fn with_filter(mut self, filter: Filter) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Set the document IDs for this scan (used in explain prefixes)
+    pub fn with_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
+        // Only set if non-empty; empty means scan entire collection
+        if !doc_ids.is_empty() {
+            self.doc_ids = Some(doc_ids);
+        }
         self
     }
 
@@ -103,6 +131,18 @@ impl ScanNode {
     pub fn collection_name(&self) -> &str {
         &self.collection.name
     }
+
+    /// Get the storage prefix for this collection.
+    ///
+    /// Uses the sequential root_id if available (assigned during collection creation),
+    /// falling back to hash-based short_id for backwards compatibility.
+    fn collection_prefix(&self) -> u32 {
+        if self.collection.root_id > 0 {
+            self.collection.root_id
+        } else {
+            collection_short_id(&self.collection.collection_id)
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -110,12 +150,22 @@ impl ScanNode {
 impl PlanNode for ScanNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
+        // Reset execution stats
+        self.exec_info = ExecInfo::default();
 
         // If docs weren't provided and we have a fetcher, load documents from storage
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
-                let storage_docs = fetcher.get_all(&self.collection.name).await?;
-                self.docs = documents_to_plan_docs(&storage_docs, &self.document_mapping)?;
+                // Use get_all_with_deleted to get documents with their deletion status.
+                // When show_deleted is true, we get all documents including deleted ones.
+                // The deletion status is used to:
+                // 1. Set DocStatus on the plan Doc for filtering in next()
+                // 2. Populate the _deleted field if it's in the document mapping
+                let docs_with_status = fetcher
+                    .get_all_with_deleted(&self.collection.name, self.show_deleted)
+                    .await?;
+                self.docs =
+                    documents_with_status_to_plan_docs(&docs_with_status, &self.document_mapping)?;
             } else {
                 // No docs provided and no fetcher - this is a programming error.
                 // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
@@ -142,6 +192,9 @@ impl PlanNode for ScanNode {
             ));
         }
 
+        // Track iteration (Go counts each call to next, including final false)
+        self.exec_info.iterations += 1;
+
         loop {
             if self.position >= self.docs.len() {
                 return Ok(false);
@@ -149,6 +202,11 @@ impl PlanNode for ScanNode {
 
             let doc = &self.docs[self.position];
             self.position += 1;
+
+            // Track document fetch
+            self.exec_info.docs_fetched += 1;
+            // Track field fetches (each field in the document)
+            self.exec_info.fields_fetched += self.fields_per_doc as u64;
 
             // Skip deleted docs if not showing deleted
             if !self.show_deleted && doc.is_deleted() {
@@ -192,23 +250,74 @@ impl PlanNode for ScanNode {
     fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
+        // Go DefraDB format: always include filter (null if none or empty)
+        // When filter has empty conditions, treat it as null to match Go behavior
+        if let Some(ref filter) = self.filter {
+            let conditions = filter.conditions();
+            if conditions.is_empty() {
+                obj.insert("filter".to_string(), serde_json::Value::Null);
+            } else {
+                obj.insert("filter".to_string(), serde_json::json!(conditions));
+            }
+        } else {
+            obj.insert("filter".to_string(), serde_json::Value::Null);
+        }
+
         // Go DefraDB uses "collectionName" and "collectionID"
+        // Note: Go's explain uses VersionID (not CollectionID) for the collectionID field
         obj.insert(
             "collectionName".to_string(),
             serde_json::Value::String(self.collection.name.clone()),
         );
         obj.insert(
             "collectionID".to_string(),
-            serde_json::Value::String(self.collection.collection_id.clone()),
+            serde_json::Value::String(self.collection.version_id.clone()),
         );
 
-        if let Some(ref filter) = self.filter {
-            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
-        }
+        // Go DefraDB format: always include prefixes
+        // When docIDs are provided, each prefix is "/<collection_prefix>/<docID>"
+        // Otherwise just "/<collection_prefix>"
+        let prefixes: Vec<String> = if let Some(ref doc_ids) = self.doc_ids {
+            doc_ids
+                .iter()
+                .map(|id| format!("/{}/{}", self.collection_prefix(), id))
+                .collect()
+        } else {
+            vec![format!("/{}", self.collection_prefix())]
+        };
+        obj.insert("prefixes".to_string(), serde_json::json!(prefixes));
 
         if self.show_deleted {
             obj.insert("showDeleted".to_string(), serde_json::Value::Bool(true));
         }
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn exec_info(&self) -> ExecInfo {
+        self.exec_info.clone()
+    }
+
+    fn explain_execute_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // Go DefraDB execute format: iterations, docFetches, fieldFetches, indexFetches
+        obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.exec_info.iterations),
+        );
+        obj.insert(
+            "docFetches".to_string(),
+            serde_json::json!(self.exec_info.docs_fetched),
+        );
+        obj.insert(
+            "fieldFetches".to_string(),
+            serde_json::json!(self.exec_info.fields_fetched),
+        );
+        obj.insert(
+            "indexFetches".to_string(),
+            serde_json::json!(self.exec_info.indexes_fetched),
+        );
 
         serde_json::Value::Object(obj)
     }

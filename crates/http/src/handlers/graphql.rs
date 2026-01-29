@@ -42,7 +42,7 @@ fn permission_for_query(query: &str) -> NodePermission {
         Ok(ParsedOperation::Query { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Subscription { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Introspection { .. }) => NodePermission::DocumentRead,
-        Ok(ParsedOperation::Mutation(_)) => NodePermission::DocumentUpdate,
+        Ok(ParsedOperation::Mutation { .. }) => NodePermission::DocumentUpdate,
         // Parse failures default to the more restrictive permission
         Err(_) => NodePermission::DocumentUpdate,
     }

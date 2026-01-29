@@ -36,11 +36,7 @@ fn preprocess_empty_types(sdl: &str) -> String {
     let re = Regex::new(r"(\btype\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
 
     re.replace_all(sdl, |caps: &regex::Captures| {
-        format!(
-            "{}{{ {}: String }}",
-            &caps[1],
-            EMPTY_TYPE_PLACEHOLDER
-        )
+        format!("{}{{ {}: String }}", &caps[1], EMPTY_TYPE_PLACEHOLDER)
     })
     .to_string()
 }
@@ -93,6 +89,8 @@ pub struct SdlParser<'a> {
     sdl: &'a str,
     /// Parsed type definitions by name
     type_defs: HashMap<String, ParsedTypeDef>,
+    /// Type names in SDL definition order (Go returns collections in this order)
+    definition_order: Vec<String>,
     /// Warnings collected during parsing
     warnings: Vec<ParseWarning>,
     /// Current type being parsed (for warning context)
@@ -164,6 +162,7 @@ impl<'a> SdlParser<'a> {
         Self {
             sdl,
             type_defs: HashMap::new(),
+            definition_order: Vec::new(),
             warnings: Vec::new(),
             current_type: None,
         }
@@ -232,6 +231,7 @@ impl<'a> SdlParser<'a> {
 
         let type_directives = self.parse_type_directives(&obj.directives)?;
 
+        self.definition_order.push(name.clone());
         self.type_defs.insert(
             name.clone(),
             ParsedTypeDef {
@@ -544,10 +544,7 @@ impl<'a> SdlParser<'a> {
     ///
     /// Go format: `@index(includes: [{field: "name"}, {field: "age", direction: DESC}])`
     /// Returns (field_name, descending) tuples extracted from the objects.
-    fn parse_includes_argument(
-        &self,
-        directive: &Directive<'_, String>,
-    ) -> Vec<(String, bool)> {
+    fn parse_includes_argument(&self, directive: &Directive<'_, String>) -> Vec<(String, bool)> {
         let Some(value) = get_directive_arg(directive, "includes") else {
             return Vec::new();
         };
@@ -668,11 +665,15 @@ impl<'a> SdlParser<'a> {
             "json" => {
                 // JSON @default accepts various value types
                 match value {
-                    // String must be valid JSON
+                    // String containing JSON - validate but store as string literal
+                    // Go stores JSON defaults as strings and returns them as strings
                     graphql_parser::schema::Value::String(s) => {
-                        serde_json::from_str(s).map_err(|e| {
+                        // Validate the JSON is parseable
+                        let _: serde_json::Value = serde_json::from_str(s).map_err(|e| {
                             QueryError::parse(format!("@default json contains invalid JSON: {}", e))
-                        })
+                        })?;
+                        // Store as string literal to match Go behavior
+                        Ok(serde_json::Value::String(s.clone()))
                     }
                     // Primitives and structured types are converted directly
                     graphql_parser::schema::Value::Int(n) => {
@@ -683,21 +684,26 @@ impl<'a> SdlParser<'a> {
                         .map(serde_json::Value::Number)
                         .ok_or_else(|| QueryError::parse("@default json float is invalid (NaN or Infinity)")),
                     graphql_parser::schema::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-                    graphql_parser::schema::Value::Null => Ok(serde_json::Value::Null),
+                    graphql_parser::schema::Value::Null => {
+                        Err(QueryError::parse("default value is invalid for type JSON"))
+                    }
                     graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
+                    // JSON array/object defaults are stored as serialized strings to match Go behavior
                     graphql_parser::schema::Value::List(arr) => {
                         let items: Vec<serde_json::Value> = arr
                             .iter()
                             .map(|v| graphql_schema_value_to_json(v))
                             .collect();
-                        Ok(serde_json::Value::Array(items))
+                        let json_array = serde_json::Value::Array(items);
+                        Ok(serde_json::Value::String(serde_json::to_string(&json_array).unwrap_or_default()))
                     }
                     graphql_parser::schema::Value::Object(obj) => {
                         let items: serde_json::Map<String, serde_json::Value> = obj
                             .iter()
                             .map(|(k, v)| (k.clone(), graphql_schema_value_to_json(v)))
                             .collect();
-                        Ok(serde_json::Value::Object(items))
+                        let json_obj = serde_json::Value::Object(items);
+                        Ok(serde_json::Value::String(serde_json::to_string(&json_obj).unwrap_or_default()))
                     }
                     graphql_parser::schema::Value::Variable(v) => Ok(serde_json::Value::String(format!("${}", v))),
                 }
@@ -861,9 +867,11 @@ impl<'a> SdlParser<'a> {
 
         // TWO-PASS APPROACH:
         // Pass 1: Calculate CollectionIDs in topological order
-        // This ensures CID dependencies are resolved correctly
+        // This ensures CID dependencies are resolved correctly.
+        // Also simulates Go's headstore to replicate prefix collision behavior.
         let mut all_collection_ids: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut headstore: HashMap<String, (Cid, u64)> = HashMap::new();
 
         for type_name in &processing_order {
             let type_def = self.type_defs.get(type_name).unwrap();
@@ -873,25 +881,56 @@ impl<'a> SdlParser<'a> {
                 &collection_set,
                 &all_collection_ids, // Pass already-calculated CollectionIDs
                 &primary_directives,
+                &headstore,
             )?;
             // Store this type's CollectionID for later types to reference
             all_collection_ids.insert(type_name.clone(), collection.collection_id.clone());
-        }
 
+            // Update simulated headstore: store this collection's CID with height=1
+            // (Go stores collection definition CIDs at prefix /g/<CollectionName>)
+            if let Ok(cid) = collection.collection_id.parse::<Cid>() {
+                // Determine height: check if any prefix collision occurred
+                let prefix = format!("/g/{}", type_name);
+                let max_height: u64 = headstore
+                    .iter()
+                    .filter(|(k, _)| format!("/g/{}", k).starts_with(&prefix))
+                    .map(|(_, (_, h))| *h)
+                    .max()
+                    .unwrap_or(0);
+                let height = max_height + 1;
+                headstore.insert(type_name.clone(), (cid, height));
+            }
+        }
         // Pass 2: Rebuild all collections with ALL CollectionIDs known
         // This ensures all relation fields have proper CollectionKind (not NamedKind)
-        // for query resolution, even for secondary fields pointing to later types
+        // for query resolution, even for secondary fields pointing to later types.
+        // Return in SDL definition order to match Go's parser behavior (Go's sequential
+        // prefix counter assigns IDs in the order types appear in the SDL).
+        //
+        // IMPORTANT: Use the collection_id/version_id from Pass 1, not the regenerated
+        // ones from Pass 2. Pass 1 computes CIDs in topological order with headstore
+        // simulation matching Go's behavior. Pass 2 may produce different field CIDs
+        // (because Named → Relation resolution changes the field kind), which would
+        // change the collection CID incorrectly.
         let mut collections = Vec::new();
 
-        for type_name in &sorted_type_names {
+        for type_name in &self.definition_order {
             let type_def = self.type_defs.get(type_name).unwrap();
-            let collection = self.build_collection(
+            let mut collection = self.build_collection(
                 type_def,
                 &type_names,
                 &collection_set,
                 &all_collection_ids, // Now has ALL CollectionIDs
                 &primary_directives,
+                &headstore,
             )?;
+
+            // Override with Pass 1's CID (computed in topological order with headstore)
+            if let Some(pass1_id) = all_collection_ids.get(type_name) {
+                collection.collection_id = pass1_id.clone();
+                collection.version_id = pass1_id.clone();
+            }
+
             collections.push(collection);
         }
 
@@ -1072,6 +1111,7 @@ impl<'a> SdlParser<'a> {
         collection_set: &std::collections::HashMap<String, i32>,
         known_collection_ids: &std::collections::HashMap<String, String>,
         primary_directives: &std::collections::HashMap<(String, String), bool>,
+        headstore: &HashMap<String, (Cid, u64)>,
     ) -> Result<CollectionVersion> {
         // collection_id will be generated after fields are created (like Go)
         let mut fields = Vec::new();
@@ -1215,11 +1255,27 @@ impl<'a> SdlParser<'a> {
 
                     // FK field has same is_primary status as relation object field
                     let mut id_field =
-                        FieldDescription::new(&id_field_id, &id_field_name, id_field_kind)
+                        FieldDescription::new(&id_field_id, &id_field_name.clone(), id_field_kind)
                             .with_crdt_type(id_field_crdt)
                             .with_relation_name(relation_name);
                     if is_primary {
                         id_field = id_field.as_primary();
+
+                        // Go DefraDB automatically creates a unique index on the _*ID field
+                        // for primary one-to-one relations. This enforces that each target
+                        // document can only be linked to once (one-to-one constraint).
+                        // See Go's ensureOneToOneUniqueIndex() in collection_define.go
+                        let idx_name = format!("{}_{}_unique", type_def.name, id_field_name);
+                        indexes.push(IndexDescription {
+                            name: idx_name,
+                            id: field_id_counter,
+                            fields: vec![IndexedFieldDescription {
+                                name: id_field_name.clone(),
+                                descending: false,
+                            }],
+                            unique: true,
+                        });
+                        field_id_counter += 1;
                     }
                     fields.push(id_field);
                     field_id_counter += 1;
@@ -1265,8 +1321,11 @@ impl<'a> SdlParser<'a> {
             }
 
             let idx_name = composite_idx.name.clone().unwrap_or_else(|| {
-                let field_names: Vec<&str> =
-                    composite_idx.fields.iter().map(|(n, _)| n.as_str()).collect();
+                let field_names: Vec<&str> = composite_idx
+                    .fields
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect();
                 format!("{}_{}_idx", type_def.name, field_names.join("_"))
             });
 
@@ -1305,10 +1364,11 @@ impl<'a> SdlParser<'a> {
         }
 
         // Generate collection ID from type name and fields (like Go, includes field CIDs as links)
-        let collection_id = generate_collection_id(&type_def.name, &fields);
+        // The headstore simulates Go's prefix collision behavior for deterministic CIDs
+        let collection_id = generate_collection_id(&type_def.name, &fields, headstore);
 
-        // Generate version ID from content
-        let version_id = generate_version_id(&type_def.name, &fields);
+        // Version ID equals collection ID for new schemas (Go behavior)
+        let version_id = collection_id.clone();
 
         let mut collection =
             CollectionVersion::new(&type_def.name, &version_id, &collection_id, fields);
@@ -1447,7 +1507,18 @@ fn hash_to_hex(hash: &[u8]) -> String {
 /// IMPORTANT: Secondary relation fields (where relation_name is set but is_primary is false)
 /// are NOT saved to the blockstore in Go and must be excluded from CID generation.
 /// See Go's internal/core/crdt/field_definition.go lines 95-98.
-fn generate_collection_id(type_name: &str, fields: &[FieldDescription]) -> String {
+///
+/// The `headstore` parameter simulates Go's headstore prefix collision behavior.
+/// In Go, collection definitions are stored with prefix `/g/<CollectionName>`.
+/// When a new collection's headset does a prefix scan, it inadvertently matches
+/// entries from other collections whose names share the same prefix (e.g., "Author"
+/// prefix-matches "AuthorContact"). This affects the block's priority and heads fields,
+/// changing the resulting CID. Passing an empty map produces standard priority=1 behavior.
+fn generate_collection_id(
+    type_name: &str,
+    fields: &[FieldDescription],
+    headstore: &HashMap<String, (Cid, u64)>,
+) -> String {
     // Sort fields to match Go's order: _docID first, then alphabetically by name
     // Skip:
     // - Secondary relation fields (array relations - Go skips these)
@@ -1477,8 +1548,31 @@ fn generate_collection_id(type_name: &str, fields: &[FieldDescription]) -> Strin
         })
         .collect();
 
-    // Use schema::generate_collection_cid_with_priority with priority=1 for Go-compatible CID
-    match schema::generate_collection_cid_with_priority(type_name, &field_cids, 1) {
+    // Simulate Go's headstore prefix collision:
+    // Scan for any existing headstore entry whose name starts with this type's name
+    // (Go uses prefix `/g/<name>` which matches `/g/<name>*`)
+    let prefix = format!("/g/{}", type_name);
+    let mut max_height: u64 = 0;
+    let mut head_cids: Vec<Cid> = Vec::new();
+    for (key, (cid, height)) in headstore {
+        let entry_prefix = format!("/g/{}", key);
+        if entry_prefix.starts_with(&prefix) {
+            head_cids.push(*cid);
+            if *height > max_height {
+                max_height = *height;
+            }
+        }
+    }
+    head_cids.sort_by_key(|c| c.to_string());
+
+    let priority = max_height + 1;
+
+    match schema::generate_collection_cid_with_priority_and_heads(
+        type_name,
+        &field_cids,
+        priority,
+        &head_cids,
+    ) {
         Ok(cid) => cid.to_string(),
         Err(_) => {
             // Fallback to simple hash if CID generation fails
@@ -1527,7 +1621,7 @@ fn generate_field_id(field_name: &str, kind: &FieldKind, crdt_type: CType) -> St
 /// In Go, for a new schema the VersionID equals the CollectionID.
 fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
     // Version ID uses the same logic as collection ID (Go behavior for new schemas)
-    generate_collection_id(name, fields)
+    generate_collection_id(name, fields, &HashMap::new())
 }
 
 /// Generate a relation name following Go DefraDB conventions.
@@ -2134,11 +2228,11 @@ mod tests {
     #[test]
     fn test_collection_ids_are_deterministic() {
         // With empty fields (matches Go's behavior for field-less collections)
-        let id1 = generate_collection_id("User", &[]);
-        let id2 = generate_collection_id("User", &[]);
+        let id1 = generate_collection_id("User", &[], &HashMap::new());
+        let id2 = generate_collection_id("User", &[], &HashMap::new());
         assert_eq!(id1, id2, "same type name should produce same collection ID");
 
-        let id3 = generate_collection_id("Post", &[]);
+        let id3 = generate_collection_id("Post", &[], &HashMap::new());
         assert_ne!(
             id1, id3,
             "different type names should produce different IDs"

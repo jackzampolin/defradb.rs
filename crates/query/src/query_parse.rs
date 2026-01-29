@@ -51,7 +51,11 @@ pub enum ParsedOperation {
         explain: Option<ExplainType>,
     },
     /// Mutation operations (CREATE, UPDATE, DELETE)
-    Mutation(Vec<Mutation>),
+    Mutation {
+        mutations: Vec<Mutation>,
+        /// Whether @explain directive was used and which type
+        explain: Option<ExplainType>,
+    },
     /// Subscription operations (single root field only per GraphQL spec)
     Subscription {
         /// The single select for the subscription.
@@ -172,7 +176,7 @@ fn parse_selection_to_selects<'a>(
 pub fn parse_query(query: &str) -> Result<Vec<Select>> {
     match parse_request(query)? {
         ParsedOperation::Query { selects, .. } => Ok(selects),
-        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+        ParsedOperation::Mutation { .. } => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_request() for mutations.",
         )),
         ParsedOperation::Subscription { .. } => Err(QueryError::parse(
@@ -194,15 +198,15 @@ pub fn parse_query_with_variables(
 ) -> Result<Vec<Select>> {
     match parse_request_with_variables(query, variables, None)? {
         ParsedOperation::Query { selects, .. } => Ok(selects),
-        ParsedOperation::Mutation(_) => Err(QueryError::parse(
+        ParsedOperation::Mutation { .. } => Err(QueryError::parse(
             "Expected query but got mutation. Use parse_mutations_with_variables() for mutations.",
         )),
-        ParsedOperation::Subscription { .. } => Err(QueryError::parse(
-            "Expected query but got subscription.",
-        )),
-        ParsedOperation::Introspection { .. } => Err(QueryError::parse(
-            "Expected query but got introspection.",
-        )),
+        ParsedOperation::Subscription { .. } => {
+            Err(QueryError::parse("Expected query but got subscription."))
+        }
+        ParsedOperation::Introspection { .. } => {
+            Err(QueryError::parse("Expected query but got introspection."))
+        }
     }
 }
 
@@ -221,7 +225,7 @@ pub fn parse_mutations_with_variables(
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Vec<Mutation>> {
     match parse_request_with_variables(query, variables, None)? {
-        ParsedOperation::Mutation(mutations) => Ok(mutations),
+        ParsedOperation::Mutation { mutations, .. } => Ok(mutations),
         ParsedOperation::Query { .. } => Err(QueryError::parse("Expected mutation but got query")),
         ParsedOperation::Subscription { .. } => {
             Err(QueryError::parse("Expected mutation but got subscription"))
@@ -386,6 +390,10 @@ pub fn parse_request_with_variables(
                     }
                     OperationDefinition::Mutation(m) => {
                         has_mutation = true;
+                        // Check for @explain directive and parse type
+                        if let Some(explain_type) = parse_explain_directive(&m.directives) {
+                            explain = Some(explain_type);
+                        }
 
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&m.variable_definitions)?;
@@ -461,7 +469,7 @@ pub fn parse_request_with_variables(
             select: subscription_selects.into_iter().next().unwrap(),
         })
     } else if has_mutation {
-        Ok(ParsedOperation::Mutation(mutations))
+        Ok(ParsedOperation::Mutation { mutations, explain })
     } else {
         Ok(ParsedOperation::Query { selects, explain })
     }
@@ -621,9 +629,10 @@ fn parse_field_to_select(
                     continue;
                 }
                 // Allow FK fields for relation groupBy fields (e.g. _authorID for author)
-                let is_fk_for_group = group_by.fields.iter().any(|gb_field| {
-                    f.name == format!("_{}ID", gb_field)
-                });
+                let is_fk_for_group = group_by
+                    .fields
+                    .iter()
+                    .any(|gb_field| f.name == format!("_{}ID", gb_field));
                 if is_fk_for_group {
                     continue;
                 }
@@ -1079,7 +1088,8 @@ fn parse_order_from_json(json: &JsonValue) -> Result<OrderBy> {
             for (field_name, dir_val) in obj {
                 if let Some(dir_str) = dir_val.as_str() {
                     if let Some(direction) = OrderDirection::parse(dir_str) {
-                        order_by = order_by.with_condition(OrderCondition::new(field_name, direction));
+                        order_by =
+                            order_by.with_condition(OrderCondition::new(field_name, direction));
                     }
                 }
             }
@@ -1090,16 +1100,19 @@ fn parse_order_from_json(json: &JsonValue) -> Result<OrderBy> {
                     for (field_name, dir_val) in obj {
                         if let Some(dir_str) = dir_val.as_str() {
                             if let Some(direction) = OrderDirection::parse(dir_str) {
-                                order_by = order_by.with_condition(OrderCondition::new(
-                                    field_name, direction,
-                                ));
+                                order_by = order_by
+                                    .with_condition(OrderCondition::new(field_name, direction));
                             }
                         }
                     }
                 }
             }
         }
-        _ => return Err(QueryError::parse("order variable must be an object or array")),
+        _ => {
+            return Err(QueryError::parse(
+                "order variable must be an object or array",
+            ))
+        }
     }
     Ok(order_by)
 }
@@ -1317,8 +1330,10 @@ fn parse_aggregate_target_from_json(
                 "filter" => {
                     // Convert JSON filter to a Filter
                     if let JsonValue::Object(filter_obj) = val {
-                        let conditions: HashMap<String, JsonValue> =
-                            filter_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        let conditions: HashMap<String, JsonValue> = filter_obj
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
                         target.filter = Some(Filter::from_conditions(conditions));
                     }
                 }
@@ -1405,10 +1420,7 @@ fn parse_aggregate_field(
                             ))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "Variable \"${}\" was not provided",
-                                name
-                            ))
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
                         })?;
                         let target =
                             parse_aggregate_target_from_json(arg_name, json_val, variables)?;
@@ -1495,10 +1507,7 @@ fn parse_top_level_aggregate(
     if agg_type != AggregateType::Count {
         for target in &aggregate.targets {
             if target.field_name.is_none() {
-                let type_name = format!(
-                    "{}NumericFieldsArg!",
-                    capitalize_first(&target.host_name)
-                );
+                let type_name = format!("{}NumericFieldsArg!", capitalize_first(&target.host_name));
                 return Err(QueryError::parse(format!(
                     "Argument \"{}\" has invalid value {{}}.\nIn field \"field\": Expected \"{}\", found null.",
                     target.host_name,
@@ -1695,6 +1704,11 @@ fn parse_field_to_mutation(
         MutationType::Upsert => Mutation::upsert(&collection_name),
     };
 
+    // Capture GraphQL alias if present (e.g., "john: update_Users(...)")
+    if let Some(ref alias) = field.alias {
+        mutation = mutation.with_alias(alias.clone());
+    }
+
     // Track if input argument was present (even if null)
     let mut has_input_arg = false;
 
@@ -1750,6 +1764,9 @@ fn parse_field_to_mutation(
                     mutation.filter = Some(filter);
                 }
             }
+
+            // Encryption arguments: accepted but not yet implemented in Rust
+            (_, "encrypt") | (_, "encryptFields") => {}
 
             // Unknown argument
             _ => {
@@ -1812,7 +1829,6 @@ fn parse_field_to_mutation(
 
     // Parse selection set (fields to return after mutation)
     // For mutations, we don't support fragments in return fields
-    // For mutations, we don't support fragments in return fields
     let empty_fragments: FragmentMap<'_> = HashMap::new();
     let mut empty_visiting = HashSet::new();
     let (fields, mapping) = parse_selection_set(
@@ -1822,6 +1838,15 @@ fn parse_field_to_mutation(
         &empty_fragments,
         &mut empty_visiting,
     )?;
+
+    // All mutations return [TypeName], which is an object type requiring a sub selection.
+    if fields.is_empty() {
+        return Err(QueryError::parse(format!(
+            "Field \"{}\" of type \"[{}]\" must have a sub selection.",
+            field_name, collection_name
+        )));
+    }
+
     mutation.fields = fields;
     mutation.document_mapping = mapping;
 
@@ -2375,7 +2400,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
-            ParsedOperation::Mutation(mutations) => {
+            ParsedOperation::Mutation { mutations, .. } => {
                 assert_eq!(mutations.len(), 1);
                 let input = &mutations[0].create_input[0];
                 assert_eq!(input.get("name"), Some(&json!("Bob")));
@@ -2399,7 +2424,7 @@ mod variable_tests {
 
         let result = parse_request_with_variables(query, Some(&variables), None).unwrap();
         match result {
-            ParsedOperation::Mutation(mutations) => {
+            ParsedOperation::Mutation { mutations, .. } => {
                 assert_eq!(mutations[0].doc_ids, Some(vec!["bae-999".to_string()]));
             }
             _ => panic!("Expected mutation"),
@@ -2747,7 +2772,7 @@ mod variable_tests {
         // Don't provide the variable - should use default
         let result = parse_request_with_variables(query, None, None).unwrap();
         match result {
-            ParsedOperation::Mutation(mutations) => {
+            ParsedOperation::Mutation { mutations, .. } => {
                 let input = &mutations[0].create_input;
                 assert_eq!(input[0].get("name"), Some(&json!("DefaultUser")));
             }

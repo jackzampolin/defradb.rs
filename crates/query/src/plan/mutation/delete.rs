@@ -263,4 +263,45 @@ impl PlanNode for DeleteNode {
     fn kind(&self) -> &'static str {
         "deleteNode"
     }
+
+    fn explain_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // docID: array of doc IDs to delete (null if using filter)
+        if let Some(ref doc_ids) = self.doc_ids {
+            obj.insert(
+                "docID".to_string(),
+                serde_json::Value::Array(
+                    doc_ids
+                        .iter()
+                        .map(|id| serde_json::Value::String(id.clone()))
+                        .collect(),
+                ),
+            );
+        } else {
+            obj.insert("docID".to_string(), serde_json::Value::Null);
+        }
+
+        // filter: the filter expression (null if using doc IDs)
+        if let Some(ref filter) = self.filter {
+            obj.insert(
+                "filter".to_string(),
+                serde_json::json!(filter.conditions()),
+            );
+        } else {
+            obj.insert("filter".to_string(), serde_json::Value::Null);
+        }
+
+        // Include child node if present
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        serde_json::Value::Object(obj)
+    }
 }

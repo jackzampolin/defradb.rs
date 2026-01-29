@@ -67,21 +67,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     )
                     .await
                 } else {
-                    self.execute_selects_internal(
-                        selects,
-                        self.fetcher.as_ref(),
+                    self.execute_selects_internal(selects, self.fetcher.as_ref(), identity)
+                        .await
+                }
+            }
+            ParsedOperation::Mutation { explain, .. } => {
+                if let Some(explain_type) = explain {
+                    // Return mutation plan instead of executing
+                    self.explain_mutation_with_identity(&request.query, identity, explain_type)
+                        .await
+                } else {
+                    self.execute_mutation_with_identity_and_vars(
+                        &request.query,
                         identity,
+                        variables.as_ref(),
                     )
                     .await
                 }
-            }
-            ParsedOperation::Mutation(_) => {
-                self.execute_mutation_with_identity_and_vars(
-                    &request.query,
-                    identity,
-                    variables.as_ref(),
-                )
-                .await
             }
             ParsedOperation::Subscription { .. } => {
                 // Subscriptions require SSE transport - they cannot be executed via regular request/response
@@ -181,39 +183,41 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     )
                     .await
                 } else {
-                    self.execute_selects_internal(
-                        selects,
-                        fetcher.as_ref(),
+                    self.execute_selects_internal(selects, fetcher.as_ref(), identity)
+                        .await
+                }
+            }
+            ParsedOperation::Mutation { explain, .. } => {
+                if let Some(explain_type) = explain {
+                    // Return mutation plan instead of executing
+                    self.explain_mutation_with_identity(&request.query, identity, explain_type)
+                        .await
+                } else {
+                    // Check if this is a read-only transaction
+                    if txn_ctx.is_readonly() {
+                        return QueryResponse::error(
+                            "cannot execute mutation in read-only transaction".to_string(),
+                        );
+                    }
+
+                    // Get the transaction-scoped mutator
+                    let mutator = match txn_ctx.doc_mutator() {
+                        Some(m) => m,
+                        None => {
+                            return QueryResponse::error(
+                                "mutations not supported in this transaction context".to_string(),
+                            );
+                        }
+                    };
+
+                    self.execute_mutation_internal_with_vars(
+                        &request.query,
+                        mutator,
                         identity,
+                        variables.as_ref(),
                     )
                     .await
                 }
-            }
-            ParsedOperation::Mutation(_) => {
-                // Check if this is a read-only transaction
-                if txn_ctx.is_readonly() {
-                    return QueryResponse::error(
-                        "cannot execute mutation in read-only transaction".to_string(),
-                    );
-                }
-
-                // Get the transaction-scoped mutator
-                let mutator = match txn_ctx.doc_mutator() {
-                    Some(m) => m,
-                    None => {
-                        return QueryResponse::error(
-                            "mutations not supported in this transaction context".to_string(),
-                        );
-                    }
-                };
-
-                self.execute_mutation_internal_with_vars(
-                    &request.query,
-                    mutator,
-                    identity,
-                    variables.as_ref(),
-                )
-                .await
             }
             ParsedOperation::Subscription { .. } => {
                 // Subscriptions require SSE transport

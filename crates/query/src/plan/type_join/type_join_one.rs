@@ -8,7 +8,7 @@ use tracing::warn;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::Filter;
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, ExecInfo, PlanNode};
 
 use super::{JoinDirection, JoinSide};
 
@@ -64,6 +64,10 @@ pub struct TypeJoinOne {
     /// Example: `{author: {verified: {_eq: true}}}` means only include parents
     /// where their related child (author) has verified=true.
     relation_filter: Option<RelationFilter>,
+    /// Execution statistics for this join node
+    exec_info: ExecInfo,
+    /// Cached child plan execution info (captured before child is closed)
+    child_exec_info: ExecInfo,
 }
 
 /// A filter condition on a relation field.
@@ -123,6 +127,8 @@ impl TypeJoinOne {
             initialized: false,
             child_cache: HashMap::new(),
             relation_filter: None,
+            exec_info: ExecInfo::default(),
+            child_exec_info: ExecInfo::default(),
         }
     }
 
@@ -246,6 +252,9 @@ impl TypeJoinOne {
             }
         }
 
+        // Capture child plan's execution info before closing
+        self.child_exec_info = self.child_plan.exec_info();
+
         self.child_plan.close().await?;
         Ok(())
     }
@@ -349,6 +358,10 @@ impl TypeJoinOne {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PlanNode for TypeJoinOne {
     async fn init(&mut self) -> Result<()> {
+        // Reset execution stats
+        self.exec_info = ExecInfo::default();
+        self.child_exec_info = ExecInfo::default();
+
         // Build child cache first (scans child_plan once)
         self.build_child_cache().await?;
         // Then init parent plan
@@ -367,6 +380,9 @@ impl PlanNode for TypeJoinOne {
                 "TypeJoinOne.next() called before init()",
             ));
         }
+
+        // Track iterations (Go counts each call to next, including final false)
+        self.exec_info.iterations += 1;
 
         loop {
             if !self.parent_plan.next().await? {
@@ -416,6 +432,140 @@ impl PlanNode for TypeJoinOne {
     }
 
     fn kind(&self) -> &'static str {
-        "typeJoinOne"
+        // Go's explain uses "typeIndexJoin" as the wrapper node
+        "typeIndexJoin"
+    }
+
+    fn explain_inner(&self) -> JsonValue {
+        // Simple/Default mode: typeIndexJoin contains both attributes and tree structure
+        let mut obj = serde_json::Map::new();
+
+        // direction: primary or secondary (Go uses "secondary" not "inverted")
+        let direction = match self.direction {
+            JoinDirection::Primary { .. } => "primary",
+            JoinDirection::Inverted => "secondary",
+        };
+        obj.insert("direction".to_string(), serde_json::json!(direction));
+
+        // joinType: "typeJoinOne" for one-to-one joins
+        obj.insert("joinType".to_string(), serde_json::json!("typeJoinOne"));
+
+        // rootName: the child side's relation field name (points back to parent)
+        // Go uses immutable.Option[string], but areResultOptionsEqual compares the inner value
+        let root_name = self.child_side.relation_field().name.clone();
+        obj.insert("rootName".to_string(), serde_json::json!(root_name));
+
+        // subTypeName: the child side's relation field name (from parent perspective)
+        obj.insert(
+            "subTypeName".to_string(),
+            serde_json::json!(self.parent_side.relation_field().name),
+        );
+
+        // root: the parent plan's explain (contains scanNode)
+        let root_explain = self.parent_plan.explain();
+        obj.insert("root".to_string(), root_explain);
+
+        // subType: the child plan's explain wrapped in selectTopNode > selectNode
+        // selectNode must include docID and filter attributes (Go always includes these)
+        let child_explain = self.child_plan.explain();
+        let mut select_node_inner = serde_json::Map::new();
+        select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
+        select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
+        // Merge child explain (e.g., scanNode) into selectNode
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                select_node_inner.insert(key.clone(), value.clone());
+            }
+        }
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": serde_json::Value::Object(select_node_inner)
+            }
+        });
+        obj.insert("subType".to_string(), sub_type);
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn explain_debug_inner(&self) -> JsonValue {
+        // Debug mode: typeIndexJoin contains typeJoinOne wrapper with full tree structure
+        let mut inner_obj = serde_json::Map::new();
+
+        // root: the parent plan's explain_debug (contains scanNode)
+        let root_explain = self.parent_plan.explain_debug();
+        inner_obj.insert("root".to_string(), root_explain);
+
+        // subType: the child plan's explain_debug wrapped in selectTopNode > selectNode
+        let child_explain = self.child_plan.explain_debug();
+        let mut select_node_inner = serde_json::Map::new();
+        // Merge child explain into selectNode
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                select_node_inner.insert(key.clone(), value.clone());
+            }
+        }
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": serde_json::Value::Object(select_node_inner)
+            }
+        });
+        inner_obj.insert("subType".to_string(), sub_type);
+
+        // Wrap in typeJoinOne
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "typeJoinOne".to_string(),
+            serde_json::Value::Object(inner_obj),
+        );
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn exec_info(&self) -> ExecInfo {
+        self.exec_info.clone()
+    }
+
+    fn explain_execute_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Go DefraDB execute format: iterations from the join node itself
+        obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.exec_info.iterations),
+        );
+
+        // scanNode: parent plan's execution stats
+        // Get the parent's explain_execute and extract its inner content
+        let parent_execute = self.parent_plan.explain_execute();
+        if let Some(parent_obj) = parent_execute.as_object() {
+            for (key, value) in parent_obj {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        // subTypeScanNode: child plan's execution stats (captured before close)
+        let mut sub_type_obj = serde_json::Map::new();
+        sub_type_obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.child_exec_info.iterations),
+        );
+        sub_type_obj.insert(
+            "docFetches".to_string(),
+            serde_json::json!(self.child_exec_info.docs_fetched),
+        );
+        sub_type_obj.insert(
+            "fieldFetches".to_string(),
+            serde_json::json!(self.child_exec_info.fields_fetched),
+        );
+        sub_type_obj.insert(
+            "indexFetches".to_string(),
+            serde_json::json!(self.child_exec_info.indexes_fetched),
+        );
+        obj.insert(
+            "subTypeScanNode".to_string(),
+            serde_json::Value::Object(sub_type_obj),
+        );
+
+        serde_json::Value::Object(obj)
     }
 }

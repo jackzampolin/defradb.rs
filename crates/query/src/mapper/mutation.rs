@@ -62,6 +62,8 @@ pub struct Mutation {
     pub mutation_type: MutationType,
     /// Target collection name
     pub collection_name: String,
+    /// GraphQL alias for this mutation (e.g., "john" in `john: update_Users(...)`)
+    pub alias: Option<String>,
     /// For CREATE: Array of documents to create (each is a field-value map)
     pub create_input: Vec<HashMap<String, JsonValue>>,
     /// For UPDATE: Fields to update (patch)
@@ -82,6 +84,7 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Create,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
@@ -96,6 +99,7 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Update,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
@@ -110,6 +114,7 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Delete,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
@@ -124,12 +129,28 @@ impl Mutation {
         Self {
             mutation_type: MutationType::Upsert,
             collection_name: collection_name.into(),
+            alias: None,
             create_input: Vec::new(),
             update_input: HashMap::new(),
             doc_ids: None,
             filter: None,
             fields: Vec::new(),
             document_mapping: DocumentMapping::new(),
+        }
+    }
+
+    /// Set the GraphQL alias for this mutation.
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    /// Get the response key: alias if set, otherwise "{operation}_{collection}".
+    pub fn output_name(&self) -> String {
+        if let Some(ref alias) = self.alias {
+            alias.clone()
+        } else {
+            format!("{}_{}", self.mutation_type.as_prefix(), self.collection_name)
         }
     }
 

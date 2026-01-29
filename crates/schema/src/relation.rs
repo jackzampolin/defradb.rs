@@ -3,7 +3,9 @@
 //! This module handles the auto-generation of `_id` fields and auto-determination
 //! of primary sides for relation fields. It matches Go DefraDB's `finalizeRelations()`.
 
-use crate::{CType, CollectionVersion, FieldDescription, FieldKind, Result, SchemaError};
+use crate::{
+    CType, CollectionVersion, FieldDescription, FieldKind, IndexDescription, Result, SchemaError,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 impl CollectionVersion {
@@ -20,6 +22,53 @@ impl CollectionVersion {
     pub fn has_relation_id_field(&self, relation_field_name: &str) -> bool {
         let id_field_name = Self::relation_id_field_name(relation_field_name);
         self.fields.iter().any(|f| f.name == id_field_name)
+    }
+
+    /// Check if a unique index exists with the given field as its first field.
+    ///
+    /// Returns `Some(true)` if a unique index exists, `Some(false)` if a non-unique
+    /// index exists, or `None` if no index exists on this field.
+    fn has_unique_index_on_field(&self, field_name: &str) -> Option<bool> {
+        for index in &self.indexes {
+            if !index.fields.is_empty() && index.fields[0].name == field_name {
+                return Some(index.unique);
+            }
+        }
+        None
+    }
+
+    /// Ensure a unique index exists for a one-to-one relation's _id field.
+    ///
+    /// Returns `Ok(Some(index))` if a new index should be added.
+    /// Returns `Ok(None)` if an existing unique index is sufficient.
+    /// Returns `Err` if an existing non-unique index violates the constraint.
+    fn ensure_one_to_one_unique_index(
+        &self,
+        relation_field_name: &str,
+        next_index_id: &mut impl FnMut() -> u32,
+    ) -> Result<Option<IndexDescription>> {
+        let id_field_name = Self::relation_id_field_name(relation_field_name);
+
+        // Check for existing index on the _id field
+        if let Some(is_unique) = self.has_unique_index_on_field(&id_field_name) {
+            return if is_unique {
+                Ok(None) // User's unique index is sufficient
+            } else {
+                Err(SchemaError::OneToOneRequiresUniqueIndex {
+                    object: self.name.clone(),
+                    field: relation_field_name.to_string(),
+                })
+            };
+        }
+
+        // No existing index - create automatic unique index
+        let index_name = format!("{}_{}_unique", self.name, relation_field_name);
+        let mut index = IndexDescription::new(index_name)
+            .with_field(id_field_name, false)
+            .as_unique();
+        index.id = next_index_id();
+
+        Ok(Some(index))
     }
 
     /// Add `_id` fields for all non-array relation fields that don't already have one
@@ -102,15 +151,18 @@ impl CollectionVersion {
     /// This is called after all collections are parsed to:
     /// 1. Auto-generate missing `_id` fields for non-array relations
     /// 2. Auto-determine which side is primary for one-to-many relations
+    /// 3. Auto-create unique indexes for one-to-one relations
     ///
     /// Uses `BTreeMap` for deterministic processing order.
     /// Matches Go's `finalizeRelations()` function.
     ///
     /// # Errors
-    /// Returns an error if field ID generation produces duplicates.
+    /// Returns an error if field ID generation produces duplicates or if a
+    /// one-to-one relation has a non-unique index defined.
     pub fn finalize_relations(
         collections: &mut BTreeMap<String, CollectionVersion>,
         mut next_field_id: impl FnMut() -> String,
+        mut next_index_id: impl FnMut() -> u32,
     ) -> Result<()> {
         let collection_names: Vec<String> = collections.keys().cloned().collect();
 
@@ -119,8 +171,9 @@ impl CollectionVersion {
                 .remove(&name)
                 .ok_or_else(|| SchemaError::CollectionNotFound(name.clone()))?;
 
-            // Find fields that need _id and/or auto-primary
+            // Find fields that need _id and/or auto-primary, and track one-to-one relations
             let mut updates = Vec::new();
+            let mut one_to_one_fields = Vec::new();
 
             for (idx, field) in collection.fields.iter().enumerate() {
                 if !field.kind.is_relation() {
@@ -158,11 +211,19 @@ impl CollectionVersion {
                         col.field_by_relation(rel_name, &collection.name, &field.name)
                     });
 
+                    // Check if other side is also non-array (one-to-one)
+                    let other_is_array = other_field.map(|f| f.kind.is_array()).unwrap_or(false);
+
                     // If other side doesn't exist or is an array, this side is primary
-                    if other_field.is_none()
-                        || other_field.map(|f| f.kind.is_array()).unwrap_or(false)
-                    {
+                    if other_field.is_none() || other_is_array {
                         updates.push((idx, true)); // Mark as primary
+                    } else {
+                        // Other side exists and is non-array: this is a one-to-one relation
+                        // Don't auto-mark as primary - rely on @primary directive from schema
+                        // But track for unique index creation if this side is marked primary
+                        if field.is_primary {
+                            one_to_one_fields.push(field.name.clone());
+                        }
                     }
                 }
             }
@@ -170,6 +231,19 @@ impl CollectionVersion {
             // Apply primary updates
             for (idx, is_primary) in updates {
                 collection.fields[idx].is_primary = is_primary;
+            }
+
+            // Add unique indexes for one-to-one relations
+            let mut indexes_to_add = Vec::new();
+            for field_name in one_to_one_fields {
+                if let Some(index) =
+                    collection.ensure_one_to_one_unique_index(&field_name, &mut next_index_id)?
+                {
+                    indexes_to_add.push(index);
+                }
+            }
+            for index in indexes_to_add {
+                collection.indexes.push(index);
             }
 
             // Add missing _id fields
@@ -189,9 +263,10 @@ impl CollectionVersion {
     pub fn finalize_relations_hashmap(
         collections: &mut HashMap<String, CollectionVersion>,
         next_field_id: impl FnMut() -> String,
+        next_index_id: impl FnMut() -> u32,
     ) -> Result<()> {
         let mut btree: BTreeMap<String, CollectionVersion> = collections.drain().collect();
-        Self::finalize_relations(&mut btree, next_field_id)?;
+        Self::finalize_relations(&mut btree, next_field_id, next_index_id)?;
         collections.extend(btree);
         Ok(())
     }

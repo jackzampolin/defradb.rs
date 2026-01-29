@@ -49,7 +49,7 @@ pub enum Error {
     ///
     /// This occurs when two transactions attempt to modify the same keys concurrently.
     /// The transaction should typically be retried.
-    #[error("transaction conflict, retry required")]
+    #[error("transaction conflict. Please retry")]
     TxnConflict,
 
     /// Attempted a write operation on a read-only transaction.
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(Error::ValueNil.to_string(), "value is nil");
         assert_eq!(
             Error::TxnConflict.to_string(),
-            "transaction conflict, retry required"
+            "transaction conflict. Please retry"
         );
     }
 

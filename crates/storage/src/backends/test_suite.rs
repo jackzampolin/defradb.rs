@@ -1526,19 +1526,28 @@ pub async fn test_concurrent_writes_different_keys<S: Store + 'static>(store: Ar
 
 /// Test concurrent writes to the SAME key (last writer wins)
 pub async fn test_concurrent_writes_same_key<S: Store + 'static>(store: Arc<S>) {
-    let commit_count = Arc::new(AtomicUsize::new(0));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let conflict_count = Arc::new(AtomicUsize::new(0));
     let mut handles = vec![];
 
     for i in 0..10 {
         let store = store.clone();
-        let commit_count = commit_count.clone();
+        let success_count = success_count.clone();
+        let conflict_count = conflict_count.clone();
         handles.push(tokio::spawn(async move {
             let mut txn = store.new_txn(false).await.unwrap();
             txn.set(b"contended_key", format!("value_{}", i).as_bytes())
                 .await
                 .unwrap();
-            txn.commit().await.unwrap();
-            commit_count.fetch_add(1, Ordering::SeqCst);
+            match txn.commit().await {
+                Ok(()) => {
+                    success_count.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(Error::TxnConflict) => {
+                    conflict_count.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(e) => panic!("unexpected error: {}", e),
+            }
         }));
     }
 
@@ -1546,8 +1555,11 @@ pub async fn test_concurrent_writes_same_key<S: Store + 'static>(store: Arc<S>) 
         handle.await.unwrap();
     }
 
-    // All commits should succeed (no OCC = no conflicts)
-    assert_eq!(commit_count.load(Ordering::SeqCst), 10);
+    // At least one commit should succeed, others may conflict
+    let successes = success_count.load(Ordering::SeqCst);
+    let conflicts = conflict_count.load(Ordering::SeqCst);
+    assert!(successes >= 1, "At least one commit should succeed");
+    assert_eq!(successes + conflicts, 10, "All transactions should complete");
 
     // Key should have SOME value
     let txn = store.new_txn(true).await.unwrap();
@@ -1562,19 +1574,27 @@ pub async fn test_last_writer_wins<S: Store + 'static>(store: Arc<S>) {
     txn1.set(b"shared", b"from_txn1").await.unwrap();
     txn2.set(b"shared", b"from_txn2").await.unwrap();
 
-    // Commit order determines winner
+    // First commit succeeds, second detects conflict
     txn1.commit().await.unwrap();
-    txn2.commit().await.unwrap();
+    let result = txn2.commit().await;
+    assert!(
+        result.is_err(),
+        "Second commit should fail with conflict"
+    );
+    assert!(
+        matches!(result.unwrap_err(), Error::TxnConflict),
+        "Error should be TxnConflict"
+    );
 
     let txn = store.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"shared").await.unwrap(),
-        Some(b"from_txn2".to_vec()),
-        "Last commit should win"
+        Some(b"from_txn1".to_vec()),
+        "First commit should win (second conflicted)"
     );
 }
 
-/// Test reverse commit order
+/// Test reverse commit order - second commit conflicts
 pub async fn test_last_writer_wins_reverse<S: Store + 'static>(store: Arc<S>) {
     let mut txn1 = store.new_txn(false).await.unwrap();
     let mut txn2 = store.new_txn(false).await.unwrap();
@@ -1582,14 +1602,23 @@ pub async fn test_last_writer_wins_reverse<S: Store + 'static>(store: Arc<S>) {
     txn1.set(b"shared", b"from_txn1").await.unwrap();
     txn2.set(b"shared", b"from_txn2").await.unwrap();
 
-    // Reverse order
+    // Reverse order: txn2 commits first, txn1 conflicts
     txn2.commit().await.unwrap();
-    txn1.commit().await.unwrap();
+    let result = txn1.commit().await;
+    assert!(
+        result.is_err(),
+        "Second commit should fail with conflict"
+    );
+    assert!(
+        matches!(result.unwrap_err(), Error::TxnConflict),
+        "Error should be TxnConflict"
+    );
 
     let txn = store.new_txn(true).await.unwrap();
     assert_eq!(
         txn.get(b"shared").await.unwrap(),
-        Some(b"from_txn1".to_vec())
+        Some(b"from_txn2".to_vec()),
+        "First commit should win (second conflicted)"
     );
 }
 
@@ -1818,15 +1847,23 @@ pub async fn test_write_write_isolation<S: Store + 'static>(store: Arc<S>) {
         "Writer2 should see its own write, not writer1's commit"
     );
 
-    // Commit writer2 (last writer wins)
-    writer2.commit().await.unwrap();
+    // Commit writer2 - conflicts on shared_key which writer1 already committed
+    let result = writer2.commit().await;
+    assert!(
+        result.is_err(),
+        "Writer2 commit should fail due to conflict on shared_key"
+    );
+    assert!(
+        matches!(result.unwrap_err(), Error::TxnConflict),
+        "Error should be TxnConflict"
+    );
 
-    // New transaction should see writer2's final state
+    // New transaction should see writer1's state (writer2 was rejected)
     let reader = store.new_txn(true).await.unwrap();
     assert_eq!(
         reader.get(b"shared_key").await.unwrap(),
-        Some(b"from_writer2".to_vec()),
-        "Final value should be from writer2 (last commit)"
+        Some(b"from_writer1".to_vec()),
+        "Final value should be from writer1 (writer2 conflicted)"
     );
     assert_eq!(
         reader.get(b"writer1_only").await.unwrap(),
@@ -1835,8 +1872,8 @@ pub async fn test_write_write_isolation<S: Store + 'static>(store: Arc<S>) {
     );
     assert_eq!(
         reader.get(b"writer2_only").await.unwrap(),
-        Some(b"exclusive".to_vec()),
-        "writer2_only key should exist"
+        None,
+        "writer2_only key should not exist (writer2 conflicted)"
     );
 }
 

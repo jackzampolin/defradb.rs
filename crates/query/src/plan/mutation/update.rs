@@ -18,7 +18,8 @@ use crate::mapper::Filter;
 use crate::mutator::{DocMutator, UpdateResult};
 use crate::planner::{Doc, PlanNode};
 
-use super::create::{json_to_normal_value_with_kind, normal_value_to_json};
+use super::create::{json_to_normal_value_with_kind_and_time, normal_value_to_json};
+use chrono::{DateTime, FixedOffset};
 
 /// Input for an update mutation - field values to patch on existing documents.
 #[derive(Debug, Clone)]
@@ -50,13 +51,23 @@ impl UpdateInput {
         doc: &mut Document,
         collection: Option<&CollectionVersion>,
     ) -> Result<usize> {
+        self.apply_to_with_time(doc, collection, None)
+    }
+
+    /// Apply this update to a document with an optional pre-computed request time for UTC_NOW.
+    pub fn apply_to_with_time(
+        &self,
+        doc: &mut Document,
+        collection: Option<&CollectionVersion>,
+        request_time: Option<DateTime<FixedOffset>>,
+    ) -> Result<usize> {
         let mut modified_count = 0;
 
         for (field_name, value) in &self.fields {
             let field_def =
                 collection.and_then(|c| c.fields.iter().find(|f| f.name == *field_name));
             let field_kind = field_def.map(|f| &f.kind);
-            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
+            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
 
             // Counter CRDT fields use increment semantics
             if let Some(fd) = field_def {
@@ -174,6 +185,8 @@ pub struct UpdateNode {
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
     collection: Option<Arc<CollectionVersion>>,
+    /// Pre-computed request time for UTC_NOW resolution (ensures consistency within a request)
+    request_time: Option<DateTime<FixedOffset>>,
     /// Document IDs to update (mutually exclusive with filter)
     doc_ids: Option<Vec<String>>,
     /// Filter to find documents to update (mutually exclusive with doc_ids)
@@ -215,6 +228,7 @@ impl UpdateNode {
             fetcher,
             document_mapping,
             collection: None,
+            request_time: None,
             doc_ids: None,
             filter: None,
             input: UpdateInput::new(),
@@ -248,6 +262,15 @@ impl UpdateNode {
     /// Set the collection schema for schema-aware type coercion.
     pub fn with_collection(mut self, collection: Arc<CollectionVersion>) -> Self {
         self.collection = Some(collection);
+        self
+    }
+
+    /// Set the pre-computed request time for UTC_NOW resolution.
+    ///
+    /// When set, all `UTC_NOW` values in this node's inputs will resolve
+    /// to the same timestamp, matching Go DefraDB's behavior.
+    pub fn with_request_time(mut self, request_time: DateTime<FixedOffset>) -> Self {
+        self.request_time = Some(request_time);
         self
     }
 
@@ -359,8 +382,8 @@ impl PlanNode for UpdateNode {
                     .await?;
 
                 if let Some(mut doc) = doc_opt {
-                    // Apply update input with schema-aware coercion
-                    self.input.apply_to(&mut doc, self.collection.as_deref())?;
+                    // Apply update input with schema-aware coercion and request time
+                    self.input.apply_to_with_time(&mut doc, self.collection.as_deref(), self.request_time)?;
 
                     // Collect the modified field names for block creation
                     let modified_fields: std::collections::HashSet<String> =
@@ -439,5 +462,45 @@ impl PlanNode for UpdateNode {
 
     fn kind(&self) -> &'static str {
         "updateNode"
+    }
+
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // docID: array of doc IDs to update (null if using filter)
+        if let Some(ref doc_ids) = self.doc_ids {
+            obj.insert(
+                "docID".to_string(),
+                JsonValue::Array(doc_ids.iter().map(|id| JsonValue::String(id.clone())).collect()),
+            );
+        } else {
+            obj.insert("docID".to_string(), JsonValue::Null);
+        }
+
+        // filter: the filter expression (null if using doc IDs)
+        if let Some(ref filter) = self.filter {
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
+        } else {
+            obj.insert("filter".to_string(), JsonValue::Null);
+        }
+
+        // input: the update values as a map
+        let mut input_obj = serde_json::Map::new();
+        for (field_name, value) in &self.input.fields {
+            input_obj.insert(field_name.clone(), value.clone());
+        }
+        obj.insert("input".to_string(), JsonValue::Object(input_obj));
+
+        // Include child node if present
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        JsonValue::Object(obj)
     }
 }

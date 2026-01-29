@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, FixedOffset, Utc};
 use document::{DocID, Document};
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
@@ -18,7 +19,7 @@ use crate::error::{QueryError, Result};
 use crate::mutator::DocMutator;
 use crate::planner::{Doc, PlanNode};
 
-use super::create::{json_to_normal_value_with_kind, normal_value_to_json, CreateInput};
+use super::create::{json_to_normal_value_with_kind_and_time, normal_value_to_json, CreateInput};
 
 /// Input for an upsert mutation - field values for create or update.
 #[derive(Debug, Clone)]
@@ -51,10 +52,13 @@ impl UpsertInput {
     }
 
     /// Apply as update to an existing document, using schema-aware type coercion when available.
+    ///
+    /// The `utc_now` parameter is used for `UTC_NOW` values to ensure consistent timestamps.
     pub fn apply_to(
         &self,
         doc: &mut Document,
         collection: Option<&CollectionVersion>,
+        utc_now: DateTime<FixedOffset>,
     ) -> Result<usize> {
         let mut modified_count = 0;
 
@@ -65,7 +69,7 @@ impl UpsertInput {
                     .find(|f| f.name == *field_name)
                     .map(|f| &f.kind)
             });
-            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
+            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
             doc.set(field_name.clone(), normal_value);
             modified_count += 1;
         }
@@ -230,7 +234,12 @@ impl UpsertNode {
     }
 
     /// Upsert a single document by ID with the given input.
-    async fn upsert_by_id(&mut self, doc_id_str: &str, input: &UpsertInput) -> Result<()> {
+    async fn upsert_by_id(
+        &mut self,
+        doc_id_str: &str,
+        input: &UpsertInput,
+        utc_now: DateTime<FixedOffset>,
+    ) -> Result<()> {
         let doc_id = DocID::from_string(doc_id_str)
             .map_err(|e| QueryError::execution(format!("Invalid DocID '{}': {}", doc_id_str, e)))?;
 
@@ -248,7 +257,7 @@ impl UpsertNode {
                 "Upsert: updating existing document"
             );
 
-            input.apply_to(&mut doc, None)?;
+            input.apply_to(&mut doc, None, utc_now)?;
 
             // Collect the modified field names for block creation
             let modified_fields: std::collections::HashSet<String> =
@@ -273,7 +282,7 @@ impl UpsertNode {
             // Create document with the specified ID
             let mut doc = Document::with_id(doc_id);
             for (field_name, value) in &input.fields {
-                let normal_value = json_to_normal_value_with_kind(value, None)?;
+                let normal_value = json_to_normal_value_with_kind_and_time(value, None, Some(utc_now))?;
                 doc.set(field_name.clone(), normal_value);
             }
 
@@ -348,6 +357,10 @@ impl PlanNode for UpsertNode {
 
         // On first call, perform all upserts
         if !self.did_upsert {
+            // Capture a single timestamp for all UTC_NOW values in this upsert
+            let utc_offset = FixedOffset::east_opt(0).unwrap();
+            let utc_now = Utc::now().with_timezone(&utc_offset);
+
             // Go DefraDB upsert semantics (with create_input and update_input)
             if self.create_input.is_some() || self.update_input.is_some() {
                 // Clone doc_ids to avoid borrow conflict
@@ -367,7 +380,7 @@ impl PlanNode for UpsertNode {
                             )
                         })?;
                         let doc_id = doc_ids[0].clone();
-                        self.upsert_by_id(&doc_id, &update_input).await?;
+                        self.upsert_by_id(&doc_id, &update_input, utc_now).await?;
                     }
                     _ => {
                         // No matches - CREATE with create_input
@@ -392,7 +405,7 @@ impl PlanNode for UpsertNode {
                     UpsertInput::default()
                 });
                 for doc_id_str in doc_ids.clone() {
-                    self.upsert_by_id(&doc_id_str, &input).await?;
+                    self.upsert_by_id(&doc_id_str, &input, utc_now).await?;
                 }
             } else if !self.inputs.is_empty() {
                 // Create new documents from inputs

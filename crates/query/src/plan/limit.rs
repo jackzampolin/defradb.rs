@@ -114,16 +114,20 @@ impl PlanNode for LimitNode {
     fn explain_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
-        if let Some(limit) = self.limit {
-            obj.insert("limit".to_string(), serde_json::Value::Number(limit.into()));
-        }
+        // Go always includes limit field, even when null
+        obj.insert(
+            "limit".to_string(),
+            match self.limit {
+                Some(limit) => serde_json::Value::Number(limit.into()),
+                None => serde_json::Value::Null,
+            },
+        );
 
-        if self.offset > 0 {
-            obj.insert(
-                "offset".to_string(),
-                serde_json::Value::Number(self.offset.into()),
-            );
-        }
+        // Go always includes offset, even when 0
+        obj.insert(
+            "offset".to_string(),
+            serde_json::Value::Number(self.offset.into()),
+        );
 
         // Recursively explain child node - merge their wrapped structure
         let child_explain = self.source.explain();

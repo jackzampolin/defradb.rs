@@ -41,6 +41,25 @@ pub struct GroupAlias {
     pub doc_ids: Option<Vec<String>>,
 }
 
+/// Metadata about a child select for explain output.
+///
+/// This mirrors Go's groupNode.childSelects structure used in explain.
+#[derive(Debug, Clone, Default)]
+pub struct ChildSelectMeta {
+    /// Collection name for this child select
+    pub collection_name: String,
+    /// Optional docID filter
+    pub doc_ids: Option<Vec<String>>,
+    /// Optional filter
+    pub filter: Option<Filter>,
+    /// Optional limit
+    pub limit: Option<Limit>,
+    /// Optional order
+    pub order: Option<OrderBy>,
+    /// Optional inner groupBy fields
+    pub group_by: Option<Vec<String>>,
+}
+
 /// A group of documents with the same group key
 #[derive(Debug)]
 pub struct DocumentGroup {
@@ -101,6 +120,8 @@ pub struct GroupByNode {
     third_level_group_by_fields: Vec<String>,
     /// Third-level aggregate definitions (from 3rd-level _group's aggregates)
     third_level_aggregates: Vec<InnerAggregateDef>,
+    /// Child select metadata for explain output
+    child_selects: Vec<ChildSelectMeta>,
 }
 
 impl GroupByNode {
@@ -126,11 +147,17 @@ impl GroupByNode {
             inner_group_order: None,
             third_level_group_by_fields: Vec::new(),
             third_level_aggregates: Vec::new(),
+            child_selects: Vec::new(),
         }
     }
 
     pub fn with_group_aliases(mut self, aliases: Vec<GroupAlias>) -> Self {
         self.group_aliases = aliases;
+        self
+    }
+
+    pub fn with_child_selects(mut self, child_selects: Vec<ChildSelectMeta>) -> Self {
+        self.child_selects = child_selects;
         self
     }
 
@@ -472,41 +499,35 @@ impl GroupByNode {
                         };
 
                     // Apply inner _group order
-                    let inner_ordered: Vec<&Doc> =
-                        if let Some(ref order) = self.inner_group_order {
-                            let mut sorted = inner_filtered;
-                            sorted.sort_by(|a, b| {
-                                for cond in &order.conditions {
-                                    if let Some(field_name) = cond.fields.first() {
-                                        if let Some(idx) =
-                                            self.document_mapping.first_index_of_name(field_name)
-                                        {
-                                            let cmp = Self::compare_field_values(
-                                                a.get(idx),
-                                                b.get(idx),
-                                            );
-                                            let cmp = match cond.direction {
-                                                OrderDirection::Asc => cmp,
-                                                OrderDirection::Desc => cmp.reverse(),
-                                            };
-                                            if cmp != std::cmp::Ordering::Equal {
-                                                return cmp;
-                                            }
+                    let inner_ordered: Vec<&Doc> = if let Some(ref order) = self.inner_group_order {
+                        let mut sorted = inner_filtered;
+                        sorted.sort_by(|a, b| {
+                            for cond in &order.conditions {
+                                if let Some(field_name) = cond.fields.first() {
+                                    if let Some(idx) =
+                                        self.document_mapping.first_index_of_name(field_name)
+                                    {
+                                        let cmp =
+                                            Self::compare_field_values(a.get(idx), b.get(idx));
+                                        let cmp = match cond.direction {
+                                            OrderDirection::Asc => cmp,
+                                            OrderDirection::Desc => cmp.reverse(),
+                                        };
+                                        if cmp != std::cmp::Ordering::Equal {
+                                            return cmp;
                                         }
                                     }
                                 }
-                                std::cmp::Ordering::Equal
-                            });
-                            sorted
-                        } else {
-                            inner_filtered
-                        };
+                            }
+                            std::cmp::Ordering::Equal
+                        });
+                        sorted
+                    } else {
+                        inner_filtered
+                    };
 
                     let inner_array = if !self.third_level_group_by_fields.is_empty() {
-                        self.build_innermost_group_array(
-                            &inner_ordered,
-                            inner_child_mapping,
-                        )
+                        self.build_innermost_group_array(&inner_ordered, inner_child_mapping)
                     } else {
                         Self::render_docs_with_keys(
                             &inner_ordered,
@@ -569,10 +590,7 @@ impl GroupByNode {
                         if rk.key == "_group" || rk.key == "__typename" {
                             continue;
                         }
-                        let value = first_doc
-                            .get(rk.index)
-                            .cloned()
-                            .unwrap_or(JsonValue::Null);
+                        let value = first_doc.get(rk.index).cloned().unwrap_or(JsonValue::Null);
                         obj.insert(rk.key.clone(), value);
                     }
                 } else {
@@ -903,7 +921,167 @@ impl PlanNode for GroupByNode {
     }
 
     fn kind(&self) -> &'static str {
-        "groupByNode"
+        "groupNode"
+    }
+
+    fn explain_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // groupByFields: array of field names being grouped by
+        let group_by_fields: Vec<JsonValue> = self
+            .group_by
+            .fields
+            .iter()
+            .map(|f| JsonValue::String(f.clone()))
+            .collect();
+        obj.insert("groupByFields".to_string(), JsonValue::Array(group_by_fields));
+
+        // childSelects: array of objects with child selection metadata
+        if self.child_selects.is_empty() {
+            // If no child_selects metadata, create default from collection_name
+            if let Some(ref name) = self.collection_name {
+                let child_select = serde_json::json!({
+                    "collectionName": name,
+                    "docID": serde_json::Value::Null,
+                    "filter": serde_json::Value::Null,
+                    "groupBy": serde_json::Value::Null,
+                    "limit": serde_json::Value::Null,
+                    "orderBy": serde_json::Value::Null
+                });
+                obj.insert(
+                    "childSelects".to_string(),
+                    JsonValue::Array(vec![child_select]),
+                );
+            } else {
+                obj.insert("childSelects".to_string(), serde_json::Value::Null);
+            }
+        } else {
+            let child_selects: Vec<JsonValue> = self
+                .child_selects
+                .iter()
+                .map(|cs| {
+                    let mut child_obj = serde_json::Map::new();
+                    child_obj.insert(
+                        "collectionName".to_string(),
+                        JsonValue::String(cs.collection_name.clone()),
+                    );
+                    // docID
+                    if let Some(ref ids) = cs.doc_ids {
+                        let ids_arr: Vec<JsonValue> =
+                            ids.iter().map(|id| JsonValue::String(id.clone())).collect();
+                        child_obj.insert("docID".to_string(), JsonValue::Array(ids_arr));
+                    } else {
+                        child_obj.insert("docID".to_string(), serde_json::Value::Null);
+                    }
+                    // filter
+                    if let Some(ref filter) = cs.filter {
+                        child_obj
+                            .insert("filter".to_string(), serde_json::json!(filter.conditions()));
+                    } else {
+                        child_obj.insert("filter".to_string(), serde_json::Value::Null);
+                    }
+                    // limit
+                    if let Some(ref limit) = cs.limit {
+                        child_obj.insert(
+                            "limit".to_string(),
+                            serde_json::json!({
+                                "limit": limit.limit.unwrap_or(0),
+                                "offset": limit.offset
+                            }),
+                        );
+                    } else {
+                        child_obj.insert("limit".to_string(), serde_json::Value::Null);
+                    }
+                    // orderBy
+                    if let Some(ref order) = cs.order {
+                        let orderings: Vec<JsonValue> = order
+                            .conditions
+                            .iter()
+                            .map(|c| {
+                                serde_json::json!({
+                                    "fields": c.fields,
+                                    "direction": match c.direction {
+                                        OrderDirection::Asc => "ASC",
+                                        OrderDirection::Desc => "DESC",
+                                    }
+                                })
+                            })
+                            .collect();
+                        child_obj.insert("orderBy".to_string(), JsonValue::Array(orderings));
+                    } else {
+                        child_obj.insert("orderBy".to_string(), serde_json::Value::Null);
+                    }
+                    // groupBy
+                    if let Some(ref gb) = cs.group_by {
+                        let gb_arr: Vec<JsonValue> =
+                            gb.iter().map(|f| JsonValue::String(f.clone())).collect();
+                        child_obj.insert("groupBy".to_string(), JsonValue::Array(gb_arr));
+                    } else {
+                        child_obj.insert("groupBy".to_string(), serde_json::Value::Null);
+                    }
+                    JsonValue::Object(child_obj)
+                })
+                .collect();
+            obj.insert("childSelects".to_string(), JsonValue::Array(child_selects));
+        }
+
+        // Recursively explain child node - merge their wrapped structure
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn explain_debug_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        // For GroupBy, Go inserts a pipeNode between selectNode and scanNode
+        // The source chain is: groupNode -> selectNode -> scanNode
+        // But Go expects: groupNode -> selectNode -> pipeNode -> scanNode
+        if let Some(source) = self.source() {
+            let child_explain = source.explain_debug();
+            if let Some(child_obj) = child_explain.as_object() {
+                // Check if child is selectNode
+                if let Some(select_content) = child_obj.get("selectNode") {
+                    // Insert pipeNode wrapper around selectNode's child (scanNode)
+                    let mut modified_select = serde_json::Map::new();
+                    if let Some(select_obj) = select_content.as_object() {
+                        for (key, value) in select_obj {
+                            if key == "scanNode" {
+                                // Wrap scanNode in pipeNode
+                                let pipe_node = serde_json::json!({
+                                    "pipeNode": { "scanNode": value }
+                                });
+                                if let Some(pipe_obj) = pipe_node.as_object() {
+                                    for (pk, pv) in pipe_obj {
+                                        modified_select.insert(pk.clone(), pv.clone());
+                                    }
+                                }
+                            } else {
+                                modified_select.insert(key.clone(), value.clone());
+                            }
+                        }
+                    }
+                    obj.insert(
+                        "selectNode".to_string(),
+                        serde_json::Value::Object(modified_select),
+                    );
+                } else {
+                    // Not selectNode, just merge as-is
+                    for (key, value) in child_obj {
+                        obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+
+        serde_json::Value::Object(obj)
     }
 
     fn current_group_docs(&self) -> Option<&[Doc]> {

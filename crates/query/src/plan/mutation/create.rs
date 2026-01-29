@@ -58,6 +58,16 @@ impl CreateInput {
     /// type is DateTime (matching Go DefraDB behavior). It also preserves
     /// the CRDT type from the schema (e.g., PnCounter, PCounter).
     pub fn to_document_with_schema(&self, collection: &CollectionVersion) -> Result<Document> {
+        self.to_document_with_schema_and_time(collection, None)
+    }
+
+    /// Convert to a Document for storage with schema-aware type coercion
+    /// and an optional pre-computed request time for UTC_NOW resolution.
+    pub fn to_document_with_schema_and_time(
+        &self,
+        collection: &CollectionVersion,
+        request_time: Option<DateTime<FixedOffset>>,
+    ) -> Result<Document> {
         use schema::CType;
 
         let mut doc = Document::new();
@@ -73,7 +83,7 @@ impl CreateInput {
             let crdt_type = field_def.map(|f| f.crdt_type).unwrap_or(CType::LwwRegister);
 
             // Convert JsonValue to appropriate NormalValue, using schema for type coercion
-            let normal_value = json_to_normal_value_with_kind(value, field_kind)?;
+            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
 
             // Use set_with_crdt to preserve the CRDT type from the schema
             // This is critical for Counter fields to generate correct block CIDs
@@ -210,9 +220,23 @@ pub fn json_to_normal_value(value: &JsonValue) -> Result<document::NormalValue> 
 /// This function uses the field kind to properly coerce values. For example,
 /// when the field kind is DateTime, it parses RFC 3339 strings as DateTime values.
 /// This matches Go DefraDB's `validateFieldSchema` behavior.
+///
+/// The `request_time` parameter is used for `UTC_NOW` resolution. When provided,
+/// all `UTC_NOW` values in the same request will resolve to the same timestamp,
+/// matching Go DefraDB's behavior where the time is computed once per request.
 pub fn json_to_normal_value_with_kind(
     value: &JsonValue,
     field_kind: Option<&FieldKind>,
+) -> Result<document::NormalValue> {
+    json_to_normal_value_with_kind_and_time(value, field_kind, None)
+}
+
+/// Convert a JSON value to a document NormalValue with schema-aware type coercion
+/// and an optional pre-computed request time for UTC_NOW resolution.
+pub fn json_to_normal_value_with_kind_and_time(
+    value: &JsonValue,
+    field_kind: Option<&FieldKind>,
+    request_time: Option<DateTime<FixedOffset>>,
 ) -> Result<document::NormalValue> {
     use document::NormalValue;
 
@@ -234,9 +258,12 @@ pub fn json_to_normal_value_with_kind(
                     JsonValue::String(s) => {
                         // Handle special value UTC_NOW - return current time in UTC
                         if s == "UTC_NOW" {
-                            // Convert to FixedOffset for consistent type
-                            let utc_offset = FixedOffset::east_opt(0).unwrap();
-                            return Ok(NormalValue::Time(Utc::now().with_timezone(&utc_offset)));
+                            // Use pre-computed request time if available, otherwise compute now
+                            let time = request_time.unwrap_or_else(|| {
+                                let utc_offset = FixedOffset::east_opt(0).unwrap();
+                                Utc::now().with_timezone(&utc_offset)
+                            });
+                            return Ok(NormalValue::Time(time));
                         }
                         // Parse RFC 3339 string to DateTime, preserving original timezone
                         // Go's time.Parse(time.RFC3339, s) preserves the original timezone
@@ -535,6 +562,8 @@ pub struct CreateNode {
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
     collection: Option<Arc<CollectionVersion>>,
+    /// Pre-computed request time for UTC_NOW resolution (ensures consistency within a request)
+    request_time: Option<DateTime<FixedOffset>>,
     /// Input documents to create
     inputs: Vec<CreateInput>,
     /// Created documents (populated after first next())
@@ -567,6 +596,7 @@ impl CreateNode {
             mutator,
             document_mapping,
             collection: None,
+            request_time: None,
             inputs: Vec::new(),
             created_docs: Vec::new(),
             position: 0,
@@ -594,6 +624,15 @@ impl CreateNode {
     /// document creation (e.g., parsing RFC 3339 strings as DateTime values).
     pub fn with_collection(mut self, collection: Arc<CollectionVersion>) -> Self {
         self.collection = Some(collection);
+        self
+    }
+
+    /// Set the pre-computed request time for UTC_NOW resolution.
+    ///
+    /// When set, all `UTC_NOW` values in this node's inputs will resolve
+    /// to the same timestamp, matching Go DefraDB's behavior.
+    pub fn with_request_time(mut self, request_time: DateTime<FixedOffset>) -> Self {
+        self.request_time = Some(request_time);
         self
     }
 
@@ -810,7 +849,7 @@ impl PlanNode for CreateNode {
             for input in &self.inputs {
                 // Convert input to Document (using schema-aware conversion if available)
                 let doc = if let Some(ref collection) = self.collection {
-                    input.to_document_with_schema(collection)?
+                    input.to_document_with_schema_and_time(collection, self.request_time)?
                 } else {
                     input.to_document()?
                 };
@@ -855,5 +894,36 @@ impl PlanNode for CreateNode {
 
     fn kind(&self) -> &'static str {
         "createNode"
+    }
+
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Convert inputs to JSON array of objects
+        let input_array: Vec<JsonValue> = self
+            .inputs
+            .iter()
+            .map(|input| {
+                let mut input_obj = serde_json::Map::new();
+                for (field_name, value) in &input.fields {
+                    input_obj.insert(field_name.clone(), value.clone());
+                }
+                JsonValue::Object(input_obj)
+            })
+            .collect();
+
+        obj.insert("input".to_string(), JsonValue::Array(input_array));
+
+        // Include child node (selectTopNode) if present
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        JsonValue::Object(obj)
     }
 }

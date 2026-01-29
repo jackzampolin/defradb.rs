@@ -13,10 +13,11 @@ use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode,
-    InnerAggregateDef, JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter,
-    ScanNode, SelectNode, SumNode, TypeJoinMany, TypeJoinOne,
+    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef,
+    JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
+    SumNode, TypeJoinMany, TypeJoinOne,
 };
+use crate::plan::groupby::ChildSelectMeta;
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
     IndexScanType,
@@ -71,11 +72,18 @@ impl Planner {
             .into_iter()
             .map(|c| (c.name.clone(), Arc::new(c)))
             .collect();
-        // Build a second map by CollectionID for relation field resolution
-        let collections_by_id: HashMap<String, Arc<CollectionVersion>> = collections
-            .values()
-            .map(|c| (c.collection_id.clone(), c.clone()))
-            .collect();
+        // Build a second map by CollectionID and VersionID for relation field resolution.
+        // FieldKind::Relation stores the schema version CID (version_id), so we need
+        // to look up by both collection_id and version_id.
+        let mut collections_by_id: HashMap<String, Arc<CollectionVersion>> = HashMap::new();
+        for c in collections.values() {
+            if !c.collection_id.is_empty() {
+                collections_by_id.insert(c.collection_id.clone(), c.clone());
+            }
+            if !c.version_id.is_empty() {
+                collections_by_id.insert(c.version_id.clone(), c.clone());
+            }
+        }
         Self {
             collections,
             collections_by_id,
@@ -237,7 +245,6 @@ impl Planner {
         // Build scan mapping: for queries with nested selections, relation filters, relation ordering,
         // relation aggregates, or relation groupBy fields, use full schema mapping so that FK fields
         // are available for TypeJoin lookups and schema indices don't collide with sequential render indices.
-        // For simple queries, use the render_mapping directly.
         let needs_joins = has_nested
             || filter_has_relations
             || order_has_relations
@@ -492,26 +499,15 @@ impl Planner {
             if let Some(ref fetcher) = self.fetcher {
                 scan = scan.with_fetcher(fetcher.clone());
             }
+            // Pass doc_ids to ScanNode for explain prefixes
+            if let Some(ref doc_ids) = select.doc_ids {
+                scan = scan.with_doc_ids(doc_ids.clone());
+            }
             Box::new(scan)
         };
 
-        // 2. Apply scalar filter before join (if present and not complex)
-        // For complex filters, we apply the whole filter after join instead.
-        // Note: Even with IndexScanNode, we may need a SelectNode for:
-        //   - Field projection
-        //   - Conditions not covered by the index
-        if !is_complex_filter && (scalar_filter.is_some() || !select.fields.is_empty()) {
-            let mut select_node = SelectNode::new(plan, scan_mapping.clone());
-            if let Some(filter) = scalar_filter {
-                select_node = select_node.with_filter(filter);
-            }
-            plan = Box::new(select_node);
-        } else if is_complex_filter && !select.fields.is_empty() {
-            // For complex filters, still need SelectNode for field projection (no filter yet)
-            plan = Box::new(SelectNode::new(plan, scan_mapping.clone()));
-        }
-
-        // 3. Apply join nodes for relation fields in the selection set
+        // 2. Apply join nodes BEFORE SelectNode (matches Go DefraDB plan construction order).
+        // TypeJoin nodes wrap the raw ScanNode, and SelectNode wraps the join result.
         // For simple filters: relation filters are extracted and applied inside TypeJoin nodes
         // For complex filters: pass None, the full filter is applied after join
         let filter_for_joins = if is_complex_filter {
@@ -519,14 +515,8 @@ impl Planner {
         } else {
             filter_for_plan.as_ref()
         };
-        (plan, scan_mapping) = self.apply_joins(
-            plan,
-            select,
-            &collection,
-            scan_mapping,
-            0,
-            filter_for_joins,
-        )?;
+        (plan, scan_mapping) =
+            self.apply_joins(plan, select, &collection, scan_mapping, 0, filter_for_joins)?;
 
         // 3b. Apply joins for multi-level relation filter paths where the first relation
         // is NOT in the selection set. If the first relation IS selected, then apply_joins
@@ -674,6 +664,32 @@ impl Planner {
             }
         }
 
+        // 3d. Apply SelectNode AFTER all joins (matches Go DefraDB plan order).
+        // The SelectNode wraps the joined plan and applies scalar filters.
+        // Note: Even with IndexScanNode, we may need a SelectNode for:
+        //   - Field projection
+        //   - Conditions not covered by the index
+        if !is_complex_filter && (scalar_filter.is_some() || !select.fields.is_empty()) {
+            let mut select_node = SelectNode::new(plan, scan_mapping.clone());
+            if let Some(ref doc_ids) = select.doc_ids {
+                select_node = select_node.with_doc_ids(doc_ids.clone());
+            }
+            if let Some(filter) = scalar_filter {
+                select_node = select_node.with_filter(filter);
+            }
+            plan = Box::new(select_node);
+        } else if is_complex_filter && !select.fields.is_empty() {
+            // For complex filters where there are no join-related fields,
+            // still need SelectNode for field projection (filter applied below)
+            if !needs_joins {
+                let mut select_node = SelectNode::new(plan, scan_mapping.clone());
+                if let Some(ref doc_ids) = select.doc_ids {
+                    select_node = select_node.with_doc_ids(doc_ids.clone());
+                }
+                plan = Box::new(select_node);
+            }
+        }
+
         // 4. Apply complex filter after join (when merged document is available)
         // Complex filters contain _and/_or with mixed scalar and relation conditions
         // that must be evaluated together on the merged document.
@@ -686,9 +702,11 @@ impl Planner {
                     Some(filter.clone())
                 };
                 if let Some(f) = pre_agg_filter {
-                    plan = Box::new(
-                        SelectNode::new(plan, scan_mapping.clone()).with_filter(f),
-                    );
+                    let mut select_node = SelectNode::new(plan, scan_mapping.clone()).with_filter(f);
+                    if let Some(ref doc_ids) = select.doc_ids {
+                        select_node = select_node.with_doc_ids(doc_ids.clone());
+                    }
+                    plan = Box::new(select_node);
                 }
             }
         }
@@ -719,8 +737,7 @@ impl Planner {
                 for field in &select.fields {
                     if let Requestable::Select(nested) = field {
                         if nested.field.name == "_group" {
-                            let alias_index =
-                                group_indices.get(alias_count).copied().unwrap_or(0);
+                            let alias_index = group_indices.get(alias_count).copied().unwrap_or(0);
                             alias_count += 1;
 
                             group_aliases.push(GroupAlias {
@@ -737,9 +754,8 @@ impl Planner {
                                 inner_extracted = true;
 
                                 if let Some(ref inner_group_by) = nested.group_by {
-                                    group_node = group_node.with_inner_group_by_fields(
-                                        inner_group_by.fields.clone(),
-                                    );
+                                    group_node = group_node
+                                        .with_inner_group_by_fields(inner_group_by.fields.clone());
                                 }
 
                                 // Extract inner aggregate definitions
@@ -804,9 +820,7 @@ impl Planner {
                                                                 third_agg.targets[0].field_name
                                                             {
                                                                 scan_mapping
-                                                                    .first_index_of_name(
-                                                                        field_name,
-                                                                    )
+                                                                    .first_index_of_name(field_name)
                                                                     .unwrap_or(0)
                                                             } else {
                                                                 0
@@ -839,6 +853,42 @@ impl Planner {
                 if !group_aliases.is_empty() {
                     group_node = group_node.with_group_aliases(group_aliases);
                 }
+
+                // Build child_selects metadata for explain output
+                // Each _group nested select contributes a ChildSelectMeta
+                let mut child_selects_meta: Vec<ChildSelectMeta> = Vec::new();
+                for field in &select.fields {
+                    if let Requestable::Select(nested) = field {
+                        if nested.field.name == "_group" {
+                            let mut meta = ChildSelectMeta {
+                                collection_name: select.collection_name.clone(),
+                                doc_ids: nested.doc_ids.clone(),
+                                filter: nested.filter.clone(),
+                                limit: nested.limit.clone(),
+                                order: nested.order_by.clone(),
+                                group_by: nested.group_by.as_ref().map(|gb| gb.fields.clone()),
+                            };
+
+                            // If this _group has a nested _group with further groupBy, include that
+                            for inner_field in &nested.fields {
+                                if let Requestable::Select(inner_nested) = inner_field {
+                                    if inner_nested.field.name == "_group" {
+                                        if let Some(ref inner_gb) = inner_nested.group_by {
+                                            meta.group_by = Some(inner_gb.fields.clone());
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            child_selects_meta.push(meta);
+                        }
+                    }
+                }
+                if !child_selects_meta.is_empty() {
+                    group_node = group_node.with_child_selects(child_selects_meta);
+                }
+
                 plan = Box::new(group_node);
             }
 
@@ -851,9 +901,8 @@ impl Planner {
             if let Some(ref filter) = select.filter {
                 let (_non_alias, alias_filter) = filter.split_alias();
                 if let Some(alias_f) = alias_filter {
-                    plan = Box::new(
-                        SelectNode::new(plan, scan_mapping.clone()).with_filter(alias_f),
-                    );
+                    plan =
+                        Box::new(SelectNode::new(plan, scan_mapping.clone()).with_filter(alias_f));
                 }
             }
 
@@ -931,9 +980,13 @@ impl Planner {
 
     /// Add aggregate nodes to the plan based on the select's aggregate fields.
     ///
-    /// Only adds plan nodes for group-by and field-only aggregates. Relation
-    /// and inline-array aggregates (targets with non-empty host_name) are
-    /// handled by compute_relation_aggregates() in the runner instead.
+    /// Handles three types of aggregates:
+    /// - Simple field aggregates (e.g., _sum(field: age))
+    /// - Group aggregates (e.g., _sum(_group: {field: age}))
+    /// - Relation aggregates (e.g., _sum(articles: {field: pages}))
+    ///
+    /// Relation and inline-array aggregates are handled by iterating through
+    /// the JSON array stored in the relation/array field.
     fn add_aggregate_nodes(
         &self,
         mut plan: Box<dyn PlanNode>,
@@ -942,16 +995,6 @@ impl Planner {
     ) -> Result<Box<dyn PlanNode>> {
         for field in &select.fields {
             if let Requestable::Aggregate(agg) = field {
-                // Skip relation and inline-array aggregates — they are computed
-                // in compute_relation_aggregates() after plan execution.
-                let is_host_aggregate = agg
-                    .targets
-                    .iter()
-                    .any(|t| !t.host_name.is_empty() && t.host_name != "_group");
-                if is_host_aggregate {
-                    continue;
-                }
-
                 // Get the index where the aggregate result should be stored.
                 // Use the output name (alias if set, otherwise type name) to look up the
                 // correct render_key index. This handles aliased aggregates correctly
@@ -965,40 +1008,42 @@ impl Planner {
                         ))
                     })?;
 
-                // For aggregates that operate on a field, get the field index.
-                // Also detect child aggregate targets: when host_name="_group" and
-                // the target field is an aggregate name computed by the inner group.
-                let mut is_child_aggregate = false;
-                let mut child_field_name = String::new();
-                let field_index = if !agg.targets.is_empty() && agg.targets[0].field_name.is_some()
-                {
-                    let target_field = agg.targets[0].field_name.as_ref().unwrap();
-                    // Check if this is a child aggregate (inner aggregate within _group).
-                    // When host_name is "_group" and target is an aggregate type name,
-                    // it's always a child aggregate - even if the same name exists in
-                    // the parent mapping (e.g., _max(_group: {field: _max})).
-                    let is_aggregate_name = matches!(
-                        target_field.as_str(),
-                        "_count" | "_sum" | "_avg" | "_min" | "_max"
-                    );
-                    if agg.targets[0].host_name == "_group"
-                        && (is_aggregate_name
-                            || mapping.first_index_of_name(target_field).is_none())
-                    {
-                        is_child_aggregate = true;
-                        child_field_name = target_field.clone();
-                        0 // placeholder - not used in child aggregate mode
-                    } else {
-                        mapping.first_index_of_name(target_field).ok_or_else(|| {
+                // Detect the aggregate source type and set up accordingly:
+                // 1. Child aggregate: host_name="_group" (iterate _group array)
+                // 2. Relation aggregate: host_name is a relation field (iterate relation array)
+                // 3. Simple aggregate: no host_name or host_name is non-relation field
+                let mut is_array_aggregate = false;
+                let mut array_field_index = 0usize;
+                let mut target_field_name = String::new();
+                let mut field_index = 0usize;
+
+                if !agg.targets.is_empty() {
+                    let target = &agg.targets[0];
+                    let host_name = &target.host_name;
+
+                    if host_name == "_group" {
+                        // Child aggregate within _group
+                        is_array_aggregate = true;
+                        array_field_index = mapping.first_index_of_name("_group").unwrap_or(0);
+                        target_field_name = target.field_name.clone().unwrap_or_default();
+                    } else if !host_name.is_empty() {
+                        // Relation or inline-array aggregate (e.g., _sum(articles: {field: pages}))
+                        // Get the relation/array field index
+                        if let Some(idx) = mapping.first_index_of_name(host_name) {
+                            is_array_aggregate = true;
+                            array_field_index = idx;
+                            target_field_name = target.field_name.clone().unwrap_or_default();
+                        }
+                    } else if let Some(ref fname) = target.field_name {
+                        // Simple field aggregate
+                        field_index = mapping.first_index_of_name(fname).ok_or_else(|| {
                             QueryError::execution(format!(
                                 "aggregate target field '{}' not found in mapping",
-                                target_field
+                                fname
                             ))
-                        })?
+                        })?;
                     }
-                } else {
-                    0 // Not used for count
-                };
+                }
 
                 // Extract filter and limit from aggregate target (if any)
                 let target_filter = if !agg.targets.is_empty() {
@@ -1012,20 +1057,13 @@ impl Planner {
                     None
                 };
 
-                // Get the _group field index for child aggregate mode
-                let group_field_index = if is_child_aggregate {
-                    mapping.first_index_of_name("_group").unwrap_or(0)
-                } else {
-                    0
-                };
-
                 match agg.aggregate_type {
                     AggregateType::Count => {
                         let mut node = CountNode::new(plan, mapping.clone(), agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1038,10 +1076,10 @@ impl Planner {
                     }
                     AggregateType::Sum => {
                         let mut node = SumNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1055,10 +1093,10 @@ impl Planner {
                     AggregateType::Average => {
                         let mut node =
                             AverageNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1071,10 +1109,10 @@ impl Planner {
                     }
                     AggregateType::Min => {
                         let mut node = MinNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1087,10 +1125,10 @@ impl Planner {
                     }
                     AggregateType::Max => {
                         let mut node = MaxNode::new(plan, mapping.clone(), field_index, agg_index);
-                        if is_child_aggregate {
+                        if is_array_aggregate {
                             node = node.with_child_aggregate_source(
-                                group_field_index,
-                                child_field_name.clone(),
+                                array_field_index,
+                                target_field_name.clone(),
                             );
                         }
                         if let Some(filter) = target_filter {
@@ -1223,26 +1261,27 @@ impl Planner {
 
             // Find the relation field in the parent collection
             let relation_field = parent_collection
-                    .field_by_name(relation_field_name)
-                    .ok_or_else(|| QueryError::unknown_field(relation_field_name))?;
+                .field_by_name(relation_field_name)
+                .ok_or_else(|| QueryError::unknown_field(relation_field_name))?;
 
-                // Verify it's a relation field
-                if !relation_field.kind.is_relation() {
-                    return Err(QueryError::execution(format!(
-                        "field '{}' on collection '{}' is not a relation (type: {}). \
+            // Verify it's a relation field
+            if !relation_field.kind.is_relation() {
+                return Err(QueryError::execution(format!(
+                    "field '{}' on collection '{}' is not a relation (type: {}). \
                          Only relation fields can have nested selections.",
-                        relation_field_name,
-                        parent_collection.name,
-                        relation_field.kind.graphql_type_name()
-                    )));
-                }
+                    relation_field_name,
+                    parent_collection.name,
+                    relation_field.kind.graphql_type_name()
+                )));
+            }
 
-                // Get the target collection
-                // The relation_collection_id() returns either:
-                // - CollectionID (CID) for FieldKind::Relation
-                // - RelativeID for FieldKind::SelfRef (empty string for same-type self-refs)
-                // - Collection name for FieldKind::Named
-                let target_collection_id = relation_field
+            // Get the target collection
+            // The relation_collection_id() returns either:
+            // - CollectionID (CID) for FieldKind::Relation
+            // - RelativeID for FieldKind::SelfRef (empty string for same-type self-refs)
+            // - Collection name for FieldKind::Named
+            let target_collection_id =
+                relation_field
                     .kind
                     .relation_collection_id()
                     .ok_or_else(|| {
@@ -1258,428 +1297,428 @@ impl Planner {
                     Arc::new(parent_collection.clone())
                 } else {
                     self.get_collection(target_collection_id)
+                        .or_else(|| {
+                            // CID lookup failed - try to find target by matching relation_name.
+                            // Handles CID mismatch from circular schema set-based versioning.
+                            let rel_name = relation_field.relation_name.as_deref().unwrap_or("");
+                            if rel_name.is_empty() {
+                                return None;
+                            }
+                            for coll in self.collections.values() {
+                                if coll.name == parent_collection.name {
+                                    continue;
+                                }
+                                for f in &coll.fields {
+                                    if f.relation_name.as_deref() == Some(rel_name) {
+                                        return Some(coll.clone());
+                                    }
+                                }
+                            }
+                            None
+                        })
                         .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
                 };
 
-                // Build child mapping for rendering (only selected fields)
-                let child_render_mapping = self.build_mapping(nested_select, &target_collection)?;
+            // Build child mapping for rendering (only selected fields)
+            let child_render_mapping = self.build_mapping(nested_select, &target_collection)?;
 
-                // Build scan mapping that includes ALL fields at schema indices.
-                // This is required because JoinSide derives FK field indices from the schema,
-                // so the doc fields must be at their schema positions for FK lookups to work.
-                let mut child_scan_mapping =
-                    self.build_scan_mapping_for_join(&target_collection, &child_render_mapping);
+            // Build scan mapping that includes ALL fields at schema indices.
+            // This is required because JoinSide derives FK field indices from the schema,
+            // so the doc fields must be at their schema positions for FK lookups to work.
+            let mut child_scan_mapping =
+                self.build_scan_mapping_for_join(&target_collection, &child_render_mapping);
 
-                // Check if aggregates reference this relation and need additional fields for filters.
-                // For example, _count(published: {filter: {rating: {_gt: 4.8}}}) needs the 'rating'
-                // field to be included even if it's not in the selection set.
-                for requestable in &select.fields {
-                    if let Requestable::Aggregate(agg) = requestable {
-                        for target in &agg.targets {
-                            if target.host_name == *relation_field_name {
-                                // This aggregate references this relation - add filter fields
-                                if let Some(ref filter) = target.filter {
-                                    for filter_field in filter.referenced_fields() {
-                                        // Skip special fields
-                                        if filter_field.starts_with('_') {
-                                            continue;
-                                        }
-                                        // Find the field index in the target collection
-                                        if let Some(idx) = target_collection
-                                            .fields
-                                            .iter()
-                                            .position(|f| f.name == filter_field)
-                                        {
-                                            // Add the field to child_scan_mapping if not present
-                                            if child_scan_mapping
-                                                .first_index_of_name(&filter_field)
-                                                .is_none()
-                                            {
-                                                child_scan_mapping.add(idx, &filter_field);
-                                            }
-                                            // Add render_key so the field appears in the output
-                                            if !child_scan_mapping
-                                                .render_keys
-                                                .iter()
-                                                .any(|rk| rk.key == filter_field)
-                                            {
-                                                child_scan_mapping.add_render_key(idx, &filter_field);
-                                            }
-                                        }
+            // Check if aggregates reference this relation and need additional fields for filters.
+            // For example, _count(published: {filter: {rating: {_gt: 4.8}}}) needs the 'rating'
+            // field to be included even if it's not in the selection set.
+            for requestable in &select.fields {
+                if let Requestable::Aggregate(agg) = requestable {
+                    for target in &agg.targets {
+                        if target.host_name == *relation_field_name {
+                            // This aggregate references this relation - add filter fields
+                            if let Some(ref filter) = target.filter {
+                                for filter_field in filter.referenced_fields() {
+                                    // Skip special fields
+                                    if filter_field.starts_with('_') {
+                                        continue;
                                     }
-                                }
-                                // Also add the aggregate target field if specified
-                                if let Some(ref field_name) = target.field_name {
+                                    // Find the field index in the target collection
                                     if let Some(idx) = target_collection
                                         .fields
                                         .iter()
-                                        .position(|f| f.name == *field_name)
+                                        .position(|f| f.name == filter_field)
                                     {
+                                        // Add the field to child_scan_mapping if not present
                                         if child_scan_mapping
-                                            .first_index_of_name(field_name)
+                                            .first_index_of_name(&filter_field)
                                             .is_none()
                                         {
-                                            child_scan_mapping.add(idx, field_name);
+                                            child_scan_mapping.add(idx, &filter_field);
                                         }
+                                        // Add render_key so the field appears in the output
                                         if !child_scan_mapping
                                             .render_keys
                                             .iter()
-                                            .any(|rk| rk.key == *field_name)
+                                            .any(|rk| rk.key == filter_field)
                                         {
-                                            child_scan_mapping.add_render_key(idx, field_name);
+                                            child_scan_mapping.add_render_key(idx, &filter_field);
                                         }
+                                    }
+                                }
+                            }
+                            // Also add the aggregate target field if specified
+                            if let Some(ref field_name) = target.field_name {
+                                if let Some(idx) = target_collection
+                                    .fields
+                                    .iter()
+                                    .position(|f| f.name == *field_name)
+                                {
+                                    if child_scan_mapping.first_index_of_name(field_name).is_none()
+                                    {
+                                        child_scan_mapping.add(idx, field_name);
+                                    }
+                                    if !child_scan_mapping
+                                        .render_keys
+                                        .iter()
+                                        .any(|rk| rk.key == *field_name)
+                                    {
+                                        child_scan_mapping.add_render_key(idx, field_name);
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                // Check if parent's order_by references fields in this relation.
-                // If so, add those fields to child_scan_mapping.render_keys so they're
-                // available in the merged JSON for ordering. The fields won't appear in
-                // the final output unless they're also in the selection set.
-                if let Some(ref order_by) = select.order_by {
-                    for condition in &order_by.conditions {
-                        // Check if this order condition starts with this relation field
-                        if condition.fields.len() > 1 && condition.fields[0] == *relation_field_name
-                        {
-                            // Get the nested field name (e.g., "verified" from ["author", "verified"])
-                            let nested_field = &condition.fields[1];
-                            // Find the schema index for this field
-                            if let Some(idx) = child_scan_mapping.first_index_of_name(nested_field)
-                            {
-                                // Add render_key if not already present
-                                if !child_scan_mapping
-                                    .render_keys
-                                    .iter()
-                                    .any(|rk| rk.key == *nested_field)
-                                {
-                                    child_scan_mapping.add_render_key(idx, nested_field);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Check if parent's filter has multi-level paths starting with this relation.
-                // If so, we need to add nested relation fields to the child mapping and build
-                // sub-joins for them so the filter can be evaluated on the merged document.
-                let multi_level_paths_for_relation: Vec<Vec<String>> = select
-                    .filter
-                    .as_ref()
-                    .map(|f| {
-                        f.get_multi_level_relation_paths()
-                            .into_iter()
-                            .filter(|path| {
-                                path.first()
-                                    .map_or(false, |first| first == relation_field_name)
-                            })
-                            .map(|path| path[1..].to_vec()) // Get remaining path after this relation
-                            .filter(|remaining| !remaining.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // Add render_keys for nested relation fields needed by multi-level filters
-                for remaining_path in &multi_level_paths_for_relation {
-                    if let Some(first_nested) = remaining_path.first() {
-                        if let Some(idx) = child_scan_mapping.first_index_of_name(first_nested) {
+            // Check if parent's order_by references fields in this relation.
+            // If so, add those fields to child_scan_mapping.render_keys so they're
+            // available in the merged JSON for ordering. The fields won't appear in
+            // the final output unless they're also in the selection set.
+            if let Some(ref order_by) = select.order_by {
+                for condition in &order_by.conditions {
+                    // Check if this order condition starts with this relation field
+                    if condition.fields.len() > 1 && condition.fields[0] == *relation_field_name {
+                        // Get the nested field name (e.g., "verified" from ["author", "verified"])
+                        let nested_field = &condition.fields[1];
+                        // Find the schema index for this field
+                        if let Some(idx) = child_scan_mapping.first_index_of_name(nested_field) {
+                            // Add render_key if not already present
                             if !child_scan_mapping
                                 .render_keys
                                 .iter()
-                                .any(|rk| rk.key == *first_nested)
+                                .any(|rk| rk.key == *nested_field)
                             {
-                                child_scan_mapping.add_render_key(idx, first_nested);
+                                child_scan_mapping.add_render_key(idx, nested_field);
                             }
                         }
                     }
                 }
+            }
 
-                // Get the relation field index in the parent mapping.
-                // First try by render_key (for aliased fields), then fall back to name lookup.
-                // The fallback handles relation fields inside _group which are added without render_keys.
-                let relation_field_index = mapping
-                    .try_find_index_from_render_key(output_name)
-                    .or_else(|| mapping.first_index_of_name(relation_field_name))
-                    .ok_or_else(|| {
-                        QueryError::internal(format!(
-                            "relation field '{}' (output name '{}') not in mapping",
-                            relation_field_name, output_name
-                        ))
-                    })?;
-
-                // If this relation field is inside _group, update the _group child mapping
-                // to use the correct index for rendering. TypeJoinMany stores the relation
-                // data at relation_field_index, so the child mapping must use the same index.
-                if let Some(grp_idx) = group_index {
-                    if let Some(group_child_mapping) = mapping.child_at_mut(grp_idx) {
-                        // Update the child mapping: replace the dynamic index with relation_field_index
-                        // First, find and remove any existing entry for this field
-                        let old_index =
-                            group_child_mapping.first_index_of_name(relation_field_name);
-                        if let Some(old_idx) = old_index {
-                            // Remove old render_key with the wrong index
-                            group_child_mapping
-                                .render_keys
-                                .retain(|rk| rk.index != old_idx);
-                        }
-                        // Add with the correct index
-                        group_child_mapping.add(relation_field_index, relation_field_name);
-                        group_child_mapping.add_render_key(relation_field_index, output_name);
-                    }
-                }
-
-                // Set up child scan mapping in parent (for TypeJoin to render children).
-                // We use child_scan_mapping (not child_render_mapping) because child docs
-                // have fields at schema indices, and render_keys need to match those indices.
-                mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
-
-                // Create the child scan plan with scan_mapping (includes FK fields for joins)
-                let mut child_scan =
-                    ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
-                if let Some(ref fetcher) = self.fetcher {
-                    child_scan = child_scan.with_fetcher(fetcher.clone());
-                }
-
-                // Extract nested limit/offset and order_by for per-parent application in TypeJoin.
-                let nested_limit = nested_select.limit.as_ref().and_then(|l| l.limit);
-                let nested_offset = nested_select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
-                let nested_order_by = nested_select.order_by.clone();
-
-                // Build a combined filter from doc_ids and explicit filter
-                let doc_ids_filter = if let Some(ref doc_ids) = nested_select.doc_ids {
-                    // Create a filter: _docID IN [...]
-                    if doc_ids.len() == 1 {
-                        // Single ID: _docID == "..."
-                        let mut conditions = HashMap::new();
-                        conditions.insert(
-                            "_docID".to_string(),
-                            serde_json::json!({"_eq": doc_ids[0]}),
-                        );
-                        Some(Filter::from_conditions(conditions))
-                    } else {
-                        // Multiple IDs: _docID IN [...]
-                        let mut conditions = HashMap::new();
-                        conditions.insert("_docID".to_string(), serde_json::json!({"_in": doc_ids}));
-                        Some(Filter::from_conditions(conditions))
-                    }
-                } else {
-                    None
-                };
-
-                // Combine doc_ids filter with explicit filter
-                let combined_filter = match (&doc_ids_filter, &nested_select.filter) {
-                    (Some(doc_filter), Some(explicit_filter)) => {
-                        // Both: AND them together
-                        Some(doc_filter.and(explicit_filter.clone()))
-                    }
-                    (Some(doc_filter), None) => Some(doc_filter.clone()),
-                    (None, Some(explicit_filter)) => Some(explicit_filter.clone()),
-                    (None, None) => None,
-                };
-
-                // Wrap in SelectNode if there's any filter
-                let mut child_plan: Box<dyn PlanNode> =
-                    if let Some(ref filter) = combined_filter {
-                        // Validate that all explicitly-filtered fields exist in the render mapping.
-                        // Skip doc_ids filter fields since _docID is always available.
-                        if let Some(ref explicit_filter) = nested_select.filter {
-                            for field in explicit_filter.referenced_fields() {
-                                if !child_render_mapping.has_field(&field) {
-                                    return Err(QueryError::filter_field_not_selected(
-                                        &field,
-                                        &target_collection.name,
-                                    ));
-                                }
-                            }
-                        }
-
-                        Box::new(
-                            SelectNode::new(Box::new(child_scan), child_scan_mapping.clone())
-                                .with_filter(filter.clone()),
-                        )
-                    } else {
-                        Box::new(child_scan)
-                    };
-
-                // Recursively apply joins for any nested selections within this nested select.
-                // This handles multi-level nesting like Users -> Posts -> Comments.
-                // Note: We pass None for parent_filter since relation filters only apply at the top level.
-                (child_plan, child_scan_mapping) = self.apply_joins(
-                    child_plan,
-                    nested_select,
-                    &target_collection,
-                    child_scan_mapping,
-                    depth + 1,
-                    None, // Nested relation filters handled differently
-                )?;
-
-                // Apply sub-joins for multi-level filter paths within this relation.
-                // For example, if we're joining Book → Author and the filter has path
-                // ["author", "published"], we need to add a sub-join for "published" here.
-                for remaining_path in &multi_level_paths_for_relation {
-                    let (new_child_plan, new_child_mapping) = self.apply_multi_level_sub_joins(
-                        child_plan,
-                        remaining_path,
-                        &target_collection,
-                        child_scan_mapping.clone(),
-                    )?;
-                    child_plan = new_child_plan;
-                    child_scan_mapping = new_child_mapping;
-                }
-
-                // Update parent mapping with the final child mapping (after sub-joins)
-                // This ensures the nested relation mappings are included
-                mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
-
-                // Find the other side of the relation
-                let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
-                    target_collection.field_by_relation(
-                        rel_name,
-                        &parent_collection.name,
-                        relation_field_name,
-                    )
-                } else {
-                    None
-                };
-
-                // Debug: Log relation field resolution
-                debug!(
-                    parent_collection = %parent_collection.name,
-                    target_collection = %target_collection.name,
-                    relation_field_name = %relation_field_name,
-                    relation_name = ?relation_field.relation_name,
-                    parent_is_primary = relation_field.is_primary,
-                    target_relation_field_found = target_relation_field.is_some(),
-                    target_field_name = ?target_relation_field.map(|f| &f.name),
-                    target_is_primary = ?target_relation_field.map(|f| f.is_primary),
-                    "Resolving relation for join"
-                );
-
-                // Get child relation field index (if it exists).
-                // For bidirectional relations, this is the index of the back-reference field
-                // (e.g., `author` field on posts when joining from users.posts).
-                // For unidirectional relations (no back-reference), we default to index 0.
-                // This is safe because TypeJoin nodes use the relation_id_field_index()
-                // (derived from the FK field) for actual join matching, not this index.
-                let child_relation_index = target_relation_field
-                    .and_then(|f| {
-                        target_collection
-                            .fields
-                            .iter()
-                            .position(|tf| tf.name == f.name)
-                    })
-                    .unwrap_or_else(|| {
-                        warn!(
-                            parent_collection = %parent_collection.name,
-                            target_collection = %target_collection.name,
-                            relation_field = %relation_field_name,
-                            "No back-reference field found for relation, using default index 0. \
-                             This may indicate a unidirectional relation or schema misconfiguration."
-                        );
-                        0
-                    });
-
-                // Create join sides
-                let parent_side = JoinSide::new(
-                    parent_collection.clone(),
-                    relation_field.clone(),
-                    relation_field_index,
-                )?;
-
-                let child_side = JoinSide::new(
-                    (*target_collection).clone(),
-                    target_relation_field
-                        .cloned()
-                        .unwrap_or_else(|| relation_field.clone()),
-                    child_relation_index,
-                )?;
-
-                // Extract relation filter for this join if parent has a filter
-                let relation_filter = parent_filter.and_then(|f| {
-                    f.extract_relation_filter(relation_field_name)
-                        .map(|nested_filter| RelationFilter {
-                            relation_field: relation_field_name.clone(),
-                            conditions: nested_filter,
+            // Check if parent's filter has multi-level paths starting with this relation.
+            // If so, we need to add nested relation fields to the child mapping and build
+            // sub-joins for them so the filter can be evaluated on the merged document.
+            let multi_level_paths_for_relation: Vec<Vec<String>> = select
+                .filter
+                .as_ref()
+                .map(|f| {
+                    f.get_multi_level_relation_paths()
+                        .into_iter()
+                        .filter(|path| {
+                            path.first()
+                                .map_or(false, |first| first == relation_field_name)
                         })
+                        .map(|path| path[1..].to_vec()) // Get remaining path after this relation
+                        .filter(|remaining| !remaining.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Add render_keys for nested relation fields needed by multi-level filters
+            for remaining_path in &multi_level_paths_for_relation {
+                if let Some(first_nested) = remaining_path.first() {
+                    if let Some(idx) = child_scan_mapping.first_index_of_name(first_nested) {
+                        if !child_scan_mapping
+                            .render_keys
+                            .iter()
+                            .any(|rk| rk.key == *first_nested)
+                        {
+                            child_scan_mapping.add_render_key(idx, first_nested);
+                        }
+                    }
+                }
+            }
+
+            // Get the relation field index in the parent mapping.
+            // First try by render_key (for aliased fields), then fall back to name lookup.
+            // The fallback handles relation fields inside _group which are added without render_keys.
+            let relation_field_index = mapping
+                .try_find_index_from_render_key(output_name)
+                .or_else(|| mapping.first_index_of_name(relation_field_name))
+                .ok_or_else(|| {
+                    QueryError::internal(format!(
+                        "relation field '{}' (output name '{}') not in mapping",
+                        relation_field_name, output_name
+                    ))
+                })?;
+
+            // If this relation field is inside _group, update the _group child mapping
+            // to use the correct index for rendering. TypeJoinMany stores the relation
+            // data at relation_field_index, so the child mapping must use the same index.
+            if let Some(grp_idx) = group_index {
+                if let Some(group_child_mapping) = mapping.child_at_mut(grp_idx) {
+                    // Update the child mapping: replace the dynamic index with relation_field_index
+                    // First, find and remove any existing entry for this field
+                    let old_index = group_child_mapping.first_index_of_name(relation_field_name);
+                    if let Some(old_idx) = old_index {
+                        // Remove old render_key with the wrong index
+                        group_child_mapping
+                            .render_keys
+                            .retain(|rk| rk.index != old_idx);
+                    }
+                    // Add with the correct index
+                    group_child_mapping.add(relation_field_index, relation_field_name);
+                    group_child_mapping.add_render_key(relation_field_index, output_name);
+                }
+            }
+
+            // Set up child scan mapping in parent (for TypeJoin to render children).
+            // We use child_scan_mapping (not child_render_mapping) because child docs
+            // have fields at schema indices, and render_keys need to match those indices.
+            mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
+
+            // Create the child scan plan with scan_mapping (includes FK fields for joins)
+            let mut child_scan =
+                ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
+            if let Some(ref fetcher) = self.fetcher {
+                child_scan = child_scan.with_fetcher(fetcher.clone());
+            }
+
+            // Extract nested limit/offset and order_by for per-parent application in TypeJoin.
+            let nested_limit = nested_select.limit.as_ref().and_then(|l| l.limit);
+            let nested_offset = nested_select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
+            let nested_order_by = nested_select.order_by.clone();
+
+            // Build a combined filter from doc_ids and explicit filter
+            let doc_ids_filter = if let Some(ref doc_ids) = nested_select.doc_ids {
+                // Create a filter: _docID IN [...]
+                if doc_ids.len() == 1 {
+                    // Single ID: _docID == "..."
+                    let mut conditions = HashMap::new();
+                    conditions.insert("_docID".to_string(), serde_json::json!({"_eq": doc_ids[0]}));
+                    Some(Filter::from_conditions(conditions))
+                } else {
+                    // Multiple IDs: _docID IN [...]
+                    let mut conditions = HashMap::new();
+                    conditions.insert("_docID".to_string(), serde_json::json!({"_in": doc_ids}));
+                    Some(Filter::from_conditions(conditions))
+                }
+            } else {
+                None
+            };
+
+            // Combine doc_ids filter with explicit filter
+            let combined_filter = match (&doc_ids_filter, &nested_select.filter) {
+                (Some(doc_filter), Some(explicit_filter)) => {
+                    // Both: AND them together
+                    Some(doc_filter.and(explicit_filter.clone()))
+                }
+                (Some(doc_filter), None) => Some(doc_filter.clone()),
+                (None, Some(explicit_filter)) => Some(explicit_filter.clone()),
+                (None, None) => None,
+            };
+
+            // Wrap in SelectNode if there's any filter
+            let mut child_plan: Box<dyn PlanNode> = if let Some(ref filter) = combined_filter {
+                // Validate that all explicitly-filtered fields exist in the render mapping.
+                // Skip doc_ids filter fields since _docID is always available.
+                if let Some(ref explicit_filter) = nested_select.filter {
+                    for field in explicit_filter.referenced_fields() {
+                        if !child_render_mapping.has_field(&field) {
+                            return Err(QueryError::filter_field_not_selected(
+                                &field,
+                                &target_collection.name,
+                            ));
+                        }
+                    }
+                }
+
+                Box::new(
+                    SelectNode::new(Box::new(child_scan), child_scan_mapping.clone())
+                        .with_filter(filter.clone()),
+                )
+            } else {
+                Box::new(child_scan)
+            };
+
+            // Recursively apply joins for any nested selections within this nested select.
+            // This handles multi-level nesting like Users -> Posts -> Comments.
+            // Note: We pass None for parent_filter since relation filters only apply at the top level.
+            (child_plan, child_scan_mapping) = self.apply_joins(
+                child_plan,
+                nested_select,
+                &target_collection,
+                child_scan_mapping,
+                depth + 1,
+                None, // Nested relation filters handled differently
+            )?;
+
+            // Apply sub-joins for multi-level filter paths within this relation.
+            // For example, if we're joining Book → Author and the filter has path
+            // ["author", "published"], we need to add a sub-join for "published" here.
+            for remaining_path in &multi_level_paths_for_relation {
+                let (new_child_plan, new_child_mapping) = self.apply_multi_level_sub_joins(
+                    child_plan,
+                    remaining_path,
+                    &target_collection,
+                    child_scan_mapping.clone(),
+                )?;
+                child_plan = new_child_plan;
+                child_scan_mapping = new_child_mapping;
+            }
+
+            // Update parent mapping with the final child mapping (after sub-joins)
+            // This ensures the nested relation mappings are included
+            mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
+
+            // Find the other side of the relation
+            let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
+                target_collection.field_by_relation(
+                    rel_name,
+                    &parent_collection.name,
+                    relation_field_name,
+                )
+            } else {
+                None
+            };
+
+            // Debug: Log relation field resolution
+            debug!(
+                parent_collection = %parent_collection.name,
+                target_collection = %target_collection.name,
+                relation_field_name = %relation_field_name,
+                relation_name = ?relation_field.relation_name,
+                parent_is_primary = relation_field.is_primary,
+                target_relation_field_found = target_relation_field.is_some(),
+                target_field_name = ?target_relation_field.map(|f| &f.name),
+                target_is_primary = ?target_relation_field.map(|f| f.is_primary),
+                "Resolving relation for join"
+            );
+
+            // Get child relation field index (if it exists).
+            // For bidirectional relations, this is the index of the back-reference field
+            // (e.g., `author` field on posts when joining from users.posts).
+            // For unidirectional relations (no back-reference), we default to index 0.
+            // This is safe because TypeJoin nodes use the relation_id_field_index()
+            // (derived from the FK field) for actual join matching, not this index.
+            let child_relation_index = target_relation_field
+                .and_then(|f| {
+                    target_collection
+                        .fields
+                        .iter()
+                        .position(|tf| tf.name == f.name)
+                })
+                .unwrap_or_else(|| {
+                    warn!(
+                        parent_collection = %parent_collection.name,
+                        target_collection = %target_collection.name,
+                        relation_field = %relation_field_name,
+                        "No back-reference field found for relation, using default index 0. \
+                         This may indicate a unidirectional relation or schema misconfiguration."
+                    );
+                    0
                 });
 
-                // Create the appropriate join node
-                // Note: We pass child_render_mapping as the output mapping (for TypeJoin to render children)
-                // but the child_plan uses child_scan_mapping internally (for FK lookups)
-                if relation_field.kind.is_array() {
-                    // One-to-many: TypeJoinMany
-                    let mut join_many = TypeJoinMany::new(
-                        plan,
-                        child_plan,
-                        parent_side,
-                        child_side,
-                        mapping.clone(),
-                    )?;
+            // Create join sides
+            let parent_side = JoinSide::new(
+                parent_collection.clone(),
+                relation_field.clone(),
+                relation_field_index,
+            )?;
 
-                    // Apply relation filter (filters parents by children)
-                    if let Some(rel_filter) = relation_filter {
-                        join_many = join_many.with_relation_filter(rel_filter);
-                    }
+            let child_side = JoinSide::new(
+                (*target_collection).clone(),
+                target_relation_field
+                    .cloned()
+                    .unwrap_or_else(|| relation_field.clone()),
+                child_relation_index,
+            )?;
 
-                    // Apply per-parent limit/offset/ordering
-                    if let Some(limit) = nested_limit {
-                        join_many = join_many.with_limit(limit);
-                    }
-                    if nested_offset > 0 {
-                        join_many = join_many.with_offset(nested_offset);
-                    }
-                    if let Some(order_by) = nested_order_by.clone() {
-                        join_many = join_many.with_order_by(order_by);
-                    }
+            // Extract relation filter for this join if parent has a filter
+            let relation_filter = parent_filter.and_then(|f| {
+                f.extract_relation_filter(relation_field_name)
+                    .map(|nested_filter| RelationFilter {
+                        relation_field: relation_field_name.clone(),
+                        conditions: nested_filter,
+                    })
+            });
 
-                    // Apply nested groupBy if present
-                    if let Some(ref group_by) = nested_select.group_by {
-                        join_many = join_many.with_group_by(group_by.clone());
+            // Create the appropriate join node
+            // Note: We pass child_render_mapping as the output mapping (for TypeJoin to render children)
+            // but the child_plan uses child_scan_mapping internally (for FK lookups)
+            if relation_field.kind.is_array() {
+                // One-to-many: TypeJoinMany
+                let mut join_many =
+                    TypeJoinMany::new(plan, child_plan, parent_side, child_side, mapping.clone())?;
 
-                        // Find the _group nested select and build its mapping
-                        // Use indices from child_scan_mapping so the mapping matches
-                        // the child document's field array indices.
-                        for field in &nested_select.fields {
-                            if let Requestable::Select(group_select) = field {
-                                if group_select.field.name == "_group" {
-                                    // Build mapping for _group contents using child_scan_mapping indices
-                                    let mut group_mapping = DocumentMapping::new();
-                                    for group_field in &group_select.fields {
-                                        if let Requestable::Field(f) = group_field {
-                                            // Use the index from child_scan_mapping
-                                            if let Some(idx) =
-                                                child_scan_mapping.first_index_of_name(&f.name)
-                                            {
-                                                let output_name = f.output_name().to_string();
-                                                group_mapping.add(idx, &output_name);
-                                                group_mapping.add_render_key(idx, output_name);
-                                            }
+                // Apply relation filter (filters parents by children)
+                if let Some(rel_filter) = relation_filter {
+                    join_many = join_many.with_relation_filter(rel_filter);
+                }
+
+                // Apply per-parent limit/offset/ordering
+                if let Some(limit) = nested_limit {
+                    join_many = join_many.with_limit(limit);
+                }
+                if nested_offset > 0 {
+                    join_many = join_many.with_offset(nested_offset);
+                }
+                if let Some(order_by) = nested_order_by.clone() {
+                    join_many = join_many.with_order_by(order_by);
+                }
+
+                // Apply nested groupBy if present
+                if let Some(ref group_by) = nested_select.group_by {
+                    join_many = join_many.with_group_by(group_by.clone());
+
+                    // Find the _group nested select and build its mapping
+                    // Use indices from child_scan_mapping so the mapping matches
+                    // the child document's field array indices.
+                    for field in &nested_select.fields {
+                        if let Requestable::Select(group_select) = field {
+                            if group_select.field.name == "_group" {
+                                // Build mapping for _group contents using child_scan_mapping indices
+                                let mut group_mapping = DocumentMapping::new();
+                                for group_field in &group_select.fields {
+                                    if let Requestable::Field(f) = group_field {
+                                        // Use the index from child_scan_mapping
+                                        if let Some(idx) =
+                                            child_scan_mapping.first_index_of_name(&f.name)
+                                        {
+                                            let output_name = f.output_name().to_string();
+                                            group_mapping.add(idx, &output_name);
+                                            group_mapping.add_render_key(idx, output_name);
                                         }
                                     }
-                                    join_many = join_many.with_group_mapping(group_mapping);
-                                    break;
                                 }
+                                join_many = join_many.with_group_mapping(group_mapping);
+                                break;
                             }
                         }
                     }
-
-                    plan = Box::new(join_many);
-                } else {
-                    // One-to-one: TypeJoinOne
-                    let mut join = TypeJoinOne::new(
-                        plan,
-                        child_plan,
-                        parent_side,
-                        child_side,
-                        mapping.clone(),
-                    );
-                    if let Some(rel_filter) = relation_filter {
-                        join = join.with_relation_filter(rel_filter);
-                    }
-                    plan = Box::new(join);
                 }
+
+                plan = Box::new(join_many);
+            } else {
+                // One-to-one: TypeJoinOne
+                let mut join =
+                    TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
+                if let Some(rel_filter) = relation_filter {
+                    join = join.with_relation_filter(rel_filter);
+                }
+                plan = Box::new(join);
+            }
         }
 
         // Handle relation filters without corresponding selections.
@@ -1689,9 +1728,10 @@ impl Planner {
             // Get relations referenced by the filter
             for (relation_name, nested_conditions) in filter.relation_conditions() {
                 // Skip if already joined via selection
-                let already_joined = select.fields.iter().any(|f| {
-                    matches!(f, Requestable::Select(s) if s.field.name == relation_name)
-                });
+                let already_joined = select
+                    .fields
+                    .iter()
+                    .any(|f| matches!(f, Requestable::Select(s) if s.field.name == relation_name));
                 if already_joined {
                     continue;
                 }
@@ -2005,7 +2045,7 @@ impl Planner {
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
                     {
                         Some(f) => f,
-                        None => continue, // Skip if not found (might be invalid)
+                        None => continue,
                     };
 
                     // Inline array fields are handled by scan_mapping setup
@@ -2025,7 +2065,35 @@ impl Planner {
                     } else {
                         match self.get_collection(target_collection_id) {
                             Some(c) => c,
-                            None => continue,
+                            None => {
+                                // CID lookup failed - try to find target by matching relation_name.
+                                // This handles cases where the relation's collection_id CID differs
+                                // from the target collection's current collection_id/version_id
+                                // (e.g., circular schema definitions with set-based versioning).
+                                let parent_rel_name =
+                                    relation_field.relation_name.as_deref().unwrap_or("");
+                                let mut found_by_relation = None;
+                                if !parent_rel_name.is_empty() {
+                                    for coll in self.collections.values() {
+                                        if coll.name == parent_collection.name {
+                                            continue;
+                                        }
+                                        for f in &coll.fields {
+                                            if f.relation_name.as_deref() == Some(parent_rel_name) {
+                                                found_by_relation = Some(coll.clone());
+                                                break;
+                                            }
+                                        }
+                                        if found_by_relation.is_some() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                match found_by_relation {
+                                    Some(c) => c,
+                                    None => continue,
+                                }
+                            }
                         }
                     };
 
@@ -2050,8 +2118,13 @@ impl Planner {
                                     .iter()
                                     .position(|f| f.name == filter_field)
                                 {
-                                    if let Some(child_mapping) = mapping.child_at_mut(relation_field_index) {
-                                        if child_mapping.first_index_of_name(&filter_field).is_none() {
+                                    if let Some(child_mapping) =
+                                        mapping.child_at_mut(relation_field_index)
+                                    {
+                                        if child_mapping
+                                            .first_index_of_name(&filter_field)
+                                            .is_none()
+                                        {
                                             child_mapping.add(idx, &filter_field);
                                             child_mapping.add_render_key(idx, &filter_field);
                                         }
@@ -2071,8 +2144,13 @@ impl Planner {
                                         .iter()
                                         .position(|f| f.name == *order_field)
                                     {
-                                        if let Some(child_mapping) = mapping.child_at_mut(relation_field_index) {
-                                            if child_mapping.first_index_of_name(order_field).is_none() {
+                                        if let Some(child_mapping) =
+                                            mapping.child_at_mut(relation_field_index)
+                                        {
+                                            if child_mapping
+                                                .first_index_of_name(order_field)
+                                                .is_none()
+                                            {
                                                 child_mapping.add(idx, order_field);
                                                 child_mapping.add_render_key(idx, order_field);
                                             }
@@ -2431,8 +2509,7 @@ impl Planner {
                 TypeJoinMany::new(plan, child_plan, parent_side, child_side, mapping.clone())?;
             Ok((Box::new(join_many), mapping))
         } else {
-            let join =
-                TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
+            let join = TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
             Ok((Box::new(join), mapping))
         }
     }
@@ -3290,8 +3367,11 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The plan should be a TypeJoinOne (for one-to-one)
-        assert_eq!(plan.kind(), "typeJoinOne");
+        // After plan_with_index_info: ScanNode → TypeJoinOne → SelectNode
+        // Outermost is SelectNode (Go DefraDB plan order: joins before select)
+        assert_eq!(plan.kind(), "selectNode");
+        let source = plan.source().unwrap();
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3310,8 +3390,11 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The plan should be a TypeJoinMany (for one-to-many)
-        assert_eq!(plan.kind(), "typeJoinMany");
+        // After plan_with_index_info: ScanNode → TypeJoinMany → SelectNode
+        // Outermost is SelectNode (Go DefraDB plan order: joins before select)
+        assert_eq!(plan.kind(), "selectNode");
+        let source = plan.source().unwrap();
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3347,12 +3430,16 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be a LimitNode wrapping the join
+        // The outermost node should be a LimitNode
         assert_eq!(plan.kind(), "limitNode");
 
-        // The source should be the join
+        // The source should be SelectNode (which wraps the join)
         let source = plan.source().unwrap();
-        assert_eq!(source.kind(), "typeJoinMany");
+        assert_eq!(source.kind(), "selectNode");
+
+        // SelectNode's source should be the join
+        let join = source.source().unwrap();
+        assert_eq!(join.kind(), "typeIndexJoin");
     }
 
     // ========================================================================
@@ -3381,14 +3468,12 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be TypeJoinMany
-        assert_eq!(plan.kind(), "typeJoinMany");
+        // The outermost node should be selectNode (wraps the join)
+        assert_eq!(plan.kind(), "selectNode");
 
-        // The child source of the join should be a selectNode (with the filter)
-        // not a raw scanNode
+        // SelectNode's source should be typeIndexJoin
         let source = plan.source().unwrap();
-        // Parent source is selectNode
-        assert_eq!(source.kind(), "selectNode");
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3413,12 +3498,12 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be TypeJoinOne
-        assert_eq!(plan.kind(), "typeJoinOne");
+        // The outermost node should be selectNode (wraps the join)
+        assert_eq!(plan.kind(), "selectNode");
 
-        // The parent source of the join should be a selectNode
+        // SelectNode's source should be typeIndexJoin
         let source = plan.source().unwrap();
-        assert_eq!(source.kind(), "selectNode");
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]
@@ -3453,12 +3538,12 @@ mod tests {
 
         let plan = planner.plan(&select).unwrap();
 
-        // The outermost node should be TypeJoinMany
-        assert_eq!(plan.kind(), "typeJoinMany");
+        // The outermost node should be selectNode (wraps the join)
+        assert_eq!(plan.kind(), "selectNode");
 
-        // The parent source should be selectNode (with parent filter)
+        // SelectNode's source should be typeIndexJoin
         let source = plan.source().unwrap();
-        assert_eq!(source.kind(), "selectNode");
+        assert_eq!(source.kind(), "typeIndexJoin");
     }
 
     #[tokio::test]

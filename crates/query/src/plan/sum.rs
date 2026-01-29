@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::mapper::{Filter, Limit};
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, ExecInfo, PlanNode};
 
 /// SumNode computes the sum of a numeric field from its source.
 ///
@@ -41,6 +41,8 @@ pub struct SumNode {
     aggregate_limit: Option<Limit>,
     /// If set, operate in "child aggregate" mode: read values from _group JSON array.
     child_aggregate_source: Option<(usize, String)>,
+    /// Execution statistics for explain execute mode
+    exec_info: ExecInfo,
 }
 
 impl SumNode {
@@ -65,6 +67,7 @@ impl SumNode {
             aggregate_filter: None,
             aggregate_limit: None,
             child_aggregate_source: None,
+            exec_info: ExecInfo::default(),
         }
     }
 
@@ -160,6 +163,7 @@ impl PlanNode for SumNode {
         self.done = false;
         self.started = false;
         self.grouped_mode = false;
+        self.exec_info = ExecInfo::default();
         self.source.init().await
     }
 
@@ -173,6 +177,9 @@ impl PlanNode for SumNode {
         if !self.started {
             self.start().await?;
         }
+
+        // Track iterations (Go counts each call to next)
+        self.exec_info.iterations += 1;
 
         // Child aggregate mode: read from _group JSON array on each doc
         if let Some((group_index, ref field_name)) = self.child_aggregate_source {
@@ -289,5 +296,29 @@ impl PlanNode for SumNode {
 
     fn is_grouped_source(&self) -> bool {
         self.source.is_grouped_source()
+    }
+
+    fn exec_info(&self) -> ExecInfo {
+        self.exec_info.clone()
+    }
+
+    fn explain_execute_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // Go DefraDB execute format: iterations
+        obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.exec_info.iterations),
+        );
+
+        // Recursively explain child node with execution info
+        let child_explain = self.source.explain_execute();
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        serde_json::Value::Object(obj)
     }
 }

@@ -227,8 +227,16 @@ fn test_time_format_matches_go_rfc3339_nano() {
     let s1 = map1.get("timestamp").unwrap().as_str().unwrap();
 
     // Should NOT have .000000000
-    assert!(!s1.contains(".000000000"), "Expected no fractional seconds for zero nanos, got: {}", s1);
-    assert!(s1.ends_with("-05:00"), "Expected -05:00 timezone, got: {}", s1);
+    assert!(
+        !s1.contains(".000000000"),
+        "Expected no fractional seconds for zero nanos, got: {}",
+        s1
+    );
+    assert!(
+        s1.ends_with("-05:00"),
+        "Expected -05:00 timezone, got: {}",
+        s1
+    );
 
     // Test 2: Time with nanoseconds (Go: "2017-07-23T03:46:56.123456789-05:00")
     let t2 = t1.with_nanosecond(123456789).unwrap();
@@ -240,5 +248,9 @@ fn test_time_format_matches_go_rfc3339_nano() {
     let s2 = map2.get("timestamp").unwrap().as_str().unwrap();
 
     // Should have .123456789
-    assert!(s2.contains(".123456789"), "Expected .123456789, got: {}", s2);
+    assert!(
+        s2.contains(".123456789"),
+        "Expected .123456789, got: {}",
+        s2
+    );
 }

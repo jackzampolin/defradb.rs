@@ -65,6 +65,10 @@ pub struct Document {
     /// Stored in the datastore at key `/{collectionShortID}/v/{docID}/v`.
     #[serde(skip)]
     schema_version_id: Option<String>,
+
+    /// Whether this document has been soft-deleted (marked with DeletedObjectMarker).
+    #[serde(skip)]
+    deleted: bool,
 }
 
 impl Document {
@@ -78,6 +82,7 @@ impl Document {
             is_dirty: true,
             collection: None,
             schema_version_id: None,
+            deleted: false,
         }
     }
 
@@ -92,6 +97,7 @@ impl Document {
             is_dirty: true,
             collection: Some(collection),
             schema_version_id: Some(version_id),
+            deleted: false,
         }
     }
 
@@ -105,6 +111,7 @@ impl Document {
             is_dirty: true,
             collection: None,
             schema_version_id: None,
+            deleted: false,
         }
     }
 
@@ -209,6 +216,16 @@ impl Document {
             // If no version is set, assume it's already at target (legacy behavior)
             None => false,
         }
+    }
+
+    /// Check if this document is soft-deleted.
+    pub fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+
+    /// Mark this document as soft-deleted.
+    pub fn set_deleted(&mut self, deleted: bool) {
+        self.deleted = deleted;
     }
 
     /// Check if the document has unsaved changes.
@@ -517,6 +534,7 @@ mod tests {
             is_embedded_only: false,
             is_placeholder: false,
             vector_embeddings: vec![],
+            root_id: 0,
         });
 
         // Generate the docID

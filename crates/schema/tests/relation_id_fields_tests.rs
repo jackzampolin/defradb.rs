@@ -144,10 +144,18 @@ fn test_finalize_relations_adds_id_fields() {
     );
 
     let mut counter = 100;
-    CollectionVersion::finalize_relations(&mut collections, || {
-        counter += 1;
-        counter.to_string()
-    })
+    let mut index_counter = 10000u32;
+    CollectionVersion::finalize_relations(
+        &mut collections,
+        || {
+            counter += 1;
+            counter.to_string()
+        },
+        || {
+            index_counter += 1;
+            index_counter
+        },
+    )
     .unwrap();
 
     let users = collections.get("users").unwrap();
@@ -215,10 +223,18 @@ fn test_finalize_relations_hashmap() {
     );
 
     let mut counter = 100;
-    CollectionVersion::finalize_relations_hashmap(&mut collections, || {
-        counter += 1;
-        counter.to_string()
-    })
+    let mut index_counter = 10000u32;
+    CollectionVersion::finalize_relations_hashmap(
+        &mut collections,
+        || {
+            counter += 1;
+            counter.to_string()
+        },
+        || {
+            index_counter += 1;
+            index_counter
+        },
+    )
     .unwrap();
 
     // Verify HashMap was updated in place

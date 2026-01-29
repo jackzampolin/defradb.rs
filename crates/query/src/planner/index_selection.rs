@@ -454,7 +454,10 @@ pub fn filter_to_index_scan(
                 }
             }
             // _ne/_like use full index scan with post-filtering (matches Go behavior)
-            FilterOp::Ne | FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike
+            FilterOp::Ne
+            | FilterOp::Like
+            | FilterOp::Nlike
+            | FilterOp::Ilike
             | FilterOp::Nilike => {
                 has_scan_all = true;
             }
