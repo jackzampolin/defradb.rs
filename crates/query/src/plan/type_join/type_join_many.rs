@@ -631,7 +631,8 @@ impl PlanNode for TypeJoinMany {
         let root_explain = self.parent_plan.explain();
         obj.insert("root".to_string(), root_explain);
 
-        // subType: the child plan's explain wrapped in selectTopNode > selectNode
+        // subType: the child plan's explain wrapped in selectTopNode
+        // Optionally includes orderNode and/or limitNode wrappers
         // selectNode must include docID and filter attributes (Go always includes these)
         let child_explain = self.child_plan.explain();
         let mut select_node_inner = serde_json::Map::new();
@@ -643,11 +644,67 @@ impl PlanNode for TypeJoinMany {
                 select_node_inner.insert(key.clone(), value.clone());
             }
         }
-        let sub_type = serde_json::json!({
-            "selectTopNode": {
-                "selectNode": serde_json::Value::Object(select_node_inner)
+
+        // Build the subType structure based on order/limit presence
+        // Structure: selectTopNode > [orderNode >] [limitNode >] selectNode > scanNode
+        let has_order = self.child_order_by.is_some();
+        let has_limit = self.child_limit.is_some() || self.child_offset > 0;
+
+        // Start with selectNode, then wrap with limitNode, then orderNode
+        let mut inner_content = serde_json::Value::Object(select_node_inner);
+
+        if has_limit {
+            // Wrap selectNode in limitNode
+            let mut limit_node = serde_json::Map::new();
+            if let Some(limit) = self.child_limit {
+                limit_node.insert(
+                    "limit".to_string(),
+                    serde_json::Value::Number(limit.into()),
+                );
             }
-        });
+            // Go always includes offset
+            limit_node.insert(
+                "offset".to_string(),
+                serde_json::Value::Number(self.child_offset.into()),
+            );
+            limit_node.insert("selectNode".to_string(), inner_content);
+            inner_content = serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
+        } else {
+            // No limit, wrap selectNode directly
+            inner_content = serde_json::json!({ "selectNode": inner_content });
+        }
+
+        if has_order {
+            // Wrap in orderNode
+            let mut order_node = serde_json::Map::new();
+            // Add order attributes from child_order_by
+            if let Some(ref order_by) = self.child_order_by {
+                let orderings: Vec<JsonValue> = order_by
+                    .conditions
+                    .iter()
+                    .map(|cond| {
+                        serde_json::json!({
+                            "direction": match cond.direction {
+                                OrderDirection::Asc => "ASC",
+                                OrderDirection::Desc => "DESC",
+                            },
+                            "fields": cond.fields.clone()
+                        })
+                    })
+                    .collect();
+                order_node.insert("orderings".to_string(), serde_json::json!(orderings));
+            }
+            // Add the child (limitNode or selectNode)
+            if let Some(inner_obj) = inner_content.as_object() {
+                for (key, value) in inner_obj {
+                    order_node.insert(key.clone(), value.clone());
+                }
+            }
+            inner_content = serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
+        }
+
+        // Wrap everything in selectTopNode
+        let sub_type = serde_json::json!({ "selectTopNode": inner_content });
         obj.insert("subType".to_string(), sub_type);
 
         serde_json::Value::Object(obj)
@@ -661,7 +718,8 @@ impl PlanNode for TypeJoinMany {
         let root_explain = self.parent_plan.explain_debug();
         inner_obj.insert("root".to_string(), root_explain);
 
-        // subType: the child plan's explain_debug wrapped in selectTopNode > selectNode
+        // subType: the child plan's explain_debug wrapped in selectTopNode
+        // Optionally includes orderNode and/or limitNode wrappers
         let child_explain = self.child_plan.explain_debug();
         let mut select_node_inner = serde_json::Map::new();
         // Merge child explain into selectNode
@@ -670,11 +728,41 @@ impl PlanNode for TypeJoinMany {
                 select_node_inner.insert(key.clone(), value.clone());
             }
         }
-        let sub_type = serde_json::json!({
-            "selectTopNode": {
-                "selectNode": serde_json::Value::Object(select_node_inner)
+
+        // Build the subType structure based on order/limit presence
+        // Structure: selectTopNode > [orderNode >] [limitNode >] selectNode > scanNode
+        let has_order = self.child_order_by.is_some();
+        let has_limit = self.child_limit.is_some() || self.child_offset > 0;
+
+        // Start with selectNode, then wrap with limitNode, then orderNode
+        let mut inner_content = serde_json::Value::Object(select_node_inner);
+
+        if has_limit {
+            // Wrap selectNode in limitNode (debug mode: no attributes, just structure)
+            inner_content = serde_json::json!({
+                "limitNode": {
+                    "selectNode": inner_content
+                }
+            });
+        } else {
+            // No limit, wrap selectNode directly
+            inner_content = serde_json::json!({ "selectNode": inner_content });
+        }
+
+        if has_order {
+            // Wrap in orderNode (debug mode: no attributes, just structure)
+            let mut order_node_content = serde_json::Map::new();
+            // Add the child (limitNode or selectNode)
+            if let Some(inner_obj) = inner_content.as_object() {
+                for (key, value) in inner_obj {
+                    order_node_content.insert(key.clone(), value.clone());
+                }
             }
-        });
+            inner_content = serde_json::json!({ "orderNode": serde_json::Value::Object(order_node_content) });
+        }
+
+        // Wrap everything in selectTopNode
+        let sub_type = serde_json::json!({ "selectTopNode": inner_content });
         inner_obj.insert("subType".to_string(), sub_type);
 
         // Wrap in typeJoinMany

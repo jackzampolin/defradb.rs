@@ -17,6 +17,7 @@ use crate::plan::{
     JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
     SumNode, TypeJoinMany, TypeJoinOne,
 };
+use crate::plan::groupby::ChildSelectMeta;
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
     IndexScanType,
@@ -837,6 +838,42 @@ impl Planner {
                 if !group_aliases.is_empty() {
                     group_node = group_node.with_group_aliases(group_aliases);
                 }
+
+                // Build child_selects metadata for explain output
+                // Each _group nested select contributes a ChildSelectMeta
+                let mut child_selects_meta: Vec<ChildSelectMeta> = Vec::new();
+                for field in &select.fields {
+                    if let Requestable::Select(nested) = field {
+                        if nested.field.name == "_group" {
+                            let mut meta = ChildSelectMeta {
+                                collection_name: select.collection_name.clone(),
+                                doc_ids: nested.doc_ids.clone(),
+                                filter: nested.filter.clone(),
+                                limit: nested.limit.clone(),
+                                order: nested.order_by.clone(),
+                                group_by: nested.group_by.as_ref().map(|gb| gb.fields.clone()),
+                            };
+
+                            // If this _group has a nested _group with further groupBy, include that
+                            for inner_field in &nested.fields {
+                                if let Requestable::Select(inner_nested) = inner_field {
+                                    if inner_nested.field.name == "_group" {
+                                        if let Some(ref inner_gb) = inner_nested.group_by {
+                                            meta.group_by = Some(inner_gb.fields.clone());
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            child_selects_meta.push(meta);
+                        }
+                    }
+                }
+                if !child_selects_meta.is_empty() {
+                    group_node = group_node.with_child_selects(child_selects_meta);
+                }
+
                 plan = Box::new(group_node);
             }
 
