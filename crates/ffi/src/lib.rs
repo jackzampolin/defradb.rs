@@ -15,25 +15,9 @@
 //!     ↓
 //! db, query, storage crates
 //! ```
-//!
-//! # Usage from Go
-//!
-//! 1. Build the static library: `cargo build --release -p ffi`
-//! 2. Generate headers: `cbindgen --crate ffi --output defra.h`
-//! 3. Link from Go with CGO directives
-//!
-//! # MVP Functions
-//!
-//! - `defra_init()` - Initialize the library
-//! - `defra_version()` - Get library version
-//! - `new_node()` - Create a new database node
-//! - `node_close()` - Close and cleanup a node
-//! - `add_schema()` - Add GraphQL SDL schema
-//! - `get_collections()` - List all collections
-//! - `exec_request()` - Execute GraphQL queries/mutations
-//! - `defra_free_string()` - Free strings allocated by FFI functions
 
 pub mod acp;
+pub mod block;
 pub mod collection;
 pub mod document;
 pub mod index;
@@ -70,52 +54,87 @@ macro_rules! get_runtime {
     };
 }
 
-// Re-export FFI functions at crate root
+// Re-export FFI functions at crate root for cbindgen
 pub use acp::{
-    add_dac_actor_relationship, add_dac_policy, add_nac_actor_relationship, create_identity,
-    delete_dac_actor_relationship, delete_nac_actor_relationship, disable_nac, enable_nac,
-    get_dac_policy, get_nac_status, get_node_identity, list_dac_policies, re_enable_nac,
+    acp_add_dac_actor_relationship, acp_add_dac_policy, acp_add_nac_actor_relationship,
+    acp_delete_dac_actor_relationship, acp_delete_nac_actor_relationship, acp_disable_nac,
+    acp_get_nac_status, acp_re_enable_nac, get_node_identity, identity_free, identity_new,
 };
+pub use block::block_verify_signature;
 pub use collection::{
-    add_view, delete_collection, find_collection_by_id, get_collection_by_name,
-    get_collection_by_version_id, has_collection, patch_collection, refresh_views,
-    set_active_collection_version, set_migration,
+    collection_delete, collection_describe, collection_patch, set_active_collection, view_add,
+    view_refresh,
 };
-pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
-pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
-pub use lens::{lens_add, lens_list};
+pub use document::{
+    collection_create, collection_get, collection_list_doc_ids, collection_truncate,
+    collection_update,
+};
+pub use index::{
+    encrypted_index_create, encrypted_index_delete, encrypted_index_list, index_create, index_drop,
+    index_list,
+};
+pub use lens::{lens_add, lens_list, lens_set};
 pub use node::{new_node, node_close};
 pub use p2p::{
-    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_connect, p2p_delete_replicator,
-    p2p_get_all_collections, p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections,
-    p2p_set_replicator,
+    p2p_active_peers, p2p_add_collections, p2p_branchable_collection_sync,
+    p2p_collection_sync_versions, p2p_connect, p2p_delete_replicator, p2p_document_add,
+    p2p_document_get_all, p2p_document_remove, p2p_document_sync, p2p_get_all_collections,
+    p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections, p2p_set_replicator,
 };
-pub use query::exec_request;
-pub use schema::{add_schema, get_collections};
-pub use subscription::{close_subscription, create_subscription, poll_subscription};
-pub use txn::{begin_txn, commit_txn, exec_request_in_txn, rollback_txn};
+pub use query::execute_query;
+pub use schema::add_schema;
+pub use subscription::{close_subscription, poll_subscription};
+pub use txn::{transaction_commit, transaction_create, transaction_discard};
 pub use types::defra_free_string;
 
 /// Initialize the FFI library.
 ///
 /// This must be called once before any other FFI functions.
 /// Safe to call multiple times.
-#[no_mangle]
+#[export_name = "DefraInit"]
 pub extern "C" fn defra_init() {
-    // Ignore return value - errors will surface when operations are attempted
     let _ = runtime::init_runtime();
 }
 
 /// Get the library version.
 ///
 /// Returns a null-terminated string that must be freed with `defra_free_string`.
-#[no_mangle]
+#[export_name = "DefraVersion"]
 pub extern "C" fn defra_version() -> *mut c_char {
     let version = env!("CARGO_PKG_VERSION");
-    // CARGO_PKG_VERSION is a compile-time constant without null bytes
     CString::new(version)
         .unwrap_or_else(|_| CString::new("unknown").unwrap())
         .into_raw()
+}
+
+/// Get version info matching Go's VersionGet interface.
+///
+/// # Arguments
+///
+/// * `flag_full` - If non-zero, return full version string
+/// * `flag_json` - If non-zero, return JSON object
+#[export_name = "VersionGet"]
+pub extern "C" fn version_get(
+    flag_full: std::ffi::c_int,
+    flag_json: std::ffi::c_int,
+) -> types::FfiResult {
+    let version = env!("CARGO_PKG_VERSION");
+
+    if flag_json != 0 {
+        let json = serde_json::json!({
+            "version": version,
+            "commit": option_env!("GIT_HASH").unwrap_or(""),
+            "buildDate": option_env!("BUILD_DATE").unwrap_or(""),
+            "goVersion": "",
+            "platform": "rust"
+        })
+        .to_string();
+        types::FfiResult::success(json)
+    } else if flag_full != 0 {
+        types::FfiResult::success(format!("defradb v{} (rust)", version))
+    } else {
+        types::FfiResult::success(version.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -136,11 +155,39 @@ mod tests {
         let version = defra_version();
         let version_str = unsafe { CStr::from_ptr(version).to_string_lossy() };
         assert!(!version_str.is_empty());
-        // Should match Cargo.toml version
         assert!(version_str.starts_with("0."));
 
-        // Clean up
         unsafe { defra_free_string(version) };
+    }
+
+    #[test]
+    fn test_version_get_short() {
+        let result = version_get(0, 0);
+        assert_eq!(result.status, 0);
+        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.starts_with("0."), "should be version number");
+        unsafe { defra_free_string(result.value) };
+    }
+
+    #[test]
+    fn test_version_get_full() {
+        let result = version_get(1, 0);
+        assert_eq!(result.status, 0);
+        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.contains("defradb"), "should contain defradb");
+        assert!(value.contains("rust"), "should indicate rust platform");
+        unsafe { defra_free_string(result.value) };
+    }
+
+    #[test]
+    fn test_version_get_json() {
+        let result = version_get(0, 1);
+        assert_eq!(result.status, 0);
+        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
+        let parsed: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert!(parsed["version"].as_str().unwrap().starts_with("0."));
+        assert_eq!(parsed["platform"].as_str().unwrap(), "rust");
+        unsafe { defra_free_string(result.value) };
     }
 
     #[test]
@@ -148,10 +195,8 @@ mod tests {
         use std::ffi::CString;
         use types::NodeInitOptions;
 
-        // Initialize
         defra_init();
 
-        // Create node
         let options = NodeInitOptions::default();
         let result = new_node(options);
         assert_eq!(result.status, 0, "new_node failed");
@@ -159,25 +204,18 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type Person { name: String, age: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, sdl.as_ptr(), 0) };
         assert_eq!(result.status, 0, "add_schema failed");
         if !result.value.is_null() {
             unsafe { defra_free_string(result.value) };
         }
-
-        // Get collections
-        let result = get_collections(node);
-        assert_eq!(result.status, 0, "get_collections failed");
-        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(value.contains("Person"), "should contain Person collection");
-        unsafe { defra_free_string(result.value) };
 
         // Create a person
         let mutation = CString::new(
             r#"mutation { create_Person(input: {name: "Bob", age: 30}) { _docID name age } }"#,
         )
         .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { execute_query(node, mutation.as_ptr(), 0, ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "mutation failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "should contain Bob");
@@ -185,7 +223,8 @@ mod tests {
 
         // Query people
         let query_str = CString::new("{ Person { name age } }").unwrap();
-        let result = unsafe { exec_request(node, query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result =
+            unsafe { execute_query(node, query_str.as_ptr(), 0, ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "query failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "query should return Bob");

@@ -1,178 +1,21 @@
 //! Subscription management for FFI.
 //!
 //! This module exposes a polling-based subscription API for FFI callers.
-//! Since FFI can't easily handle async callbacks, we use a polling model:
+//! Go uses string-based subscription IDs and FfiResult return types.
 //!
-//! 1. `create_subscription` - Start listening for events, returns handle
-//! 2. `poll_subscription` - Non-blocking poll for next event
-//! 3. `close_subscription` - Stop listening and cleanup
+//! Subscription creation goes through ExecuteQuery (returns status=2).
+//! This module only handles poll and close.
 
-use std::ffi::{c_char, c_int};
-use std::ptr;
+use std::ffi::c_char;
 
-use crate::state::{SubscriptionState, NODES, SUBSCRIPTIONS};
-use crate::types::{c_str_to_string, sanitize_to_cstring};
-use crate::ERR_INVALID_NODE_HANDLE;
-
-/// Result type for subscription creation.
-#[repr(C)]
-pub struct CreateSubscriptionResult {
-    /// Status code: 0=success, 1=error
-    pub status: c_int,
-    /// Error message (null on success). Caller must free with `defra_free_string`.
-    pub error: *mut c_char,
-    /// Subscription handle (0 on error).
-    pub subscription_handle: usize,
-}
-
-impl CreateSubscriptionResult {
-    fn success(handle: usize) -> Self {
-        Self {
-            status: 0,
-            error: ptr::null_mut(),
-            subscription_handle: handle,
-        }
-    }
-
-    fn error(message: impl Into<String>) -> Self {
-        Self {
-            status: 1,
-            error: sanitize_to_cstring(message, "unknown error").into_raw(),
-            subscription_handle: 0,
-        }
-    }
-}
-
-/// Result type for polling subscriptions.
-///
-/// Status codes:
-/// - 0: Event available (value contains JSON event data)
-/// - 1: Error occurred
-/// - 2: No event available (subscription open but no pending events)
-/// - 3: Subscription closed (no more events will arrive)
-#[repr(C)]
-pub struct PollSubscriptionResult {
-    /// Status code (see above)
-    pub status: c_int,
-    /// Error message (null unless status=1). Caller must free with `defra_free_string`.
-    pub error: *mut c_char,
-    /// Event data as JSON (null unless status=0). Caller must free with `defra_free_string`.
-    pub value: *mut c_char,
-    /// Number of events dropped due to buffer overflow since last poll.
-    /// When non-zero, the client should re-fetch data to ensure consistency.
-    pub dropped_count: u64,
-}
-
-impl PollSubscriptionResult {
-    fn event(json: String, dropped: u64) -> Self {
-        Self {
-            status: 0,
-            error: ptr::null_mut(),
-            value: sanitize_to_cstring(json, "{}").into_raw(),
-            dropped_count: dropped,
-        }
-    }
-
-    fn error(message: impl Into<String>) -> Self {
-        Self {
-            status: 1,
-            error: sanitize_to_cstring(message, "unknown error").into_raw(),
-            value: ptr::null_mut(),
-            dropped_count: 0,
-        }
-    }
-
-    fn no_event(dropped: u64) -> Self {
-        Self {
-            status: 2,
-            error: ptr::null_mut(),
-            value: ptr::null_mut(),
-            dropped_count: dropped,
-        }
-    }
-
-    fn closed() -> Self {
-        Self {
-            status: 3,
-            error: ptr::null_mut(),
-            value: ptr::null_mut(),
-            dropped_count: 0,
-        }
-    }
-}
-
-/// Result type for closing subscriptions.
-#[repr(C)]
-pub struct CloseSubscriptionResult {
-    /// Status code: 0=success, 1=error
-    pub status: c_int,
-    /// Error message (null on success). Caller must free with `defra_free_string`.
-    pub error: *mut c_char,
-}
-
-impl CloseSubscriptionResult {
-    fn success() -> Self {
-        Self {
-            status: 0,
-            error: ptr::null_mut(),
-        }
-    }
-
-    fn error(message: impl Into<String>) -> Self {
-        Self {
-            status: 1,
-            error: sanitize_to_cstring(message, "unknown error").into_raw(),
-        }
-    }
-}
-
-/// Create a subscription to database events.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `collection_filter` - Optional collection name to filter events (null for all)
-///
-/// # Returns
-///
-/// A handle that can be used with `poll_subscription` and `close_subscription`.
-///
-/// # Safety
-///
-/// The collection_filter must be either null or a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn create_subscription(
-    node_ptr: usize,
-    collection_filter: *const c_char,
-) -> CreateSubscriptionResult {
-    let collection = c_str_to_string(collection_filter);
-
-    // Get the event bus from the node
-    let subscription = match NODES.get(node_ptr, |state| {
-        // Subscribe to Update events (document changes)
-        state.event_bus.subscribe(&[events::EventName::Update])
-    }) {
-        Some(sub) => sub,
-        None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    // Create subscription state with optional collection filter
-    let state = SubscriptionState {
-        subscription,
-        node_handle: node_ptr,
-        collection_filter: collection,
-    };
-
-    // Register and return handle
-    let handle = SUBSCRIPTIONS.insert(state);
-    CreateSubscriptionResult::success(handle)
-}
+use crate::state::{NODES, SUBSCRIPTIONS};
+use crate::types::{c_str_to_string, FfiResult};
 
 /// Poll a subscription for the next event (non-blocking).
 ///
 /// # Arguments
 ///
-/// * `subscription_handle` - Handle from `create_subscription`
+/// * `subscription_id` - String subscription ID (from ExecuteQuery with status=2)
 ///
 /// # Returns
 ///
@@ -181,88 +24,139 @@ pub unsafe extern "C" fn create_subscription(
 /// - status=2: No event available yet
 /// - status=3: Subscription closed
 ///
-/// # Event JSON Format
+/// # Safety
 ///
-/// ```json
-/// {
-///     "type": "update",
-///     "doc_id": "bae-...",
-///     "collection_id": "...",
-///     "is_relay": false
-/// }
-/// ```
-#[no_mangle]
-pub extern "C" fn poll_subscription(subscription_handle: usize) -> PollSubscriptionResult {
-    let result = SUBSCRIPTIONS.get_mut(subscription_handle, |state| {
-        // Check for dropped messages
+/// `subscription_id` must be a valid null-terminated UTF-8 string.
+#[export_name = "PollSubscription"]
+pub unsafe extern "C" fn poll_subscription(subscription_id: *const c_char) -> FfiResult {
+    let id_str = match c_str_to_string(subscription_id) {
+        Some(s) => s,
+        None => return FfiResult::error("subscription_id is null"),
+    };
+
+    // Parse the subscription ID as a handle
+    let handle: usize = match id_str.parse() {
+        Ok(h) => h,
+        Err(_) => return FfiResult::error(format!("invalid subscription ID: {}", id_str)),
+    };
+
+    let result = SUBSCRIPTIONS.get_mut(handle, |state| {
         let dropped = state.subscription.check_and_reset_dropped();
 
-        // Try to receive events, filtering by collection if specified
         loop {
             match state.subscription.try_recv() {
                 Ok(message) => {
-                    // Check collection filter
                     if let Some(ref filter) = state.collection_filter {
                         if let Some(update) = message.as_update() {
-                            // Filter by collection name (collection_id contains the schema version ID,
-                            // but we match against collection name for user convenience)
-                            // The collection_id format is typically the collection name
                             if !update.collection_id.contains(filter.as_str()) {
-                                // Skip this event, try next
                                 continue;
                             }
                         }
                     }
 
-                    // Convert message to JSON
                     let json = message_to_json(&message);
-                    return PollSubscriptionResult::event(json, dropped);
+                    // status=0 with value means event available
+                    let mut result = FfiResult::success(json);
+                    // Encode dropped count info if any
+                    if dropped > 0 {
+                        // Include dropped info in the JSON itself
+                        let json = message_to_json_with_dropped(&message, dropped);
+                        result = FfiResult::success(json);
+                    }
+                    return result;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    return PollSubscriptionResult::no_event(dropped);
+                    // status=2 means no event available
+                    return FfiResult {
+                        status: 2,
+                        error: std::ptr::null_mut(),
+                        value: std::ptr::null_mut(),
+                    };
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    return PollSubscriptionResult::closed();
+                    // status=3 means subscription closed
+                    return FfiResult {
+                        status: 3,
+                        error: std::ptr::null_mut(),
+                        value: std::ptr::null_mut(),
+                    };
                 }
             }
         }
     });
 
-    result.unwrap_or_else(|| PollSubscriptionResult::error("invalid subscription handle"))
+    result.unwrap_or_else(|| FfiResult::error("invalid subscription handle"))
 }
 
 /// Close a subscription and release resources.
 ///
 /// # Arguments
 ///
-/// * `subscription_handle` - Handle from `create_subscription`
+/// * `subscription_id` - String subscription ID
 ///
 /// # Safety
 ///
-/// After this call, the subscription handle is no longer valid.
-#[no_mangle]
-pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscriptionResult {
-    // Remove from registry
-    let state = match SUBSCRIPTIONS.remove(subscription_handle) {
+/// `subscription_id` must be a valid null-terminated UTF-8 string.
+/// After this call, the subscription ID is no longer valid.
+#[export_name = "CloseSubscription"]
+pub unsafe extern "C" fn close_subscription(subscription_id: *const c_char) -> FfiResult {
+    let id_str = match c_str_to_string(subscription_id) {
+        Some(s) => s,
+        None => return FfiResult::error("subscription_id is null"),
+    };
+
+    let handle: usize = match id_str.parse() {
+        Ok(h) => h,
+        Err(_) => return FfiResult::error(format!("invalid subscription ID: {}", id_str)),
+    };
+
+    let state = match SUBSCRIPTIONS.remove(handle) {
         Some(state) => state,
-        None => return CloseSubscriptionResult::error("invalid subscription handle"),
+        None => return FfiResult::error("invalid subscription handle"),
     };
 
     // Unsubscribe from the event bus
-    let unsubscribed = NODES.get(state.node_handle, |node_state| {
+    NODES.get(state.node_handle, |node_state| {
         node_state.event_bus.unsubscribe(state.subscription.id());
     });
 
-    if unsubscribed.is_none() {
-        // Node already closed, subscription is effectively cleaned up
-    }
+    FfiResult::ok()
+}
 
-    CloseSubscriptionResult::success()
+/// Create a subscription to database events (internal helper, not exported to Go).
+///
+/// Go creates subscriptions through ExecuteQuery, but we keep this
+/// for Rust-only tests.
+///
+/// # Safety
+///
+/// `collection_filter` must be null or a valid null-terminated UTF-8 string.
+pub unsafe fn create_subscription_internal(
+    node_ptr: usize,
+    collection_filter: *const c_char,
+) -> Result<usize, String> {
+    use crate::state::SubscriptionState;
+
+    let collection = c_str_to_string(collection_filter);
+
+    let subscription = NODES
+        .get(node_ptr, |state| {
+            state.event_bus.subscribe(&[events::EventName::Update])
+        })
+        .ok_or_else(|| crate::ERR_INVALID_NODE_HANDLE.to_string())?;
+
+    let state = SubscriptionState {
+        subscription,
+        node_handle: node_ptr,
+        collection_filter: collection,
+    };
+
+    let handle = SUBSCRIPTIONS.insert(state);
+    Ok(handle)
 }
 
 /// Convert an event message to JSON.
 fn message_to_json(message: &events::Message) -> String {
-    // Check if this is an Update event with data
     if let Some(update) = message.as_update() {
         return serde_json::json!({
             "type": "update",
@@ -275,7 +169,6 @@ fn message_to_json(message: &events::Message) -> String {
         .to_string();
     }
 
-    // Signal event without data
     let event_type = match message.name {
         events::EventName::Merge => "merge",
         events::EventName::MergeComplete => "merge_complete",
@@ -288,57 +181,79 @@ fn message_to_json(message: &events::Message) -> String {
     .to_string()
 }
 
+/// Convert an event message to JSON with dropped count.
+fn message_to_json_with_dropped(message: &events::Message, dropped: u64) -> String {
+    if let Some(update) = message.as_update() {
+        return serde_json::json!({
+            "type": "update",
+            "doc_id": update.doc_id,
+            "cid": update.cid.to_string(),
+            "collection_id": update.collection_id,
+            "is_retry": update.is_retry,
+            "is_relay": update.is_relay,
+            "dropped_count": dropped
+        })
+        .to_string();
+    }
+
+    let event_type = match message.name {
+        events::EventName::Merge => "merge",
+        events::EventName::MergeComplete => "merge_complete",
+        events::EventName::Update => "update",
+        events::EventName::WildCard => "wildcard",
+    };
+    serde_json::json!({
+        "type": event_type,
+        "dropped_count": dropped
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::node::{new_node, node_close};
-    use crate::schema::add_schema;
     use crate::types::NodeInitOptions;
     use std::ffi::CString;
+    use std::ptr;
 
     #[test]
     fn test_subscription_lifecycle() {
-        // Initialize runtime
         assert!(crate::runtime::init_runtime());
 
-        // Create node
         let options = NodeInitOptions::default();
         let result = new_node(options);
         assert_eq!(result.status, 0);
         let node = result.node_ptr;
 
-        // Create subscription
-        let result = unsafe { create_subscription(node, ptr::null()) };
-        assert_eq!(result.status, 0, "create_subscription should succeed");
-        assert!(result.subscription_handle > 0);
-        let sub_handle = result.subscription_handle;
+        // Create subscription via internal helper
+        let handle = unsafe { create_subscription_internal(node, ptr::null()) }.unwrap();
+        let handle_str = CString::new(handle.to_string()).unwrap();
 
-        // Poll (should return no event)
-        let result = poll_subscription(sub_handle);
+        // Poll (should return no event, status=2)
+        let result = unsafe { poll_subscription(handle_str.as_ptr()) };
         assert_eq!(result.status, 2, "should have no event initially");
 
         // Close subscription
-        let result = close_subscription(sub_handle);
+        let result = unsafe { close_subscription(handle_str.as_ptr()) };
         assert_eq!(result.status, 0, "close_subscription should succeed");
 
         // Poll closed subscription should fail
-        let result = poll_subscription(sub_handle);
+        let result = unsafe { poll_subscription(handle_str.as_ptr()) };
         assert_eq!(result.status, 1, "polling closed sub should error");
         if !result.error.is_null() {
             unsafe { crate::types::defra_free_string(result.error) };
         }
 
-        // Close node
         node_close(node);
     }
 
     #[test]
     fn test_subscription_receives_mutation_event() {
-        use crate::query::exec_request;
+        use crate::query::execute_query;
 
         assert!(crate::runtime::init_runtime());
 
-        // Create node
         let options = NodeInitOptions::default();
         let result = new_node(options);
         assert_eq!(result.status, 0);
@@ -346,30 +261,27 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type Book { title: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { crate::schema::add_schema(node, sdl.as_ptr(), 0) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         // Create subscription BEFORE mutation
-        let result = unsafe { create_subscription(node, ptr::null()) };
-        assert_eq!(result.status, 0);
-        let sub_handle = result.subscription_handle;
+        let handle = unsafe { create_subscription_internal(node, ptr::null()) }.unwrap();
+        let handle_str = CString::new(handle.to_string()).unwrap();
 
         // Perform a mutation
         let mutation =
             CString::new(r#"mutation { create_Book(input: {title: "Test"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { execute_query(node, mutation.as_ptr(), 0, ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         // Poll should return the event
-        let result = poll_subscription(sub_handle);
-        // Event may or may not be available depending on timing
-        // status 0 = event, 2 = no event yet, both are valid
+        let result = unsafe { poll_subscription(handle_str.as_ptr()) };
         assert!(
             result.status == 0 || result.status == 2,
             "poll should succeed"
@@ -381,17 +293,17 @@ mod tests {
         }
 
         // Cleanup
-        close_subscription(sub_handle);
+        let _ = unsafe { close_subscription(handle_str.as_ptr()) };
         node_close(node);
     }
 
     #[test]
-    fn test_subscription_invalid_node() {
+    fn test_subscription_invalid_id() {
         assert!(crate::runtime::init_runtime());
 
-        // Create subscription with invalid node
-        let result = unsafe { create_subscription(0, ptr::null()) };
-        assert_eq!(result.status, 1, "should fail with invalid node");
+        let bad_id = CString::new("not_a_number").unwrap();
+        let result = unsafe { poll_subscription(bad_id.as_ptr()) };
+        assert_eq!(result.status, 1, "should fail with invalid ID");
         assert!(!result.error.is_null());
         unsafe { crate::types::defra_free_string(result.error) };
     }
@@ -400,128 +312,25 @@ mod tests {
     fn test_close_invalid_subscription() {
         assert!(crate::runtime::init_runtime());
 
-        let result = close_subscription(999999);
+        let bad_id = CString::new("999999").unwrap();
+        let result = unsafe { close_subscription(bad_id.as_ptr()) };
         assert_eq!(result.status, 1);
         assert!(!result.error.is_null());
         unsafe { crate::types::defra_free_string(result.error) };
     }
 
     #[test]
-    fn test_node_close_cleans_subscriptions() {
+    fn test_subscription_null_id() {
         assert!(crate::runtime::init_runtime());
 
-        // Create node
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
+        let result = unsafe { poll_subscription(ptr::null()) };
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+        unsafe { crate::types::defra_free_string(result.error) };
 
-        // Create multiple subscriptions
-        let result1 = unsafe { create_subscription(node, ptr::null()) };
-        assert_eq!(result1.status, 0);
-        let sub1 = result1.subscription_handle;
-
-        let result2 = unsafe { create_subscription(node, ptr::null()) };
-        assert_eq!(result2.status, 0);
-        let sub2 = result2.subscription_handle;
-
-        // Close node (should clean up subscriptions)
-        let result = node_close(node);
-        assert_eq!(result.status, 0);
-
-        // Subscriptions should now be invalid
-        let result = poll_subscription(sub1);
-        assert!(
-            result.status == 1 || result.status == 3,
-            "sub should be closed or invalid"
-        );
-        if !result.error.is_null() {
-            unsafe { crate::types::defra_free_string(result.error) };
-        }
-
-        let result = poll_subscription(sub2);
-        assert!(
-            result.status == 1 || result.status == 3,
-            "sub should be closed or invalid"
-        );
-        if !result.error.is_null() {
-            unsafe { crate::types::defra_free_string(result.error) };
-        }
-    }
-
-    #[test]
-    fn test_subscription_collection_filter() {
-        use crate::query::exec_request;
-
-        assert!(crate::runtime::init_runtime());
-
-        // Create node
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // Add two schemas
-        let sdl = CString::new("type Author { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
-        assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        let sdl = CString::new("type Article { title: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
-        assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        // Create subscription filtered to Author only
-        let filter = CString::new("Author").unwrap();
-        let result = unsafe { create_subscription(node, filter.as_ptr()) };
-        assert_eq!(result.status, 0);
-        let sub_handle = result.subscription_handle;
-
-        // Create an Article (should NOT trigger filtered subscription)
-        let mutation =
-            CString::new(r#"mutation { create_Article(input: {title: "Test"}) { _docID } }"#)
-                .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
-        assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        // Poll should return no event (Article is filtered out)
-        let result = poll_subscription(sub_handle);
-        assert_eq!(
-            result.status, 2,
-            "should have no event for filtered collection"
-        );
-
-        // Create an Author (should trigger subscription)
-        let mutation =
-            CString::new(r#"mutation { create_Author(input: {name: "Bob"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
-        assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        // Poll should return the Author event
-        let result = poll_subscription(sub_handle);
-        // Event may or may not be available depending on timing
-        if result.status == 0 && !result.value.is_null() {
-            let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
-            assert!(
-                value.contains("Author"),
-                "event should be for Author collection"
-            );
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        // Cleanup
-        close_subscription(sub_handle);
-        node_close(node);
+        let result = unsafe { close_subscription(ptr::null()) };
+        assert_eq!(result.status, 1);
+        assert!(!result.error.is_null());
+        unsafe { crate::types::defra_free_string(result.error) };
     }
 }

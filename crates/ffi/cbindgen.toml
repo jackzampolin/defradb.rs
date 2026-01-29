@@ -24,7 +24,9 @@ include = [
     "FfiResult",
     "NewNodeResult",
     "NewTxnResult",
+    "NewIdentityResult",
     "NodeInitOptions",
+    "CollectionOptions",
 ]
 
 [fn]

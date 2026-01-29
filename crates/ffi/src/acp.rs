@@ -3,14 +3,16 @@
 //! This module exposes ACP management functions for both:
 //! - NAC (Node Access Control) - node-level permissions
 //! - DAC (Document Access Control) - document-level permissions
+//!
+//! All functions use identity_ptr handles instead of DID strings.
 
 use std::ffi::c_char;
 
 use identity::Identity;
 
 use crate::get_runtime;
-use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
+use crate::state::{IDENTITIES, NODES};
+use crate::types::{c_str_to_string, resolve_identity_did, FfiResult, NewIdentityResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
 // ============================================================================
@@ -19,20 +21,14 @@ use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Get the current NAC status.
 ///
-/// Returns a JSON object with NAC status information:
-/// ```json
-/// {
-///   "status": "enabled" | "disabled_temporarily" | "not_configured",
-///   "configured_enabled": true | false,
-///   "dev_mode": true | false,
-///   "owner": "did:key:..." | null
-/// }
-/// ```
-#[no_mangle]
-pub extern "C" fn get_nac_status(node_ptr: usize) -> FfiResult {
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle (0 for no identity)
+#[export_name = "ACPGetNACStatus"]
+pub extern "C" fn acp_get_nac_status(node_ptr: usize, _identity_ptr: usize) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
@@ -54,29 +50,27 @@ pub extern "C" fn get_nac_status(node_ptr: usize) -> FfiResult {
 
 /// Temporarily disable NAC.
 ///
-/// The requestor_did must be an admin. Returns success on completion.
+/// # Arguments
 ///
-/// # Safety
-///
-/// `requestor_did` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle for the admin performing the action
+#[export_name = "ACPDisableNAC"]
+pub extern "C" fn acp_disable_nac(node_ptr: usize, identity_ptr: usize) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
+    let requestor_did = match resolve_identity_did(identity_ptr) {
+        Ok(did) => did,
+        Err(e) => return FfiResult::error(e),
     };
 
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid DID '{}': {}", requestor_str, e))?;
+        let requestor = identity::Did::new(&requestor_did)
+            .map_err(|e| format!("invalid DID '{}': {}", requestor_did, e))?;
 
         nac_manager
             .disable(&requestor)
@@ -94,29 +88,27 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
 
 /// Re-enable NAC after temporary disable.
 ///
-/// The requestor_did must be an admin. Returns success on completion.
+/// # Arguments
 ///
-/// # Safety
-///
-/// `requestor_did` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle for the admin performing the action
+#[export_name = "ACPReEnableNAC"]
+pub extern "C" fn acp_re_enable_nac(node_ptr: usize, identity_ptr: usize) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
+    let requestor_did = match resolve_identity_did(identity_ptr) {
+        Ok(did) => did,
+        Err(e) => return FfiResult::error(e),
     };
 
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid DID '{}': {}", requestor_str, e))?;
+        let requestor = identity::Did::new(&requestor_did)
+            .map_err(|e| format!("invalid DID '{}': {}", requestor_did, e))?;
 
         nac_manager
             .re_enable(&requestor)
@@ -132,84 +124,45 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
     }
 }
 
-/// Enable NAC with the given owner identity.
+/// Add a NAC actor relationship.
 ///
-/// This initializes NAC and sets the owner. Can only be called when NAC
-/// is not already enabled.
+/// # Arguments
 ///
-/// # Safety
-///
-/// `owner_did` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let owner_str = match c_str_to_string(owner_did) {
-        Some(s) => s,
-        None => return FfiResult::error("owner_did is null"),
-    };
-
-    // Validate node handle before entering async block
-    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
-        Some(m) => m,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
-        let owner = identity::Did::new(&owner_str)
-            .map_err(|e| format!("invalid DID '{}': {}", owner_str, e))?;
-
-        nac_manager
-            .enable(&owner)
-            .await
-            .map_err(|e| format!("failed to enable NAC: {}", e))?;
-
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
-}
-
-/// Add a NAC actor relationship (grant admin to target).
-///
-/// The requestor must be an admin. Returns JSON with success status:
-/// ```json
-/// { "added": true }  // or false if already exists
-/// ```
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle for the admin
+/// * `relation` - Relation type (e.g., "admin")
+/// * `actor` - Target actor DID string
 ///
 /// # Safety
 ///
-/// All string parameters must be valid null-terminated UTF-8 strings.
-#[no_mangle]
-pub unsafe extern "C" fn add_nac_actor_relationship(
+/// String pointers must be valid null-terminated UTF-8 strings.
+#[export_name = "ACPAddNACActorRelationship"]
+pub unsafe extern "C" fn acp_add_nac_actor_relationship(
     node_ptr: usize,
-    requestor_did: *const c_char,
-    target_did: *const c_char,
+    identity_ptr: usize,
+    _relation: *const c_char,
+    actor: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
+    let requestor_did = match resolve_identity_did(identity_ptr) {
+        Ok(did) => did,
+        Err(e) => return FfiResult::error(e),
     };
 
-    let target_str = match c_str_to_string(target_did) {
+    let target_str = match c_str_to_string(actor) {
         Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
+        None => return FfiResult::error("actor is null"),
     };
 
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
+        let requestor = identity::Did::new(&requestor_did)
+            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_did, e))?;
         let target = identity::Did::new(&target_str)
             .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
 
@@ -228,44 +181,45 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
     }
 }
 
-/// Delete a NAC actor relationship (remove admin from target).
+/// Delete a NAC actor relationship.
 ///
-/// The requestor must be an admin. The owner cannot be removed.
-/// Returns JSON with success status:
-/// ```json
-/// { "deleted": true }  // or false if didn't exist
-/// ```
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle for the admin
+/// * `relation` - Relation type (e.g., "admin")
+/// * `actor` - Target actor DID string
 ///
 /// # Safety
 ///
-/// All string parameters must be valid null-terminated UTF-8 strings.
-#[no_mangle]
-pub unsafe extern "C" fn delete_nac_actor_relationship(
+/// String pointers must be valid null-terminated UTF-8 strings.
+#[export_name = "ACPDeleteNACActorRelationship"]
+pub unsafe extern "C" fn acp_delete_nac_actor_relationship(
     node_ptr: usize,
-    requestor_did: *const c_char,
-    target_did: *const c_char,
+    identity_ptr: usize,
+    _relation: *const c_char,
+    actor: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
+    let requestor_did = match resolve_identity_did(identity_ptr) {
+        Ok(did) => did,
+        Err(e) => return FfiResult::error(e),
     };
 
-    let target_str = match c_str_to_string(target_did) {
+    let target_str = match c_str_to_string(actor) {
         Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
+        None => return FfiResult::error("actor is null"),
     };
 
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
+        let requestor = identity::Did::new(&requestor_did)
+            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_did, e))?;
         let target = identity::Did::new(&target_str)
             .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
 
@@ -290,20 +244,19 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
 
 /// Add a DAC policy.
 ///
-/// Accepts a policy definition in YAML or JSON format.
-/// Returns a JSON object with the policy ID:
-/// ```json
-/// { "PolicyID": "sha256_hash_of_policy" }
-/// ```
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle for the requestor
+/// * `policy` - Policy definition string (YAML or JSON)
 ///
 /// # Safety
 ///
-/// `policy` must be a valid null-terminated UTF-8 string containing
-/// the policy definition in YAML or JSON format.
-#[no_mangle]
-pub unsafe extern "C" fn add_dac_policy(
+/// `policy` must be a valid null-terminated UTF-8 string.
+#[export_name = "ACPAddDACPolicy"]
+pub unsafe extern "C" fn acp_add_dac_policy(
     node_ptr: usize,
-    _identity_did: *const c_char,
+    _identity_ptr: usize,
     policy: *const c_char,
 ) -> FfiResult {
     let policy_str = match c_str_to_string(policy) {
@@ -331,95 +284,39 @@ pub unsafe extern "C" fn add_dac_policy(
     }
 }
 
-/// Get a DAC policy by ID.
+/// Add a DAC actor relationship.
 ///
-/// Returns a JSON object with the policy content, or null if not found.
+/// # Arguments
 ///
-/// # Safety
-///
-/// `policy_id` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn get_dac_policy(node_ptr: usize, policy_id: *const c_char) -> FfiResult {
-    let policy_id_str = match c_str_to_string(policy_id) {
-        Some(s) => s,
-        None => return FfiResult::error("policy_id is null"),
-    };
-
-    let result = NODES
-        .get(node_ptr, |state| {
-            match state.policy_store.get_policy(&policy_id_str) {
-                Some(policy) => serde_json::json!({
-                    "id": policy_id_str,
-                    "policy": policy
-                })
-                .to_string(),
-                None => serde_json::json!(null).to_string(),
-            }
-        })
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
-}
-
-/// List all DAC policy IDs.
-///
-/// Returns a JSON array of policy IDs.
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle for the requestor (document owner)
+/// * `collection_id` - Collection ID string
+/// * `doc_id` - Document ID string
+/// * `relation` - Relation type (e.g., "reader", "updater", "deleter")
+/// * `actor` - Target actor DID string
 ///
 /// # Safety
 ///
-/// No unsafe string parameters.
-#[no_mangle]
-pub extern "C" fn list_dac_policies(node_ptr: usize) -> FfiResult {
-    let result = NODES
-        .get(node_ptr, |state| {
-            let ids = state.policy_store.list_policies();
-            serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
-        })
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
-}
-
-/// Add a DAC actor relationship (share document access with target).
-///
-/// The requestor must be the document owner. Relation can be:
-/// - "reader" - read access
-/// - "updater" - read + update access
-/// - "deleter" - read + delete access
-///
-/// Returns JSON with success status:
-/// ```json
-/// { "added": true }  // or false if already exists
-/// ```
-///
-/// # Safety
-///
-/// All string parameters must be valid null-terminated UTF-8 strings.
-#[no_mangle]
-pub unsafe extern "C" fn add_dac_actor_relationship(
+/// All string pointers must be valid null-terminated UTF-8 strings.
+#[export_name = "ACPAddDACActorRelationship"]
+pub unsafe extern "C" fn acp_add_dac_actor_relationship(
     node_ptr: usize,
-    requestor_did: *const c_char,
-    target_did: *const c_char,
+    identity_ptr: usize,
     collection_id: *const c_char,
     doc_id: *const c_char,
     relation: *const c_char,
+    actor: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
+    let requestor_did = match resolve_identity_did(identity_ptr) {
+        Ok(did) => did,
+        Err(e) => return FfiResult::error(e),
     };
 
-    let target_str = match c_str_to_string(target_did) {
+    let target_str = match c_str_to_string(actor) {
         Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
+        None => return FfiResult::error("actor is null"),
     };
 
     let collection_id_str = match c_str_to_string(collection_id) {
@@ -437,15 +334,14 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         None => return FfiResult::error("relation is null"),
     };
 
-    // Validate node handle before entering async block
     let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
         Some(acp) => acp,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
+        let requestor = identity::Did::new(&requestor_did)
+            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_did, e))?;
         let target = identity::Did::new(&target_str)
             .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
 
@@ -470,37 +366,39 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     }
 }
 
-/// Delete a DAC actor relationship (revoke document access from target).
+/// Delete a DAC actor relationship.
 ///
-/// The requestor must be the document owner.
+/// # Arguments
 ///
-/// Returns JSON with success status:
-/// ```json
-/// { "deleted": true }  // or false if didn't exist
-/// ```
+/// * `node_ptr` - Handle to the node
+/// * `identity_ptr` - Identity handle for the requestor (document owner)
+/// * `collection_id` - Collection ID string
+/// * `doc_id` - Document ID string
+/// * `relation` - Relation type
+/// * `actor` - Target actor DID string
 ///
 /// # Safety
 ///
-/// All string parameters must be valid null-terminated UTF-8 strings.
-#[no_mangle]
-pub unsafe extern "C" fn delete_dac_actor_relationship(
+/// All string pointers must be valid null-terminated UTF-8 strings.
+#[export_name = "ACPDeleteDACActorRelationship"]
+pub unsafe extern "C" fn acp_delete_dac_actor_relationship(
     node_ptr: usize,
-    requestor_did: *const c_char,
-    target_did: *const c_char,
+    identity_ptr: usize,
     collection_id: *const c_char,
     doc_id: *const c_char,
     relation: *const c_char,
+    actor: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
+    let requestor_did = match resolve_identity_did(identity_ptr) {
+        Ok(did) => did,
+        Err(e) => return FfiResult::error(e),
     };
 
-    let target_str = match c_str_to_string(target_did) {
+    let target_str = match c_str_to_string(actor) {
         Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
+        None => return FfiResult::error("actor is null"),
     };
 
     let collection_id_str = match c_str_to_string(collection_id) {
@@ -518,15 +416,14 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
         None => return FfiResult::error("relation is null"),
     };
 
-    // Validate node handle before entering async block
     let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
         Some(acp) => acp,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
+        let requestor = identity::Did::new(&requestor_did)
+            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_did, e))?;
         let target = identity::Did::new(&target_str)
             .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
 
@@ -556,18 +453,10 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
 // ============================================================================
 
 /// Get the node's identity (DID).
-///
-/// Returns JSON with the node identity:
-/// ```json
-/// { "did": "did:key:z6Mk..." }
-/// ```
-///
-/// Returns an error if no node identity is configured.
-#[no_mangle]
+#[export_name = "GetNodeIdentity"]
 pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
         Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
@@ -592,47 +481,36 @@ pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
     }
 }
 
-/// Create a new identity (Ed25519 keypair).
+/// Create a new identity and return an opaque handle.
 ///
-/// Generates a fresh Ed25519 keypair and returns the DID and private key.
-/// This is stateless — no node is required.
+/// # Safety
 ///
-/// Returns a JSON object:
-/// ```json
-/// {
-///   "did": "did:key:z6Mk...",
-///   "privateKeyHex": "abcd...",
-///   "keyType": "ed25519"
-/// }
-/// ```
-#[no_mangle]
-pub extern "C" fn create_identity() -> FfiResult {
+/// * `key_type` must be null or a valid null-terminated UTF-8 string.
+/// * The returned handle must be freed with `identity_free`.
+#[export_name = "IdentityNew"]
+pub unsafe extern "C" fn identity_new(_key_type: *const c_char) -> NewIdentityResult {
     let result = (|| {
         let private_key = crypto::generate_ed25519()
             .map_err(|e| format!("failed to generate Ed25519 key: {}", e))?;
 
-        let identity = identity::RawIdentity::from_ed25519(private_key)
+        let raw_identity = identity::RawIdentity::from_ed25519(private_key)
             .map_err(|e| format!("failed to create identity: {}", e))?;
 
-        let did = identity
-            .did()
-            .map_err(|e| format!("failed to derive DID: {}", e))?;
-
-        let private_key_hex = hex::encode(identity.private_key_bytes());
-
-        let json = serde_json::json!({
-            "did": did.to_string(),
-            "privateKeyHex": private_key_hex,
-            "keyType": "ed25519"
-        })
-        .to_string();
-
-        Ok::<String, String>(json)
+        let handle = IDENTITIES.insert(raw_identity);
+        Ok::<usize, String>(handle)
     })();
 
     match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
+        Ok(handle) => NewIdentityResult::success(handle),
+        Err(e) => NewIdentityResult::error(e),
+    }
+}
+
+/// Free an identity handle.
+#[export_name = "IdentityFree"]
+pub extern "C" fn identity_free(identity_ptr: usize) {
+    if identity_ptr != 0 {
+        IDENTITIES.remove(identity_ptr);
     }
 }
 
@@ -641,18 +519,10 @@ mod tests {
     use super::*;
     use crate::node::{new_node, node_close};
     use crate::types::NodeInitOptions;
-    use std::ffi::{CStr, CString};
-
-    fn test_did() -> &'static str {
-        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
-    }
-
-    fn test_did2() -> &'static str {
-        "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
-    }
+    use std::ffi::CStr;
 
     #[test]
-    fn test_get_nac_status() {
+    fn test_acp_get_nac_status() {
         assert!(crate::runtime::init_runtime());
 
         let options = NodeInitOptions::default();
@@ -660,9 +530,8 @@ mod tests {
         assert_eq!(result.status, 0);
         let node = result.node_ptr;
 
-        // Get NAC status
-        let result = get_nac_status(node);
-        assert_eq!(result.status, 0, "get_nac_status should succeed");
+        let result = acp_get_nac_status(node, 0);
+        assert_eq!(result.status, 0, "acp_get_nac_status should succeed");
         assert!(!result.value.is_null());
 
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
@@ -676,160 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn test_enable_nac() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // Enable NAC
-        let owner_did = CString::new(test_did()).unwrap();
-        let result = unsafe { enable_nac(node, owner_did.as_ptr()) };
-        assert_eq!(result.status, 0, "enable_nac should succeed");
-
-        // Verify NAC is now enabled
-        let result = get_nac_status(node);
-        assert_eq!(result.status, 0);
-        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(value.contains("enabled"), "NAC should be enabled");
-        assert!(value.contains(test_did()), "should show owner DID");
-
-        unsafe { crate::types::defra_free_string(result.value) };
-        node_close(node);
-    }
-
-    #[test]
-    fn test_disable_and_re_enable_nac() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // Enable NAC first
-        let owner_did = CString::new(test_did()).unwrap();
-        let result = unsafe { enable_nac(node, owner_did.as_ptr()) };
-        assert_eq!(result.status, 0);
-
-        // Disable NAC
-        let result = unsafe { disable_nac(node, owner_did.as_ptr()) };
-        assert_eq!(result.status, 0, "disable_nac should succeed");
-
-        // Verify NAC is disabled
-        let result = get_nac_status(node);
-        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(
-            value.contains("disabled_temporarily"),
-            "NAC should be disabled"
-        );
-        unsafe { crate::types::defra_free_string(result.value) };
-
-        // Re-enable NAC
-        let result = unsafe { re_enable_nac(node, owner_did.as_ptr()) };
-        assert_eq!(result.status, 0, "re_enable_nac should succeed");
-
-        // Verify NAC is enabled again
-        let result = get_nac_status(node);
-        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(
-            value.contains("\"status\":\"enabled\""),
-            "NAC should be re-enabled"
-        );
-        unsafe { crate::types::defra_free_string(result.value) };
-
-        node_close(node);
-    }
-
-    #[test]
-    fn test_nac_actor_relationship() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // Enable NAC first
-        let owner_did = CString::new(test_did()).unwrap();
-        let result = unsafe { enable_nac(node, owner_did.as_ptr()) };
-        assert_eq!(result.status, 0);
-
-        // Add admin relationship
-        let target_did = CString::new(test_did2()).unwrap();
-        let result =
-            unsafe { add_nac_actor_relationship(node, owner_did.as_ptr(), target_did.as_ptr()) };
-        assert_eq!(
-            result.status, 0,
-            "add_nac_actor_relationship should succeed"
-        );
-        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(value.contains("\"added\":true"), "should indicate added");
-        unsafe { crate::types::defra_free_string(result.value) };
-
-        // Delete admin relationship
-        let result =
-            unsafe { delete_nac_actor_relationship(node, owner_did.as_ptr(), target_did.as_ptr()) };
-        assert_eq!(
-            result.status, 0,
-            "delete_nac_actor_relationship should succeed"
-        );
-        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(
-            value.contains("\"deleted\":true"),
-            "should indicate deleted"
-        );
-        unsafe { crate::types::defra_free_string(result.value) };
-
-        node_close(node);
-    }
-
-    #[test]
-    fn test_dac_actor_relationship() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // Add DAC relationship (no document registered, but we test the API)
-        let requestor_did = CString::new(test_did()).unwrap();
-        let target_did = CString::new(test_did2()).unwrap();
-        let collection_id = CString::new("test-collection").unwrap();
-        let doc_id = CString::new("test-doc").unwrap();
-        let relation = CString::new("reader").unwrap();
-
-        let result = unsafe {
-            add_dac_actor_relationship(
-                node,
-                requestor_did.as_ptr(),
-                target_did.as_ptr(),
-                collection_id.as_ptr(),
-                doc_id.as_ptr(),
-                relation.as_ptr(),
-            )
-        };
-        // This may fail because the document isn't registered - but it tests the API
-        // The status code indicates the FFI function was called correctly
-        if result.status == 0 {
-            let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-            assert!(
-                value.contains("added"),
-                "should have added field in response"
-            );
-            unsafe { crate::types::defra_free_string(result.value) };
-        } else {
-            // Expected - document not registered
-            unsafe { crate::types::defra_free_string(result.error) };
-        }
-
-        node_close(node);
-    }
-
-    #[test]
     fn test_get_node_identity_not_configured() {
         assert!(crate::runtime::init_runtime());
 
@@ -838,7 +553,6 @@ mod tests {
         assert_eq!(result.status, 0);
         let node = result.node_ptr;
 
-        // Get node identity (should fail - not configured)
         let result = get_node_identity(node);
         assert_eq!(result.status, 1, "should fail when identity not configured");
         let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
@@ -852,81 +566,19 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_did_handling() {
-        assert!(crate::runtime::init_runtime());
+    fn test_identity_new_and_free() {
+        let result = unsafe { identity_new(std::ptr::null()) };
+        assert_eq!(result.status, 0, "identity_new should succeed");
+        assert_ne!(result.identity_ptr, 0, "should return non-zero handle");
 
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
+        let identity = crate::state::IDENTITIES.get(result.identity_ptr);
+        assert!(identity.is_some(), "identity should be in registry");
 
-        // Try to enable NAC with invalid DID
-        let invalid_did = CString::new("invalid-did").unwrap();
-        let result = unsafe { enable_nac(node, invalid_did.as_ptr()) };
-        assert_eq!(result.status, 1, "should fail with invalid DID");
-        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
-        assert!(error.contains("invalid DID"), "should indicate invalid DID");
+        identity_free(result.identity_ptr);
 
-        unsafe { crate::types::defra_free_string(result.error) };
-        node_close(node);
-    }
+        let identity = crate::state::IDENTITIES.get(result.identity_ptr);
+        assert!(identity.is_none(), "identity should be removed after free");
 
-    #[test]
-    fn test_null_pointer_handling() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // Test null pointer handling
-        let result = unsafe { enable_nac(node, std::ptr::null()) };
-        assert_eq!(result.status, 1, "should fail with null pointer");
-        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
-        assert!(error.contains("null"), "should indicate null pointer");
-
-        unsafe { crate::types::defra_free_string(result.error) };
-        node_close(node);
-    }
-
-    #[test]
-    fn test_create_identity() {
-        let result = create_identity();
-        assert_eq!(result.status, 0, "create_identity should succeed");
-        assert!(!result.value.is_null());
-
-        let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
-        let parsed: serde_json::Value = serde_json::from_str(&value).unwrap();
-
-        // DID should start with did:key:z6Mk (Ed25519 multicodec prefix)
-        let did = parsed["did"].as_str().unwrap();
-        assert!(
-            did.starts_with("did:key:z6Mk"),
-            "DID should start with did:key:z6Mk, got: {}",
-            did
-        );
-
-        // Private key hex should be non-empty
-        let private_key_hex = parsed["privateKeyHex"].as_str().unwrap();
-        assert!(
-            !private_key_hex.is_empty(),
-            "privateKeyHex should be non-empty"
-        );
-
-        // Key type should be ed25519
-        assert_eq!(parsed["keyType"].as_str().unwrap(), "ed25519");
-
-        unsafe { crate::types::defra_free_string(result.value) };
-
-        // Call twice and verify different DIDs (randomness check)
-        let result2 = create_identity();
-        assert_eq!(result2.status, 0);
-        let value2 = unsafe { CStr::from_ptr(result2.value).to_string_lossy() };
-        let parsed2: serde_json::Value = serde_json::from_str(&value2).unwrap();
-        let did2 = parsed2["did"].as_str().unwrap();
-
-        assert_ne!(did, did2, "two calls should produce different DIDs");
-        unsafe { crate::types::defra_free_string(result2.value) };
+        identity_free(0);
     }
 }

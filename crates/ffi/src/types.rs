@@ -3,12 +3,14 @@
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 
+use identity::Identity;
+
 /// FFI result type matching Go's Result struct.
 ///
 /// Status codes:
 /// - 0: Success
 /// - 1: Error (message in error field)
-/// - 2: Subscription (ID in value field, not yet implemented)
+/// - 2: Subscription (ID in value field)
 #[repr(C)]
 pub struct FfiResult {
     /// Status code: 0=success, 1=error, 2=subscription
@@ -90,24 +92,27 @@ impl NewNodeResult {
     }
 }
 
-/// FFI result for transaction creation, containing a transaction ID.
+/// FFI result for transaction creation, containing a transaction handle.
+///
+/// Matches Go's NewTxnResult struct. The txn_ptr is an opaque handle
+/// into the TxnRegistry, not a string ID.
 #[repr(C)]
 pub struct NewTxnResult {
     /// Status code: 0=success, 1=error
     pub status: c_int,
     /// Error message (null on success). Caller must free with `defra_free_string`.
     pub error: *mut c_char,
-    /// Transaction ID (null on error). Caller must free with `defra_free_string`.
-    pub txn_id: *mut c_char,
+    /// Transaction handle (0 on error).
+    pub txn_ptr: usize,
 }
 
 impl NewTxnResult {
-    /// Create a success result with a transaction ID.
-    pub fn success(txn_id: impl Into<String>) -> Self {
+    /// Create a success result with a transaction handle.
+    pub fn success(handle: usize) -> Self {
         Self {
             status: 0,
             error: ptr::null_mut(),
-            txn_id: sanitize_to_cstring(txn_id, "unknown").into_raw(),
+            txn_ptr: handle,
         }
     }
 
@@ -116,28 +121,130 @@ impl NewTxnResult {
         Self {
             status: 1,
             error: sanitize_to_cstring(message, "unknown error").into_raw(),
-            txn_id: ptr::null_mut(),
+            txn_ptr: 0,
+        }
+    }
+}
+
+/// FFI result for identity creation, containing an identity handle.
+///
+/// Matches Go's NewIdentityResult struct.
+#[repr(C)]
+pub struct NewIdentityResult {
+    /// Status code: 0=success, 1=error
+    pub status: c_int,
+    /// Error message (null on success). Caller must free with `defra_free_string`.
+    pub error: *mut c_char,
+    /// Handle to the identity (0 on error).
+    pub identity_ptr: usize,
+}
+
+impl NewIdentityResult {
+    /// Create a success result with an identity handle.
+    pub fn success(handle: usize) -> Self {
+        Self {
+            status: 0,
+            error: ptr::null_mut(),
+            identity_ptr: handle,
+        }
+    }
+
+    /// Create an error result.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            status: 1,
+            error: sanitize_to_cstring(message, "unknown error").into_raw(),
+            identity_ptr: 0,
         }
     }
 }
 
 /// Options for node initialization.
 ///
-/// Matches Go's NodeInitOptions struct.
+/// Matches Go's NodeInitOptions struct (10 fields).
 #[repr(C)]
 pub struct NodeInitOptions {
     /// Path to store directory (null for in-memory).
     pub db_path: *const c_char,
+    /// Comma-separated listening addresses for P2P (null to disable).
+    pub listening_addresses: *const c_char,
+    /// Comma-separated replicator retry intervals (null for defaults).
+    pub replicator_retry_intervals: *const c_char,
+    /// Comma-separated peer addresses to connect to on startup.
+    pub peers: *const c_char,
+    /// Identity handle (0 for no identity).
+    pub identity_ptr: usize,
     /// Use in-memory storage (1=true, 0=false).
     pub in_memory: c_int,
+    /// Disable P2P networking (1=true, 0=false).
+    pub disable_p2p: c_int,
+    /// Disable the HTTP API server (1=true, 0=false).
+    pub disable_api: c_int,
+    /// Enable node-level access control (1=true, 0=false).
+    pub enable_node_acp: c_int,
+    /// Maximum number of transaction retries (0 for default).
+    pub max_transaction_retries: c_int,
 }
 
 impl Default for NodeInitOptions {
     fn default() -> Self {
         Self {
             db_path: ptr::null(),
+            listening_addresses: ptr::null(),
+            replicator_retry_intervals: ptr::null(),
+            peers: ptr::null(),
+            identity_ptr: 0,
             in_memory: 1, // Default to in-memory
+            disable_p2p: 1,
+            disable_api: 1,
+            enable_node_acp: 0,
+            max_transaction_retries: 0,
         }
+    }
+}
+
+/// Options for resolving a collection.
+///
+/// Matches Go's CollectionOptions struct. Provides multiple ways to
+/// identify a collection: by name, version, or collection_id.
+#[repr(C)]
+pub struct CollectionOptions {
+    /// Collection version string (null if not specified).
+    pub version: *const c_char,
+    /// Collection ID string (null if not specified).
+    pub collection_id: *const c_char,
+    /// Collection name (null if not specified).
+    pub name: *const c_char,
+    /// Whether to include inactive collections (1=true, 0=false).
+    pub get_inactive: c_int,
+}
+
+impl CollectionOptions {
+    /// Extract the collection name as a Rust String, if present.
+    ///
+    /// # Safety
+    ///
+    /// The `name` pointer must be null or point to a valid null-terminated string.
+    pub unsafe fn name_str(&self) -> Option<String> {
+        c_str_to_string(self.name)
+    }
+
+    /// Extract the version as a Rust String, if present.
+    ///
+    /// # Safety
+    ///
+    /// The `version` pointer must be null or point to a valid null-terminated string.
+    pub unsafe fn version_str(&self) -> Option<String> {
+        c_str_to_string(self.version)
+    }
+
+    /// Extract the collection_id as a Rust String, if present.
+    ///
+    /// # Safety
+    ///
+    /// The `collection_id` pointer must be null or point to a valid null-terminated string.
+    pub unsafe fn collection_id_str(&self) -> Option<String> {
+        c_str_to_string(self.collection_id)
     }
 }
 
@@ -146,11 +253,6 @@ impl Default for NodeInitOptions {
 /// If the string contains embedded null bytes, they are replaced with the
 /// Unicode replacement character (`\u{FFFD}`) to avoid panicking at the FFI
 /// boundary. If sanitization fails, the fallback string is used.
-///
-/// # Arguments
-///
-/// * `value` - The string to convert
-/// * `fallback` - Fallback string if conversion fails entirely
 pub fn sanitize_to_cstring(value: impl Into<String>, fallback: &str) -> CString {
     let s = value.into();
     match CString::new(s.clone()) {
@@ -189,6 +291,70 @@ pub unsafe extern "C" fn defra_free_string(ptr: *mut c_char) {
     }
 }
 
+/// Resolve a collection from CollectionOptions.
+///
+/// Tries name first, then version_id, then collection_id. Returns an error
+/// if no collection can be found.
+///
+/// # Safety
+///
+/// String pointers in `opts` must be null or valid null-terminated UTF-8 strings.
+pub unsafe fn resolve_collection(
+    database: &std::sync::Arc<crate::state::FfiDatabase>,
+    opts: &CollectionOptions,
+) -> Result<db::Collection, String> {
+    // Try by name first
+    if let Some(name) = opts.name_str() {
+        if !name.is_empty() {
+            return database
+                .get_collection(&name)
+                .map_err(|e| format!("failed to get collection: {}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", name));
+        }
+    }
+
+    // Try by version_id
+    if let Some(version) = opts.version_str() {
+        if !version.is_empty() {
+            return database
+                .get_collection_by_version_id(&version)
+                .map_err(|e| format!("failed to get collection by version: {}", e))?
+                .ok_or_else(|| format!("collection with version '{}' not found", version));
+        }
+    }
+
+    // Try by collection_id
+    if let Some(col_id) = opts.collection_id_str() {
+        if !col_id.is_empty() {
+            return database
+                .find_collection_by_id(&col_id)
+                .map_err(|e| format!("failed to find collection: {}", e))?
+                .ok_or_else(|| format!("collection with ID '{}' not found", col_id));
+        }
+    }
+
+    Err("no collection identifier provided in options".to_string())
+}
+
+/// Resolve an identity DID string from an identity handle.
+///
+/// Returns the DID string for the identity, or an error if the handle is invalid.
+pub fn resolve_identity_did(identity_ptr: usize) -> Result<String, String> {
+    if identity_ptr == 0 {
+        return Err("identity_ptr is 0 (no identity)".to_string());
+    }
+
+    let identity = crate::state::IDENTITIES
+        .get(identity_ptr)
+        .ok_or_else(|| format!("invalid identity handle: {}", identity_ptr))?;
+
+    let did = identity
+        .did()
+        .map_err(|e| format!("failed to get DID: {}", e))?;
+
+    Ok(did.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,17 +389,13 @@ mod tests {
         assert!(result.error.is_null());
     }
 
-    // Edge case tests for null byte handling (H2)
-
     #[test]
     fn test_ffi_result_success_with_null_bytes() {
-        // String with embedded null byte should not panic
         let value_with_null = "hello\0world";
         let result = FfiResult::success(value_with_null);
         assert_eq!(result.status, 0);
         assert!(!result.value.is_null());
 
-        // Value should have null bytes replaced
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains('\u{FFFD}'), "null byte should be replaced");
         assert!(!value.contains('\0'), "should not contain null byte");
@@ -243,13 +405,11 @@ mod tests {
 
     #[test]
     fn test_ffi_result_error_with_null_bytes() {
-        // Error message with embedded null byte should not panic
         let error_with_null = "error\0message";
         let result = FfiResult::error(error_with_null);
         assert_eq!(result.status, 1);
         assert!(!result.error.is_null());
 
-        // Error should have null bytes replaced
         let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
         assert!(error.contains('\u{FFFD}'), "null byte should be replaced");
         assert!(!error.contains('\0'), "should not contain null byte");
@@ -259,18 +419,24 @@ mod tests {
 
     #[test]
     fn test_new_node_result_error_with_null_bytes() {
-        // Error message with embedded null byte should not panic
         let error_with_null = "node\0error";
         let result = NewNodeResult::error(error_with_null);
         assert_eq!(result.status, 1);
         assert!(!result.error.is_null());
         assert_eq!(result.node_ptr, 0);
 
-        // Error should have null bytes replaced
         let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
         assert!(error.contains('\u{FFFD}'), "null byte should be replaced");
 
         unsafe { defra_free_string(result.error) };
+    }
+
+    #[test]
+    fn test_new_txn_result() {
+        let result = NewTxnResult::success(42);
+        assert_eq!(result.status, 0);
+        assert_eq!(result.txn_ptr, 42);
+        assert!(result.error.is_null());
     }
 
     #[test]
@@ -281,7 +447,6 @@ mod tests {
 
     #[test]
     fn test_defra_free_string_null_ptr() {
-        // Should not panic when freeing null pointer
         unsafe { defra_free_string(ptr::null_mut()) };
     }
 

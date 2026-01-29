@@ -317,6 +317,152 @@ impl NodesAccess {
 /// Global NODES accessor for backwards compatibility.
 pub static NODES: NodesAccess = NodesAccess;
 
+// =============================================================================
+// Identity Registry
+// =============================================================================
+
+/// Type alias for identity handles (opaque to FFI callers).
+pub type IdentityHandle = usize;
+
+/// Global registry of identity handles.
+///
+/// Stores RawIdentity objects keyed by opaque handles, allowing Go code
+/// to pass identity references across FFI boundaries.
+pub struct IdentityRegistry {
+    identities: RwLock<HashMap<IdentityHandle, Arc<identity::RawIdentity>>>,
+    next_handle: AtomicUsize,
+}
+
+impl IdentityRegistry {
+    fn new() -> Self {
+        Self {
+            identities: RwLock::new(HashMap::new()),
+            next_handle: AtomicUsize::new(1), // 0 is invalid/no identity
+        }
+    }
+
+    /// Insert a new identity and return its handle.
+    pub fn insert(&self, identity: identity::RawIdentity) -> IdentityHandle {
+        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+        let mut ids = self.identities.write();
+        ids.insert(handle, Arc::new(identity));
+        handle
+    }
+
+    /// Get a cloned Arc reference to an identity.
+    pub fn get(&self, handle: IdentityHandle) -> Option<Arc<identity::RawIdentity>> {
+        let ids = self.identities.read();
+        ids.get(&handle).cloned()
+    }
+
+    /// Remove and return an identity.
+    pub fn remove(&self, handle: IdentityHandle) -> Option<Arc<identity::RawIdentity>> {
+        let mut ids = self.identities.write();
+        ids.remove(&handle)
+    }
+}
+
+/// Global identity registry singleton.
+static IDENTITY_REGISTRY: OnceLock<IdentityRegistry> = OnceLock::new();
+
+/// Access the global identity registry.
+pub fn identities() -> &'static IdentityRegistry {
+    IDENTITY_REGISTRY.get_or_init(IdentityRegistry::new)
+}
+
+/// Convenience wrapper for identity registry access.
+pub struct IdentitiesAccess;
+
+impl IdentitiesAccess {
+    pub fn insert(&self, identity: identity::RawIdentity) -> IdentityHandle {
+        identities().insert(identity)
+    }
+
+    pub fn get(&self, handle: IdentityHandle) -> Option<Arc<identity::RawIdentity>> {
+        identities().get(handle)
+    }
+
+    pub fn remove(&self, handle: IdentityHandle) -> Option<Arc<identity::RawIdentity>> {
+        identities().remove(handle)
+    }
+}
+
+/// Global IDENTITIES accessor.
+pub static IDENTITIES: IdentitiesAccess = IdentitiesAccess;
+
+// =============================================================================
+// Transaction Registry
+// =============================================================================
+
+/// Type alias for transaction handles (opaque to FFI callers).
+pub type TxnHandle = usize;
+
+/// Global registry of transaction handles.
+///
+/// Stores (NodeHandle, transaction_string_id) pairs keyed by opaque handles,
+/// allowing Go code to pass transaction references across FFI boundaries.
+pub struct TxnRegistry {
+    txns: RwLock<HashMap<TxnHandle, (NodeHandle, String)>>,
+    next_handle: AtomicUsize,
+}
+
+impl TxnRegistry {
+    fn new() -> Self {
+        Self {
+            txns: RwLock::new(HashMap::new()),
+            next_handle: AtomicUsize::new(1), // 0 is invalid
+        }
+    }
+
+    /// Insert a new transaction and return its handle.
+    pub fn insert(&self, node_handle: NodeHandle, txn_string_id: String) -> TxnHandle {
+        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+        let mut txns = self.txns.write();
+        txns.insert(handle, (node_handle, txn_string_id));
+        handle
+    }
+
+    /// Get the (node_handle, txn_string_id) pair for a transaction handle.
+    pub fn get(&self, handle: TxnHandle) -> Option<(NodeHandle, String)> {
+        let txns = self.txns.read();
+        txns.get(&handle).cloned()
+    }
+
+    /// Remove and return a transaction entry.
+    pub fn remove(&self, handle: TxnHandle) -> Option<(NodeHandle, String)> {
+        let mut txns = self.txns.write();
+        txns.remove(&handle)
+    }
+}
+
+/// Global transaction registry singleton.
+static TXN_REGISTRY: OnceLock<TxnRegistry> = OnceLock::new();
+
+/// Access the global transaction registry.
+pub fn txns() -> &'static TxnRegistry {
+    TXN_REGISTRY.get_or_init(TxnRegistry::new)
+}
+
+/// Convenience wrapper for transaction registry access.
+pub struct TxnsAccess;
+
+impl TxnsAccess {
+    pub fn insert(&self, node_handle: NodeHandle, txn_string_id: String) -> TxnHandle {
+        txns().insert(node_handle, txn_string_id)
+    }
+
+    pub fn get(&self, handle: TxnHandle) -> Option<(NodeHandle, String)> {
+        txns().get(handle)
+    }
+
+    pub fn remove(&self, handle: TxnHandle) -> Option<(NodeHandle, String)> {
+        txns().remove(handle)
+    }
+}
+
+/// Global TXNS accessor.
+pub static TXNS: TxnsAccess = TxnsAccess;
+
 #[cfg(test)]
 mod tests {
     use super::*;
