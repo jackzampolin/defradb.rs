@@ -3,7 +3,6 @@
 //! This module provides FFI functions for lens transform operations:
 //! - Adding lens transforms
 //! - Listing lens transforms
-//! - Setting lens migrations between schema versions
 
 use std::ffi::c_char;
 
@@ -16,15 +15,26 @@ use lens::{LensConfig, LensModule};
 
 /// Add a lens transform to the database.
 ///
+/// This registers a lens transform without linking it to schema versions.
+/// Use `set_migration` to link a transform between specific versions.
+///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `lens_json` - JSON string containing the lens configuration
+/// * `lens_json` - JSON string containing the lens configuration:
+///   - `Path`: Optional path to WASM module file
+///   - `Module`: Optional base64-encoded WASM bytes
+///   - `Arguments`: Optional JSON arguments for the module
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains the lens ID)
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
 /// `lens_json` must be a valid null-terminated UTF-8 string.
-#[export_name = "LensAdd"]
+#[no_mangle]
 pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
@@ -33,17 +43,22 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
         None => return FfiResult::error("lens_json is null"),
     };
 
+    // Validate node handle before entering async block
     let lens_store = match NODES.get(node_ptr, |state| state.database.lens_store().clone()) {
         Some(store) => store,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
+        // Parse the LensModule from JSON
         let lens_module: LensModule = serde_json::from_str(&lens_str)
             .map_err(|e| format!("failed to parse lens config: {}", e))?;
 
+        // Create a LensConfig with empty version IDs (just for storing the module)
+        // This matches Go's behavior where AddLens just stores the transform
         let config = LensConfig::new("", "", lens_module);
 
+        // Register the lens in the store
         let lens_id = lens_store
             .add(config)
             .await
@@ -62,13 +77,32 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
 ///
 /// Returns a JSON object mapping lens IDs to their configurations.
 ///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains JSON object of lenses)
+/// - Status 1: Error (error field contains message)
+///
+/// # Example Response
+///
+/// ```json
+/// {
+///   "lens_0": {"Path": "/path/to/transform.wasm"},
+///   "lens_1": {"Module": "base64...", "Arguments": {...}}
+/// }
+/// ```
+///
 /// # Safety
 ///
 /// The caller must free the returned string with `defra_free_string`.
-#[export_name = "LensList"]
+#[no_mangle]
 pub extern "C" fn lens_list(node_ptr: usize) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
+    // Validate node handle before entering async block
     let lens_store = match NODES.get(node_ptr, |state| state.database.lens_store().clone()) {
         Some(store) => store,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
@@ -80,6 +114,7 @@ pub extern "C" fn lens_list(node_ptr: usize) -> FfiResult {
             .await
             .map_err(|e| format!("failed to list lenses: {}", e))?;
 
+        // Convert to JSON
         let json = serde_json::to_string(&lenses)
             .map_err(|e| format!("failed to serialize lenses: {}", e))?;
 
@@ -88,67 +123,6 @@ pub extern "C" fn lens_list(node_ptr: usize) -> FfiResult {
 
     match result {
         Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
-}
-
-/// Set a lens migration between two schema versions.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `src_version` - Source schema version ID
-/// * `dst_version` - Destination schema version ID
-/// * `lens_cfg_json` - JSON string containing the lens module configuration
-///
-/// # Safety
-///
-/// All string pointers must be valid null-terminated UTF-8 strings.
-#[export_name = "LensSet"]
-pub unsafe extern "C" fn lens_set(
-    node_ptr: usize,
-    src_version: *const c_char,
-    dst_version: *const c_char,
-    lens_cfg_json: *const c_char,
-) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let src = match c_str_to_string(src_version) {
-        Some(s) => s,
-        None => return FfiResult::error("src_version is null"),
-    };
-
-    let dst = match c_str_to_string(dst_version) {
-        Some(s) => s,
-        None => return FfiResult::error("dst_version is null"),
-    };
-
-    let cfg_str = match c_str_to_string(lens_cfg_json) {
-        Some(s) => s,
-        None => return FfiResult::error("lens_cfg_json is null"),
-    };
-
-    let lens_store = match NODES.get(node_ptr, |state| state.database.lens_store().clone()) {
-        Some(store) => store,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
-        let lens_module: LensModule = serde_json::from_str(&cfg_str)
-            .map_err(|e| format!("failed to parse lens config: {}", e))?;
-
-        let config = LensConfig::new(&src, &dst, lens_module);
-
-        lens_store
-            .add(config)
-            .await
-            .map_err(|e| format!("failed to set lens migration: {}", e))?;
-
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
         Err(e) => FfiResult::error(e),
     }
 }
@@ -202,6 +176,7 @@ mod tests {
         assert!(!result.value.is_null());
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        // Should be empty object
         assert!(value == "{}" || value == "[]", "should be empty: {}", value);
         unsafe { crate::types::defra_free_string(result.value) };
 
@@ -216,49 +191,5 @@ mod tests {
         assert_eq!(result.status, 1);
         assert!(!result.error.is_null());
         unsafe { crate::types::defra_free_string(result.error) };
-    }
-
-    #[test]
-    fn test_lens_set_invalid_node() {
-        assert!(crate::runtime::init_runtime());
-
-        let src = CString::new("v1").unwrap();
-        let dst = CString::new("v2").unwrap();
-        let cfg = CString::new(r#"{"Path": "/path/to/transform.wasm"}"#).unwrap();
-        let result = unsafe { lens_set(0, src.as_ptr(), dst.as_ptr(), cfg.as_ptr()) };
-        assert_eq!(result.status, 1);
-        assert!(!result.error.is_null());
-        unsafe { crate::types::defra_free_string(result.error) };
-    }
-
-    #[test]
-    fn test_lens_set_null_params() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // null src
-        let dst = CString::new("v2").unwrap();
-        let cfg = CString::new(r#"{}"#).unwrap();
-        let result = unsafe { lens_set(node, std::ptr::null(), dst.as_ptr(), cfg.as_ptr()) };
-        assert_eq!(result.status, 1);
-
-        // null dst
-        let src = CString::new("v1").unwrap();
-        let result = unsafe { lens_set(node, src.as_ptr(), std::ptr::null(), cfg.as_ptr()) };
-        assert_eq!(result.status, 1);
-
-        // null cfg
-        let result = unsafe { lens_set(node, src.as_ptr(), dst.as_ptr(), std::ptr::null()) };
-        assert_eq!(result.status, 1);
-
-        if !result.error.is_null() {
-            unsafe { crate::types::defra_free_string(result.error) };
-        }
-
-        node_close(node);
     }
 }

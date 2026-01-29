@@ -1,86 +1,207 @@
 //! Collection management operations for FFI.
 //!
 //! This module exposes collection lifecycle and management functions
-//! that match Go's cbindings collection management behavior.
-//! All functions use CollectionOptions + identity_ptr pattern.
+//! that match Go's collection management behavior.
 
 use std::ffi::c_char;
 
 use crate::get_runtime;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, resolve_collection, CollectionOptions, FfiResult};
+use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
-/// Delete document(s) from a collection.
+/// Get a collection by name.
 ///
-/// Supports deletion by doc_id or by filter.
+/// Returns a JSON object containing the collection's schema (CollectionVersion)
+/// if found, or an error if the collection doesn't exist.
 ///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `doc_id` - Document ID to delete (null if using filter)
-/// * `filter` - JSON filter for bulk delete (null if using doc_id)
-/// * `opts` - Collection options identifying which collection
-/// * `identity_ptr` - Identity handle (0 for no identity)
+/// * `name` - The collection name
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains JSON CollectionVersion)
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
-/// All string pointers must be valid null-terminated UTF-8 strings or null.
-#[export_name = "CollectionDelete"]
-pub unsafe extern "C" fn collection_delete(
-    node_ptr: usize,
-    doc_id: *const c_char,
-    _filter: *const c_char,
-    opts: CollectionOptions,
-    _identity_ptr: usize,
-) -> FfiResult {
+/// `name` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn get_collection_by_name(node_ptr: usize, name: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let doc_id_opt = c_str_to_string(doc_id).filter(|s| !s.is_empty());
+    let name_str = match c_str_to_string(name) {
+        Some(s) => s,
+        None => return FfiResult::error("name is null"),
+    };
 
+    // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
         Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let collection = match resolve_collection(&database, &opts) {
-        Ok(c) => c,
-        Err(e) => return FfiResult::error(e),
+    let result = rt.block_on(async {
+        let collection = database
+            .get_collection(&name_str)
+            .map_err(|e| format!("failed to get collection: {}", e))?
+            .ok_or_else(|| format!("collection '{}' not found", name_str))?;
+
+        let json = serde_json::to_string(collection.schema())
+            .map_err(|e| format!("failed to serialize collection: {}", e))?;
+
+        Ok::<String, String>(json)
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Check if a collection exists by name.
+///
+/// Returns a JSON boolean: `true` if the collection exists, `false` otherwise.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `name` - The collection name to check
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains "true" or "false")
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn has_collection(node_ptr: usize, name: *const c_char) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let name_str = match c_str_to_string(name) {
+        Some(s) => s,
+        None => return FfiResult::error("name is null"),
     };
 
-    let col_name = collection.schema().name.clone();
-
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        match doc_id_opt {
-            Some(id_str) => {
-                let delete_gql = format!(
-                    "mutation {{ delete_{name}(docID: \"{id}\") {{ _docID }} }}",
-                    name = col_name,
-                    id = id_str
-                );
-                let request = query::QueryRequest::new(delete_gql);
-                let response = runner.execute(request).await;
+        let exists = database
+            .has_collection(&name_str)
+            .map_err(|e| format!("failed to check collection: {}", e))?;
 
-                if !response.errors.is_empty() {
-                    let error_msg = response
-                        .errors
-                        .iter()
-                        .map(|e| e.message.clone())
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(error_msg);
-                }
+        Ok::<String, String>(exists.to_string())
+    });
 
-                serde_json::to_string(&response.data)
-                    .map_err(|e| format!("failed to serialize response: {}", e))
-            }
-            None => Err("either doc_id or filter must be provided".to_string()),
-        }
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Delete a collection by name.
+///
+/// Deletes the collection and all its documents.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `name` - The collection name to delete
+///
+/// # Returns
+///
+/// - Status 0: Success (value is empty)
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn delete_collection(node_ptr: usize, name: *const c_char) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let name_str = match c_str_to_string(name) {
+        Some(s) => s,
+        None => return FfiResult::error("name is null"),
+    };
+
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        database
+            .delete_collection(&name_str)
+            .await
+            .map_err(|e| format!("failed to delete collection: {}", e))?;
+
+        Ok::<String, String>("{}".to_string())
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Find a collection by its collection ID (schema version ID).
+///
+/// This is useful for P2P sync where we receive blocks with schema_version_id
+/// and need to find the corresponding collection.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `collection_id` - The collection ID (schema version ID)
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains JSON CollectionVersion or "null" if not found)
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `collection_id` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn find_collection_by_id(
+    node_ptr: usize,
+    collection_id: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let id_str = match c_str_to_string(collection_id) {
+        Some(s) => s,
+        None => return FfiResult::error("collection_id is null"),
+    };
+
+    // Validate node handle before entering async block
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        let collection = database
+            .find_collection_by_id(&id_str)
+            .map_err(|e| format!("failed to find collection: {}", e))?;
+
+        let json = match collection {
+            Some(c) => serde_json::to_string(c.schema())
+                .map_err(|e| format!("failed to serialize collection: {}", e))?,
+            None => "null".to_string(),
+        };
+
+        Ok::<String, String>(json)
     });
 
     match result {
@@ -91,28 +212,35 @@ pub unsafe extern "C" fn collection_delete(
 
 /// Set the active collection version.
 ///
+/// This activates the collection with the given version ID and deactivates
+/// any other versions of the same collection.
+///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `opts` - Collection options (version field used to identify the version to activate)
-/// * `identity_ptr` - Identity handle (0 for no identity)
+/// * `version_id` - The version ID of the collection to activate
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
-/// String pointers in `opts` must be null or valid null-terminated UTF-8 strings.
-#[export_name = "SetActiveCollection"]
-pub unsafe extern "C" fn set_active_collection(
+/// `version_id` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn set_active_collection_version(
     node_ptr: usize,
-    opts: CollectionOptions,
-    _identity_ptr: usize,
+    version_id: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let version_str = match opts.version_str() {
-        Some(s) if !s.is_empty() => s,
-        _ => return FfiResult::error("version is required in options"),
+    let version_str = match c_str_to_string(version_id) {
+        Some(s) => s,
+        None => return FfiResult::error("version_id is null"),
     };
 
+    // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
         Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
@@ -135,61 +263,57 @@ pub unsafe extern "C" fn set_active_collection(
 
 /// Patch a collection's schema using JSON patch operations.
 ///
+/// This applies the given JSON patch to the collection's schema,
+/// validates the result, and updates the collection.
+///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
+/// * `collection_name` - The name of the collection to patch
 /// * `patch` - A JSON patch string (RFC 6902 format)
-/// * `lens_config` - Optional lens config JSON (null for none)
-/// * `identity_ptr` - Identity handle (0 for no identity)
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains the updated CollectionVersion as JSON)
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
-/// All string pointers must be valid null-terminated UTF-8 strings or null.
-#[export_name = "CollectionPatch"]
-pub unsafe extern "C" fn collection_patch(
+/// `collection_name` and `patch` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn patch_collection(
     node_ptr: usize,
+    collection_name: *const c_char,
     patch: *const c_char,
-    _lens_config: *const c_char,
-    _identity_ptr: usize,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    let name_str = match c_str_to_string(collection_name) {
+        Some(s) => s,
+        None => return FfiResult::error("collection_name is null"),
+    };
 
     let patch_str = match c_str_to_string(patch) {
         Some(s) => s,
         None => return FfiResult::error("patch is null"),
     };
 
+    // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
         Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        // Parse patch to extract collection name from the patch target
-        // Go sends patch as a JSON object with collection name as key
-        let patch_value: serde_json::Value = serde_json::from_str(&patch_str)
-            .map_err(|e| format!("failed to parse patch: {}", e))?;
+        let updated_schema = database
+            .patch_collection(&name_str, &patch_str)
+            .await
+            .map_err(|e| format!("failed to patch collection: {}", e))?;
 
-        // If the patch is an object with collection name as key, extract it
-        if let Some(obj) = patch_value.as_object() {
-            if let Some((col_name, col_patch)) = obj.iter().next() {
-                let patch_str = serde_json::to_string(col_patch)
-                    .map_err(|e| format!("failed to serialize patch: {}", e))?;
-                let updated_schema = database
-                    .patch_collection(col_name, &patch_str)
-                    .await
-                    .map_err(|e| format!("failed to patch collection: {}", e))?;
+        let json = serde_json::to_string(&updated_schema)
+            .map_err(|e| format!("failed to serialize updated schema: {}", e))?;
 
-                let json = serde_json::to_string(&updated_schema)
-                    .map_err(|e| format!("failed to serialize updated schema: {}", e))?;
-
-                return Ok::<String, String>(json);
-            }
-        }
-
-        // If it's a JSON array, it's a raw patch - need collection name from context
-        // For backwards compatibility, try to apply as-is
-        Err("patch must be a JSON object with collection name as key".to_string())
+        Ok::<String, String>(json)
     });
 
     match result {
@@ -198,60 +322,53 @@ pub unsafe extern "C" fn collection_patch(
     }
 }
 
-/// Describe collections matching the given options.
+/// Get a collection by its version ID.
 ///
-/// Returns a JSON array of CollectionVersion objects.
+/// This searches all collections for one matching the given version ID.
 ///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `opts` - Collection options (name to describe specific, empty for all)
+/// * `version_id` - The version ID to search for
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains JSON CollectionVersion or "null" if not found)
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
-/// String pointers in `opts` must be null or valid null-terminated UTF-8 strings.
-/// * `identity_ptr` - Identity handle (0 for no identity)
-#[export_name = "CollectionDescribe"]
-pub unsafe extern "C" fn collection_describe(
+/// `version_id` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn get_collection_by_version_id(
     node_ptr: usize,
-    opts: CollectionOptions,
-    _identity_ptr: usize,
+    version_id: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let name_opt = opts.name_str().filter(|s| !s.is_empty());
+    let version_str = match c_str_to_string(version_id) {
+        Some(s) => s,
+        None => return FfiResult::error("version_id is null"),
+    };
 
+    // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
         Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        match name_opt {
-            Some(name) => {
-                let collection = database
-                    .get_collection(&name)
-                    .map_err(|e| format!("failed to get collection: {}", e))?
-                    .ok_or_else(|| format!("collection '{}' not found", name))?;
+        let collection = database
+            .get_collection_by_version_id(&version_str)
+            .map_err(|e| format!("failed to get collection: {}", e))?;
 
-                let versions = vec![collection.schema().clone()];
-                serde_json::to_string(&versions).map_err(|e| format!("failed to serialize: {}", e))
-            }
-            None => {
-                let names = database
-                    .list_collections()
-                    .map_err(|e| format!("failed to list collections: {}", e))?;
+        let json = match collection {
+            Some(c) => serde_json::to_string(c.schema())
+                .map_err(|e| format!("failed to serialize collection: {}", e))?,
+            None => "null".to_string(),
+        };
 
-                let mut versions = Vec::new();
-                for name in names {
-                    if let Ok(Some(col)) = database.get_collection(&name) {
-                        versions.push(col.schema().clone());
-                    }
-                }
-
-                serde_json::to_string(&versions).map_err(|e| format!("failed to serialize: {}", e))
-            }
-        }
+        Ok::<String, String>(json)
     });
 
     match result {
@@ -266,24 +383,29 @@ pub unsafe extern "C" fn collection_describe(
 
 /// Add a view to the database.
 ///
+/// Creates a new Defra View from a GQL query and SDL schema.
+///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
 /// * `gql_query` - The GraphQL query defining the view
 /// * `sdl` - The SDL schema for the view output type
 /// * `transform` - Optional Lens transform configuration (JSON, null for none)
-/// * `identity_ptr` - Identity handle (0 for no identity)
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains JSON array of CollectionVersions)
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
 /// All string pointers must be valid null-terminated UTF-8 strings or null.
-#[export_name = "ViewAdd"]
-pub unsafe extern "C" fn view_add(
+#[no_mangle]
+pub unsafe extern "C" fn add_view(
     node_ptr: usize,
     gql_query: *const c_char,
     sdl: *const c_char,
     transform: *const c_char,
-    _identity_ptr: usize,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
@@ -299,20 +421,24 @@ pub unsafe extern "C" fn view_add(
 
     let transform_opt = c_str_to_string(transform);
 
+    // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
         Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
+        // Parse the SDL into collection versions
         let collections =
             query::parse_sdl(&sdl_str).map_err(|e| format!("failed to parse view SDL: {}", e))?;
 
+        // Build the query source
         let mut query_source = schema::QuerySource::new(serde_json::Value::String(query_str));
         if let Some(ref t) = transform_opt {
             query_source = query_source.with_transform(t);
         }
 
+        // Create each collection with the query source attached
         let mut created_versions = Vec::new();
         for mut col_version in collections {
             col_version.query = Some(query_source.clone());
@@ -338,41 +464,72 @@ pub unsafe extern "C" fn view_add(
 
 /// Refresh view caches.
 ///
+/// Refreshes the caches of all views matching the given options.
+///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `opts` - Collection options to filter which views to refresh
-/// * `identity_ptr` - Identity handle (0 for no identity)
+/// * `options` - JSON string of CollectionFetchOptions (null for all views)
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
-/// String pointers in `opts` must be null or valid null-terminated UTF-8 strings.
-#[export_name = "ViewRefresh"]
-pub unsafe extern "C" fn view_refresh(
-    _node_ptr: usize,
-    _opts: CollectionOptions,
-    _identity_ptr: usize,
-) -> FfiResult {
-    FfiResult::error("view_refresh is not yet implemented")
+/// `options` must be null or a valid null-terminated UTF-8 string.
+///
+/// # Note
+///
+/// Not yet implemented. See issue #178.
+#[no_mangle]
+pub unsafe extern "C" fn refresh_views(_node_ptr: usize, _options: *const c_char) -> FfiResult {
+    FfiResult::error("refresh_views is not yet implemented - see issue #178")
 }
 
-/// Set migration for collection versions (internal, used by LensSet).
+/// Set migration for collection versions.
+///
+/// Sets the migration for all collections using the given source-destination
+/// collection version IDs.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `config` - JSON string of LensConfig containing:
+///   - `source_version_id`: Source collection version ID
+///   - `destination_version_id`: Destination collection version ID
+///   - `lens`: Lens transform configuration
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains the Lens transform ID)
+/// - Status 1: Error (error field contains message)
 ///
 /// # Safety
 ///
-/// Caller must ensure `node_ptr` is a valid node handle.
-pub unsafe fn set_migration_internal(node_ptr: usize, config: &str) -> FfiResult {
+/// `config` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn set_migration(node_ptr: usize, config: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
+    let config_str = match c_str_to_string(config) {
+        Some(s) => s,
+        None => return FfiResult::error("config is null"),
+    };
+
+    // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
         Some(db) => db,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
     let result = rt.block_on(async {
-        let lens_config: lens::LensConfig = serde_json::from_str(config)
+        // Parse the LensConfig from JSON
+        let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
             .map_err(|e| format!("failed to parse lens config: {}", e))?;
 
+        // Register the migration with the lens store
         let transform_id = database
             .set_migration(lens_config)
             .await
@@ -394,19 +551,9 @@ mod tests {
     use crate::schema::add_schema;
     use crate::types::NodeInitOptions;
     use std::ffi::CString;
-    use std::ptr;
-
-    fn make_opts(name: *const c_char) -> CollectionOptions {
-        CollectionOptions {
-            version: ptr::null(),
-            collection_id: ptr::null(),
-            name,
-            get_inactive: 0,
-        }
-    }
 
     #[test]
-    fn test_collection_describe_specific() {
+    fn test_get_collection_by_name() {
         assert!(crate::runtime::init_runtime());
 
         let options = NodeInitOptions::default();
@@ -414,86 +561,408 @@ mod tests {
         assert_eq!(result.status, 0);
         let node = result.node_ptr;
 
-        let sdl = CString::new("type Animal { species: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr(), 0) };
-        assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        let name = CString::new("Animal").unwrap();
-        let result = unsafe { collection_describe(node, make_opts(name.as_ptr()), 0) };
-        assert_eq!(result.status, 0, "collection_describe should succeed");
-
-        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(value.contains("Animal"), "should contain collection name");
-        assert!(value.contains("species"), "should contain field name");
-
-        unsafe { crate::types::defra_free_string(result.value) };
-        node_close(node);
-    }
-
-    #[test]
-    fn test_collection_describe_all() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        let sdl1 = CString::new("type Cat { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl1.as_ptr(), 0) };
-        assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        let sdl2 = CString::new("type Dog { breed: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl2.as_ptr(), 0) };
-        assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
-
-        let result = unsafe { collection_describe(node, make_opts(ptr::null()), 0) };
-        assert_eq!(result.status, 0, "collection_describe all should succeed");
-
-        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
-        assert!(value.contains("Cat"), "should contain Cat");
-        assert!(value.contains("Dog"), "should contain Dog");
-
-        unsafe { crate::types::defra_free_string(result.value) };
-        node_close(node);
-    }
-
-    #[test]
-    fn test_view_add() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
+        // Add schema
         let sdl = CString::new("type User { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr(), 0) };
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
         assert_eq!(result.status, 0);
-        if !result.value.is_null() {
-            unsafe { crate::types::defra_free_string(result.value) };
-        }
+        unsafe { crate::types::defra_free_string(result.value) };
 
+        // Get collection by name
+        let name = CString::new("User").unwrap();
+        let result = unsafe { get_collection_by_name(node, name.as_ptr()) };
+        assert_eq!(result.status, 0, "get_collection_by_name should succeed");
+        assert!(!result.value.is_null());
+
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.contains("User"), "should contain User collection");
+        assert!(value.contains("name"), "should contain name field");
+
+        unsafe { crate::types::defra_free_string(result.value) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_get_collection_by_name_not_found() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let name = CString::new("NonExistent").unwrap();
+        let result = unsafe { get_collection_by_name(node, name.as_ptr()) };
+        assert_eq!(
+            result.status, 1,
+            "should return error for non-existent collection"
+        );
+        assert!(!result.error.is_null());
+
+        let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
+        assert!(
+            error.contains("not found"),
+            "error should mention not found"
+        );
+
+        unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_get_collection_by_name_null_pointer() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let result = unsafe { get_collection_by_name(node, std::ptr::null()) };
+        assert_eq!(result.status, 1, "should return error for null name");
+        assert!(!result.error.is_null());
+
+        unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_has_collection() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type Person { name: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Check existing collection
+        let name = CString::new("Person").unwrap();
+        let result = unsafe { has_collection(node, name.as_ptr()) };
+        assert_eq!(result.status, 0);
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert_eq!(value, "true");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Check non-existing collection
+        let name = CString::new("NonExistent").unwrap();
+        let result = unsafe { has_collection(node, name.as_ptr()) };
+        assert_eq!(result.status, 0);
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert_eq!(value, "false");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_delete_collection() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type ToDelete { field: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Verify it exists
+        let name = CString::new("ToDelete").unwrap();
+        let result = unsafe { has_collection(node, name.as_ptr()) };
+        assert_eq!(result.status, 0);
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert_eq!(value, "true");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Delete it
+        let name = CString::new("ToDelete").unwrap();
+        let result = unsafe { delete_collection(node, name.as_ptr()) };
+        assert_eq!(result.status, 0, "delete_collection should succeed");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Verify it's gone
+        let name = CString::new("ToDelete").unwrap();
+        let result = unsafe { has_collection(node, name.as_ptr()) };
+        assert_eq!(result.status, 0);
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert_eq!(value, "false");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_find_collection_by_id() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type FindMe { data: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+
+        // Extract collection ID from add_schema result
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        let collections: Vec<serde_json::Value> = serde_json::from_str(&value).unwrap();
+        let collection_id = collections[0]["CollectionID"].as_str().unwrap();
+
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Find by collection ID
+        let id_cstr = CString::new(collection_id).unwrap();
+        let result = unsafe { find_collection_by_id(node, id_cstr.as_ptr()) };
+        assert_eq!(result.status, 0, "find_collection_by_id should succeed");
+        assert!(!result.value.is_null());
+
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.contains("FindMe"), "should contain FindMe collection");
+
+        unsafe { crate::types::defra_free_string(result.value) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_find_collection_by_id_not_found() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let id = CString::new("bafkreibnonexistent").unwrap();
+        let result = unsafe { find_collection_by_id(node, id.as_ptr()) };
+        assert_eq!(result.status, 0, "should succeed with null value");
+
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert_eq!(value, "null", "should return null for non-existent ID");
+
+        unsafe { crate::types::defra_free_string(result.value) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_set_active_collection_version() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type Active { data: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+
+        // Extract version ID from result
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        let collections: Vec<serde_json::Value> = serde_json::from_str(&value).unwrap();
+        let version_id = collections[0]["VersionID"].as_str().unwrap();
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Set active version (should succeed)
+        let version_cstr = CString::new(version_id).unwrap();
+        let result = unsafe { set_active_collection_version(node, version_cstr.as_ptr()) };
+        assert_eq!(
+            result.status, 0,
+            "set_active_collection_version should succeed"
+        );
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_set_active_collection_version_not_found() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let version_id = CString::new("nonexistent-version-id").unwrap();
+        let result = unsafe { set_active_collection_version(node, version_id.as_ptr()) };
+        assert_eq!(result.status, 1, "should fail for non-existent version");
+
+        unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_get_collection_by_version_id() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type VersionTest { field: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+
+        // Extract version ID
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        let collections: Vec<serde_json::Value> = serde_json::from_str(&value).unwrap();
+        let version_id = collections[0]["VersionID"].as_str().unwrap();
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Get by version ID
+        let version_cstr = CString::new(version_id).unwrap();
+        let result = unsafe { get_collection_by_version_id(node, version_cstr.as_ptr()) };
+        assert_eq!(
+            result.status, 0,
+            "get_collection_by_version_id should succeed"
+        );
+
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.contains("VersionTest"), "should contain VersionTest");
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_patch_collection() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type Patchable { original: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Patch the collection - change is_active to false
+        let patch = CString::new(r#"[{"op":"replace","path":"/IsActive","value":false}]"#).unwrap();
+        let name = CString::new("Patchable").unwrap();
+        let result = unsafe { patch_collection(node, name.as_ptr(), patch.as_ptr()) };
+        assert_eq!(result.status, 0, "patch_collection should succeed");
+
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert!(value.contains("Patchable"), "should contain Patchable");
+        assert!(
+            value.contains("\"IsActive\":false"),
+            "should have IsActive:false"
+        );
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        node_close(node);
+    }
+
+    #[test]
+    fn test_patch_collection_not_found() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let patch = CString::new(r#"[{"op":"replace","path":"/IsActive","value":false}]"#).unwrap();
+        let name = CString::new("NonExistent").unwrap();
+        let result = unsafe { patch_collection(node, name.as_ptr(), patch.as_ptr()) };
+        assert_eq!(result.status, 1, "should fail for non-existent collection");
+
+        unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_patch_collection_invalid_patch() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add schema
+        let sdl = CString::new("type PatchTest { field: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Invalid patch - not valid JSON
+        let patch = CString::new("not valid json").unwrap();
+        let name = CString::new("PatchTest").unwrap();
+        let result = unsafe { patch_collection(node, name.as_ptr(), patch.as_ptr()) };
+        assert_eq!(result.status, 1, "should fail for invalid patch");
+
+        unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_add_view() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        // Add base schema first
+        let sdl = CString::new("type User { name: String }").unwrap();
+        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        assert_eq!(result.status, 0);
+        unsafe { crate::types::defra_free_string(result.value) };
+
+        // Add a view
         let gql_query = CString::new("{ User { name } }").unwrap();
         let view_sdl = CString::new("type UserView { name: String }").unwrap();
-        let result =
-            unsafe { view_add(node, gql_query.as_ptr(), view_sdl.as_ptr(), ptr::null(), 0) };
-        assert_eq!(result.status, 0, "view_add should succeed");
+        let result = unsafe {
+            add_view(
+                node,
+                gql_query.as_ptr(),
+                view_sdl.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(result.status, 0, "add_view should succeed");
         assert!(!result.value.is_null());
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("UserView"), "should contain view name");
 
         unsafe { crate::types::defra_free_string(result.value) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_add_view_null_query() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let view_sdl = CString::new("type V { name: String }").unwrap();
+        let result =
+            unsafe { add_view(node, std::ptr::null(), view_sdl.as_ptr(), std::ptr::null()) };
+        assert_eq!(result.status, 1, "should fail with null query");
+
+        unsafe { crate::types::defra_free_string(result.error) };
         node_close(node);
     }
 }
