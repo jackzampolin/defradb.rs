@@ -1053,9 +1053,12 @@ impl Planner {
                     })?;
 
                 // Detect the aggregate source type and set up accordingly:
-                // 1. Child aggregate: host_name="_group" (iterate _group array)
+                // 1. Child aggregate: host_name="_group" AND target is an inner aggregate
+                //    name (e.g., _count, _sum) or a field not in the parent mapping.
+                //    These read pre-computed values from the _group JSON array.
                 // 2. Relation aggregate: host_name is a relation field (iterate relation array)
-                // 3. Simple aggregate: no host_name or host_name is non-relation field
+                // 3. Simple/grouped aggregate: target field exists in parent mapping,
+                //    or count with no field. These use grouped mode which applies filters.
                 let mut is_array_aggregate = false;
                 let mut array_field_index = 0usize;
                 let mut target_field_name = String::new();
@@ -1066,10 +1069,33 @@ impl Planner {
                     let host_name = &target.host_name;
 
                     if host_name == "_group" {
-                        // Child aggregate within _group
-                        is_array_aggregate = true;
-                        array_field_index = mapping.first_index_of_name("_group").unwrap_or(0);
-                        target_field_name = target.field_name.clone().unwrap_or_default();
+                        // Only use child aggregate (array) mode when the target field
+                        // is an inner aggregate name or doesn't exist in the parent
+                        // mapping. Regular fields (e.g., Age) that exist in the parent
+                        // mapping use grouped mode, which properly applies filters/limits.
+                        if let Some(ref fname) = target.field_name {
+                            let is_aggregate_name = matches!(
+                                fname.as_str(),
+                                "_count" | "_sum" | "_avg" | "_min" | "_max"
+                            );
+                            if is_aggregate_name
+                                || mapping.first_index_of_name(fname).is_none()
+                            {
+                                is_array_aggregate = true;
+                                array_field_index =
+                                    mapping.first_index_of_name("_group").unwrap_or(0);
+                                target_field_name = fname.clone();
+                            } else {
+                                field_index =
+                                    mapping.first_index_of_name(fname).ok_or_else(|| {
+                                        QueryError::execution(format!(
+                                            "aggregate target field '{}' not found in mapping",
+                                            fname
+                                        ))
+                                    })?;
+                            }
+                        }
+                        // else: count with no field_name → stays in grouped mode
                     } else if !host_name.is_empty() {
                         // Relation or inline-array aggregate (e.g., _sum(articles: {field: pages}))
                         // Get the relation/array field index
