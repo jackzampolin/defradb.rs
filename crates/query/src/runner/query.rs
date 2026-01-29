@@ -1015,6 +1015,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     AggregateType::Max => "maxNode",
                 };
 
+                // Go's averageNode returns empty {} for simple explain
+                // Other aggregates (sum, count, min, max) include sources
+                if agg.aggregate_type == AggregateType::Average {
+                    top_level_children.push(serde_json::json!({
+                        node_name: {}
+                    }));
+                    continue;
+                }
+
                 // Build sources for explain output
                 // For top-level aggregates, the source is the collection
                 let target_filter = if !agg.targets.is_empty() {
@@ -1034,14 +1043,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     JsonValue::Null
                 };
 
-                let sources = serde_json::json!([{
-                    "fieldName": select.collection_name,
-                    "filter": filter_value
-                }]);
+                // For aggregates that operate on a field (sum, min, max), include childFieldName
+                let child_field_name = if !agg.targets.is_empty() {
+                    agg.targets[0].field_name.as_ref()
+                } else {
+                    None
+                };
+
+                let source = if let Some(field_name) = child_field_name {
+                    serde_json::json!({
+                        "fieldName": select.collection_name,
+                        "childFieldName": field_name,
+                        "filter": filter_value
+                    })
+                } else {
+                    serde_json::json!({
+                        "fieldName": select.collection_name,
+                        "filter": filter_value
+                    })
+                };
 
                 top_level_children.push(serde_json::json!({
                     node_name: {
-                        "sources": sources
+                        "sources": [source]
                     }
                 }));
             }

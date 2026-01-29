@@ -3,7 +3,7 @@
 mod alldocs;
 mod average;
 mod count;
-mod groupby;
+pub mod groupby;
 mod index_scan;
 mod limit;
 mod max;
