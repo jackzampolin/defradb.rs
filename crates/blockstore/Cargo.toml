@@ -23,7 +23,6 @@ sha2 = { workspace = true }
 
 # Async
 async-trait = { workspace = true }
-tokio = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }

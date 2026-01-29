@@ -9,6 +9,7 @@ pub mod document;
 pub mod error;
 pub mod ipld;
 pub mod store;
+pub mod thread_bounds;
 pub mod transaction;
 pub mod types;
 

@@ -11,7 +11,7 @@ pub mod secp256r1;
 /// Base trait for all cryptographic keys
 ///
 /// Provides common operations for key comparison, serialization, and type information.
-pub trait Key: Send + Sync {
+pub trait Key: defra_core::thread_bounds::MaybeSendSync {
     /// Check if this key equals another key (byte-level comparison)
     fn equal(&self, other: &dyn Key) -> bool;
 

@@ -43,6 +43,9 @@
 ///     let redb_store = RedbStore::open("/path/to/db")?;
 /// }
 /// ```
+// Memory backend uses tokio::sync::RwLock, only available on native platforms
+// For WASM, use the simplified memory store in the wasm crate
+#[cfg(not(target_arch = "wasm32"))]
 pub mod memory;
 
 // Redb is only available on native platforms (not WASM)
@@ -53,9 +56,21 @@ pub mod redb;
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub mod redb_config;
 
-#[cfg(test)]
+// LevelDB backend - pure Rust, WASM only (rusty-leveldb uses Rc internally, not Send/Sync)
+// On native platforms, use redb instead for full concurrency support.
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub mod leveldb;
+
+// OPFS environment for LevelDB browser persistence.
+// Implements rusty-leveldb's synchronous Env trait using an in-memory filesystem
+// that loads from and persists to the browser's Origin Private File System (OPFS).
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub mod opfs_env;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test_suite;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use memory::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
@@ -63,3 +78,9 @@ pub use redb::{CallbackCounts, IntegrityReport, RedbStore};
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use redb_config::RedbStoreOptions;
+
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub use leveldb::LevelDbStore;
+
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub use opfs_env::OpfsEnv;

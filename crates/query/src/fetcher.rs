@@ -8,6 +8,7 @@ use document::Document;
 use schema::CollectionVersion;
 use std::collections::HashMap;
 use std::sync::Arc;
+use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
 use crate::planner::index_selection::IndexScanParams;
@@ -65,8 +66,9 @@ impl FetchByIdsResult {
 }
 
 /// Storage abstraction for fetching documents.
-#[async_trait]
-pub trait DocFetcher: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait DocFetcher: MaybeSendSync {
     /// Get all documents from a collection.
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
 
@@ -209,8 +211,9 @@ pub struct CommitsQueryOptions {
 /// resolve collections from the database at query time instead of using a
 /// static cache. This eliminates synchronization issues when schemas are
 /// added or modified.
-#[async_trait]
-pub trait CollectionProvider: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait CollectionProvider: MaybeSendSync {
     /// Get a collection schema by name.
     async fn get_collection(&self, name: &str) -> Result<Option<Arc<CollectionVersion>>>;
 
@@ -242,7 +245,8 @@ impl StaticCollectionProvider {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CollectionProvider for StaticCollectionProvider {
     async fn get_collection(&self, name: &str) -> Result<Option<Arc<CollectionVersion>>> {
         Ok(self.collections.get(name).cloned())

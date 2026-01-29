@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use document::{DocID, Document};
+use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
 
@@ -168,8 +169,9 @@ impl DeleteResult {
 ///     Ok(result.doc_id)
 /// }
 /// ```
-#[async_trait]
-pub trait DocMutator: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait DocMutator: MaybeSendSync {
     /// Create a new document in a collection.
     ///
     /// The document should NOT have an ID set - the mutator will generate

@@ -72,7 +72,8 @@ impl FetcherWrapper {
 unsafe impl Send for FetcherWrapper {}
 unsafe impl Sync for FetcherWrapper {}
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocFetcher for FetcherWrapper {
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
         self.get_fetcher()

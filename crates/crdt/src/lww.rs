@@ -275,7 +275,8 @@ impl Lww {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ReplicatedData for Lww {
     async fn merge(
         &self,
@@ -319,14 +320,16 @@ impl ReplicatedData for Lww {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ValueReader for Lww {
     async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
         self.get_value_internal(reader).await
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PriorityReader for Lww {
     async fn priority(&self, reader: &dyn Reader) -> Result<u64> {
         self.get_priority_internal(reader).await

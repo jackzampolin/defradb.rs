@@ -12,7 +12,7 @@ use schema::{FieldKind, IndexDescription};
 use tracing::trace;
 
 use super::iterator::{Bound, IndexEntry, IndexIterator};
-use crate::corekv::{IterOptions, Iterator, Reader, Result};
+use crate::corekv::{IterOptions, Iterator, MaybeSend, Reader, Result};
 use crate::field_value::{decode_field_value, encode_field_value};
 use crate::keys::IndexDataStoreKey;
 
@@ -50,7 +50,7 @@ impl RangeIterator {
     /// Create a new range iterator that scans all entries in an index.
     ///
     /// This is equivalent to a full index scan with optional ordering.
-    pub async fn new_scan<R: Reader + Send + ?Sized>(
+    pub async fn new_scan<R: Reader + MaybeSend + ?Sized>(
         txn: &R,
         collection_short_id: u32,
         desc: &IndexDescription,
@@ -83,7 +83,7 @@ impl RangeIterator {
     ///
     /// Scans all entries where the first `prefix_values.len()` fields match exactly.
     /// Useful for composite indexes where you want to filter on the first field(s).
-    pub async fn new_prefix<R: Reader + Send + ?Sized>(
+    pub async fn new_prefix<R: Reader + MaybeSend + ?Sized>(
         txn: &R,
         collection_short_id: u32,
         desc: &IndexDescription,
@@ -125,7 +125,7 @@ impl RangeIterator {
     /// Optionally match first `prefix_values.len()` fields exactly, then apply
     /// range bounds on the next field.
     #[allow(clippy::too_many_arguments)]
-    pub async fn new_range<R: Reader + Send + ?Sized>(
+    pub async fn new_range<R: Reader + MaybeSend + ?Sized>(
         txn: &R,
         collection_short_id: u32,
         desc: &IndexDescription,
@@ -344,7 +344,8 @@ impl RangeIterator {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl IndexIterator for RangeIterator {
     async fn next(&mut self) -> Result<Option<IndexEntry>> {
         if self.exhausted {

@@ -1,11 +1,11 @@
 //! Document mutator for transaction-scoped mutations.
 
+use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
-use tokio::sync::Mutex as TokioMutex;
 
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::txn::DbTxn;
@@ -76,7 +76,8 @@ impl<S: Store> DbDocMutator<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     async fn create(
         &self,

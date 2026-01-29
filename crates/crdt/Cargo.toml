@@ -13,7 +13,6 @@ storage = { path = "../storage" }
 
 # Async
 async-trait.workspace = true
-tokio.workspace = true
 
 # Serialization
 serde.workspace = true

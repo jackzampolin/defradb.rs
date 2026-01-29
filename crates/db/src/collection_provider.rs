@@ -32,7 +32,8 @@ impl<S: Store + 'static> DbCollectionProvider<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> CollectionProvider for DbCollectionProvider<S> {
     async fn get_collection(&self, name: &str) -> QueryResult<Option<Arc<CollectionVersion>>> {
         match self.db.get_collection(name) {

@@ -5,8 +5,10 @@
 
 use document::NormalValue;
 
+use crate::corekv::MaybeSendSync;
+
 /// Trait for matching values against filter conditions.
-pub trait IndexMatcher: Send + Sync {
+pub trait IndexMatcher: MaybeSendSync {
     /// Check if the given value matches this condition.
     fn matches(&self, value: &NormalValue) -> bool;
 }

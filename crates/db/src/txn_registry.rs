@@ -247,7 +247,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     async fn begin(
         &self,

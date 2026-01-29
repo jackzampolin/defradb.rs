@@ -8,10 +8,13 @@ license.workspace = true
 repository.workspace = true
 description = "Lens schema migration support for DefraDB"
 
+[features]
+default = ["wasmtime-runtime"]
+wasmtime-runtime = ["dep:wasmtime", "dep:tokio", "dep:tokio-stream", "dep:parking_lot"]
+
 [dependencies]
 # Core
 async-trait.workspace = true
-tokio.workspace = true
 futures.workspace = true
 
 # Serialization
@@ -24,14 +27,11 @@ thiserror.workspace = true
 # Encoding
 base64.workspace = true
 
-# Synchronization
-parking_lot.workspace = true
-
-# Async streams
-tokio-stream.workspace = true
-
-# WASM runtime
-wasmtime = "27"
+# Wasmtime runtime dependencies (optional for wasm32)
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+wasmtime = { version = "27", optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

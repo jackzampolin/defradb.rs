@@ -872,7 +872,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> MergeHandler
     for DbMergeHandler<S, B>
 {

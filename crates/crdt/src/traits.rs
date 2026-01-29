@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use defra_core::{types::DocId, Result};
 use std::any::Any;
+use storage::corekv::MaybeSendSync;
 use storage::{Reader, ReaderWriter};
 
 /// Result of a merge operation, providing visibility into what happened
@@ -50,7 +51,7 @@ pub struct Context {
 ///
 /// All CRDT deltas must implement this trait to support priority-based
 /// conflict resolution.
-pub trait Delta: Send + Sync {
+pub trait Delta: MaybeSendSync {
     /// Get the priority of this delta for conflict resolution
     fn get_priority(&self) -> u64;
 
@@ -83,8 +84,9 @@ pub trait Delta: Send + Sync {
 /// - Matches Go DefraDB's design where CRDTs receive `corekv.ReaderWriter`
 /// - Allows the caller to control transaction lifecycle (commit/rollback)
 /// - Enables multiple CRDT operations within a single transaction
-#[async_trait]
-pub trait ReplicatedData: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait ReplicatedData: MaybeSendSync {
     /// Merge an incoming delta into this CRDT
     ///
     /// # Arguments
@@ -115,14 +117,16 @@ pub trait ReplicatedData: Send + Sync {
 }
 
 /// Trait for CRDTs that support value retrieval
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait ValueReader: ReplicatedData {
     /// Get the current value from storage
     async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>>;
 }
 
 /// Trait for CRDTs that support priority retrieval
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait PriorityReader: ReplicatedData {
     /// Get the current priority from storage
     async fn priority(&self, reader: &dyn Reader) -> Result<u64>;

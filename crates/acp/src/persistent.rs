@@ -6,11 +6,14 @@
 
 use async_trait::async_trait;
 use identity::Did;
-use std::path::Path;
 use std::sync::Arc;
 
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use storage::RedbStore;
 
 use crate::error::{Error, Result};
@@ -71,6 +74,7 @@ impl<S: Store> PersistentAcpStore<S> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PersistentAcpStore<RedbStore> {
     /// Open a persistent ACP store at the given directory path.
     ///
@@ -156,8 +160,10 @@ impl PersistentAcpStore<RedbStore> {
     }
 }
 
-#[async_trait]
-impl<S: Store> AcpStore for PersistentAcpStore<S> {
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
     async fn put_tuple(&self, tuple: &RelationTuple) -> Result<()> {
         let mut txn = self
             .store

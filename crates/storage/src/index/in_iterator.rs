@@ -11,7 +11,7 @@ use schema::IndexDescription;
 
 use super::eq_iterator::ExactMatchIterator;
 use super::iterator::{IndexEntry, IndexIterator};
-use crate::corekv::{Reader, Result};
+use crate::corekv::{MaybeSend, Reader, Result};
 
 /// Iterator for IN operator queries on an index.
 ///
@@ -37,7 +37,7 @@ pub struct InIterator {
 
 impl InIterator {
     /// Create a new IN iterator for a simple (non-unique) index.
-    pub async fn new_simple<R: Reader + Send + ?Sized>(
+    pub async fn new_simple<R: Reader + MaybeSend + ?Sized>(
         txn: &R,
         collection_short_id: u32,
         desc: &IndexDescription,
@@ -59,7 +59,7 @@ impl InIterator {
     }
 
     /// Create a new IN iterator for a unique index.
-    pub async fn new_unique<R: Reader + Send + ?Sized>(
+    pub async fn new_unique<R: Reader + MaybeSend + ?Sized>(
         txn: &R,
         collection_short_id: u32,
         desc: &IndexDescription,
@@ -81,7 +81,7 @@ impl InIterator {
     }
 
     /// Pre-fetch all results into the cache.
-    async fn prefetch_all<R: Reader + Send + ?Sized>(
+    async fn prefetch_all<R: Reader + MaybeSend + ?Sized>(
         &mut self,
         txn: &R,
         collection_short_id: u32,
@@ -120,7 +120,8 @@ impl InIterator {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl IndexIterator for InIterator {
     async fn next(&mut self) -> Result<Option<IndexEntry>> {
         if self.exhausted || self.cache_position >= self.cached_results.len() {

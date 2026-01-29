@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
+use async_lock::Mutex as TokioMutex;
 use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
-use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, warn};
 
 use crate::collection::{collection_short_id, Collection};

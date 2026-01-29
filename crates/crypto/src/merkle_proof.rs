@@ -302,8 +302,9 @@ impl SignedMerkleProof {
 ///
 /// This trait abstracts block retrieval to allow proof extraction from
 /// any block storage implementation.
-#[async_trait::async_trait]
-pub trait ProofBlockstore: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait ProofBlockstore: defra_core::thread_bounds::MaybeSendSync {
     /// Get a block by CID
     async fn get_block(&self, cid: &Cid) -> Result<Option<Vec<u8>>>;
 }

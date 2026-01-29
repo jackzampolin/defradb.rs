@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use storage::corekv::MaybeSendSync;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
@@ -117,8 +118,9 @@ impl Doc {
 /// `init() -> start() -> next()* -> close()`
 ///
 /// The iterator pattern allows lazy evaluation and pipelining of results.
-#[async_trait]
-pub trait PlanNode: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait PlanNode: MaybeSendSync {
     /// Initialize or reinitialize the node.
     ///
     /// Called before start() to set up internal state.

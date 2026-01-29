@@ -31,7 +31,8 @@ impl<S: Store> Blockstore<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Blockstore<S> {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         let txn = self.store.new_txn(readonly).await?;
@@ -153,7 +154,8 @@ impl BlockstoreTxn {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for BlockstoreTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.txn.get(key).await
@@ -172,7 +174,8 @@ impl Reader for BlockstoreTxn {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for BlockstoreTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.txn.set(key, value).await
@@ -183,7 +186,8 @@ impl Writer for BlockstoreTxn {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Txn for BlockstoreTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
         self.txn.commit().await

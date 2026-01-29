@@ -8,7 +8,7 @@ use document::NormalValue;
 use schema::IndexDescription;
 
 use super::iterator::{IndexEntry, IndexIterator};
-use crate::corekv::{IterOptions, Iterator, Reader, Result};
+use crate::corekv::{IterOptions, Iterator, MaybeSend, Reader, Result};
 use crate::keys::datastore::IndexedField;
 use crate::keys::IndexDataStoreKey;
 
@@ -38,7 +38,7 @@ impl ExactMatchIterator {
     /// Create a new exact match iterator for a simple (non-unique) index.
     ///
     /// Scans all index entries with the given field values.
-    pub async fn new_simple<R: Reader + Send + ?Sized>(
+    pub async fn new_simple<R: Reader + MaybeSend + ?Sized>(
         txn: &R,
         collection_short_id: u32,
         desc: &IndexDescription,
@@ -65,7 +65,7 @@ impl ExactMatchIterator {
     ///
     /// For non-NULL values: performs direct key lookup (single result).
     /// For NULL values: performs prefix scan (multiple results allowed).
-    pub async fn new_unique<R: Reader + Send + ?Sized>(
+    pub async fn new_unique<R: Reader + MaybeSend + ?Sized>(
         txn: &R,
         collection_short_id: u32,
         desc: &IndexDescription,
@@ -129,7 +129,8 @@ impl ExactMatchIterator {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl IndexIterator for ExactMatchIterator {
     async fn next(&mut self) -> Result<Option<IndexEntry>> {
         if self.exhausted {

@@ -12,10 +12,11 @@
 //!   when NAC is disabled to prevent privilege escalation attacks.
 
 use std::sync::Arc;
+use storage::corekv::MaybeSendSync;
 
+use async_lock::RwLock;
 use async_trait::async_trait;
 use identity::Did;
-use tokio::sync::RwLock;
 
 use super::permission::NodePermission;
 use super::policy::{
@@ -590,8 +591,9 @@ impl<S: ZanzibarStore> NodeACP<S> {
 }
 
 /// Trait for NAC operations accessible via HTTP.
-#[async_trait]
-pub trait NodeAcpOperations: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait NodeAcpOperations: MaybeSendSync {
     /// Check if an identity has a specific permission.
     async fn check_permission(&self, identity: &Did, permission: NodePermission) -> Result<bool>;
 
@@ -608,7 +610,8 @@ pub trait NodeAcpOperations: Send + Sync {
     async fn owner(&self) -> Option<Did>;
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: ZanzibarStore + 'static> NodeAcpOperations for NodeACP<S> {
     async fn check_permission(&self, identity: &Did, permission: NodePermission) -> Result<bool> {
         NodeACP::check_permission(self, identity, permission).await

@@ -11,7 +11,7 @@ description = "Transaction wrapper for DefraDB providing multistore access and c
 [dependencies]
 # Async runtime
 async-trait.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+async-lock.workspace = true
 futures.workspace = true
 
 # Error handling
@@ -25,6 +25,9 @@ cid.workspace = true
 
 # Internal crates
 storage = { path = "../storage" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 # Testing

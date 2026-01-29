@@ -2,18 +2,25 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+#[cfg(feature = "channel")]
 use tokio::sync::mpsc;
 
+#[cfg(feature = "channel")]
 use crate::event::Message;
 
 /// Subscription to events from the event bus.
 ///
 /// Provides access to a channel of messages and the subscription ID
 /// for unsubscribing. Uses bounded channels to prevent memory exhaustion.
+///
+/// When the `channel` feature is disabled (e.g., wasm32), this is a
+/// stub that never receives messages.
 pub struct Subscription {
     /// Unique subscription identifier.
     id: u64,
     /// Receiver channel for messages (bounded).
+    #[cfg(feature = "channel")]
     receiver: mpsc::Receiver<Message>,
     /// Shared counter tracking messages dropped due to buffer overflow.
     /// When non-zero, the client may need to resync to get consistent state.
@@ -22,6 +29,7 @@ pub struct Subscription {
 
 impl Subscription {
     /// Create a new subscription with the given ID and receiver.
+    #[cfg(feature = "channel")]
     pub(crate) fn new(id: u64, receiver: mpsc::Receiver<Message>) -> Self {
         Self {
             id,
@@ -30,7 +38,17 @@ impl Subscription {
         }
     }
 
+    /// Create a closed subscription (no-op, for wasm32).
+    #[cfg(not(feature = "channel"))]
+    pub(crate) fn closed() -> Self {
+        Self {
+            id: 0,
+            dropped_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
     /// Create a new subscription with a shared dropped counter.
+    #[cfg(feature = "channel")]
     pub(crate) fn with_dropped_counter(
         id: u64,
         receiver: mpsc::Receiver<Message>,
@@ -51,6 +69,7 @@ impl Subscription {
     /// Receive the next message.
     ///
     /// Returns `None` if the subscription is closed.
+    #[cfg(feature = "channel")]
     pub async fn recv(&mut self) -> Option<Message> {
         self.receiver.recv().await
     }
@@ -60,11 +79,13 @@ impl Subscription {
     /// Returns `Ok(msg)` if a message is available,
     /// `Err(TryRecvError::Empty)` if no message is available,
     /// or `Err(TryRecvError::Disconnected)` if the subscription is closed.
+    #[cfg(feature = "channel")]
     pub fn try_recv(&mut self) -> Result<Message, mpsc::error::TryRecvError> {
         self.receiver.try_recv()
     }
 
     /// Convert into the underlying receiver for use with streams.
+    #[cfg(feature = "channel")]
     pub fn into_receiver(self) -> mpsc::Receiver<Message> {
         self.receiver
     }

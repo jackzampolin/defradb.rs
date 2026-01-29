@@ -22,10 +22,13 @@ pub mod systemstore;
 pub use blockstore::Blockstore;
 pub use datastore::{Datastore, CHUNK_SIZE};
 pub use headstore::Headstore;
-pub use multistore::{MemoryMultistore, Multistore};
+pub use multistore::Multistore;
 pub use peerstore::Peerstore;
 pub use rootstore::RootStore;
 pub use systemstore::Systemstore;
 
-#[cfg(feature = "redb")]
+#[cfg(not(target_arch = "wasm32"))]
+pub use multistore::MemoryMultistore;
+
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use multistore::RedbMultistore;

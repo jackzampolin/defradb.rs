@@ -486,7 +486,8 @@ impl Counter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ReplicatedData for Counter {
     async fn merge(
         &self,
@@ -534,7 +535,8 @@ impl ReplicatedData for Counter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ValueReader for Counter {
     async fn value(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
         self.get_value_internal(reader).await

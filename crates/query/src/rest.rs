@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use identity::Did;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
+use storage::corekv::MaybeSendSync;
 
 use crate::error::QueryError;
 use crate::fetcher::DocFetcher;
@@ -143,8 +144,9 @@ impl From<QueryError> for RestError {
 ///     }), None).await
 /// }
 /// ```
-#[async_trait]
-pub trait RestOperations: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait RestOperations: MaybeSendSync {
     /// List all collection names.
     ///
     /// Returns the names of all collections in the database.
@@ -376,7 +378,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOperationsImpl<F, R> {
     async fn list_collections(&self) -> RestResult<Vec<String>> {
         self.runner

@@ -1,12 +1,17 @@
 //! Lens migration pipeline.
 //!
 //! Matches Go's internal/lens/lens.go Lens type and behavior.
+//!
+//! Two modes:
+//! - With `wasmtime-runtime`: spawns a background task via tokio for processing
+//! - Without: processes documents inline (suitable for wasm32/browser)
 
+#[cfg(not(feature = "wasmtime-runtime"))]
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use futures::channel::mpsc;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 
 use crate::store::TransformStore;
 use crate::{Error, LensDoc, Result, TargetedHistoryLink, TransformId};
@@ -37,12 +42,17 @@ impl LensInput {
 ///
 /// Matches Go's Lens interface.
 pub struct Lens {
-    #[allow(dead_code)]
+    #[cfg_attr(feature = "wasmtime-runtime", allow(dead_code))]
     store: Arc<dyn TransformStore>,
     target_version_id: String,
+    #[cfg_attr(feature = "wasmtime-runtime", allow(dead_code))]
     collection_history: HashMap<String, TargetedHistoryLink>,
-    input_tx: mpsc::UnboundedSender<LensInput>,
-    output_rx: mpsc::UnboundedReceiver<Result<LensDoc>>,
+    #[cfg(feature = "wasmtime-runtime")]
+    input_tx: futures::channel::mpsc::UnboundedSender<LensInput>,
+    #[cfg(feature = "wasmtime-runtime")]
+    output_rx: futures::channel::mpsc::UnboundedReceiver<Result<LensDoc>>,
+    #[cfg(not(feature = "wasmtime-runtime"))]
+    pending: VecDeque<LensInput>,
 }
 
 impl Lens {
@@ -57,42 +67,84 @@ impl Lens {
         target_version_id: impl Into<String>,
         collection_history: HashMap<String, TargetedHistoryLink>,
     ) -> Self {
-        let (input_tx, input_rx) = mpsc::unbounded();
-        let (output_tx, output_rx) = mpsc::unbounded();
-
         let target_version_id = target_version_id.into();
 
-        // Spawn the pipeline processor
-        let pipeline = PipelineProcessor {
-            store: store.clone(),
-            target_version_id: target_version_id.clone(),
-            collection_history: collection_history.clone(),
-            input_rx,
-            output_tx,
-        };
+        #[cfg(feature = "wasmtime-runtime")]
+        {
+            use futures::channel::mpsc;
 
-        tokio::spawn(pipeline.run());
+            let (input_tx, input_rx) = mpsc::unbounded();
+            let (output_tx, output_rx) = mpsc::unbounded();
 
-        Self {
-            store,
-            target_version_id,
-            collection_history,
-            input_tx,
-            output_rx,
+            let pipeline = PipelineProcessor {
+                store: store.clone(),
+                target_version_id: target_version_id.clone(),
+                collection_history: collection_history.clone(),
+                input_rx,
+                output_tx,
+            };
+
+            tokio::spawn(pipeline.run());
+
+            Self {
+                store,
+                target_version_id,
+                collection_history,
+                input_tx,
+                output_rx,
+            }
+        }
+
+        #[cfg(not(feature = "wasmtime-runtime"))]
+        {
+            Self {
+                store,
+                target_version_id,
+                collection_history,
+                pending: VecDeque::new(),
+            }
         }
     }
 
     /// Put a document into the pipeline for transformation.
     pub async fn put(&mut self, schema_version_id: &str, doc: LensDoc) -> Result<()> {
-        self.input_tx
-            .send(LensInput::new(schema_version_id, doc))
-            .await
-            .map_err(|e| Error::Pipeline(format!("failed to send input: {}", e)))
+        #[cfg(feature = "wasmtime-runtime")]
+        {
+            use futures::SinkExt;
+            self.input_tx
+                .send(LensInput::new(schema_version_id, doc))
+                .await
+                .map_err(|e| Error::Pipeline(format!("failed to send input: {}", e)))
+        }
+
+        #[cfg(not(feature = "wasmtime-runtime"))]
+        {
+            self.pending
+                .push_back(LensInput::new(schema_version_id, doc));
+            Ok(())
+        }
     }
 
     /// Get the next transformed document from the pipeline.
     pub async fn next(&mut self) -> Option<Result<LensDoc>> {
-        self.output_rx.next().await
+        #[cfg(feature = "wasmtime-runtime")]
+        {
+            self.output_rx.next().await
+        }
+
+        #[cfg(not(feature = "wasmtime-runtime"))]
+        {
+            let input = self.pending.pop_front()?;
+            Some(
+                transform_to_target(
+                    &self.store,
+                    &self.target_version_id,
+                    &self.collection_history,
+                    input,
+                )
+                .await,
+            )
+        }
     }
 
     /// Check if a migration is needed for the given schema version.
@@ -107,131 +159,129 @@ impl Lens {
     }
 }
 
-/// Internal pipeline processor that handles document transformation.
+/// Internal pipeline processor that handles document transformation (spawned mode).
+#[cfg(feature = "wasmtime-runtime")]
 struct PipelineProcessor {
     store: Arc<dyn TransformStore>,
     target_version_id: String,
     collection_history: HashMap<String, TargetedHistoryLink>,
-    input_rx: mpsc::UnboundedReceiver<LensInput>,
-    output_tx: mpsc::UnboundedSender<Result<LensDoc>>,
+    input_rx: futures::channel::mpsc::UnboundedReceiver<LensInput>,
+    output_tx: futures::channel::mpsc::UnboundedSender<Result<LensDoc>>,
 }
 
+#[cfg(feature = "wasmtime-runtime")]
 impl PipelineProcessor {
     async fn run(mut self) {
         while let Some(input) = self.input_rx.next().await {
-            let result = self.transform_to_target(input).await;
+            let result = transform_to_target(
+                &self.store,
+                &self.target_version_id,
+                &self.collection_history,
+                input,
+            )
+            .await;
             if self.output_tx.unbounded_send(result).is_err() {
-                // Output channel closed, stop processing
                 break;
             }
         }
     }
+}
 
-    async fn transform_to_target(&self, input: LensInput) -> Result<LensDoc> {
-        // If already at target version, pass through unchanged
-        if input.schema_version_id == self.target_version_id {
-            return Ok(input.doc);
+/// Transform a document to the target schema version.
+///
+/// Shared between spawned and inline modes.
+async fn transform_to_target(
+    store: &Arc<dyn TransformStore>,
+    target_version_id: &str,
+    collection_history: &HashMap<String, TargetedHistoryLink>,
+    input: LensInput,
+) -> Result<LensDoc> {
+    if input.schema_version_id == target_version_id {
+        return Ok(input.doc);
+    }
+
+    let _history_link = collection_history
+        .get(&input.schema_version_id)
+        .ok_or_else(|| Error::SchemaVersionNotFound(input.schema_version_id.clone()))?;
+
+    let mut current_doc = input.doc;
+    let mut current_version = input.schema_version_id.clone();
+
+    let mut visited = HashSet::new();
+    visited.insert(current_version.clone());
+
+    loop {
+        if current_version == target_version_id {
+            return Ok(current_doc);
         }
 
-        // Find the history link for this version
-        let _history_link = self
-            .collection_history
-            .get(&input.schema_version_id)
-            .ok_or_else(|| Error::SchemaVersionNotFound(input.schema_version_id.clone()))?;
+        let current_link = collection_history
+            .get(&current_version)
+            .ok_or_else(|| Error::SchemaVersionNotFound(current_version.clone()))?;
 
-        // Determine the migration path (forward or backward)
-        let mut current_doc = input.doc;
-        let mut current_version = input.schema_version_id.clone();
-
-        // Track visited versions to detect cycles
-        let mut visited = HashSet::new();
-        visited.insert(current_version.clone());
-
-        loop {
-            if current_version == self.target_version_id {
-                return Ok(current_doc);
-            }
-
-            let current_link = self
-                .collection_history
-                .get(&current_version)
-                .ok_or_else(|| Error::SchemaVersionNotFound(current_version.clone()))?;
-
-            // Try to move forward first
-            if let Some(ref next_version) = current_link.next {
-                // Check for cycle before moving forward
-                if visited.contains(next_version) {
-                    return Err(Error::Pipeline(format!(
-                        "cycle detected in migration path at version {}",
-                        next_version
-                    )));
-                }
-
-                let next_link = self
-                    .collection_history
-                    .get(next_version)
-                    .ok_or_else(|| Error::SchemaVersionNotFound(next_version.clone()))?;
-
-                if let Some(ref transform_id) = next_link.transform {
-                    // Apply forward transform
-                    current_doc = self
-                        .apply_transform(&TransformId::new(transform_id), current_doc, false)
-                        .await?;
-                }
-
-                current_version = next_version.clone();
-                visited.insert(current_version.clone());
-            } else if let Some(ref prev_version) = current_link.previous {
-                // Check for cycle before moving backward
-                if visited.contains(prev_version) {
-                    return Err(Error::Pipeline(format!(
-                        "cycle detected in migration path at version {}",
-                        prev_version
-                    )));
-                }
-
-                // Move backward (inverse transform)
-                if let Some(ref transform_id) = current_link.transform {
-                    // Apply inverse transform
-                    current_doc = self
-                        .apply_transform(&TransformId::new(transform_id), current_doc, true)
-                        .await?;
-                }
-
-                current_version = prev_version.clone();
-                visited.insert(current_version.clone());
-            } else {
-                // No path to target
+        if let Some(ref next_version) = current_link.next {
+            if visited.contains(next_version) {
                 return Err(Error::Pipeline(format!(
-                    "no migration path from {} to {}",
-                    input.schema_version_id, self.target_version_id
+                    "cycle detected in migration path at version {}",
+                    next_version
                 )));
             }
+
+            let next_link = collection_history
+                .get(next_version)
+                .ok_or_else(|| Error::SchemaVersionNotFound(next_version.clone()))?;
+
+            if let Some(ref transform_id) = next_link.transform {
+                current_doc =
+                    apply_transform(store, &TransformId::new(transform_id), current_doc, false)
+                        .await?;
+            }
+
+            current_version = next_version.clone();
+            visited.insert(current_version.clone());
+        } else if let Some(ref prev_version) = current_link.previous {
+            if visited.contains(prev_version) {
+                return Err(Error::Pipeline(format!(
+                    "cycle detected in migration path at version {}",
+                    prev_version
+                )));
+            }
+
+            if let Some(ref transform_id) = current_link.transform {
+                current_doc =
+                    apply_transform(store, &TransformId::new(transform_id), current_doc, true)
+                        .await?;
+            }
+
+            current_version = prev_version.clone();
+            visited.insert(current_version.clone());
+        } else {
+            return Err(Error::Pipeline(format!(
+                "no migration path from {} to {}",
+                input.schema_version_id, target_version_id
+            )));
         }
     }
+}
 
-    async fn apply_transform(
-        &self,
-        transform_id: &TransformId,
-        doc: LensDoc,
-        inverse: bool,
-    ) -> Result<LensDoc> {
-        // Create a single-item stream
-        let input_stream = Box::pin(futures::stream::once(async move { doc }));
+async fn apply_transform(
+    store: &Arc<dyn TransformStore>,
+    transform_id: &TransformId,
+    doc: LensDoc,
+    inverse: bool,
+) -> Result<LensDoc> {
+    let input_stream = Box::pin(futures::stream::once(async move { doc }));
 
-        // Apply the transform
-        let mut output_stream = if inverse {
-            self.store.inverse(transform_id, input_stream)?
-        } else {
-            self.store.transform(transform_id, input_stream)?
-        };
+    let mut output_stream = if inverse {
+        store.inverse(transform_id, input_stream)?
+    } else {
+        store.transform(transform_id, input_stream)?
+    };
 
-        // Get the transformed document
-        output_stream
-            .next()
-            .await
-            .ok_or_else(|| Error::Pipeline("transform produced no output".to_string()))?
-    }
+    output_stream
+        .next()
+        .await
+        .ok_or_else(|| Error::Pipeline("transform produced no output".to_string()))?
 }
 
 #[cfg(test)]

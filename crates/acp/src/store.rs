@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use identity::Did;
+use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
 use crate::relation::RelationTuple;
@@ -36,8 +37,9 @@ use crate::relation::RelationTuple;
 /// This approach maintains security (operation is denied) while providing
 /// actionable error information. Silently converting errors to "permission denied"
 /// masks infrastructure failures and makes debugging impossible.
-#[async_trait]
-pub trait AcpStore: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait AcpStore: MaybeSendSync {
     /// Store a relation tuple.
     ///
     /// The tuple has already been validated by construction.

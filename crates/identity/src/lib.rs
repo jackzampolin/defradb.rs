@@ -33,12 +33,13 @@ pub use raw::RawIdentity;
 pub use token::{from_token, new_token, verify_auth_token, IdentityClaims, TokenIdentity};
 
 use crypto::keys::{PrivateKey, PublicKey};
+use defra_core::thread_bounds::MaybeSendSync;
 
 /// Identity represents an entity with a public key and DID.
 ///
 /// This trait provides read-only access to identity information that can be
-/// shared publicly. Implementations must be Send + Sync for use in async contexts.
-pub trait Identity: Send + Sync {
+/// shared publicly. On native targets, implementations must be Send + Sync for async contexts.
+pub trait Identity: MaybeSendSync {
     /// Returns the public key associated with this identity.
     fn pub_key(&self) -> &dyn PublicKey;
 

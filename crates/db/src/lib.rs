@@ -42,10 +42,12 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
+#[cfg(feature = "p2p")]
 pub mod acp_merge_handler;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod block_builder;
+#[cfg(feature = "p2p")]
 pub mod broadcast_mutator;
 pub mod collection;
 pub mod collection_acp;
@@ -63,8 +65,10 @@ pub mod error;
 pub mod index_manager;
 pub mod lensed_auto_commit_fetcher;
 pub mod lensed_fetcher;
+#[cfg(feature = "p2p")]
 pub mod merge_handler;
 pub mod nac;
+#[cfg(feature = "p2p")]
 pub mod peer_identity;
 pub mod schema_loader;
 pub mod txn;
@@ -73,12 +77,14 @@ pub mod txn_registry;
 pub mod versioned_fetcher;
 
 // Re-export commonly used types
+#[cfg(feature = "p2p")]
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
 #[allow(deprecated)]
 pub use block_builder::build_block_from_document;
 pub use block_builder::{build_blocks_from_document, BlockResult};
+#[cfg(feature = "p2p")]
 pub use broadcast_mutator::BroadcastMutator;
 pub use collection::{collection_short_id, Collection};
 pub use collection_acp::{
@@ -98,7 +104,9 @@ pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
+#[cfg(feature = "p2p")]
 pub use merge_handler::{DbMergeHandler, MergeError};
+#[cfg(feature = "p2p")]
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };

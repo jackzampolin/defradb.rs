@@ -99,18 +99,27 @@ pub mod backends;
 pub mod corekv;
 pub mod encoding;
 pub mod field_value;
-pub mod index;
 pub mod keys;
 pub mod namespace;
+
+pub mod index;
 pub mod stores;
 
 // See #19 for transaction wrapper module
 
 // Re-export commonly used types for convenience
+// MemoryStore is only available on native platforms (uses tokio::sync::RwLock)
+#[cfg(not(target_arch = "wasm32"))]
 pub use backends::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use backends::RedbStore;
+
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub use backends::LevelDbStore;
+
+#[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
+pub use backends::OpfsEnv;
 
 pub use corekv::{
     Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer,

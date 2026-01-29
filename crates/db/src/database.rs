@@ -11,7 +11,11 @@ use crate::txn::DbTxn;
 use datastore::BasicTxn;
 use events::Bus;
 use identity::{Identity, RawIdentity};
-use lens::{LensConfig, TransformId, TransformStore, WasmTransformStore};
+#[cfg(not(feature = "native"))]
+use lens::MemoryTransformStore;
+#[cfg(feature = "native")]
+use lens::WasmTransformStore;
+use lens::{LensConfig, TransformId, TransformStore};
 use schema::{CollectionSource, CollectionVersion};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -115,15 +119,14 @@ impl<S: Store> DB<S> {
     /// This creates a DB with an empty collection cache. Use `open_with_options()`
     /// to load existing collections from the store.
     pub fn with_options(store: S, options: DbOptions) -> Result<Self> {
-        let lens_store = WasmTransformStore::new()
-            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
         Ok(Self {
             store: Arc::new(store),
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
-            lens_store: Arc::new(lens_store),
+            lens_store,
         })
     }
 
@@ -160,15 +163,14 @@ impl<S: Store> DB<S> {
     /// **Warning:** When multiple DB instances share a store via `from_arc()`,
     /// transaction IDs may collide if both instances create transactions concurrently.
     pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
-        let lens_store = WasmTransformStore::new()
-            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
         Ok(Self {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
-            lens_store: Arc::new(lens_store),
+            lens_store,
         })
     }
 
@@ -281,6 +283,11 @@ impl<S: Store> DB<S> {
         self.store.close().await.map_err(Error::Storage)
     }
 
+    /// Get a reference to the underlying store.
+    pub fn store(&self) -> &Arc<S> {
+        &self.store
+    }
+
     /// Get the database options.
     pub fn options(&self) -> &DbOptions {
         &self.options
@@ -299,6 +306,20 @@ impl<S: Store> DB<S> {
     /// Returns true if this database has a configured node identity.
     pub fn has_node_identity(&self) -> bool {
         self.options.node_identity.is_some()
+    }
+
+    /// Create the appropriate lens transform store for the current platform.
+    #[cfg(feature = "native")]
+    fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
+        let store = WasmTransformStore::new()
+            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
+        Ok(Arc::new(store))
+    }
+
+    /// Create the appropriate lens transform store for the current platform.
+    #[cfg(not(feature = "native"))]
+    fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
+        Ok(Arc::new(MemoryTransformStore::new()))
     }
 
     /// Get the current transaction ID counter value.

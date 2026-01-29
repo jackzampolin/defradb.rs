@@ -19,7 +19,6 @@ identity = { path = "../identity" }
 acp = { path = "../acp" }
 
 # Async runtime
-tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 
@@ -53,5 +52,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 db = { path = "../db" }
 datastore = { path = "../datastore" }

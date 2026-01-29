@@ -8,9 +8,10 @@
 /// - Systemstore: Metadata and configuration
 /// - Peerstore: Peer and replication metadata
 /// - Encstore: Encrypted blocks (uses blockstore implementation)
+#[cfg(not(target_arch = "wasm32"))]
 use crate::backends::MemoryStore;
 
-#[cfg(feature = "redb")]
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 use crate::backends::RedbStore;
 
 use crate::corekv::{Result, Store};
@@ -67,8 +68,10 @@ impl<S: Store> Multistore<S> {
 }
 
 /// Multistore specialized for MemoryStore
+#[cfg(not(target_arch = "wasm32"))]
 pub type MemoryMultistore = Multistore<MemoryStore>;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl MemoryMultistore {
     /// Create a new in-memory Multistore
     pub fn new_memory() -> Self {
@@ -77,10 +80,10 @@ impl MemoryMultistore {
 }
 
 /// Multistore specialized for RedbStore
-#[cfg(feature = "redb")]
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub type RedbMultistore = Multistore<RedbStore>;
 
-#[cfg(feature = "redb")]
+#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 impl RedbMultistore {
     /// Create a new Redb-backed Multistore
     pub fn new_redb(path: impl AsRef<std::path::Path>) -> Result<Self> {

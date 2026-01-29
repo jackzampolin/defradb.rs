@@ -1,0 +1,69 @@
+[package]
+name = "defra-wasm"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DefraDB browser client - WASM build for browser-based applications"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+] }
+
+# Serialization for JS interop
+serde-wasm-bindgen = "0.6"
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Async (minimal features for WASM)
+futures.workspace = true
+async-trait.workspace = true
+
+# Debugging
+console_error_panic_hook = "0.1"
+
+# Cryptography (for hashing schema IDs)
+sha2.workspace = true
+
+# Encoding
+hex.workspace = true
+
+# WASM random number generation
+getrandom = { version = "0.2", features = ["js"] }
+
+# Internal crates - use db crate which provides everything
+db = { path = "../db", default-features = false }
+storage = { path = "../storage", default-features = false, features = ["leveldb"] }
+schema = { path = "../schema" }
+document = { path = "../document" }
+query = { path = "../query" }
+defra-core = { path = "../defra-core" }
+crypto = { path = "../crypto" }
+
+# IPLD
+cid.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+# Enable console_error_panic_hook for better error messages in debug builds
+debug = []
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3", "--enable-mutable-globals", "--enable-bulk-memory"]

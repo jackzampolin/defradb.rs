@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use identity::Did;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use storage::corekv::MaybeSendSync;
 
 use crate::error::{Result, TransactionError};
 use crate::txn::TransactionHandle;
@@ -200,8 +201,9 @@ pub struct ErrorLocation {
 ///     Ok(responses)
 /// }
 /// ```
-#[async_trait]
-pub trait QueryExecutor: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait QueryExecutor: MaybeSendSync {
     /// Execute a GraphQL query and return the response.
     ///
     /// This handles the full pipeline: parsing → planning → execution → response.

@@ -148,7 +148,8 @@ impl<S: Store + 'static> DefraBlockstore<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     async fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>> {
         let txn = self.store.new_txn(true).await?;
@@ -325,7 +326,8 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
 /// This allows the crypto crate's `extract_proof` function to work with
 /// DefraBlockstore instances, enabling Merkle proof generation over the
 /// block DAG.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> crypto::ProofBlockstore for DefraBlockstore<S> {
     async fn get_block(&self, cid: &Cid) -> defra_core::Result<Option<Vec<u8>>> {
         // Delegate to the Blockstore::get implementation and convert error type

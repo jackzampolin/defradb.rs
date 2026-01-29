@@ -40,7 +40,8 @@ impl Default for MockFetcher {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocFetcher for MockFetcher {
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>> {
         let docs = self.docs.lock().unwrap();
@@ -146,7 +147,8 @@ impl MockTxnRegistry {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl TransactionRegistry for MockTxnRegistry {
     async fn begin(
         &self,

@@ -110,7 +110,8 @@ impl<S: Store> NamespacedStore<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for NamespacedStore<S> {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         let txn = self.store.new_txn(readonly).await?;
@@ -138,7 +139,8 @@ impl NamespacedTxn {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for NamespacedTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let prefixed = self.namespace.prefix_key(key);
@@ -189,7 +191,8 @@ impl Reader for NamespacedTxn {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespacedTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let prefixed = self.namespace.prefix_key(key);
@@ -202,7 +205,8 @@ impl Writer for NamespacedTxn {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Txn for NamespacedTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
         self.txn.commit().await
@@ -259,7 +263,8 @@ pub struct NamespacedIterator {
     namespace: Namespace,
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Iterator for NamespacedIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {
         match self.iter.next().await? {

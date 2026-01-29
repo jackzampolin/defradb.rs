@@ -3,10 +3,10 @@
 //! Implements the DocumentACP trait using the full Zanzibar permission model
 //! with computed usersets and set operations.
 
+use async_lock::RwLock;
 use async_trait::async_trait;
 use identity::Did;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use super::engine::PermissionEngine;
 use super::expression::RelationExpression;
@@ -232,7 +232,8 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
     async fn register_doc_object(
         &self,

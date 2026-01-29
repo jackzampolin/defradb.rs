@@ -10,7 +10,7 @@ use document::Document;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
 use storage::corekv::Store;
-use tokio::sync::Mutex as TokioMutex;
+use async_lock::Mutex as TokioMutex;
 use tracing::warn;
 
 use crate::database::DB;
@@ -33,7 +33,8 @@ impl<S: Store> AutoCommitFetcher<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
         // Get collection from DB cache

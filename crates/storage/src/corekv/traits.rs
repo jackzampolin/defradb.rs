@@ -9,6 +9,12 @@
 /// - TxnStore: Store that supports transactions
 ///
 /// All traits use async_trait to support asynchronous operations.
+///
+/// # WASM Compatibility
+///
+/// For WASM targets, all `Send + Sync` bounds are removed since WASM is
+/// single-threaded. The `#[cfg_attr]` pattern is used to conditionally
+/// apply `async_trait(?Send)` for WASM builds.
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
@@ -17,23 +23,43 @@ use super::errors::Result;
 use super::iterator::Iterator;
 use super::types::IterOptions;
 
+// Conditional Send bounds for callbacks based on target architecture
+#[cfg(not(target_arch = "wasm32"))]
 /// Callback function type for transaction lifecycle events.
 ///
 /// These callbacks are executed synchronously when transaction events occur.
 pub type TxnCallback = Box<dyn FnOnce() + Send + 'static>;
 
+#[cfg(target_arch = "wasm32")]
+/// Callback function type for transaction lifecycle events (WASM version).
+///
+/// These callbacks are executed synchronously when transaction events occur.
+/// No Send bound required in single-threaded WASM environment.
+pub type TxnCallback = Box<dyn FnOnce() + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Asynchronous callback function type for transaction lifecycle events.
 ///
 /// These callbacks are executed asynchronously when transaction events occur.
 pub type AsyncTxnCallback =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
 
+#[cfg(target_arch = "wasm32")]
+/// Asynchronous callback function type for transaction lifecycle events (WASM version).
+///
+/// These callbacks are executed asynchronously when transaction events occur.
+/// No Send bound required in single-threaded WASM environment.
+pub type AsyncTxnCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + 'static>;
+
+pub use defra_core::thread_bounds::{MaybeSend, MaybeSendSync, MaybeSync};
+
 /// Reader trait for read-only key-value operations.
 ///
 /// This trait provides the core read operations: get, has, and iterator.
 /// All operations are asynchronous to support various backend implementations.
-#[async_trait]
-pub trait Reader: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Reader: MaybeSendSync {
     /// Retrieve the value associated with a key.
     ///
     /// # Arguments
@@ -108,8 +134,9 @@ pub trait Reader: Send + Sync {
 /// Writer trait for write operations.
 ///
 /// This trait provides the core write operations: set and delete.
-#[async_trait]
-pub trait Writer: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Writer: MaybeSendSync {
     /// Store a key-value pair.
     ///
     /// If the key already exists, its value is overwritten.
@@ -157,8 +184,9 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 /// Store trait for key-value stores that support transactions.
 ///
 /// This trait defines the basic store interface with transaction support.
-#[async_trait]
-pub trait Store: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Store: MaybeSendSync {
     /// Create a new transaction.
     ///
     /// # Arguments
@@ -194,7 +222,8 @@ pub trait Store: Send + Sync {
 ///
 /// Concurrent writes will be blocked during `drop_all()`. Depending on the
 /// underlying store implementation, concurrent reads may or may not be blocked.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Dropable: Store {
     /// Delete all data stored in the store.
     ///
@@ -251,7 +280,8 @@ pub trait Dropable: Store {
 /// txn.set(b"key", b"value").await?;
 /// txn.commit().await?; // Callbacks execute here
 /// ```
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Txn: ReaderWriter {
     /// Commit the transaction, making all changes permanent.
     ///
@@ -371,7 +401,8 @@ impl<T> TxnStore for T where T: Store {}
 /// Blanket implementation of Reader for Box<dyn Txn>.
 ///
 /// This allows boxed transactions to be used where Reader is required.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for Box<dyn Txn> {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         (**self).get(key).await
@@ -393,7 +424,8 @@ impl Reader for Box<dyn Txn> {
 /// Blanket implementation of Writer for Box<dyn Txn>.
 ///
 /// This allows boxed transactions to be used where Writer is required.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for Box<dyn Txn> {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         (**self).set(key, value).await
@@ -411,9 +443,19 @@ impl Writer for Box<dyn Txn> {
 /// ```ignore
 /// txn.on_success(make_callback(|| println!("Success!")));
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn make_callback<F>(f: F) -> TxnCallback
 where
     F: FnOnce() + Send + 'static,
+{
+    Box::new(f)
+}
+
+/// Helper function to create a simple sync callback from a closure (WASM version).
+#[cfg(target_arch = "wasm32")]
+pub fn make_callback<F>(f: F) -> TxnCallback
+where
+    F: FnOnce() + 'static,
 {
     Box::new(f)
 }
@@ -427,10 +469,21 @@ where
 ///     println!("Async success!");
 /// }));
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn make_async_callback<F, Fut>(f: F) -> AsyncTxnCallback
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
+{
+    Box::new(move || Box::pin(f()))
+}
+
+/// Helper function to create an async callback from a closure (WASM version).
+#[cfg(target_arch = "wasm32")]
+pub fn make_async_callback<F, Fut>(f: F) -> AsyncTxnCallback
+where
+    F: FnOnce() -> Fut + 'static,
+    Fut: Future<Output = ()> + 'static,
 {
     Box::new(move || Box::pin(f()))
 }
