@@ -281,7 +281,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(node)
             }
             MutationType::Upsert => {
-                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone());
+                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone())
+                    .with_collection(collection.clone())
+                    .with_request_time(request_time);
 
                 // Set create_input (from Go's 'create' argument)
                 if !mutation.create_input.is_empty() {
@@ -449,16 +451,24 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
         let mut mapping = DocumentMapping::new();
 
-        // Add requested fields
+        // Always reserve index 0 for _docID (matches Go DefraDB DocumentMapping pattern).
+        // This ensures set_doc_id() at index 0 doesn't collide with requested field values.
+        mapping.add(0, "_docID");
+
+        // Add requested fields (starting at index 1+ since 0 is reserved for _docID)
         for field in mutation.requested_fields() {
+            if field.name == "_docID" {
+                // _docID is already at index 0, just add render key
+                mapping.add_render_key(0, field.output_name());
+                continue;
+            }
             let index = mapping.next_index();
             mapping.add(index, &field.name);
             mapping.add_render_key(index, field.output_name());
         }
 
-        // If no fields specified, at minimum return _docID
-        if mapping.next_index() == 0 {
-            mapping.add(0, "_docID");
+        // If no fields explicitly requested, render _docID by default
+        if mapping.render_keys.is_empty() {
             mapping.add_render_key(0, "_docID");
         }
 

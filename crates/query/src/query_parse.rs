@@ -1736,6 +1736,11 @@ fn parse_field_to_mutation(
 
             // UPSERT: create is the document to create if no match (single object, not array)
             (MutationType::Upsert, "create") => {
+                if matches!(arg_value, Value::Null) {
+                    return Err(QueryError::parse(
+                        "Argument \"create\" has invalid value <nil>.".to_string(),
+                    ));
+                }
                 let input = parse_update_input(arg_value, variables)?;
                 // Store create input as single-element array for consistency
                 mutation.create_input = vec![input];
@@ -1743,6 +1748,11 @@ fn parse_field_to_mutation(
 
             // UPSERT: update is the fields to update if match found
             (MutationType::Upsert, "update") => {
+                if matches!(arg_value, Value::Null) {
+                    return Err(QueryError::parse(
+                        "Argument \"update\" has invalid value <nil>.".to_string(),
+                    ));
+                }
                 let input = parse_update_input(arg_value, variables)?;
                 mutation.update_input = input;
             }
