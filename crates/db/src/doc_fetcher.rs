@@ -88,6 +88,20 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
     }
 
+    async fn get_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Vec<(Document, bool)>> {
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        collection
+            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,

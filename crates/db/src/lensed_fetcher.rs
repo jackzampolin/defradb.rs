@@ -503,6 +503,34 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         Ok(processed_docs)
     }
 
+    async fn get_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Vec<(Document, bool)>> {
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        // Check if collection has migrations registered
+        let has_migrations = Self::collection_has_migrations(&collection);
+
+        let docs_with_status = collection
+            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+
+        // Process each document, applying migration if needed
+        let mut processed_docs = Vec::with_capacity(docs_with_status.len());
+        for (doc, is_deleted) in docs_with_status {
+            let processed = self
+                .process_document(doc, &collection, &datastore, has_migrations)
+                .await?;
+            processed_docs.push((processed, is_deleted));
+        }
+
+        Ok(processed_docs)
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,

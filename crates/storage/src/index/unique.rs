@@ -239,11 +239,9 @@ impl CollectionIndex for UniqueIndex {
                 let existing_doc_id = String::from_utf8(existing)
                     .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
                 if existing_doc_id != doc_id {
-                    return Err(crate::corekv::Error::Other(format!(
-                        "unique index '{}' constraint violation: value already exists for document '{}'",
-                        self.desc.name,
-                        existing_doc_id
-                    )));
+                    return Err(crate::corekv::Error::Other(
+                        "can not index a doc's field(s) that violates unique index".to_string()
+                    ));
                 }
             }
         }

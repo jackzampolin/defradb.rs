@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use schema::CollectionVersion;
 
-use crate::document::{documents_to_plan_docs, DocumentMapping};
+use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs, DocumentMapping};
 use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
@@ -113,8 +113,16 @@ impl PlanNode for ScanNode {
         // If docs weren't provided and we have a fetcher, load documents from storage
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
-                let storage_docs = fetcher.get_all(&self.collection.name).await?;
-                self.docs = documents_to_plan_docs(&storage_docs, &self.document_mapping)?;
+                // Use get_all_with_deleted to get documents with their deletion status.
+                // When show_deleted is true, we get all documents including deleted ones.
+                // The deletion status is used to:
+                // 1. Set DocStatus on the plan Doc for filtering in next()
+                // 2. Populate the _deleted field if it's in the document mapping
+                let docs_with_status = fetcher
+                    .get_all_with_deleted(&self.collection.name, self.show_deleted)
+                    .await?;
+                self.docs =
+                    documents_with_status_to_plan_docs(&docs_with_status, &self.document_mapping)?;
             } else {
                 // No docs provided and no fetcher - this is a programming error.
                 // Either pre-load docs with with_docs() or attach a fetcher with with_fetcher().
