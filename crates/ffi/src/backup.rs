@@ -106,11 +106,11 @@ fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
 
 /// Compute `_docIDNew` from current field values.
 ///
-/// Creates a Document from the field values (minus self-referencing FK fields),
+/// Creates a Document from the field values (minus FK fields),
 /// sets the collection, and generates the content-addressed ID.
 fn compute_doc_id_new(
     doc_map: &Map<String, JsonValue>,
-    self_ref_fk_names: &[String],
+    fk_names: &[String],
     schema: &CollectionVersion,
 ) -> Result<String, String> {
     let mut fields: HashMap<String, JsonValue> = HashMap::new();
@@ -120,8 +120,8 @@ fn compute_doc_id_new(
         if key == "_docID" || key == "_docIDNew" {
             continue;
         }
-        // Skip self-referencing FK fields
-        if self_ref_fk_names.contains(key) {
+        // Skip FK fields (relationship metadata, not document data)
+        if fk_names.contains(key) {
             continue;
         }
         // Skip null values (they don't contribute to CID)
@@ -194,32 +194,44 @@ pub unsafe extern "C" fn basic_export(
         } else {
             for name in &config.collections {
                 if !all_names.contains(name) {
-                    return Err(format!("collection '{}' not found", name));
+                    return Err(format!(
+                        "failed to get collection: key not found. Name: {}",
+                        name
+                    ));
                 }
             }
             config.collections.clone()
         };
 
-        // Two-pass export:
-        // Pass 1: Query all collections, compute _docIDNew, build _docID → _docIDNew map
-        // Pass 2: Rewrite FK values to use _docIDNew (cross-collection references)
+        // Three-phase export:
+        // Phase 1: Query all docs, compute initial _docIDNew (including FK fields)
+        // Phase 2: Remap FK values to _docIDNew and recompute _docIDNew
+        // Phase 3: Build export output
 
-        struct CollectionExport {
-            name: String,
-            docs: Vec<Map<String, JsonValue>>,
-            relation_field_names: Vec<String>,
-            self_ref_fk_names: Vec<String>,
+        struct DocEntry {
+            doc_map: Map<String, JsonValue>,
+            own_doc_id: String,
+            self_ref_excludes: Vec<String>,
         }
 
-        let mut collection_exports: Vec<CollectionExport> = Vec::new();
+        struct CollectionData {
+            name: String,
+            schema: CollectionVersion,
+            docs: Vec<DocEntry>,
+            fk_field_names: Vec<String>,
+        }
+
+        let mut all_collections: Vec<CollectionData> = Vec::new();
         let mut doc_id_map: HashMap<String, String> = HashMap::new();
 
-        // Pass 1: Query docs and compute _docIDNew for each
+        // Phase 1: Query all docs and compute initial _docIDNew
         for name in &collection_names {
             let collection = database
                 .get_collection(name)
                 .map_err(|e| format!("failed to get collection '{}': {}", name, e))?
-                .ok_or_else(|| format!("collection '{}' not found", name))?;
+                .ok_or_else(|| {
+                    format!("failed to get collection: key not found. Name: {}", name)
+                })?;
 
             let schema = collection.schema().clone();
             let fields = classify_schema_fields(&schema);
@@ -227,16 +239,18 @@ pub unsafe extern "C" fn basic_export(
             // Build GraphQL query field list
             let mut query_parts = vec!["_docID".to_string()];
             let mut relation_field_names: Vec<String> = Vec::new();
-            let mut self_ref_fk_names: Vec<String> = Vec::new();
+            let mut fk_field_names: Vec<String> = Vec::new();
+            let mut self_ref_candidate_fks: Vec<String> = Vec::new();
 
             for field in &fields {
                 if field.is_relation {
                     if !field.is_array {
                         query_parts.push(format!("{} {{ _docID }}", field.name));
                         relation_field_names.push(field.name.clone());
-
+                        let fk_name = format!("_{}ID", field.name);
+                        fk_field_names.push(fk_name.clone());
                         if field.is_self_ref {
-                            self_ref_fk_names.push(format!("_{}ID", field.name));
+                            self_ref_candidate_fks.push(fk_name);
                         }
                     }
                 } else {
@@ -268,7 +282,7 @@ pub unsafe extern "C" fn basic_export(
                 .cloned()
                 .unwrap_or_default();
 
-            let mut processed_docs = Vec::new();
+            let mut doc_entries = Vec::new();
             for doc in docs {
                 let mut doc_map = match doc.as_object() {
                     Some(m) => m.clone(),
@@ -276,7 +290,6 @@ pub unsafe extern "C" fn basic_export(
                 };
 
                 // Transform relation fields: {author: {_docID: "..."}} → {_authorID: "..."}
-                // Store the raw _docID for now; Pass 2 will map to _docIDNew
                 for rel_name in &relation_field_names {
                     if let Some(related) = doc_map.remove(rel_name) {
                         if related.is_null() {
@@ -289,55 +302,107 @@ pub unsafe extern "C" fn basic_export(
                     }
                 }
 
-                // Compute _docIDNew from current field values (minus self-ref FK fields)
-                let doc_id_new =
-                    compute_doc_id_new(&doc_map, &self_ref_fk_names, &schema)?;
+                let own_doc_id = doc_map
+                    .get("_docID")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
-                // Build _docID → _docIDNew mapping
-                if let Some(doc_id) = doc_map.get("_docID").and_then(|v| v.as_str()) {
-                    doc_id_map.insert(doc_id.to_string(), doc_id_new.clone());
-                }
-
-                doc_map.insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
-                processed_docs.push(doc_map);
-            }
-
-            collection_exports.push(CollectionExport {
-                name: name.clone(),
-                docs: processed_docs,
-                relation_field_names,
-                self_ref_fk_names,
-            });
-        }
-
-        // Pass 2: Rewrite FK values from _docID to _docIDNew
-        let mut export_data = Map::new();
-        for col_export in collection_exports {
-            let mut export_docs = Vec::new();
-
-            // Collect all FK field names for this collection
-            let fk_field_names: Vec<String> = col_export
-                .relation_field_names
-                .iter()
-                .map(|n| format!("_{}ID", n))
-                .collect();
-
-            for mut doc_map in col_export.docs {
-                // Map FK values from _docID to _docIDNew
-                for fk_name in &fk_field_names {
+                // Detect document-level self-references (doc referencing itself)
+                // Go only excludes FK fields where the value equals the doc's own _docID
+                let mut self_ref_excludes: Vec<String> = Vec::new();
+                for fk_name in &self_ref_candidate_fks {
                     if let Some(fk_value) = doc_map.get(fk_name).and_then(|v| v.as_str()) {
-                        if let Some(new_id) = doc_id_map.get(fk_value) {
-                            doc_map.insert(
-                                fk_name.clone(),
-                                JsonValue::String(new_id.clone()),
-                            );
+                        if fk_value == own_doc_id {
+                            self_ref_excludes.push(fk_name.clone());
                         }
                     }
                 }
-                export_docs.push(JsonValue::Object(doc_map));
+
+                // Compute initial _docIDNew (including FK fields, excluding self-refs)
+                let doc_id_new =
+                    compute_doc_id_new(&doc_map, &self_ref_excludes, &schema)?;
+
+                doc_id_map.insert(own_doc_id.clone(), doc_id_new.clone());
+                doc_map.insert(
+                    "_docIDNew".to_string(),
+                    JsonValue::String(doc_id_new),
+                );
+
+                // Strip null fields (Go omits them in export)
+                doc_map.retain(|_, v| !v.is_null());
+
+                doc_entries.push(DocEntry {
+                    doc_map,
+                    own_doc_id,
+                    self_ref_excludes,
+                });
             }
 
-            export_data.insert(col_export.name, JsonValue::Array(export_docs));
+            all_collections.push(CollectionData {
+                name: name.clone(),
+                schema,
+                docs: doc_entries,
+                fk_field_names,
+            });
+        }
+
+        // Phase 2: Remap FK values to _docIDNew and recompute _docIDNew
+        // This handles cross-collection references where the referenced doc's
+        // _docIDNew differs from its _docID (because it was updated).
+        for col_data in &mut all_collections {
+            if col_data.fk_field_names.is_empty() {
+                continue;
+            }
+
+            for entry in &mut col_data.docs {
+                let mut needs_recompute = false;
+
+                for fk_name in &col_data.fk_field_names {
+                    if let Some(fk_value) = entry
+                        .doc_map
+                        .get(fk_name)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                    {
+                        if let Some(new_id) = doc_id_map.get(&fk_value) {
+                            if new_id != &fk_value {
+                                entry.doc_map.insert(
+                                    fk_name.clone(),
+                                    JsonValue::String(new_id.clone()),
+                                );
+                                needs_recompute = true;
+                            }
+                        }
+                    }
+                }
+
+                if needs_recompute {
+                    let doc_id_new = compute_doc_id_new(
+                        &entry.doc_map,
+                        &entry.self_ref_excludes,
+                        &col_data.schema,
+                    )?;
+
+                    doc_id_map
+                        .insert(entry.own_doc_id.clone(), doc_id_new.clone());
+                    entry.doc_map.insert(
+                        "_docIDNew".to_string(),
+                        JsonValue::String(doc_id_new),
+                    );
+                }
+            }
+        }
+
+        // Phase 3: Build export output
+        let mut export_data = Map::new();
+        for col_data in all_collections {
+            let export_docs: Vec<JsonValue> = col_data
+                .docs
+                .into_iter()
+                .map(|entry| JsonValue::Object(entry.doc_map))
+                .collect();
+            export_data.insert(col_data.name, JsonValue::Array(export_docs));
         }
 
         // Serialize to JSON
@@ -436,7 +501,7 @@ pub unsafe extern "C" fn basic_import(
                 .map_err(|e| format!("failed to get collection: {}", e))?
                 .ok_or_else(|| {
                     format!(
-                        "failed to get collection: collection '{}' not found",
+                        "failed to get collection: key not found. Name: {}",
                         collection_name
                     )
                 })?;
@@ -462,6 +527,25 @@ pub unsafe extern "C" fn basic_import(
                 }
             };
 
+            // Pre-validate all documents' field names before creating any
+            let valid_field_names: Vec<&str> =
+                schema.fields.iter().map(|f| f.name.as_str()).collect();
+            for doc in docs {
+                if let Some(doc_obj) = doc.as_object() {
+                    for key in doc_obj.keys() {
+                        if key == "_docID" || key == "_docIDNew" {
+                            continue;
+                        }
+                        if !valid_field_names.contains(&key.as_str()) {
+                            return Err(format!(
+                                "failed to create document in '{}': the given field does not exist. Name: {}",
+                                collection_name, key
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Create each document
             for doc in docs {
                 let mut doc_map = match doc.as_object() {
@@ -472,10 +556,6 @@ pub unsafe extern "C" fn basic_import(
                 // Strip backup metadata fields
                 doc_map.remove("_docID");
                 doc_map.remove("_docIDNew");
-
-                if doc_map.is_empty() {
-                    continue;
-                }
 
                 // Extract self-referencing FK fields (strip before create, apply after)
                 let mut self_ref_values: Vec<(String, JsonValue)> = Vec::new();
@@ -500,10 +580,16 @@ pub unsafe extern "C" fn basic_import(
                 if !response.errors.is_empty() {
                     let errs: Vec<String> =
                         response.errors.iter().map(|e| e.message.clone()).collect();
+                    let err_msg = errs.join("; ");
+                    // Match Go's error format for duplicate documents
+                    if err_msg.contains("already exists") {
+                        return Err(
+                            "a document with the given ID already exists".to_string()
+                        );
+                    }
                     return Err(format!(
                         "failed to create document in '{}': {}",
-                        collection_name,
-                        errs.join("; ")
+                        collection_name, err_msg
                     ));
                 }
 
