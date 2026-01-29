@@ -117,12 +117,11 @@ impl PlanNode for LimitNode {
             obj.insert("limit".to_string(), serde_json::Value::Number(limit.into()));
         }
 
-        if self.offset > 0 {
-            obj.insert(
-                "offset".to_string(),
-                serde_json::Value::Number(self.offset.into()),
-            );
-        }
+        // Go always includes offset, even when 0
+        obj.insert(
+            "offset".to_string(),
+            serde_json::Value::Number(self.offset.into()),
+        );
 
         // Recursively explain child node - merge their wrapped structure
         let child_explain = self.source.explain();

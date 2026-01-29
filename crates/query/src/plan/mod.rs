@@ -18,7 +18,7 @@ mod type_join;
 
 pub use alldocs::AllDocsNode;
 pub use average::AverageNode;
-pub use count::CountNode;
+pub use count::{CountNode, CountSourceMeta};
 pub use groupby::{DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;
 pub use limit::LimitNode;

@@ -611,8 +611,7 @@ impl PlanNode for TypeJoinMany {
         // Simple/Default mode: typeIndexJoin contains both attributes and tree structure
         let mut obj = serde_json::Map::new();
 
-        // direction: always "primary" for one-to-many (parent has the array field)
-        obj.insert("direction".to_string(), serde_json::json!("primary"));
+        // Note: Go only adds "direction" for typeJoinOne, not typeJoinMany
 
         // joinType: "typeJoinMany" for one-to-many joins
         obj.insert("joinType".to_string(), serde_json::json!("typeJoinMany"));
