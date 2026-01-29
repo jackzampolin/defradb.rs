@@ -10,6 +10,109 @@ use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
+/// Convert a Rust `Select` into a Go-compatible `request.Select` JSON object.
+///
+/// Go's `request.Select` uses PascalCase keys and `immutable.Option[T]` which
+/// serializes as `null` when empty or the bare value when present.
+fn select_to_go_json(select: &query::Select) -> serde_json::Value {
+    let fields: Vec<serde_json::Value> = select
+        .fields
+        .iter()
+        .map(|f| match f {
+            query::mapper::Requestable::Field(field) => {
+                let mut m = serde_json::Map::new();
+                m.insert("Name".into(), serde_json::Value::String(field.name.clone()));
+                m.insert(
+                    "Alias".into(),
+                    field
+                        .alias
+                        .as_ref()
+                        .map(|a| serde_json::Value::String(a.clone()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                serde_json::Value::Object(m)
+            }
+            query::mapper::Requestable::Select(sub) => select_to_go_json(sub),
+            query::mapper::Requestable::Aggregate(_agg) => {
+                serde_json::Value::Object(serde_json::Map::new())
+            }
+        })
+        .collect();
+
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "Name".into(),
+        serde_json::Value::String(select.collection_name.clone()),
+    );
+    m.insert(
+        "Alias".into(),
+        select
+            .field
+            .alias
+            .as_ref()
+            .map(|a| serde_json::Value::String(a.clone()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    m.insert("Fields".into(), serde_json::Value::Array(fields));
+    m.insert(
+        "Limit".into(),
+        select
+            .limit
+            .as_ref()
+            .and_then(|l| l.limit)
+            .map(|v| serde_json::Value::Number(v.into()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    m.insert(
+        "Offset".into(),
+        select
+            .limit
+            .as_ref()
+            .map(|l| {
+                if l.offset > 0 {
+                    serde_json::Value::Number(l.offset.into())
+                } else {
+                    serde_json::Value::Null
+                }
+            })
+            .unwrap_or(serde_json::Value::Null),
+    );
+    m.insert("OrderBy".into(), serde_json::Value::Null);
+    m.insert(
+        "Filter".into(),
+        select
+            .filter
+            .as_ref()
+            .map(|f| {
+                let conditions: serde_json::Map<String, serde_json::Value> = f
+                    .conditions()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let mut filter_obj = serde_json::Map::new();
+                filter_obj.insert(
+                    "Conditions".into(),
+                    serde_json::Value::Object(conditions),
+                );
+                serde_json::Value::Object(filter_obj)
+            })
+            .unwrap_or(serde_json::Value::Null),
+    );
+    m.insert("DocIDs".into(), serde_json::Value::Null);
+    m.insert("CID".into(), serde_json::Value::Null);
+    m.insert("GroupBy".into(), serde_json::Value::Null);
+    m.insert(
+        "ShowDeleted".into(),
+        serde_json::Value::Bool(select.show_deleted),
+    );
+    m.insert(
+        "IsEncrypted".into(),
+        serde_json::Value::Bool(select.is_encrypted),
+    );
+
+    serde_json::Value::Object(m)
+}
+
 /// Get a collection by name.
 ///
 /// Returns a JSON object containing the collection's schema (CollectionVersion)
@@ -432,8 +535,18 @@ pub unsafe extern "C" fn add_view(
         let collections =
             query::parse_sdl(&sdl_str).map_err(|e| format!("failed to parse view SDL: {}", e))?;
 
-        // Build the query source
-        let mut query_source = schema::QuerySource::new(serde_json::Value::String(query_str));
+        // Parse the GQL query into a Select, matching Go's `addView` behavior:
+        // Go wraps query as `query { <input> }` then parses to request.Select
+        let wrapped_query = format!("query {{ {} }}", &query_str);
+        let selects = query::parse_query(&wrapped_query)
+            .map_err(|e| format!("failed to parse view query: {}", e))?;
+        if selects.is_empty() {
+            return Err("invalid view query: no selections found".to_string());
+        }
+        let select_json = select_to_go_json(&selects[0]);
+
+        // Build the query source with Go-compatible Select JSON
+        let mut query_source = schema::QuerySource::new(select_json);
         if let Some(ref t) = transform_opt {
             query_source = query_source.with_transform(t);
         }

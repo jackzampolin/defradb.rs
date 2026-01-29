@@ -132,6 +132,11 @@ impl Planner {
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?
             .clone();
 
+        // If this collection is a non-materialized view, build a view plan instead
+        if let Some(ref query_source) = collection.query {
+            return self.build_view_plan(select, &collection, query_source);
+        }
+
         // Build the document mapping for this query (controls which fields appear in output)
         let render_mapping = self.build_mapping(select, &collection)?;
 
@@ -3194,6 +3199,102 @@ impl Planner {
     /// Get a collection schema by name.
     pub fn collection(&self, name: &str) -> Option<&Arc<CollectionVersion>> {
         self.collections.get(name)
+    }
+
+    /// Build a plan for a non-materialized view.
+    ///
+    /// Instead of scanning storage (which is empty for views), this parses the
+    /// stored query, builds a plan for it, and wraps it in a ViewNode that
+    /// remaps fields from the source query's mapping to the view's mapping.
+    fn build_view_plan(
+        &self,
+        select: &Select,
+        collection: &CollectionVersion,
+        query_source: &schema::QuerySource,
+    ) -> Result<PlanResult> {
+        // Extract the source collection name from the stored Select JSON
+        let source_name = query_source
+            .query
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                QueryError::execution("view QuerySource.Query missing 'Name' field")
+            })?;
+
+        // Build a Select for the underlying query from the stored JSON
+        let source_fields_json = query_source
+            .query
+            .get("Fields")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                QueryError::execution("view QuerySource.Query missing 'Fields' array")
+            })?;
+
+        let mut source_select = Select::new(source_name.to_string());
+        for field_json in source_fields_json {
+            let field_name = field_json
+                .get("Name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+
+            if field_json.get("Fields").is_some() {
+                // Nested select (relation)
+                let inner_name = field_name.to_string();
+                let inner_select = Select::new(inner_name.clone())
+                    .with_field_name(inner_name);
+                source_select.fields.push(Requestable::Select(Box::new(inner_select)));
+            } else {
+                // Simple field
+                let alias = field_json
+                    .get("Alias")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let field = if let Some(a) = alias {
+                    crate::mapper::Field::with_alias(field_name, a)
+                } else {
+                    crate::mapper::Field::new(field_name)
+                };
+                source_select.fields.push(Requestable::Field(field));
+            }
+        }
+
+        // Reconstruct filter from stored JSON if present
+        if let Some(filter_json) = query_source.query.get("Filter") {
+            if !filter_json.is_null() {
+                if let Some(conditions) = filter_json.get("Conditions").and_then(|c| c.as_object())
+                {
+                    let conditions_map: std::collections::HashMap<String, serde_json::Value> =
+                        conditions
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                    if !conditions_map.is_empty() {
+                        source_select.filter =
+                            Some(crate::mapper::Filter::from_conditions(conditions_map));
+                    }
+                }
+            }
+        }
+
+        // Build the source plan
+        let source_plan_result = self.plan_with_index_info(&source_select)?;
+        let source_mapping = source_plan_result.plan.document_map().clone();
+
+        // Build the target (view) mapping
+        let target_mapping = self.build_mapping(select, collection)?;
+
+        // Wrap in a ViewNode
+        let view_node = crate::plan::view::ViewNode::new(
+            source_plan_result.plan,
+            source_mapping,
+            target_mapping,
+        );
+
+        Ok(PlanResult {
+            plan: Box::new(view_node),
+            index_scan: None,
+            ordering_only_fields: Vec::new(),
+        })
     }
 }
 
