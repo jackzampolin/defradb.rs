@@ -171,7 +171,38 @@ impl Default for SelectionType {
     }
 }
 
-/// Requestable items in a select (field, aggregate, or sub-select)
+/// A similarity computation (dot product between document vector and query vector)
+#[derive(Debug, Clone)]
+pub struct Similarity {
+    /// The target field containing the document's vector
+    pub target_field: String,
+    /// The query vector to compare against
+    pub vector: Vec<f64>,
+    /// Optional alias for output
+    pub alias: Option<String>,
+}
+
+impl Similarity {
+    pub fn new(target_field: impl Into<String>, vector: Vec<f64>) -> Self {
+        Self {
+            target_field: target_field.into(),
+            vector,
+            alias: None,
+        }
+    }
+
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    /// Get the output name (alias if set, otherwise "_similarity")
+    pub fn output_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or("_similarity")
+    }
+}
+
+/// Requestable items in a select (field, aggregate, sub-select, or similarity)
 #[derive(Debug, Clone)]
 pub enum Requestable {
     /// Simple field
@@ -180,6 +211,8 @@ pub enum Requestable {
     Select(Box<Select>),
     /// Aggregate function
     Aggregate(Aggregate),
+    /// Similarity computation (dot product)
+    Similarity(Similarity),
 }
 
 /// Aggregate function type
@@ -410,6 +443,12 @@ impl Select {
     /// Add an aggregate
     pub fn with_aggregate(mut self, aggregate: Aggregate) -> Self {
         self.fields.push(Requestable::Aggregate(aggregate));
+        self
+    }
+
+    /// Add a similarity computation
+    pub fn with_similarity(mut self, similarity: Similarity) -> Self {
+        self.fields.push(Requestable::Similarity(similarity));
         self
     }
 

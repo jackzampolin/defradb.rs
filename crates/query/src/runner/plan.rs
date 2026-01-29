@@ -119,6 +119,9 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                 Requestable::Aggregate(_) => {
                     // Aggregates are allowed at group level
                 }
+                Requestable::Similarity(_) => {
+                    // Similarity is allowed at group level
+                }
             }
         }
     }
@@ -254,6 +257,11 @@ pub(crate) fn build_mapping(
                      this indicates a bug in query routing",
                     nested.field.name
                 )));
+            }
+            Requestable::Similarity(sim) => {
+                let index = mapping.next_index();
+                mapping.add(index, "_similarity");
+                mapping.add_render_key(index, sim.output_name());
             }
         }
     }

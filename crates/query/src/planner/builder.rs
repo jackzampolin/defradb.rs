@@ -15,7 +15,7 @@ use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
     AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef,
     JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
-    SumNode, TypeJoinMany, TypeJoinOne,
+    SimilarityNode, SumNode, TypeJoinMany, TypeJoinOne,
 };
 use crate::plan::groupby::ChildSelectMeta;
 use crate::planner::index_selection::{
@@ -365,6 +365,34 @@ impl Planner {
             }
         }
 
+        // Add similarity fields to scan_mapping.
+        // Similarity results are virtual computed fields stored at specific indices.
+        for field in &select.fields {
+            if let Requestable::Similarity(sim) = field {
+                // Add the _similarity output slot
+                let output_name = sim.output_name();
+                if scan_mapping
+                    .try_find_index_from_render_key(output_name)
+                    .is_none()
+                {
+                    let scan_index = scan_mapping.next_index();
+                    scan_mapping.add(scan_index, "_similarity");
+                    scan_mapping.add_render_key(scan_index, output_name);
+                }
+
+                // Ensure the target field (document's vector) is in scan_mapping
+                if scan_mapping
+                    .first_index_of_name(&sim.target_field)
+                    .is_none()
+                {
+                    if collection.field_by_name(&sim.target_field).is_some() {
+                        let idx = scan_mapping.next_index();
+                        scan_mapping.add(idx, &sim.target_field);
+                    }
+                }
+            }
+        }
+
         // Check if an index can be used for the filter or ordering.
         // Index selection works for both pre-loaded docs and fetcher-based loading.
         let (index_scan, index_provides_ordering) = if let Some(ref fetcher) = self.fetcher {
@@ -399,23 +427,24 @@ impl Planner {
 
         // Check if filter is complex (has relation conditions inside logical operators)
         // or has multi-level relation paths (e.g., {author: {published: {rating: ...}}})
-        // Collect aggregate output names to detect _alias conditions that should be deferred
-        let aggregate_names: Vec<&str> = select
+        // Collect aggregate and similarity output names to detect _alias conditions that should be deferred
+        let mut computed_field_names: Vec<&str> = select
             .fields
             .iter()
-            .filter_map(|f| {
-                if let Requestable::Aggregate(agg) = f {
-                    Some(agg.output_name())
-                } else {
-                    None
-                }
+            .filter_map(|f| match f {
+                Requestable::Aggregate(agg) => Some(agg.output_name()),
+                Requestable::Similarity(sim) => Some(sim.output_name()),
+                _ => None,
             })
             .collect();
+        // Deduplicate (in case of name collisions)
+        computed_field_names.sort_unstable();
+        computed_field_names.dedup();
 
-        // Strip _alias conditions that reference computed aggregates from the filter.
-        // These must be evaluated after aggregates are computed, not during plan execution.
+        // Strip _alias conditions that reference computed fields (aggregates/similarity) from the filter.
+        // These must be evaluated after the computed fields are set, not during plan execution.
         let filter_for_plan = select.filter.as_ref().map(|f| {
-            let (stripped, _) = f.strip_aggregate_alias_conditions(&aggregate_names);
+            let (stripped, _) = f.strip_aggregate_alias_conditions(&computed_field_names);
             stripped
         });
 
@@ -755,6 +784,23 @@ impl Planner {
             }
         }
 
+        // 4c. Add SimilarityNodes for _similarity fields.
+        // These compute per-document dot product before filters/ordering can reference results.
+        plan = self.add_similarity_nodes(plan, select, &scan_mapping)?;
+
+        // 4d. Apply deferred _alias filter for similarity results (non-grouped queries only).
+        // Similarity aliases are stripped from the initial filter and applied after computation.
+        if select.group_by.is_none() {
+            if let Some(ref filter) = select.filter {
+                let (_non_alias, alias_filter) = filter.split_alias();
+                if let Some(alias_f) = alias_filter {
+                    plan = Box::new(
+                        SelectNode::new(plan, scan_mapping.clone()).with_filter(alias_f),
+                    );
+                }
+            }
+        }
+
         // Check if we have GROUP BY - this affects the order of operations
         let has_group_by = select.group_by.is_some();
 
@@ -1025,6 +1071,50 @@ impl Planner {
     /// Add aggregate nodes to the plan based on the select's aggregate fields.
     ///
     /// Handles three types of aggregates:
+    /// Add SimilarityNode(s) to the plan for each _similarity field in the select.
+    ///
+    /// Each _similarity computes a dot product between the document's vector field
+    /// and the query vector, storing the result at the designated index.
+    fn add_similarity_nodes(
+        &self,
+        mut plan: Box<dyn PlanNode>,
+        select: &Select,
+        mapping: &DocumentMapping,
+    ) -> Result<Box<dyn PlanNode>> {
+        for field in &select.fields {
+            if let Requestable::Similarity(sim) = field {
+                // Find the target field index (document's vector)
+                let field_index = mapping
+                    .first_index_of_name(&sim.target_field)
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "similarity target field '{}' not found in mapping",
+                            sim.target_field
+                        ))
+                    })?;
+
+                // Find the similarity result index
+                let similarity_index = mapping
+                    .try_find_index_from_render_key(sim.output_name())
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "similarity output '{}' not found in mapping render keys",
+                            sim.output_name()
+                        ))
+                    })?;
+
+                plan = Box::new(SimilarityNode::new(
+                    plan,
+                    mapping.clone(),
+                    field_index,
+                    similarity_index,
+                    sim.vector.clone(),
+                ));
+            }
+        }
+        Ok(plan)
+    }
+
     /// - Simple field aggregates (e.g., _sum(field: age))
     /// - Group aggregates (e.g., _sum(_group: {field: age}))
     /// - Relation aggregates (e.g., _sum(articles: {field: pages}))
@@ -2964,6 +3054,11 @@ impl Planner {
                     // Use alias if provided, otherwise use the aggregate name
                     mapping.add_render_key(index, agg.output_name());
                 }
+                Requestable::Similarity(sim) => {
+                    let index = mapping.next_index();
+                    mapping.add(index, "_similarity");
+                    mapping.add_render_key(index, sim.output_name());
+                }
             }
         }
 
@@ -3063,6 +3158,9 @@ impl Planner {
                 }
                 Requestable::Aggregate(_) => {
                     // Aggregates within _group are not currently supported
+                }
+                Requestable::Similarity(_) => {
+                    // Similarity within _group is not supported
                 }
             }
         }
