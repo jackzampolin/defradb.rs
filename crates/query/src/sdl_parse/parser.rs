@@ -7,7 +7,7 @@ use cid::Cid;
 
 use crate::error::{QueryError, Result};
 use graphql_parser::schema::{
-    Definition, Directive, Document, Field, ObjectType, Type, TypeDefinition,
+    Definition, Directive, Document, Field, InterfaceType, ObjectType, Type, TypeDefinition,
 };
 use schema::{
     CType, CollectionVersion, FieldDescription, FieldKind, IndexDescription,
@@ -28,12 +28,13 @@ use regex::Regex;
 /// graphql_parser requires at least one field per type, but Go DefraDB allows empty types.
 const EMPTY_TYPE_PLACEHOLDER: &str = "__defradb_empty_type_placeholder__";
 
-/// Preprocess SDL to handle empty type definitions.
+/// Preprocess SDL to handle empty type/interface definitions.
 /// graphql_parser doesn't allow empty types, so we insert a placeholder field.
 fn preprocess_empty_types(sdl: &str) -> String {
-    // Match patterns like `type Name @directive(...)* {}` or `type Name {}`
-    // This regex finds `{` followed by optional whitespace then `}` in type definitions
-    let re = Regex::new(r"(\btype\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
+    // Match patterns like `type Name @directive(...)* {}` or `interface Name {}`
+    // This regex finds `{` followed by optional whitespace then `}` in type/interface definitions
+    let re =
+        Regex::new(r"(\b(?:type|interface)\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
 
     re.replace_all(sdl, |caps: &regex::Captures| {
         format!("{}{{ {}: String }}", &caps[1], EMPTY_TYPE_PLACEHOLDER)
@@ -190,10 +191,16 @@ impl<'a> SdlParser<'a> {
         let doc: Document<'_, String> = graphql_parser::parse_schema(&preprocessed)
             .map_err(|e| QueryError::parse(e.to_string()))?;
 
-        // First pass: collect all type definitions
+        // First pass: collect all type definitions (both `type` and `interface` keywords)
         for def in &doc.definitions {
-            if let Definition::TypeDefinition(TypeDefinition::Object(obj)) = def {
-                self.parse_object_type(obj)?;
+            match def {
+                Definition::TypeDefinition(TypeDefinition::Object(obj)) => {
+                    self.parse_object_type(obj)?;
+                }
+                Definition::TypeDefinition(TypeDefinition::Interface(iface)) => {
+                    self.parse_interface_type(iface)?;
+                }
+                _ => {}
             }
         }
 
@@ -230,6 +237,45 @@ impl<'a> SdlParser<'a> {
         }
 
         let type_directives = self.parse_type_directives(&obj.directives)?;
+
+        self.definition_order.push(name.clone());
+        self.type_defs.insert(
+            name.clone(),
+            ParsedTypeDef {
+                name,
+                fields,
+                directives: type_directives,
+            },
+        );
+
+        self.current_type = None;
+        Ok(())
+    }
+
+    /// Parse an interface type definition.
+    /// Go's SDL parser treats `interface` the same as `type` for view embedded schemas.
+    fn parse_interface_type(&mut self, iface: &InterfaceType<'_, String>) -> Result<()> {
+        let name = iface.name.clone();
+
+        if self.type_defs.contains_key(&name) {
+            return Err(QueryError::parse(format!(
+                "collection already exists. Name: {}",
+                name
+            )));
+        }
+
+        self.current_type = Some(name.clone());
+        let mut fields = Vec::new();
+
+        for field in &iface.fields {
+            if field.name == EMPTY_TYPE_PLACEHOLDER {
+                continue;
+            }
+            let parsed_field = self.parse_field(field)?;
+            fields.push(parsed_field);
+        }
+
+        let type_directives = self.parse_type_directives(&iface.directives)?;
 
         self.definition_order.push(name.clone());
         self.type_defs.insert(

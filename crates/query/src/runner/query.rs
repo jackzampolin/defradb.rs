@@ -787,8 +787,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
-        if has_nested || has_ordering_index || has_filter_index || has_relation_aggregates {
-            // Use the Planner for queries with nested selections, index usage, or relation aggregates
+        let is_view = collection.query.is_some();
+
+        if is_view || has_nested || has_ordering_index || has_filter_index || has_relation_aggregates
+        {
+            // Use the Planner for views, nested selections, index usage, or relation aggregates
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
@@ -1335,10 +1338,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Views must always use the planner because they don't store data directly -
+        // the planner creates a ViewNode that executes the underlying query.
+        let is_view = collection.query.is_some();
+
         // Use Planner if there are nested selections, filter through relations,
         // order through relations, aggregates on relations, secondary relation ID fields,
-        // similarity computations, or when an index can provide ordering
-        let needs_planner = has_nested
+        // similarity computations, when an index can provide ordering, or when querying a view
+        let needs_planner = is_view
+            || has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
@@ -2338,8 +2346,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|o| o.has_relation_order())
             .unwrap_or(false);
 
+        // Views always need the planner (they execute queries, not storage reads)
+        let is_view = collection.query.is_some();
+
         // Execute the query for document data (without _version)
-        let result = if has_nested || filter_has_relations || order_has_relations {
+        let result = if is_view || has_nested || filter_has_relations || order_has_relations {
             self.execute_nested_select_with_planner(
                 &select_without_version,
                 fetcher,

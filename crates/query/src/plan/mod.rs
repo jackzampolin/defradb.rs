@@ -16,6 +16,7 @@ mod select;
 mod similarity;
 mod sum;
 mod type_join;
+pub mod view;
 
 pub use alldocs::AllDocsNode;
 pub use average::AverageNode;
@@ -38,3 +39,4 @@ pub use sum::SumNode;
 pub use type_join::{
     compare_json_values, JoinDirection, JoinSide, RelationFilter, TypeJoinMany, TypeJoinOne,
 };
+pub use view::ViewNode;

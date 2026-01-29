@@ -124,6 +124,36 @@ pub extern "C" fn defra_version() -> *mut c_char {
         .into_raw()
 }
 
+// =============================================================================
+// Backup/Import stubs (not yet implemented)
+// =============================================================================
+
+/// Export database to a JSON file.
+///
+/// # Safety
+///
+/// `config` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn basic_export(
+    _node_ptr: usize,
+    _config: *const c_char,
+) -> types::FfiResult {
+    types::FfiResult::error("basic_export is not yet implemented")
+}
+
+/// Import documents from a JSON backup file.
+///
+/// # Safety
+///
+/// `filepath` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn basic_import(
+    _node_ptr: usize,
+    _filepath: *const c_char,
+) -> types::FfiResult {
+    types::FfiResult::error("basic_import is not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
