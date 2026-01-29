@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use std::ffi::c_char;
 
 use crate::get_runtime;
 use crate::state::{NodeState, PolicyStore, NODES};
