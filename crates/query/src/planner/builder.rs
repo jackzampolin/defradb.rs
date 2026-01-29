@@ -3237,17 +3237,57 @@ impl Planner {
         let source_mapping = source_plan_result.plan.document_map().clone();
 
         // Build the target (view) mapping
-        let target_mapping = self.build_mapping(select, collection)?;
+        let mut target_mapping = self.build_mapping(select, collection)?;
+
+        // Build child mappings for nested selects (relations) in the view.
+        // We use the stored Select JSON inner fields because they preserve
+        // the original source field names (Name) and aliases (Alias), which
+        // are needed for correct field renaming during JSON filtering.
+        for field_json in source_fields_json {
+            if let Some(inner_fields) = field_json.get("Fields").and_then(|v| v.as_array()) {
+                let field_name = field_json
+                    .get("Name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if let Some(field_index) = target_mapping.first_index_of_name(field_name) {
+                    let mut child_mapping = DocumentMapping::new();
+                    for inner_field in inner_fields {
+                        let name = inner_field
+                            .get("Name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let alias = inner_field.get("Alias").and_then(|v| v.as_str());
+                        let output_name = alias.unwrap_or(name);
+                        let idx = child_mapping.next_index();
+                        child_mapping.add(idx, name);
+                        child_mapping.add_render_key(idx, output_name);
+                    }
+                    target_mapping.set_child_at(field_index, child_mapping);
+                }
+            }
+        }
 
         // Wrap in a ViewNode
         let view_node = crate::plan::view::ViewNode::new(
             source_plan_result.plan,
             source_mapping,
-            target_mapping,
+            target_mapping.clone(),
         );
 
+        // Apply the user's query-level filter on top of the view if present.
+        // The view's stored query filter is already applied in the source plan;
+        // this handles additional filters specified by the caller.
+        let plan: Box<dyn PlanNode> = if let Some(ref filter) = select.filter {
+            Box::new(
+                SelectNode::new(Box::new(view_node), target_mapping)
+                    .with_filter(filter.clone()),
+            )
+        } else {
+            Box::new(view_node)
+        };
+
         Ok(PlanResult {
-            plan: Box::new(view_node),
+            plan,
             index_scan: None,
             ordering_only_fields: Vec::new(),
         })

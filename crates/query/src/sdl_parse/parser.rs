@@ -96,6 +96,9 @@ pub struct SdlParser<'a> {
     warnings: Vec<ParseWarning>,
     /// Current type being parsed (for warning context)
     current_type: Option<String>,
+    /// External type names (e.g. existing collection types) that can be referenced
+    /// in field types but are not defined in the SDL being parsed.
+    known_external_types: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -166,7 +169,14 @@ impl<'a> SdlParser<'a> {
             definition_order: Vec::new(),
             warnings: Vec::new(),
             current_type: None,
+            known_external_types: std::collections::HashSet::new(),
         }
+    }
+
+    /// Set external type names that can be referenced but aren't defined in the SDL.
+    pub fn with_known_types(mut self, types: std::collections::HashSet<String>) -> Self {
+        self.known_external_types = types;
+        self
     }
 
     /// Parse the SDL and return collection versions
@@ -796,8 +806,9 @@ impl<'a> SdlParser<'a> {
     }
 
     fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
-        // Build collection names set for relation detection
-        let type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
+        // Build collection names set for relation detection, including external types
+        let mut type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
+        type_names.extend(self.known_external_types.iter().cloned());
 
         // Collect @primary directive information for determining actual primaryness
         let primary_directives = self.collect_primary_directives(&type_names);
@@ -1706,6 +1717,19 @@ fn generate_relation_name(from_type: &str, _field_name: &str, to_type: &str) -> 
 /// unimplemented features, use [`parse_sdl_with_warnings`] instead.
 pub fn parse_sdl(sdl: &str) -> Result<Vec<CollectionVersion>> {
     let mut parser = SdlParser::new(sdl);
+    parser.parse()
+}
+
+/// Parse SDL with knowledge of existing collection type names.
+///
+/// External types referenced in the SDL (e.g. `books: [Book]` where `Book` is
+/// an existing collection) will be resolved as named relations instead of
+/// producing "no type found" errors.
+pub fn parse_sdl_with_known_types(
+    sdl: &str,
+    known_types: std::collections::HashSet<String>,
+) -> Result<Vec<CollectionVersion>> {
+    let mut parser = SdlParser::new(sdl).with_known_types(known_types);
     parser.parse()
 }
 

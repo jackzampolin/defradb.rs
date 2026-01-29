@@ -531,9 +531,16 @@ pub unsafe extern "C" fn add_view(
     };
 
     let result = rt.block_on(async {
-        // Parse the SDL into collection versions
-        let collections =
-            query::parse_sdl(&sdl_str).map_err(|e| format!("failed to parse view SDL: {}", e))?;
+        // Get existing collection names so the SDL parser can resolve external type references
+        let known_types: std::collections::HashSet<String> = database
+            .list_collections()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        // Parse the SDL into collection versions, passing known types for resolution
+        let collections = query::parse_sdl_with_known_types(&sdl_str, known_types)
+            .map_err(|e| format!("failed to parse view SDL: {}", e))?;
 
         // Parse the GQL query into a Select, matching Go's `addView` behavior:
         // Go wraps query as `query { <input> }` then parses to request.Select
