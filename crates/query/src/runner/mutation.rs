@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::document::{document_to_plan_doc, DocumentMapping};
 use crate::error::{QueryError, Result};
-use crate::mapper::{Mutation, MutationType};
+use crate::mapper::{Mutation, MutationType, Requestable};
 use crate::mutator::DocMutator;
 use crate::plan::{
     CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertInput, UpsertNode,
@@ -404,6 +404,45 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Enrich results with _version data if requested.
+        // _version is a nested select (Requestable::Select) that returns commit history.
+        // This must happen after ACP blocks which also need _docID.
+        let version_select = mutation.fields.iter().find_map(|r| {
+            if let Requestable::Select(s) = r {
+                if s.field.name == "_version" {
+                    return Some(s.as_ref());
+                }
+            }
+            None
+        });
+
+        if let Some(version_sel) = version_select {
+            let fetcher: &dyn crate::fetcher::DocFetcher = self.fetcher.as_ref();
+            let output_name = version_sel.field.output_name().to_string();
+            let docid_explicitly_requested = mutation
+                .requested_fields()
+                .iter()
+                .any(|f| f.name == "_docID");
+
+            for result in &mut results {
+                if let JsonValue::Object(ref mut obj) = result {
+                    if let Some(doc_id) =
+                        obj.get("_docID").and_then(|v| v.as_str()).map(String::from)
+                    {
+                        let version_data = self
+                            .fetch_version_data(fetcher, &doc_id, version_sel, None)
+                            .await?;
+                        obj.insert(output_name.clone(), version_data);
+                    }
+
+                    // Remove _docID from output if it was only added internally for version lookup
+                    if !docid_explicitly_requested {
+                        obj.remove("_docID");
+                    }
+                }
+            }
+        }
+
         Ok(JsonValue::Array(results))
     }
 
@@ -456,15 +495,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mapping.add(0, "_docID");
 
         // Add requested fields (starting at index 1+ since 0 is reserved for _docID)
+        let mut has_docid_render = false;
         for field in mutation.requested_fields() {
             if field.name == "_docID" {
                 // _docID is already at index 0, just add render key
                 mapping.add_render_key(0, field.output_name());
+                has_docid_render = true;
                 continue;
             }
             let index = mapping.next_index();
             mapping.add(index, &field.name);
             mapping.add_render_key(index, field.output_name());
+        }
+
+        // When _version is requested, ensure _docID is always rendered
+        // (needed to look up version/commit data for each document)
+        let has_version = mutation.fields.iter().any(|r| {
+            matches!(r, Requestable::Select(s) if s.field.name == "_version")
+        });
+        if has_version && !has_docid_render {
+            mapping.add_render_key(0, "_docID");
         }
 
         // If no fields explicitly requested, render _docID by default

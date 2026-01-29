@@ -2355,7 +2355,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// Returns an array of commit objects filtered to composite commits (fieldName = "_C")
     /// and rendered with the requested fields from the _version selection.
-    async fn fetch_version_data(
+    pub(crate) async fn fetch_version_data(
         &self,
         fetcher: &dyn DocFetcher,
         doc_id: &str,
