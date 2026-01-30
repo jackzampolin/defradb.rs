@@ -579,7 +579,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let collections: Vec<CollectionVersion> =
                 collections_map.values().map(|c| (**c).clone()).collect();
 
-            let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            if let Some(ref lens_store) = self.lens_store {
+                planner = planner.with_lens_store(lens_store.clone());
+            }
             let plan_result = planner.plan_with_index_info(select)?;
             let mut plan = plan_result.plan;
 
@@ -814,7 +817,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        let planner = Planner::new(collections);
+        let mut planner = Planner::new(collections);
+        if let Some(ref lens_store) = self.lens_store {
+            planner = planner.with_lens_store(lens_store.clone());
+        }
         let plan_result = planner.plan_with_index_info(select)?;
         let plan = plan_result.plan;
 
@@ -1418,7 +1424,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
-        let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        if let Some(ref lens_store) = self.lens_store {
+            planner = planner.with_lens_store(lens_store.clone());
+        }
         let plan_result = planner.plan_with_index_info(select)?;
         let mut plan = plan_result.plan;
         let ordering_only_fields = plan_result.ordering_only_fields;

@@ -63,6 +63,8 @@ pub struct Planner {
     collections_by_id: HashMap<String, Arc<CollectionVersion>>,
     /// Optional fetcher for ScanNodes to load data on-demand
     fetcher: Option<Arc<dyn DocFetcher>>,
+    /// Optional lens transform store for view queries with transforms
+    lens_store: Option<Arc<dyn lens::TransformStore>>,
 }
 
 impl Planner {
@@ -88,6 +90,7 @@ impl Planner {
             collections,
             collections_by_id,
             fetcher: None,
+            lens_store: None,
         }
     }
 
@@ -97,6 +100,12 @@ impl Planner {
     /// to load documents during initialization if no docs are pre-loaded.
     pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
         self.fetcher = Some(fetcher);
+        self
+    }
+
+    /// Set a lens transform store for view queries with transforms.
+    pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
+        self.lens_store = Some(store);
         self
     }
 
@@ -3311,23 +3320,49 @@ impl Planner {
             }
         }
 
-        // Wrap in a ViewNode
-        let view_node = crate::plan::view::ViewNode::new(
-            source_plan_result.plan,
-            source_mapping,
+        // Build the view plan. When a lens transform is present, the LensNode
+        // converts source docs to JSON, applies the transform, and converts back
+        // using target_mapping. The ViewNode then does field filtering (identity
+        // mapping for scalars, nested JSON filtering for relations).
+        let has_lens = query_source.transform.is_some() && self.lens_store.is_some();
+
+        let (effective_source, view_source_mapping): (Box<dyn PlanNode>, DocumentMapping) =
+            if let Some(ref transform_cid) = query_source.transform {
+                if let Some(ref lens_store) = self.lens_store {
+                    let transform_id = lens::TransformId::new(transform_cid.as_str());
+                    let lens_node = Box::new(crate::plan::lens_node::LensNode::new(
+                        source_plan_result.plan,
+                        source_mapping,
+                        target_mapping.clone(),
+                        lens_store.clone(),
+                        transform_id,
+                    ));
+                    // LensNode output is in target format, so ViewNode does
+                    // identity mapping (but still filters nested JSON)
+                    (lens_node, target_mapping.clone())
+                } else {
+                    (source_plan_result.plan, source_mapping)
+                }
+            } else {
+                (source_plan_result.plan, source_mapping)
+            };
+
+        let view_plan: Box<dyn PlanNode> = Box::new(crate::plan::view::ViewNode::new(
+            effective_source,
+            view_source_mapping,
             target_mapping.clone(),
-        );
+        ));
 
         // Apply the user's query-level filter on top of the view if present.
         // The view's stored query filter is already applied in the source plan;
         // this handles additional filters specified by the caller.
         let plan: Box<dyn PlanNode> = if let Some(ref filter) = select.filter {
             Box::new(
-                SelectNode::new(Box::new(view_node), target_mapping)
+                SelectNode::new(view_plan, target_mapping)
                     .with_filter(filter.clone()),
             )
         } else {
-            Box::new(view_node)
+            view_plan
         };
 
         Ok(PlanResult {
