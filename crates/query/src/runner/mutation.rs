@@ -99,7 +99,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         for mutation in mutations {
             let result = self
-                .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone(), request_time)
+                .execute_single_mutation(
+                    &mutation,
+                    mutator.clone(),
+                    caller_identity.clone(),
+                    request_time,
+                )
                 .await?;
             // Use alias if provided, otherwise full mutation name (e.g., "create_Users")
             let key = mutation.output_name();

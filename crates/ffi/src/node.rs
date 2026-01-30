@@ -145,39 +145,6 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
     }
 }
 
-/// Export the database to a JSON file.
-///
-/// # Safety
-///
-/// `node_ptr` must be a valid handle from `new_node`.
-/// `config_json` must be a valid null-terminated C string.
-#[no_mangle]
-pub extern "C" fn basic_export(node_ptr: usize, _config_json: *const c_char) -> FfiResult {
-    let _rt = get_runtime!(FfiResult);
-
-    if NODES.get(node_ptr, |_| ()).is_none() {
-        return FfiResult::error(ERR_INVALID_NODE_HANDLE);
-    }
-
-    FfiResult::error("basic_export is not yet implemented")
-}
-
-/// Import documents from a JSON backup file.
-///
-/// # Safety
-///
-/// `node_ptr` must be a valid handle from `new_node`.
-/// `filepath` must be a valid null-terminated C string.
-#[no_mangle]
-pub extern "C" fn basic_import(node_ptr: usize, _filepath: *const c_char) -> FfiResult {
-    let _rt = get_runtime!(FfiResult);
-
-    if NODES.get(node_ptr, |_| ()).is_none() {
-        return FfiResult::error(ERR_INVALID_NODE_HANDLE);
-    }
-
-    FfiResult::error("basic_import is not yet implemented")
-}
 
 #[cfg(test)]
 mod tests {

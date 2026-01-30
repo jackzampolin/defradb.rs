@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use schema::CollectionVersion;
 
-use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs, DocumentMapping};
+use crate::document::{
+    documents_to_plan_docs, documents_with_status_to_plan_docs, DocumentMapping,
+};
 use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;

@@ -23,7 +23,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `identity_did` - Optional DID of the caller for ACP permission checks (null for anonymous)
+/// * `identity_did` - Optional DID string for ACP permission checks (null for anonymous)
 /// * `request_query` - GraphQL query string (required)
 /// * `operation_name` - Optional operation name for multi-operation documents (null if not used)
 /// * `variables` - Optional JSON string of variables (null if not used)
@@ -41,15 +41,22 @@ pub unsafe extern "C" fn exec_request(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    // Accept identity_did for ACP (not yet used in Rust implementation)
-    let _identity = c_str_to_string(identity_did);
-
+    let identity_str = c_str_to_string(identity_did);
     let query_str = match c_str_to_string(request_query) {
         Some(s) => s,
         None => return FfiResult::error("request_query is null"),
     };
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
+
+    // Parse identity DID if provided
+    let did = match identity_str {
+        Some(s) if !s.is_empty() => match identity::Did::new(&s) {
+            Ok(d) => Some(d),
+            Err(e) => return FfiResult::error(format!("invalid identity DID: {}", e)),
+        },
+        _ => None,
+    };
 
     // Validate node handle before entering async block
     let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
@@ -60,6 +67,9 @@ pub unsafe extern "C" fn exec_request(
     let result = rt.block_on(async {
         // Build request
         let mut request = query::QueryRequest::new(query_str);
+        if did.is_some() {
+            request = request.with_identity(did);
+        }
         if let Some(op) = op_name {
             request = request.with_operation_name(op);
         }

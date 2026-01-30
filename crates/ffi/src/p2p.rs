@@ -211,7 +211,7 @@ pub extern "C" fn p2p_peer_info(node_ptr: usize) -> FfiResult {
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Ok("[]".to_string()),
             };
 
             rt.block_on(async {

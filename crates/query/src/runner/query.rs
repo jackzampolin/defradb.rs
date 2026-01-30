@@ -161,8 +161,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut operation_children: Vec<JsonValue> = Vec::new();
 
                 for mutation in mutations {
-                    let mutation_explain =
-                        self.explain_single_mutation(&mutation, explain_type).await?;
+                    let mutation_explain = self
+                        .explain_single_mutation(&mutation, explain_type)
+                        .await?;
                     operation_children.push(mutation_explain);
                 }
 
@@ -278,7 +279,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Build mutation node with iterations
         let mut mutation_inner = serde_json::Map::new();
         mutation_inner.insert("iterations".to_string(), serde_json::json!(iterations));
-        mutation_inner.insert("selectTopNode".to_string(), select_top_node["selectTopNode"].clone());
+        mutation_inner.insert(
+            "selectTopNode".to_string(),
+            select_top_node["selectTopNode"].clone(),
+        );
 
         let mutation_node = serde_json::json!({
             node_kind: mutation_inner
@@ -363,8 +367,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     if conditions.is_empty() {
                         mutation_attrs.insert("filter".to_string(), JsonValue::Null);
                     } else {
-                        mutation_attrs
-                            .insert("filter".to_string(), serde_json::json!(conditions));
+                        mutation_attrs.insert("filter".to_string(), serde_json::json!(conditions));
                     }
                 } else {
                     mutation_attrs.insert("filter".to_string(), JsonValue::Null);
@@ -399,8 +402,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     if conditions.is_empty() {
                         mutation_attrs.insert("filter".to_string(), JsonValue::Null);
                     } else {
-                        mutation_attrs
-                            .insert("filter".to_string(), serde_json::json!(conditions));
+                        mutation_attrs.insert("filter".to_string(), serde_json::json!(conditions));
                     }
                 } else {
                     mutation_attrs.insert("filter".to_string(), JsonValue::Null);
@@ -460,8 +462,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             {
                 Ok((explanation, doc_count, exec_count)) => {
                     // Ensure selectNode wrapper
-                    let select_node_content =
-                        Self::ensure_select_node_wrapper(explanation, &select, ExplainType::Execute);
+                    let select_node_content = Self::ensure_select_node_wrapper(
+                        explanation,
+                        &select,
+                        ExplainType::Execute,
+                    );
 
                     if is_top_level_aggregate {
                         // Top-level aggregates use topLevelNode wrapper
@@ -737,7 +742,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-
     /// Generate an explanation of a single Select operation.
     async fn explain_select(
         &self,
@@ -839,7 +843,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Ensure result is wrapped in selectNode (Go format)
-        Ok(Self::ensure_select_node_wrapper(explain, select, explain_type))
+        Ok(Self::ensure_select_node_wrapper(
+            explain,
+            select,
+            explain_type,
+        ))
     }
 
     /// Generate an explanation for a simple query without nested selections.
@@ -862,7 +870,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Ensure result is wrapped in selectNode (Go format)
-        Ok(Self::ensure_select_node_wrapper(explain, select, explain_type))
+        Ok(Self::ensure_select_node_wrapper(
+            explain,
+            select,
+            explain_type,
+        ))
     }
 
     /// Process explain output for Go format compatibility.
@@ -889,7 +901,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Generate an explanation for a _commits system collection query.
     ///
     /// Returns a dagScanNode structure matching Go's explain output for commits queries.
-    fn explain_commits_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
+    fn explain_commits_select(
+        &self,
+        select: &Select,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
         // For Debug mode, return empty inner objects
         if matches!(explain_type, ExplainType::Debug) {
             return Ok(serde_json::json!({
@@ -941,13 +957,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Aggregate node kind names that can wrap a selectNode in the plan explain.
-    const AGGREGATE_NODE_KINDS: &'static [&'static str] = &[
-        "countNode",
-        "sumNode",
-        "averageNode",
-        "minNode",
-        "maxNode",
-    ];
+    const AGGREGATE_NODE_KINDS: &'static [&'static str] =
+        &["countNode", "sumNode", "averageNode", "minNode", "maxNode"];
 
     /// Aggregate-specific explain fields that should be stripped when unwrapping aggregate nodes.
     const AGGREGATE_EXPLAIN_FIELDS: [&'static str; 1] = ["sources"];

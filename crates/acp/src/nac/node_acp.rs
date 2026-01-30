@@ -46,9 +46,9 @@ pub enum NacStatus {
 impl std::fmt::Display for NacStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotConfigured => write!(f, "not_configured"),
+            Self::NotConfigured => write!(f, "not configured"),
             Self::Enabled => write!(f, "enabled"),
-            Self::DisabledTemporarily => write!(f, "disabled_temporarily"),
+            Self::DisabledTemporarily => write!(f, "disabled temporarily"),
         }
     }
 }
@@ -194,10 +194,14 @@ impl<S: ZanzibarStore> NodeACP<S> {
     #[doc(hidden)]
     pub async fn disable(&self) -> Result<()> {
         let status = *self.status.read().await;
-        if status != NacStatus::Enabled {
-            return Err(Error::InvalidPolicy(
-                "NAC must be enabled to disable".into(),
-            ));
+        match status {
+            NacStatus::NotConfigured => {
+                return Err(Error::InvalidPolicy("node acp is not configured".into()));
+            }
+            NacStatus::DisabledTemporarily => {
+                return Err(Error::InvalidPolicy("node acp is already disabled".into()));
+            }
+            NacStatus::Enabled => {} // proceed
         }
 
         *self.status.write().await = NacStatus::DisabledTemporarily;
@@ -223,10 +227,14 @@ impl<S: ZanzibarStore> NodeACP<S> {
     #[doc(hidden)]
     pub async fn re_enable(&self) -> Result<()> {
         let status = *self.status.read().await;
-        if status != NacStatus::DisabledTemporarily {
-            return Err(Error::InvalidPolicy(
-                "NAC must be disabled to re-enable".into(),
-            ));
+        match status {
+            NacStatus::NotConfigured => {
+                return Err(Error::InvalidPolicy("node acp is not configured".into()));
+            }
+            NacStatus::Enabled => {
+                return Err(Error::InvalidPolicy("node acp is already enabled".into()));
+            }
+            NacStatus::DisabledTemporarily => {} // proceed
         }
 
         *self.status.write().await = NacStatus::Enabled;
