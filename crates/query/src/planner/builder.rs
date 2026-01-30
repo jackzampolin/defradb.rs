@@ -807,14 +807,35 @@ impl Planner {
         plan = self.add_similarity_nodes(plan, select, &scan_mapping)?;
 
         // 4d. Apply deferred _alias filter for similarity results (non-grouped queries only).
-        // Similarity aliases are stripped from the initial filter and applied after computation.
+        // Only apply alias conditions that do NOT reference aggregate fields.
+        // Aggregate alias conditions (e.g., _alias: {publishedCount: {_gt: 0}}) must wait
+        // until after aggregate nodes compute their values (handled by compute_relation_aggregates).
         if select.group_by.is_none() {
             if let Some(ref filter) = select.filter {
                 let (_non_alias, alias_filter) = filter.split_alias();
                 if let Some(alias_f) = alias_filter {
-                    plan = Box::new(
-                        SelectNode::new(plan, scan_mapping.clone()).with_filter(alias_f),
-                    );
+                    // Build a list of aggregate-only output names (not similarity).
+                    // Similarity alias conditions CAN be applied here (after SimilarityNode),
+                    // but aggregate alias conditions must be deferred.
+                    let aggregate_only_names: Vec<&str> = select
+                        .fields
+                        .iter()
+                        .filter_map(|f| {
+                            if let Requestable::Aggregate(agg) = f {
+                                Some(agg.output_name())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let (stripped_alias, _) =
+                        alias_f.strip_aggregate_alias_conditions(&aggregate_only_names);
+                    // Only apply alias filter if there are non-aggregate alias conditions remaining
+                    if !stripped_alias.conditions().is_empty() {
+                        plan = Box::new(
+                            SelectNode::new(plan, scan_mapping.clone()).with_filter(stripped_alias),
+                        );
+                    }
                 }
             }
         }
