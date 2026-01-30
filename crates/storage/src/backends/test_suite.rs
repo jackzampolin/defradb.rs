@@ -1559,7 +1559,11 @@ pub async fn test_concurrent_writes_same_key<S: Store + 'static>(store: Arc<S>) 
     let successes = success_count.load(Ordering::SeqCst);
     let conflicts = conflict_count.load(Ordering::SeqCst);
     assert!(successes >= 1, "At least one commit should succeed");
-    assert_eq!(successes + conflicts, 10, "All transactions should complete");
+    assert_eq!(
+        successes + conflicts,
+        10,
+        "All transactions should complete"
+    );
 
     // Key should have SOME value
     let txn = store.new_txn(true).await.unwrap();
@@ -1577,10 +1581,7 @@ pub async fn test_last_writer_wins<S: Store + 'static>(store: Arc<S>) {
     // First commit succeeds, second detects conflict
     txn1.commit().await.unwrap();
     let result = txn2.commit().await;
-    assert!(
-        result.is_err(),
-        "Second commit should fail with conflict"
-    );
+    assert!(result.is_err(), "Second commit should fail with conflict");
     assert!(
         matches!(result.unwrap_err(), Error::TxnConflict),
         "Error should be TxnConflict"
@@ -1605,10 +1606,7 @@ pub async fn test_last_writer_wins_reverse<S: Store + 'static>(store: Arc<S>) {
     // Reverse order: txn2 commits first, txn1 conflicts
     txn2.commit().await.unwrap();
     let result = txn1.commit().await;
-    assert!(
-        result.is_err(),
-        "Second commit should fail with conflict"
-    );
+    assert!(result.is_err(), "Second commit should fail with conflict");
     assert!(
         matches!(result.unwrap_err(), Error::TxnConflict),
         "Error should be TxnConflict"

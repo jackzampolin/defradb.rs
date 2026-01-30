@@ -555,8 +555,8 @@ impl<S: Store> DB<S> {
                         ))
                     })?;
 
-                let mut schema: CollectionVersion =
-                    serde_json::from_slice(&collection_json).map_err(|e| {
+                let mut schema: CollectionVersion = serde_json::from_slice(&collection_json)
+                    .map_err(|e| {
                         tracing::error!(
                             error = ?e,
                             collection_name = %name,
@@ -572,8 +572,10 @@ impl<S: Store> DB<S> {
                 // Load root_id from /collection/shortID/{collection_id}
                 // (root_id is #[serde(skip)] so it's not in the JSON)
                 let short_id_key = CollectionID::new(&schema.collection_id);
-                if let Some(short_id_bytes) =
-                    systemstore.get(&short_id_key.bytes()).await.map_err(Error::Storage)?
+                if let Some(short_id_bytes) = systemstore
+                    .get(&short_id_key.bytes())
+                    .await
+                    .map_err(Error::Storage)?
                 {
                     if let Ok(short_id_str) = String::from_utf8(short_id_bytes) {
                         schema.root_id = short_id_str.parse::<u32>().unwrap_or(0);
@@ -716,10 +718,7 @@ impl<S: Store> DB<S> {
         // Store short ID mapping at /collection/shortID/{collection_id}
         let short_id_key = CollectionID::new(collection_id.as_str());
         systemstore
-            .set(
-                &short_id_key.bytes(),
-                short_id.to_string().as_bytes(),
-            )
+            .set(&short_id_key.bytes(), short_id.to_string().as_bytes())
             .await
             .map_err(Error::Storage)?;
 
@@ -761,9 +760,7 @@ impl<S: Store> DB<S> {
     ///
     /// Reads the current value from `/seq/collection`, increments it, and stores
     /// the updated value. Returns the new ID. Matches Go's sequence.Next() pattern.
-    async fn next_collection_short_id(
-        systemstore: &datastore::NamespaceView,
-    ) -> Result<u32> {
+    async fn next_collection_short_id(systemstore: &datastore::NamespaceView) -> Result<u32> {
         let seq_key = CollectionIDSequenceKey::new();
         let current: u32 = match systemstore
             .get(&seq_key.bytes())
@@ -777,9 +774,7 @@ impl<S: Store> DB<S> {
                     u64::from_be_bytes(arr) as u32
                 } else {
                     // Try as string for backwards compat
-                    String::from_utf8_lossy(&bytes)
-                        .parse::<u32>()
-                        .unwrap_or(0)
+                    String::from_utf8_lossy(&bytes).parse::<u32>().unwrap_or(0)
                 }
             }
             None => 0,

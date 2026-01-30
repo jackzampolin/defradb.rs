@@ -671,7 +671,8 @@ impl PlanNode for TypeJoinMany {
                 serde_json::Value::Number(self.child_offset.into()),
             );
             limit_node.insert("selectNode".to_string(), inner_content);
-            inner_content = serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
+            inner_content =
+                serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
         } else {
             // No limit, wrap selectNode directly
             inner_content = serde_json::json!({ "selectNode": inner_content });
@@ -703,7 +704,8 @@ impl PlanNode for TypeJoinMany {
                     order_node.insert(key.clone(), value.clone());
                 }
             }
-            inner_content = serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
+            inner_content =
+                serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
         }
 
         // Wrap everything in selectTopNode
@@ -761,7 +763,8 @@ impl PlanNode for TypeJoinMany {
                     order_node_content.insert(key.clone(), value.clone());
                 }
             }
-            inner_content = serde_json::json!({ "orderNode": serde_json::Value::Object(order_node_content) });
+            inner_content =
+                serde_json::json!({ "orderNode": serde_json::Value::Object(order_node_content) });
         }
 
         // Wrap everything in selectTopNode

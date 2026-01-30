@@ -69,7 +69,8 @@ impl UpsertInput {
                     .find(|f| f.name == *field_name)
                     .map(|f| &f.kind)
             });
-            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
+            let normal_value =
+                json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
             doc.set(field_name.clone(), normal_value);
             modified_count += 1;
         }

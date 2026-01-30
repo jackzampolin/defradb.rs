@@ -5,12 +5,12 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics.
 
+use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
 use storage::corekv::Store;
-use async_lock::Mutex as TokioMutex;
 use tracing::warn;
 
 use crate::database::DB;
