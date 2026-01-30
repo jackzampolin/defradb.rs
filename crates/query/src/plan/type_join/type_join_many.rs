@@ -809,14 +809,11 @@ impl PlanNode for TypeJoinMany {
     fn explain_execute_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations from the join node itself
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
 
-        // scanNode: parent plan's execution stats
-        // Get the parent's explain_execute and extract its inner content
         let parent_execute = self.parent_plan.explain_execute();
         if let Some(parent_obj) = parent_execute.as_object() {
             for (key, value) in parent_obj {
@@ -824,23 +821,22 @@ impl PlanNode for TypeJoinMany {
             }
         }
 
-        // subTypeScanNode: child plan's execution stats (captured before close)
         let mut sub_type_obj = serde_json::Map::new();
         sub_type_obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.child_exec_info.iterations),
+            serde_json::json!(self.child_exec_info.iterations as u64),
         );
         sub_type_obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(self.child_exec_info.docs_fetched),
+            serde_json::json!(self.child_exec_info.docs_fetched as u64),
         );
         sub_type_obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(self.child_exec_info.fields_fetched),
+            serde_json::json!(self.child_exec_info.fields_fetched as u64),
         );
         sub_type_obj.insert(
             "indexFetches".to_string(),
-            serde_json::json!(self.child_exec_info.indexes_fetched),
+            serde_json::json!(self.child_exec_info.indexes_fetched as u64),
         );
         obj.insert(
             "subTypeScanNode".to_string(),

@@ -295,13 +295,11 @@ impl PlanNode for CountNode {
     fn explain_execute_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
 
-        // Recursively explain child node with execution info
         let child_explain = self.source.explain_execute();
         if let Some(child_obj) = child_explain.as_object() {
             for (key, value) in child_obj {

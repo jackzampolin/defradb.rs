@@ -14,9 +14,10 @@ use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef,
-    JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
-    SimilarityNode, SumNode, TypeJoinMany, TypeJoinOne,
+    AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, IndexScanNode,
+    InnerAggregateDef, JoinSide, LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta,
+    OrderByNode, RelationFilter, ScanNode, SelectNode, SimilarityNode, SumNode, SumSourceMeta,
+    TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
@@ -1282,6 +1283,20 @@ impl Planner {
                     None
                 };
 
+                // Determine source field name for explain output
+                let source_field_name = if !agg.targets.is_empty()
+                    && !agg.targets[0].host_name.is_empty()
+                {
+                    agg.targets[0].host_name.clone()
+                } else {
+                    select.collection_name.clone()
+                };
+                let child_field = if !agg.targets.is_empty() {
+                    agg.targets[0].field_name.clone()
+                } else {
+                    None
+                };
+
                 match agg.aggregate_type {
                     AggregateType::Count => {
                         let mut node = CountNode::new(plan, mapping.clone(), agg_index);
@@ -1291,12 +1306,17 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources = vec![CountSourceMeta {
+                            field_name: source_field_name.clone(),
+                            filter: target_filter.clone(),
+                        }];
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Sum => {
@@ -1307,12 +1327,18 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources = vec![SumSourceMeta {
+                            field_name: source_field_name.clone(),
+                            child_field_name: child_field.clone(),
+                            filter: target_filter.clone(),
+                        }];
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Average => {
@@ -1340,12 +1366,18 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources = vec![MinSourceMeta {
+                            field_name: source_field_name.clone(),
+                            child_field_name: child_field.clone(),
+                            filter: target_filter.clone(),
+                        }];
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Max => {
@@ -1356,12 +1388,18 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources = vec![MaxSourceMeta {
+                            field_name: source_field_name.clone(),
+                            child_field_name: child_field.clone(),
+                            filter: target_filter.clone(),
+                        }];
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                 }

@@ -160,14 +160,13 @@ impl PlanNode for SelectNode {
     fn explain_execute_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations, filterMatches
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
         obj.insert(
             "filterMatches".to_string(),
-            serde_json::json!(self.filter_matches),
+            serde_json::json!(self.filter_matches as u64),
         );
 
         // Recursively explain child node with execution info

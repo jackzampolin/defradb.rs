@@ -768,3 +768,39 @@ pub extern "C" fn p2p_get_all_collections(node_ptr: usize) -> FfiResult {
         Err(e) => FfiResult::error(e),
     }
 }
+
+/// Add documents to P2P replication by doc IDs.
+///
+/// # Safety
+///
+/// `doc_ids_json` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_add_documents(
+    _node_ptr: usize,
+    _doc_ids_json: *const c_char,
+) -> FfiResult {
+    FfiResult::error("p2p_add_documents not yet implemented")
+}
+
+/// Remove documents from P2P replication by doc IDs.
+///
+/// # Safety
+///
+/// `doc_ids_json` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_remove_documents(
+    _node_ptr: usize,
+    _doc_ids_json: *const c_char,
+) -> FfiResult {
+    FfiResult::error("p2p_remove_documents not yet implemented")
+}
+
+/// Get all documents in P2P replication.
+///
+/// # Safety
+///
+/// The caller must free the returned string with `defra_free_string`.
+#[no_mangle]
+pub extern "C" fn p2p_get_all_documents(_node_ptr: usize) -> FfiResult {
+    FfiResult::error("p2p_get_all_documents not yet implemented")
+}

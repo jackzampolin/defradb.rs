@@ -287,6 +287,48 @@ impl PlanNode for AverageNode {
         "averageNode"
     }
 
+    fn explain_inner(&self) -> JsonValue {
+        // Go decomposes average into: averageNode → countNode → sumNode → source
+        // Get the source explain output
+        let source_explain = self.source.explain();
+
+        // Wrap in: countNode { sumNode { ...source... } }
+        let mut sum_inner = serde_json::Map::new();
+        if let Some(source_obj) = source_explain.as_object() {
+            for (key, value) in source_obj {
+                sum_inner.insert(key.clone(), value.clone());
+            }
+        }
+
+        let mut count_inner = serde_json::Map::new();
+        count_inner.insert("sumNode".to_string(), JsonValue::Object(sum_inner));
+
+        let mut obj = serde_json::Map::new();
+        obj.insert("countNode".to_string(), JsonValue::Object(count_inner));
+
+        JsonValue::Object(obj)
+    }
+
+    fn explain_debug_inner(&self) -> JsonValue {
+        // Same structure for debug: averageNode → countNode → sumNode → source
+        let source_explain = self.source.explain_debug();
+
+        let mut sum_inner = serde_json::Map::new();
+        if let Some(source_obj) = source_explain.as_object() {
+            for (key, value) in source_obj {
+                sum_inner.insert(key.clone(), value.clone());
+            }
+        }
+
+        let mut count_inner = serde_json::Map::new();
+        count_inner.insert("sumNode".to_string(), JsonValue::Object(sum_inner));
+
+        let mut obj = serde_json::Map::new();
+        obj.insert("countNode".to_string(), JsonValue::Object(count_inner));
+
+        JsonValue::Object(obj)
+    }
+
     fn current_group_docs(&self) -> Option<&[Doc]> {
         // Pass through from source for stacked aggregates
         self.source.current_group_docs()
@@ -306,16 +348,26 @@ impl PlanNode for AverageNode {
         // Go DefraDB execute format: iterations
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
 
-        // Recursively explain child node with execution info
-        let child_explain = self.source.explain_execute();
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                obj.insert(key.clone(), value.clone());
+        // Go decomposes average execute into: averageNode → countNode → sumNode → source
+        let source_explain = self.source.explain_execute();
+
+        // Wrap in: countNode { iterations: N, sumNode { iterations: N, ...source... } }
+        let mut sum_inner = serde_json::Map::new();
+        sum_inner.insert("iterations".to_string(), serde_json::json!(0u64));
+        if let Some(source_obj) = source_explain.as_object() {
+            for (key, value) in source_obj {
+                sum_inner.insert(key.clone(), value.clone());
             }
         }
+
+        let mut count_inner = serde_json::Map::new();
+        count_inner.insert("iterations".to_string(), serde_json::json!(0u64));
+        count_inner.insert("sumNode".to_string(), JsonValue::Object(sum_inner));
+
+        obj.insert("countNode".to_string(), JsonValue::Object(count_inner));
 
         serde_json::Value::Object(obj)
     }
