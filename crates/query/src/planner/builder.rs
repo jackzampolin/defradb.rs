@@ -1720,7 +1720,8 @@ impl Planner {
 
             // Create the child scan plan with scan_mapping (includes FK fields for joins)
             let mut child_scan =
-                ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
+                ScanNode::new((*target_collection).clone(), child_scan_mapping.clone())
+                    .with_show_deleted(select.show_deleted);
             if let Some(ref fetcher) = self.fetcher {
                 child_scan = child_scan.with_fetcher(fetcher.clone());
             }
@@ -2962,6 +2963,19 @@ impl Planner {
             }
         }
 
+        // Copy _deleted virtual field from render_mapping if present.
+        // _deleted is not in the schema, so it must be explicitly added to the scan mapping.
+        if let Some(deleted_render_idx) = render_mapping.first_index_of_name("_deleted") {
+            let new_index = mapping.next_index();
+            mapping.add(new_index, "_deleted");
+            for rk in &render_mapping.render_keys {
+                if rk.index == deleted_render_idx && rk.key == "_deleted" {
+                    mapping.add_render_key(new_index, &rk.key);
+                    break;
+                }
+            }
+        }
+
         // Copy type_info from render_mapping if set (for __typename support)
         // Also need to copy the __typename render_key since it's a virtual field not in schema
         // IMPORTANT: Use collection.name as the type name, not the one from render_mapping,
@@ -3442,6 +3456,13 @@ impl Planner {
                         mapping.add_render_key(index, field.output_name());
                         continue;
                     }
+                    // Handle _deleted (soft-delete status, populated at render time)
+                    if field.name == "_deleted" {
+                        let index = mapping.next_index();
+                        mapping.add(index, "_deleted");
+                        mapping.add_render_key(index, field.output_name());
+                        continue;
+                    }
                     // Validate field exists in schema
                     if collection.field_by_name(&field.name).is_none() {
                         return Err(QueryError::unknown_field(&field.name));
@@ -3537,6 +3558,14 @@ impl Planner {
                     if field.name == "__typename" {
                         child_mapping.set_type_name(&collection.name);
                         let index = child_mapping.first_index_of_name("__typename").unwrap();
+                        child_mapping.add_render_key(index, field.output_name());
+                        continue;
+                    }
+
+                    // Handle _deleted (soft-delete status)
+                    if field.name == "_deleted" {
+                        let index = child_mapping.next_index();
+                        child_mapping.add(index, "_deleted");
                         child_mapping.add_render_key(index, field.output_name());
                         continue;
                     }

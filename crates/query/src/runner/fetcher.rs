@@ -87,6 +87,22 @@ impl DocFetcher for FetcherWrapper {
             })
     }
 
+    async fn get_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> Result<Vec<(Document, bool)>> {
+        self.get_fetcher()
+            .get_all_with_deleted(collection_name, show_deleted)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during planner execution for collection '{}' (get_all_with_deleted): {}",
+                    collection_name, e
+                ))
+            })
+    }
+
     async fn get_by_ids(
         &self,
         collection_name: &str,
