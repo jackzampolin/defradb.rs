@@ -73,7 +73,6 @@ macro_rules! get_runtime {
 }
 
 // Re-export FFI functions at crate root
-pub use backup::{basic_export, basic_import};
 pub use acp::{
     add_dac_actor_relationship, add_dac_policy, add_nac_actor_relationship, create_identity,
     delete_dac_actor_relationship, delete_nac_actor_relationship, disable_nac, enable_nac,
