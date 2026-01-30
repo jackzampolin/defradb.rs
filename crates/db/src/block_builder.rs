@@ -11,7 +11,8 @@ use blockstore::Blockstore;
 use cid::Cid;
 use datastore::NamespaceView;
 use defra_core::block::{
-    Block, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
+    Block, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, Encryption,
+    LwwDeltaPayload,
 };
 use defra_core::encryption::EncryptionConfig;
 use document::{Document, NormalValue};
@@ -69,8 +70,9 @@ pub async fn build_blocks_from_document<B: Blockstore>(
 
     // Create a block for each field (LWW or Counter depending on CRDT type)
     for (field_name, field_value) in doc.values() {
-        // Skip internal fields like _docID
-        if field_name.starts_with('_') {
+        // Skip _docID (stored as the block key, not a CRDT field).
+        // Other _-prefixed fields like _ownerID (foreign keys) DO get blocks.
+        if field_name == "_docID" {
             continue;
         }
 
@@ -347,8 +349,9 @@ pub async fn write_document_blocks(
     // For updates with modified_fields, only create blocks for changed fields.
     // For unchanged fields, use their existing head CID in the composite links.
     for (field_name, field_value) in doc.values() {
-        // Skip internal fields like _docID
-        if field_name.starts_with('_') {
+        // Skip _docID (stored as the block key, not a CRDT field).
+        // Other _-prefixed fields like _ownerID (foreign keys) DO get blocks.
+        if field_name == "_docID" {
             continue;
         }
 
@@ -376,16 +379,40 @@ pub async fn write_document_blocks(
             // Encode the field value as CBOR
             let value_bytes = encode_value_as_cbor(cbor_value)?;
 
-            // Encrypt delta if encryption is configured for this field
-            let value_bytes = if let Some(enc) = encryption_config {
+            // Encrypt delta and create Encryption metadata block if configured
+            let (value_bytes, encryption_cid) = if let Some(enc) = encryption_config {
                 if enc.should_encrypt_field(field_name) {
                     let key = enc.derive_key(field_name, &doc_id_str);
-                    encrypt_delta(&value_bytes, &key)?
+                    let encrypted = encrypt_delta(&value_bytes, &key)?;
+
+                    // Create Encryption metadata block (matches Go's block/encryption.go)
+                    let is_field_level = enc.encrypt_fields.iter().any(|f| f == field_name);
+                    let enc_block = Encryption {
+                        doc_id: doc_id_bytes.clone(),
+                        field_name: if is_field_level {
+                            Some(field_name.clone())
+                        } else {
+                            None
+                        },
+                        key: key.to_vec(),
+                    };
+                    let enc_cid = enc_block
+                        .generate_cid()
+                        .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
+                    let enc_bytes = enc_block
+                        .to_dag_cbor()
+                        .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
+                    blockstore
+                        .set(&enc_cid.to_bytes(), &enc_bytes)
+                        .await
+                        .map_err(|e| format!("Failed to store encryption block: {}", e))?;
+
+                    (encrypted, Some(enc_cid))
                 } else {
-                    value_bytes
+                    (value_bytes, None)
                 }
             } else {
-                value_bytes
+                (value_bytes, None)
             };
 
             // Check if this field is a Counter type
@@ -426,7 +453,9 @@ pub async fn write_document_blocks(
             };
 
             // Create the field block with heads linking to previous version
-            let field_block = Block::new(delta, heads.clone(), vec![]);
+            // Include encryption CID if this field was encrypted
+            let field_block =
+                Block::new_with_options(delta, heads.clone(), vec![], encryption_cid, None);
 
             // Serialize and generate CID
             let field_block_bytes = field_block
@@ -487,11 +516,44 @@ pub async fn write_document_blocks(
         status: 1, // Active document
     };
 
+    // For doc-level encryption, the composite block also carries an encryption
+    // CID link (even though its data is not encrypted). Go's AddDelta always calls
+    // determineBlockEncryption, which returns an encryption block for doc-level
+    // encryption regardless of delta type. encryptBlock() then skips actual
+    // encryption for composites but the Encryption link is still set on the block.
+    let composite_encryption_cid = if let Some(enc) = encryption_config {
+        if enc.encrypt_doc {
+            let key = enc.derive_key("", &doc_id_str); // doc-level: empty field name
+            let enc_block = Encryption {
+                doc_id: doc_id_str.as_bytes().to_vec(),
+                field_name: None,
+                key: key.to_vec(),
+            };
+            let enc_cid = enc_block
+                .generate_cid()
+                .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
+            let enc_bytes = enc_block
+                .to_dag_cbor()
+                .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
+            blockstore
+                .set(&enc_cid.to_bytes(), &enc_bytes)
+                .await
+                .map_err(|e| format!("Failed to store composite encryption block: {}", e))?;
+            Some(enc_cid)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Create the composite block with heads linking to previous version
-    let composite_block = Block::new(
+    let composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
         composite_heads,
         field_links,
+        composite_encryption_cid,
+        None,
     );
 
     // Serialize the composite block

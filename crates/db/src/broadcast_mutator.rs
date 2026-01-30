@@ -71,6 +71,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             .get_collection(collection_name)
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        let version_id = collection.version_id().to_string();
         let collection_id = collection.collection_id().to_string();
 
         // Execute the create mutation
@@ -80,7 +81,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         // This creates LWW field blocks + Composite block matching Go's format
         let block_result = match build_blocks_from_document(
             &result.document,
-            &collection_id, // schema_version_id is the same as collection_id
+            &version_id, // Go uses VersionID() for collectionVersionID
             self.sync.blockstore(),
         )
         .await
@@ -176,6 +177,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             .get_collection(collection_name)
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        let version_id = collection.version_id().to_string();
         let collection_id = collection.collection_id().to_string();
 
         // Execute the update mutation
@@ -187,7 +189,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         // Build proper Block structures for P2P sync
         let block_result = match build_blocks_from_document(
             &result.document,
-            &collection_id,
+            &version_id,
             self.sync.blockstore(),
         )
         .await

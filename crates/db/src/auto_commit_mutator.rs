@@ -119,8 +119,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         ))
                     })?;
 
-                    // Use collection_id as schema_version_id (matches how Go stores it)
-                    let schema_version_id = collection.collection_id();
+                    // Use version_id for collectionVersionID (matches Go's VersionID())
+                    let schema_version_id = collection.version_id();
 
                     // Get encryption config from thread-local (set by plan nodes)
                     let enc_config = get_encryption_config();
@@ -264,8 +264,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         ))
                     })?;
 
-                    // Use collection_id as schema_version_id (matches how Go stores it)
-                    let schema_version_id = collection.collection_id();
+                    // Use version_id for collectionVersionID (matches Go's VersionID())
+                    let schema_version_id = collection.version_id();
 
                     // Get encryption config: first try thread-local (explicit in mutation),
                     // then fall back to per-document stored config (from create with encryption).
