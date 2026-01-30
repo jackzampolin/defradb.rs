@@ -797,11 +797,16 @@ impl<'a> SdlParser<'a> {
 
                 // Only consider relations to other types in the schema
                 if type_names.contains(target) {
-                    // Key: (source_type, target_type) -> has_primary directive
-                    result.insert(
-                        (type_name.clone(), target.clone()),
-                        field.directives.is_primary,
-                    );
+                    let key = (type_name.clone(), target.clone());
+                    // Only set true, never overwrite true with false.
+                    // When multiple fields target the same type (e.g., holding @primary
+                    // and heldBy both targeting RightHand), we need to remember that
+                    // at least one field has @primary.
+                    if field.directives.is_primary {
+                        result.insert(key, true);
+                    } else {
+                        result.entry(key).or_insert(false);
+                    }
                 }
             }
         }

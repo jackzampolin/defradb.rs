@@ -3202,11 +3202,30 @@ impl Planner {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
 
-            if field_json.get("Fields").is_some() {
+            if let Some(inner_fields) = field_json.get("Fields").and_then(|v| v.as_array()) {
                 // Nested select (relation)
                 let inner_name = field_name.to_string();
-                let inner_select = Select::new(inner_name.clone())
+                let mut inner_select = Select::new(inner_name.clone())
                     .with_field_name(inner_name);
+                // Populate inner fields from stored JSON.
+                // Use original field names only (no aliases) on the source select.
+                // The ViewNode's child_mapping handles renaming via render keys.
+                for inner_field_json in inner_fields {
+                    let inner_field_name = inner_field_json
+                        .get("Name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if inner_field_json.get("Fields").is_some() {
+                        // Deeper nested select (relation within relation)
+                        let deep_name = inner_field_name.to_string();
+                        let deep_select = Select::new(deep_name.clone())
+                            .with_field_name(deep_name);
+                        inner_select.fields.push(Requestable::Select(Box::new(deep_select)));
+                    } else {
+                        let field = crate::mapper::Field::new(inner_field_name);
+                        inner_select.fields.push(Requestable::Field(field));
+                    }
+                }
                 source_select.fields.push(Requestable::Select(Box::new(inner_select)));
             } else if field_json.get("Targets").is_some() {
                 // Aggregate field (e.g., _count, _sum)
