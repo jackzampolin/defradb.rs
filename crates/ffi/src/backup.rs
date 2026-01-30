@@ -44,6 +44,7 @@ struct FieldInfo {
     is_relation: bool,
     is_self_ref: bool,
     is_array: bool,
+    is_primary: bool,
 }
 
 /// Classify fields from the typed schema, detecting scalar, relation,
@@ -67,6 +68,7 @@ fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
                         is_relation: false,
                         is_self_ref: false,
                         is_array: field.kind.is_array(),
+                        is_primary: false,
                     });
                 }
             }
@@ -76,6 +78,7 @@ fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
                     is_relation: true,
                     is_self_ref: true,
                     is_array: *is_array,
+                    is_primary: field.is_primary,
                 });
             }
             FieldKind::Relation {
@@ -89,6 +92,7 @@ fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
                     is_relation: true,
                     is_self_ref,
                     is_array: *is_array,
+                    is_primary: field.is_primary,
                 });
             }
             FieldKind::Named { is_array, .. } => {
@@ -97,6 +101,7 @@ fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
                     is_relation: true,
                     is_self_ref: false,
                     is_array: *is_array,
+                    is_primary: field.is_primary,
                 });
             }
         }
@@ -244,7 +249,9 @@ pub unsafe extern "C" fn basic_export(
 
             for field in &fields {
                 if field.is_relation {
-                    if !field.is_array {
+                    // Only include primary (non-secondary) relation fields.
+                    // Secondary relation fields don't store FK values.
+                    if !field.is_array && field.is_primary {
                         query_parts.push(format!("{} {{ _docID }}", field.name));
                         relation_field_names.push(field.name.clone());
                         let fk_name = format!("_{}ID", field.name);
@@ -602,6 +609,8 @@ pub unsafe extern "C" fn basic_import(
                     let create_key = format!("create_{}", collection_name);
                     let new_doc_id = response_json
                         .get(&create_key)
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
                         .and_then(|v| v.get("_docID"))
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| {
@@ -683,7 +692,7 @@ mod tests {
             name, age
         ))
         .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "create failed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -740,7 +749,7 @@ mod tests {
         // Verify imported documents
         let query_str = CString::new("{ User { name age } }").unwrap();
         let result =
-            unsafe { exec_request(node2, query_str.as_ptr(), ptr::null(), ptr::null()) };
+            unsafe { exec_request(node2, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "query failed");
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Alice"), "should contain Alice");
@@ -824,7 +833,7 @@ mod tests {
             r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#,
         )
         .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -833,7 +842,7 @@ mod tests {
         let mutation =
             CString::new(r#"mutation { create_Address(input: {city: "NYC"}) { _docID } }"#)
                 .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
