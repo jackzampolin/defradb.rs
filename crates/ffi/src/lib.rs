@@ -83,15 +83,16 @@ pub use backup::{basic_export, basic_import};
 pub use collection::{
     add_view, delete_collection, find_collection_by_id, get_collection_by_name,
     get_collection_by_version_id, has_collection, patch_collection, refresh_views,
-    set_active_collection_version, set_migration,
+    set_active_collection_version, set_migration, truncate_collection,
 };
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use lens::{lens_add, lens_list};
 pub use node::{new_node, node_close};
 pub use p2p::{
-    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_connect, p2p_delete_replicator,
-    p2p_get_all_collections, p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections,
+    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_add_documents, p2p_connect,
+    p2p_delete_replicator, p2p_get_all_collections, p2p_get_all_documents,
+    p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections, p2p_remove_documents,
     p2p_set_replicator,
 };
 pub use query::exec_request;

@@ -216,15 +216,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// This matches Go's `processPushlogRequest()` in `p2p.go:446-530`,
     /// except the actual CRDT merge is delegated to the database layer.
     pub async fn process_pushlog(&self, msg: &PushLogBroadcast) -> Result<()> {
-        eprintln!(
-            "[SYNC-MANAGER] process_pushlog: doc_id={}, collection_id={}, cid_bytes_len={}, block_len={}, creator={}",
-            msg.doc_id, msg.collection_id, msg.cid.len(), msg.block.len(), msg.creator
-        );
-
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_slice())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
-        eprintln!("[SYNC-MANAGER] Parsed CID: {}", cid);
 
         // Try to acquire exclusive processing rights for this CID
         match self.process_queue.try_acquire(&cid).await {
@@ -290,8 +284,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
     /// Inner block processing logic.
     async fn process_block_inner(&self, cid: &Cid, msg: &PushLogBroadcast) -> Result<()> {
-        eprintln!("[SYNC-MANAGER] process_block_inner: cid={}, doc_id={}", cid, msg.doc_id);
-
         // Check if already merged
         match self.blockstore.is_merged(cid).await {
             Ok(true) => {
@@ -377,10 +369,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         if missing.is_empty() {
             // DAG is complete - emit BlockReceived for merge
-            eprintln!(
-                "[SYNC-MANAGER] DAG complete! Emitting BlockReceived event: cid={}, doc_id={}, collection_id={}",
-                cid, msg.doc_id, msg.collection_id
-            );
             tracing::info!(
                 ?cid,
                 doc_id = %msg.doc_id,
@@ -398,7 +386,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 .await
                 .is_err()
             {
-                eprintln!("[SYNC-MANAGER] CRITICAL: Failed to send BlockReceived event - receiver dropped!");
                 tracing::error!(
                     ?cid,
                     doc_id = %msg.doc_id,

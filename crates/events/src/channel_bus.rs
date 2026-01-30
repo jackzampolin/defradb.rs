@@ -108,12 +108,9 @@ impl Default for ChannelBus {
 impl Bus for ChannelBus {
     fn publish(&self, msg: Message) {
         if self.closed.load(Ordering::Acquire) {
-            eprintln!("[EVENT-BUS] Bus closed, dropping {} message", msg.name);
             tracing::debug!(event = %msg.name, "Bus closed, dropping message");
             return;
         }
-
-        eprintln!("[EVENT-BUS] Publishing event: {}", msg.name);
 
         // Collect dead subscriber IDs for lazy cleanup
         let mut dead_subs: Vec<u64> = Vec::new();
@@ -175,10 +172,6 @@ impl Bus for ChannelBus {
             );
         }
 
-        eprintln!(
-            "[EVENT-BUS] Published event {}: subscribers={}, delivered={}, dropped={}, buffer_full={}",
-            msg.name, sub_count, delivered, dropped, buffer_full
-        );
         tracing::trace!(
             event = %msg.name,
             delivered = delivered,
@@ -190,14 +183,12 @@ impl Bus for ChannelBus {
 
     fn subscribe(&self, events: &[EventName]) -> Subscription {
         if self.closed.load(Ordering::Acquire) {
-            eprintln!("[EVENT-BUS] subscribe called on closed bus, events={:?}", events);
             // Return a subscription with a closed channel
             let (_tx, rx) = mpsc::channel(1);
             return Subscription::new(0, rx);
         }
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        eprintln!("[EVENT-BUS] New subscription id={}, events={:?}, buffer_size={}", id, events, self.config.event_buffer_size);
         let (tx, rx) = mpsc::channel(self.config.event_buffer_size);
 
         // Create shared dropped counter for both Subscriber and Subscription

@@ -948,23 +948,14 @@ impl<S: Store> P2PHost<S> {
                 response,
             } => {
                 let ident_topic = topic.to_ident_topic();
-                eprintln!(
-                    "[HOST] Publish command: topic={}, doc_id={}, collection_id={}, block_len={}",
-                    topic, message.doc_id, message.collection_id, message.block.len()
-                );
                 let result = serde_cbor::to_vec(&message)
                     .map_err(|e| Error::CborSerialization(e.to_string()))
                     .and_then(|data| {
-                        eprintln!("[HOST] Publishing {} bytes to GossipSub topic {}", data.len(), topic);
                         self.swarm
                             .behaviour_mut()
                             .publish(ident_topic, data)
-                            .map_err(|e| {
-                                eprintln!("[HOST] GossipSub publish ERROR: {}", e);
-                                Error::GossipSubPublish(e.to_string())
-                            })
+                            .map_err(|e| Error::GossipSubPublish(e.to_string()))
                     });
-                eprintln!("[HOST] Publish result: {:?}", result.as_ref().map(|id| format!("{:?}", id)).map_err(|e| e.to_string()));
                 if response.send(result).is_err() {
                     debug!(topic = ?topic, "Publish command response dropped - caller cancelled");
                 }
@@ -1555,10 +1546,6 @@ impl<S: Store> P2PHost<S> {
                 message,
             } => {
                 let topic = message.topic.to_string();
-                eprintln!(
-                    "[HOST-GOSSIP] Received gossipsub message: id={}, topic={}, from={}, data_len={}",
-                    message_id, topic, propagation_source, message.data.len()
-                );
                 debug!(
                     "Received gossipsub message {} on topic {} from {}",
                     message_id, topic, propagation_source
@@ -1568,37 +1555,13 @@ impl<S: Store> P2PHost<S> {
                 // Rust-to-Rust sends PushLogBroadcast (no MetaData).
                 // Go-to-Rust sends PushLogRequest (with MetaData).
                 // Try PushLogBroadcast first, then fall back to PushLogRequest.
-                let broadcast = match serde_cbor::from_slice::<PushLogBroadcast>(&message.data) {
-                    Ok(b) => {
-                        eprintln!(
-                            "[HOST-GOSSIP] Decoded PushLogBroadcast: doc_id={}, collection_id={}, block_len={}",
-                            b.doc_id, b.collection_id, b.block.len()
-                        );
-                        Ok(b)
-                    }
-                    Err(broadcast_err) => {
-                        eprintln!(
-                            "[HOST-GOSSIP] PushLogBroadcast decode failed: {}, trying PushLogRequest...",
-                            broadcast_err
-                        );
-                        match serde_cbor::from_slice::<PushLogRequest>(&message.data) {
-                            Ok(req) => {
-                                eprintln!(
-                                    "[HOST-GOSSIP] Decoded PushLogRequest: doc_id={}, collection_id={}, block_len={}",
-                                    req.doc_id, req.collection_id, req.block.len()
-                                );
-                                Ok(PushLogBroadcast::from_request(&req))
-                            }
-                            Err(request_err) => {
-                                eprintln!(
-                                    "[HOST-GOSSIP] Both decode attempts failed: broadcast_err={}, request_err={}",
-                                    broadcast_err, request_err
-                                );
-                                Err(request_err)
-                            }
-                        }
-                    }
-                };
+                let broadcast =
+                    serde_cbor::from_slice::<PushLogBroadcast>(&message.data).or_else(
+                        |_| {
+                            serde_cbor::from_slice::<PushLogRequest>(&message.data)
+                                .map(|req| PushLogBroadcast::from_request(&req))
+                        },
+                    );
 
                 match broadcast {
                     Ok(broadcast) => {
@@ -1613,28 +1576,21 @@ impl<S: Store> P2PHost<S> {
                             .await
                             .is_err()
                         {
-                            eprintln!("[HOST-GOSSIP] CRITICAL: Failed to send GossipMessage event - receiver dropped!");
                             error!(
                                 peer_id = %propagation_source,
                                 message_id = ?message_id,
                                 topic = %topic,
                                 "Failed to send GossipMessage event - receiver dropped, message will not be processed"
                             );
-                        } else {
-                            eprintln!("[HOST-GOSSIP] Sent GossipMessage event to coordinator");
                         }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[HOST-GOSSIP] ERROR decoding gossipsub message: {} (data_len={}, from={}, topic={})",
-                            e, message.data.len(), propagation_source, topic
-                        );
                         warn!(
                             peer_id = %propagation_source,
                             topic = %topic,
                             message_size = message.data.len(),
                             error = %e,
-                            "Failed to decode gossipsub message"
+                            "Failed to decode gossipsub message as PushLogBroadcast or PushLogRequest"
                         );
                     }
                 }

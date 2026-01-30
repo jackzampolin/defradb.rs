@@ -72,6 +72,10 @@ fn parse_collections_json(json_str: &str) -> Result<Vec<String>, String> {
     serde_json::from_str(json_str).map_err(|e| format!("invalid collections JSON: {}", e))
 }
 
+fn parse_doc_ids_json(json_str: &str) -> Result<Vec<String>, String> {
+    serde_json::from_str(json_str).map_err(|e| format!("invalid doc_ids JSON: {}", e))
+}
+
 /// Create a new DefraDB node with P2P enabled.
 ///
 /// This creates an in-memory database instance with P2P networking.
@@ -157,17 +161,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Task 1: Host event loop - reads HostEvents and feeds them to the coordinator
         let coord_for_events = coordinator.clone();
         let host_event_task = tokio::spawn(async move {
-            eprintln!("[FFI-HOST-EVENTS] Host event loop started");
             let mut rx = event_rx;
-            let mut count = 0u64;
             while let Some(event) = rx.recv().await {
-                count += 1;
-                eprintln!("[FFI-HOST-EVENTS] Received host event #{}: {:?}", count, std::mem::discriminant(&event));
                 if let Err(e) = coord_for_events.handle_host_event(event).await {
-                    eprintln!("[FFI-HOST-EVENTS] Error handling host event #{}: {}", count, e);
+                    tracing::error!(error = %e, "Error handling host event");
                 }
             }
-            eprintln!("[FFI-HOST-EVENTS] Host event loop exiting - channel closed (processed {} events)", count);
         });
 
         // Task 2: Replication loop - processes sync events and publishes MergeComplete
@@ -175,13 +174,9 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let handler_for_repl = merge_handler.clone();
         let event_bus_for_repl = event_bus.clone();
         let replication_task = tokio::spawn(async move {
-            eprintln!("[FFI-REPL-LOOP] Replication loop started");
             let config = ReplicationConfig::default();
             let mut events = sync_events_rx;
-            let mut iteration = 0u64;
             loop {
-                iteration += 1;
-                eprintln!("[FFI-REPL-LOOP] Waiting for sync event (iteration #{})", iteration);
                 let result = ReplicationLoop::process_next(
                     &coord_for_repl,
                     &mut events,
@@ -189,8 +184,6 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     &config,
                 )
                 .await;
-
-                eprintln!("[FFI-REPL-LOOP] process_next returned: {:?}", std::mem::discriminant(&result));
                 match &result {
                     ReplicationResult::Merged {
                         cid,
@@ -249,19 +242,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let coord_for_broadcast = coordinator.clone();
         let event_bus_for_broadcast = event_bus.clone();
         let broadcast_task = tokio::spawn(async move {
-            eprintln!("[FFI-BROADCAST] Broadcast task started, subscribing to Update events");
             let mut sub = event_bus_for_broadcast.subscribe(&[events::EventName::Update]);
-            let mut msg_count = 0u64;
             while let Some(msg) = sub.recv().await {
-                msg_count += 1;
                 if let Some(update) = msg.as_update() {
-                    eprintln!(
-                        "[FFI-BROADCAST] Received Update event #{}: doc_id={}, collection_id={}, cid={}, block_len={}, is_relay={}",
-                        msg_count, update.doc_id, update.collection_id, update.cid, update.block.len(), update.is_relay
-                    );
                     // Skip relay updates (already from P2P)
                     if update.is_relay {
-                        eprintln!("[FFI-BROADCAST] Skipping relay update #{}", msg_count);
                         continue;
                     }
                     let cid = update.cid;
@@ -280,22 +265,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
                             .broadcast_local_update(&cid, &block, &doc_id, &collection_id)
                             .await
                         {
-                            Ok(result) => {
-                                eprintln!("[FFI-BROADCAST] Broadcast succeeded (attempt {}): {:?}", attempt, result);
-                                break;
-                            }
+                            Ok(_) => break,
                             Err(e) => {
                                 let err_str = e.to_string();
                                 if err_str.contains("InsufficientPeers") && attempt <= max_retries {
                                     let delay_ms = 100 * (1u64 << attempt.min(5));
-                                    eprintln!(
-                                        "[FFI-BROADCAST] InsufficientPeers (attempt {}/{}), retrying in {}ms: doc_id={}, collection_id={}",
-                                        attempt, max_retries, delay_ms, doc_id, collection_id
-                                    );
                                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                                     continue;
                                 }
-                                eprintln!("[FFI-BROADCAST] Broadcast failed (attempt {}): {}", attempt, e);
                                 tracing::debug!(
                                     doc_id = %doc_id,
                                     error = %e,
@@ -305,11 +282,8 @@ pub unsafe extern "C" fn new_node_with_p2p(
                             }
                         }
                     }
-                } else {
-                    eprintln!("[FFI-BROADCAST] Received non-Update event #{}, ignoring", msg_count);
                 }
             }
-            eprintln!("[FFI-BROADCAST] Broadcast task exiting - subscription closed (processed {} messages)", msg_count);
         });
 
         // Create P2P state with sync pipeline abort handles
@@ -766,9 +740,7 @@ pub unsafe extern "C" fn p2p_add_collections(
                     // Subscribe to the GossipSub topic for this collection
                     let topic = DefraTopic::collection(name);
                     if let Err(e) = p2p.handle.subscribe(topic).await {
-                        eprintln!("[FFI-P2P] WARNING: Failed to subscribe to GossipSub topic for collection '{}': {}", name, e);
-                    } else {
-                        eprintln!("[FFI-P2P] Subscribed to GossipSub topic for collection '{}'", name);
+                        tracing::warn!(collection = %name, error = %e, "Failed to subscribe to GossipSub topic");
                     }
                     p2p.add_collection(name);
                 }
@@ -828,7 +800,7 @@ pub unsafe extern "C" fn p2p_remove_collections(
                     // Unsubscribe from the GossipSub topic for this collection
                     let topic = DefraTopic::collection(name);
                     if let Err(e) = p2p.handle.unsubscribe(topic).await {
-                        eprintln!("[FFI-P2P] WARNING: Failed to unsubscribe from GossipSub topic for collection '{}': {}", name, e);
+                        tracing::warn!(collection = %name, error = %e, "Failed to unsubscribe from GossipSub topic");
                     }
                     p2p.remove_collection(name);
                 }
@@ -882,7 +854,12 @@ pub unsafe extern "C" fn p2p_get_all_collections(
     }
 }
 
-/// Add documents to P2P replication.
+/// Add documents to P2P replication by subscribing to their GossipSub topics.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `doc_ids_json` - JSON array of document IDs
 ///
 /// # Safety
 ///
@@ -891,7 +868,7 @@ pub unsafe extern "C" fn p2p_get_all_collections(
 pub unsafe extern "C" fn p2p_add_documents(
     node_ptr: usize,
     identity_did: *const c_char,
-    _doc_ids_json: *const c_char,
+    doc_ids_json: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
@@ -899,10 +876,49 @@ pub unsafe extern "C" fn p2p_add_documents(
         return e;
     }
 
-    FfiResult::error("p2p_add_documents is not yet implemented")
+    let doc_ids_str = match c_str_to_string(doc_ids_json) {
+        Some(s) => s,
+        None => return FfiResult::error("doc_ids_json is null"),
+    };
+
+    let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
+        Ok(d) => d,
+        Err(e) => return FfiResult::error(e),
+    };
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("P2P not enabled for this node".to_string()),
+            };
+
+            rt.block_on(async {
+                for doc_id in &doc_ids {
+                    let topic = DefraTopic::document(doc_id);
+                    if let Err(e) = p2p.handle.subscribe(topic).await {
+                        tracing::warn!(doc_id = %doc_id, error = %e, "Failed to subscribe to GossipSub topic for document");
+                    }
+                    p2p.add_document(doc_id);
+                }
+                Ok(())
+            })
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(()) => FfiResult::ok(),
+        Err(e) => FfiResult::error(e),
+    }
 }
 
-/// Remove documents from P2P replication.
+/// Remove documents from P2P replication by unsubscribing from their GossipSub topics.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `doc_ids_json` - JSON array of document IDs
 ///
 /// # Safety
 ///
@@ -911,7 +927,7 @@ pub unsafe extern "C" fn p2p_add_documents(
 pub unsafe extern "C" fn p2p_remove_documents(
     node_ptr: usize,
     identity_did: *const c_char,
-    _doc_ids_json: *const c_char,
+    doc_ids_json: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
@@ -919,10 +935,46 @@ pub unsafe extern "C" fn p2p_remove_documents(
         return e;
     }
 
-    FfiResult::error("p2p_remove_documents is not yet implemented")
+    let doc_ids_str = match c_str_to_string(doc_ids_json) {
+        Some(s) => s,
+        None => return FfiResult::error("doc_ids_json is null"),
+    };
+
+    let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
+        Ok(d) => d,
+        Err(e) => return FfiResult::error(e),
+    };
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("P2P not enabled for this node".to_string()),
+            };
+
+            rt.block_on(async {
+                for doc_id in &doc_ids {
+                    let topic = DefraTopic::document(doc_id);
+                    if let Err(e) = p2p.handle.unsubscribe(topic).await {
+                        tracing::warn!(doc_id = %doc_id, error = %e, "Failed to unsubscribe from GossipSub topic for document");
+                    }
+                    p2p.remove_document(doc_id);
+                }
+                Ok(())
+            })
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(()) => FfiResult::ok(),
+        Err(e) => FfiResult::error(e),
+    }
 }
 
-/// Get all documents configured for P2P replication.
+/// Get all P2P documents.
+///
+/// Returns a JSON array of document IDs.
 ///
 /// # Safety
 ///
@@ -938,5 +990,22 @@ pub unsafe extern "C" fn p2p_get_all_documents(
         return e;
     }
 
-    FfiResult::error("p2p_get_all_documents is not yet implemented")
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("P2P not enabled for this node".to_string()),
+            };
+
+            let documents = p2p.get_documents();
+            serde_json::to_string(&documents)
+                .map_err(|e| format!("failed to serialize documents: {}", e))
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
 }

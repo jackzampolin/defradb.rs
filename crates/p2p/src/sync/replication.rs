@@ -183,14 +183,8 @@ impl ReplicationLoop {
         H: MergeHandler + ?Sized + 'static,
     {
         let event = match events.recv().await {
-            Some(e) => {
-                eprintln!("[REPL-LOOP] Received SyncEvent: {:?}", std::mem::discriminant(&e));
-                e
-            }
-            None => {
-                eprintln!("[REPL-LOOP] Event channel closed");
-                return ReplicationResult::ChannelClosed;
-            }
+            Some(e) => e,
+            None => return ReplicationResult::ChannelClosed,
         };
 
         match event {
@@ -200,10 +194,6 @@ impl ReplicationLoop {
                 collection_id,
                 creator,
             } => {
-                eprintln!(
-                    "[REPL-LOOP] BlockReceived: cid={}, doc_id={}, collection_id={}, creator={}",
-                    cid, doc_id, collection_id, creator
-                );
                 Self::handle_block_received(
                     coordinator,
                     handler,
@@ -305,11 +295,6 @@ impl ReplicationLoop {
         B: Blockstore + 'static,
         H: MergeHandler + ?Sized + 'static,
     {
-        eprintln!(
-            "[REPL-LOOP] handle_block_received: cid={}, doc_id={:?}, collection_id={:?}",
-            cid, metadata.doc_id, metadata.collection_id
-        );
-
         // Load block from blockstore
         let block_data = match coordinator.blockstore().get(&cid).await {
             Ok(Some(data)) => data,
@@ -333,10 +318,8 @@ impl ReplicationLoop {
         let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
 
         // Delegate merge to handler
-        eprintln!("[REPL-LOOP] Calling handler.handle_block for cid={}", cid);
         match handler.handle_block(&cid, &block_data, metadata).await {
             Ok(MergeOutcome::Merged) => {
-                eprintln!("[REPL-LOOP] Merge succeeded for cid={}", cid);
                 // Merge successful - mark as merged
                 if let Err(e) = coordinator.mark_as_merged(&cid).await {
                     // Return a distinct result so callers know the merge succeeded

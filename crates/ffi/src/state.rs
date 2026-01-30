@@ -129,6 +129,8 @@ pub struct P2PState {
     pub handle: P2PHostHandle,
     /// Collections subscribed for P2P replication.
     pub collections: RwLock<HashSet<String>>,
+    /// Documents subscribed for P2P replication (by doc ID).
+    pub documents: RwLock<HashSet<String>>,
     /// Abort handle for the host event loop task.
     pub host_event_handle: Option<tokio::task::AbortHandle>,
     /// Abort handle for the replication loop task.
@@ -143,6 +145,7 @@ impl P2PState {
         Self {
             handle,
             collections: RwLock::new(HashSet::new()),
+            documents: RwLock::new(HashSet::new()),
             host_event_handle: None,
             replication_handle: None,
             broadcast_handle: None,
@@ -159,6 +162,7 @@ impl P2PState {
         Self {
             handle,
             collections: RwLock::new(HashSet::new()),
+            documents: RwLock::new(HashSet::new()),
             host_event_handle: Some(host_event_handle),
             replication_handle: Some(replication_handle),
             broadcast_handle: Some(broadcast_handle),
@@ -191,6 +195,21 @@ impl P2PState {
     /// Get all P2P collections.
     pub fn get_collections(&self) -> Vec<String> {
         self.collections.read().iter().cloned().collect()
+    }
+
+    /// Add a document to P2P.
+    pub fn add_document(&self, doc_id: &str) {
+        self.documents.write().insert(doc_id.to_string());
+    }
+
+    /// Remove a document from P2P.
+    pub fn remove_document(&self, doc_id: &str) -> bool {
+        self.documents.write().remove(doc_id)
+    }
+
+    /// Get all P2P documents.
+    pub fn get_documents(&self) -> Vec<String> {
+        self.documents.read().iter().cloned().collect()
     }
 }
 
