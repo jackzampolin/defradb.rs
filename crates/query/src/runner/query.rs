@@ -2122,7 +2122,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// by walking the merkle DAG backwards and replaying CRDT deltas.
     ///
     /// CID queries require `cid` argument and optionally `docID` for validation.
-    /// Returns a single-element array containing the document at that version.
+    /// For document CIDs, returns a single-element array. For collection CIDs
+    /// (branchable collections), returns all documents visible at that state.
     async fn execute_cid_query_with_version(
         &self,
         select: &Select,
@@ -2137,13 +2138,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get expected docID from select.doc_ids (optional validation)
         let expected_doc_id = select.doc_ids.as_ref().and_then(|ids| ids.first());
 
-        // Fetch document at the specified CID
-        // If docID validation fails, Go DefraDB returns empty results instead of an error
-        let document = match fetcher
-            .get_document_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
+        // Fetch document(s) at the specified CID.
+        // For collection-level CIDs (branchable), this returns multiple documents.
+        // For document-level CIDs, this returns a single document.
+        let documents = match fetcher
+            .get_documents_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
             .await
         {
-            Ok(doc) => doc,
+            Ok(docs) => docs,
             Err(e) => {
                 let err_msg = e.to_string();
                 // docID mismatch: Go returns empty results
@@ -2185,78 +2187,85 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Build mapping for scalar fields only
         let mapping = plan::build_mapping(&select_for_mapping, &collection)?;
 
-        // Convert the document to JSON with only the requested scalar fields
-        let mut obj = serde_json::Map::new();
+        // Process each document into a JSON object
+        let mut result_array = Vec::new();
 
-        for render_key in &mapping.render_keys {
-            let field_name = mapping
-                .try_find_name_from_index(render_key.index)
-                .unwrap_or("");
+        for document in &documents {
+            // Convert the document to JSON with only the requested scalar fields
+            let mut obj = serde_json::Map::new();
 
-            let value = if field_name == "__typename" {
-                JsonValue::String(select.collection_name.clone())
-            } else if field_name == "_docID" {
-                document
-                    .id()
-                    .map(|id| JsonValue::String(id.to_string()))
-                    .unwrap_or(JsonValue::Null)
-            } else if field_name == "_deleted" {
-                JsonValue::Bool(document.is_deleted())
-            } else if let Some(nv) = document.get(field_name) {
-                crate::json_convert::normal_value_to_json(nv).unwrap_or(JsonValue::Null)
-            } else {
-                JsonValue::Null
-            };
+            for render_key in &mapping.render_keys {
+                let field_name = mapping
+                    .try_find_name_from_index(render_key.index)
+                    .unwrap_or("");
 
-            obj.insert(render_key.key.clone(), value);
-        }
+                let value = if field_name == "__typename" {
+                    JsonValue::String(select.collection_name.clone())
+                } else if field_name == "_docID" {
+                    document
+                        .id()
+                        .map(|id| JsonValue::String(id.to_string()))
+                        .unwrap_or(JsonValue::Null)
+                } else if field_name == "_deleted" {
+                    JsonValue::Bool(document.is_deleted())
+                } else if let Some(nv) = document.get(field_name) {
+                    crate::json_convert::normal_value_to_json(nv).unwrap_or(JsonValue::Null)
+                } else {
+                    JsonValue::Null
+                };
 
-        // Resolve nested selects (relation fields like `author { name }`)
-        for nested_select in &nested_selects {
-            let relation_name = &nested_select.field.name;
-            let output_name = nested_select.field.output_name();
-            let related_collection = &nested_select.collection_name;
+                obj.insert(render_key.key.clone(), value);
+            }
 
-            // Many-to-one: parent has FK field (e.g., Book._authorID → Author)
-            let fk_field_name = CollectionVersion::relation_id_field_name(relation_name);
-            if let Some(fk_value) = document.get(&fk_field_name) {
-                let fk_doc_id = crate::json_convert::normal_value_to_json(fk_value)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_default();
+            // Resolve nested selects (relation fields like `author { name }`)
+            for nested_select in &nested_selects {
+                let relation_name = &nested_select.field.name;
+                let output_name = nested_select.field.output_name();
+                let related_collection = &nested_select.collection_name;
 
-                if !fk_doc_id.is_empty() {
-                    let result = fetcher.get_by_ids(related_collection, &[fk_doc_id]).await?;
+                // Many-to-one: parent has FK field (e.g., Book._authorID → Author)
+                let fk_field_name = CollectionVersion::relation_id_field_name(relation_name);
+                if let Some(fk_value) = document.get(&fk_field_name) {
+                    let fk_doc_id = crate::json_convert::normal_value_to_json(fk_value)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
 
-                    if let Some(related_doc) = result.docs().first() {
-                        let related_obj = self.render_document_fields(related_doc, nested_select);
-                        obj.insert(output_name.to_string(), JsonValue::Object(related_obj));
+                    if !fk_doc_id.is_empty() {
+                        let result = fetcher.get_by_ids(related_collection, &[fk_doc_id]).await?;
+
+                        if let Some(related_doc) = result.docs().first() {
+                            let related_obj =
+                                self.render_document_fields(related_doc, nested_select);
+                            obj.insert(output_name.to_string(), JsonValue::Object(related_obj));
+                        } else {
+                            obj.insert(output_name.to_string(), JsonValue::Null);
+                        }
                     } else {
                         obj.insert(output_name.to_string(), JsonValue::Null);
                     }
                 } else {
+                    // One-to-many or no FK found: return null for now
                     obj.insert(output_name.to_string(), JsonValue::Null);
                 }
-            } else {
-                // One-to-many or no FK found: return null for now
-                obj.insert(output_name.to_string(), JsonValue::Null);
             }
+
+            // Add _version data if requested
+            if let Some(version_select) = version_selection {
+                let doc_id = document.id().map(|id| id.to_string());
+                if let Some(doc_id_str) = doc_id {
+                    let version_data = self
+                        .fetch_version_data(fetcher, &doc_id_str, version_select, Some(cid))
+                        .await?;
+                    let output_name = version_select.field.output_name();
+                    obj.insert(output_name.to_string(), version_data);
+                }
+            }
+
+            result_array.push(JsonValue::Object(obj));
         }
 
-        // Add _version data if requested
-        if let Some(version_select) = version_selection {
-            let doc_id = document.id().map(|id| id.to_string());
-            if let Some(doc_id_str) = doc_id {
-                let version_data = self
-                    .fetch_version_data(fetcher, &doc_id_str, version_select, Some(cid))
-                    .await?;
-                let output_name = version_select.field.output_name();
-                obj.insert(output_name.to_string(), version_data);
-            }
-        }
-
-        // Return as single-element array (Go compatibility)
-        Ok(JsonValue::Array(vec![JsonValue::Object(obj)]))
+        Ok(JsonValue::Array(result_array))
     }
 
     /// Execute a regular query with _version field support.
