@@ -303,22 +303,21 @@ impl PlanNode for ScanNode {
     fn explain_execute_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations, docFetches, fieldFetches, indexFetches
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
         obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(self.exec_info.docs_fetched),
+            serde_json::json!(self.exec_info.docs_fetched as u64),
         );
         obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(self.exec_info.fields_fetched),
+            serde_json::json!(self.exec_info.fields_fetched as u64),
         );
         obj.insert(
             "indexFetches".to_string(),
-            serde_json::json!(self.exec_info.indexes_fetched),
+            serde_json::json!(self.exec_info.indexes_fetched as u64),
         );
 
         serde_json::Value::Object(obj)

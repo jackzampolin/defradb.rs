@@ -11,7 +11,8 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Requestable, Select};
 use crate::plan::{
     AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, LimitNode,
-    MaxNode, MinNode, OrderByNode, PermissionFilterNode, ScanNode, SelectNode, SumNode,
+    MaxNode, MaxSourceMeta, MinNode, MinSourceMeta, OrderByNode, PermissionFilterNode, ScanNode,
+    SelectNode, SumNode, SumSourceMeta,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -605,12 +606,23 @@ fn add_aggregate_nodes(
                 }
                 AggregateType::Sum => {
                     let mut node = SumNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    let child_field = if !agg.targets.is_empty() {
+                        agg.targets[0].field_name.clone()
+                    } else {
+                        None
+                    };
+                    let sources = vec![SumSourceMeta {
+                        field_name: select.collection_name.clone(),
+                        child_field_name: child_field,
+                        filter: target_filter.clone(),
+                    }];
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
                 AggregateType::Average => {
@@ -625,22 +637,44 @@ fn add_aggregate_nodes(
                 }
                 AggregateType::Min => {
                     let mut node = MinNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    let child_field = if !agg.targets.is_empty() {
+                        agg.targets[0].field_name.clone()
+                    } else {
+                        None
+                    };
+                    let sources = vec![MinSourceMeta {
+                        field_name: select.collection_name.clone(),
+                        child_field_name: child_field,
+                        filter: target_filter.clone(),
+                    }];
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
                 AggregateType::Max => {
                     let mut node = MaxNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    let child_field = if !agg.targets.is_empty() {
+                        agg.targets[0].field_name.clone()
+                    } else {
+                        None
+                    };
+                    let sources = vec![MaxSourceMeta {
+                        field_name: select.collection_name.clone(),
+                        child_field_name: child_field,
+                        filter: target_filter.clone(),
+                    }];
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
             }

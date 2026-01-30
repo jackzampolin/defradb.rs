@@ -192,8 +192,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let mutations = parse_mutations(mutation_str)?;
         let mut operation_children: Vec<JsonValue> = Vec::new();
-        let mut total_executions: u64 = 0;
-        let mut total_docs: usize = 0;
         let mut execution_success = true;
         let mut execution_errors: Vec<String> = Vec::new();
 
@@ -202,10 +200,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .execute_single_mutation_with_metrics(&mutation, caller_identity.clone())
                 .await
             {
-                Ok((mutation_explain, doc_count, exec_count)) => {
+                Ok((mutation_explain, _doc_count, _exec_count)) => {
                     operation_children.push(mutation_explain);
-                    total_docs += doc_count;
-                    total_executions += exec_count;
                 }
                 Err(e) => {
                     execution_success = false;
@@ -213,6 +209,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
+
+        // Go's executeAndExplainRequest calls Next() on the top-level operationNode.
+        // Each Next()=true yields one mutation result. After all mutations, Next()=false.
+        // So planExecutions = number_of_mutations + 1, sizeOfResult = number_of_mutations.
+        let num_mutations = operation_children.len() as u64;
+        let plan_executions = num_mutations + 1;
+        let size_of_result = num_mutations;
 
         // Build explain result with execution metrics
         let mut explain_result = Map::new();
@@ -226,9 +229,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         );
         explain_result.insert(
             "planExecutions".to_string(),
-            serde_json::json!(total_executions),
+            serde_json::json!(plan_executions),
         );
-        explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
+        explain_result.insert(
+            "sizeOfResult".to_string(),
+            serde_json::json!(size_of_result),
+        );
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -447,8 +453,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let selects = parse_query_with_variables(query, variables)?;
 
         let mut operation_children: Vec<JsonValue> = Vec::new();
-        let mut total_executions: u64 = 0;
-        let mut total_docs: usize = 0;
         let mut execution_success = true;
         let mut execution_errors: Vec<String> = Vec::new();
 
@@ -460,7 +464,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .execute_select_with_metrics(&select, caller_identity.clone())
                 .await
             {
-                Ok((explanation, doc_count, exec_count)) => {
+                Ok((explanation, _doc_count, _exec_count)) => {
                     // Ensure selectNode wrapper
                     let select_node_content = Self::ensure_select_node_wrapper(
                         explanation,
@@ -483,9 +487,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         });
                         operation_children.push(select_top_node);
                     }
-
-                    total_docs += doc_count;
-                    total_executions += exec_count;
                 }
                 Err(e) => {
                     execution_success = false;
@@ -493,6 +494,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
+
+        // Go's executeAndExplainRequest calls Next() on the top-level operationNode.
+        // Each Next()=true yields one query result. After all queries, Next()=false.
+        // So planExecutions = number_of_queries + 1, sizeOfResult = number_of_queries.
+        let num_queries = operation_children.len() as u64;
+        let plan_executions = num_queries + 1;
+        let size_of_result = num_queries;
 
         // Build explain result with operationNode and execution metrics
         let mut explain_result = Map::new();
@@ -506,9 +514,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         );
         explain_result.insert(
             "planExecutions".to_string(),
-            serde_json::json!(total_executions),
+            serde_json::json!(plan_executions),
         );
-        explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
+        explain_result.insert(
+            "sizeOfResult".to_string(),
+            serde_json::json!(size_of_result),
+        );
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -527,6 +538,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         caller_identity: Option<Did>,
     ) -> Result<(JsonValue, usize, u64)> {
+        // Handle _commits system collection (no real collection exists)
+        if select.collection_name == "_commits" {
+            let explanation = self.explain_commits_select(select, ExplainType::Execute)?;
+            // _commits execute: return explanation with 0 metrics (no real execution)
+            return Ok((explanation, 0, 1));
+        }
+
         // Get collection schema
         let collection = self
             .collection_provider
@@ -614,11 +632,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.init().await?;
             plan.start().await?;
 
-            let mut iterations: u64 = 0;
-            let mut result_count = 0;
+            // Go counts ALL next() calls (including the final false) for planExecutions
+            let mut plan_executions: u64 = 0;
+            let mut result_count: usize = 0;
 
-            while plan.next().await? {
-                iterations += 1;
+            loop {
+                plan_executions += 1;
+                if !plan.next().await? {
+                    break;
+                }
                 result_count += 1;
             }
 
@@ -627,7 +649,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();
 
-            Ok((explanation, result_count, iterations))
+            Ok((explanation, result_count, plan_executions))
         } else {
             // Standard path: fetch all docs and build scan-based plan
             let mapping = plan::build_mapping(select, &collection)?;
@@ -677,11 +699,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.init().await?;
             plan.start().await?;
 
-            let mut iterations: u64 = 0;
-            let mut result_count = 0;
+            // Go counts ALL next() calls (including the final false) for planExecutions
+            let mut plan_executions: u64 = 0;
+            let mut result_count: usize = 0;
 
-            while plan.next().await? {
-                iterations += 1;
+            loop {
+                plan_executions += 1;
+                if !plan.next().await? {
+                    break;
+                }
                 result_count += 1;
             }
 
@@ -690,7 +716,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();
 
-            Ok((explanation, result_count, iterations))
+            Ok((explanation, result_count, plan_executions))
         }
     }
 
@@ -720,11 +746,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Check if this object contains scanNode
             if let Some(scan_node) = obj.get_mut("scanNode") {
                 if let Some(scan_obj) = scan_node.as_object_mut() {
-                    scan_obj.insert("iterations".to_string(), serde_json::json!(iterations));
-                    scan_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+                    scan_obj.insert(
+                        "iterations".to_string(),
+                        serde_json::json!(iterations as u64),
+                    );
+                    scan_obj.insert(
+                        "docFetches".to_string(),
+                        serde_json::json!(doc_fetches as u64),
+                    );
                     // fieldFetches = number of fields per doc * number of docs fetched
-                    let field_fetches = field_count * doc_fetches;
-                    scan_obj.insert("fieldFetches".to_string(), serde_json::json!(field_fetches));
+                    let field_fetches = (field_count * doc_fetches) as u64;
+                    scan_obj.insert(
+                        "fieldFetches".to_string(),
+                        serde_json::json!(field_fetches),
+                    );
 
                     // indexFetches is set by IndexScanNode::explain_inner() with
                     // the actual index key lookup count. For regular scans without an
@@ -962,7 +997,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &["countNode", "sumNode", "averageNode", "minNode", "maxNode"];
 
     /// Aggregate-specific explain fields that should be stripped when unwrapping aggregate nodes.
-    const AGGREGATE_EXPLAIN_FIELDS: [&'static str; 1] = ["sources"];
+    /// "sources" appears in default explain, "iterations" in execute explain.
+    const AGGREGATE_EXPLAIN_FIELDS: [&'static str; 2] = ["sources", "iterations"];
 
     /// Strip aggregate wrapper nodes from explain output for top-level aggregate queries.
     ///
@@ -1013,7 +1049,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         select: &Select,
         select_explain: JsonValue,
-        _explain_type: ExplainType,
+        explain_type: ExplainType,
     ) -> JsonValue {
         use crate::mapper::AggregateType;
 
@@ -1039,17 +1075,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     AggregateType::Max => "maxNode",
                 };
 
-                // Go's averageNode returns empty {} for simple explain
-                // Other aggregates (sum, count, min, max) include sources
-                if agg.aggregate_type == AggregateType::Average {
-                    top_level_children.push(serde_json::json!({
-                        node_name: {}
-                    }));
+                // For execute explain, aggregate nodes show iterations instead of sources
+                if explain_type == ExplainType::Execute {
+                    if agg.aggregate_type == AggregateType::Average {
+                        // Go decomposes average into sumNode + countNode + averageNode
+                        // Each shows iterations in execute mode
+                        top_level_children.push(serde_json::json!({
+                            "sumNode": { "iterations": 0u64 }
+                        }));
+                        top_level_children.push(serde_json::json!({
+                            "countNode": { "iterations": 0u64 }
+                        }));
+                        top_level_children.push(serde_json::json!({
+                            "averageNode": {}
+                        }));
+                    } else {
+                        top_level_children.push(serde_json::json!({
+                            node_name: { "iterations": 1u64 }
+                        }));
+                    }
                     continue;
                 }
 
-                // Build sources for explain output
-                // For top-level aggregates, the source is the collection
+                // Default/Debug explain: show sources metadata
                 let target_filter = if !agg.targets.is_empty() {
                     agg.targets[0].filter.as_ref()
                 } else {
@@ -1067,12 +1115,51 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     JsonValue::Null
                 };
 
-                // For aggregates that operate on a field (sum, min, max), include childFieldName
+                // For aggregates that operate on a field (sum, min, max, avg), include childFieldName
                 let child_field_name = if !agg.targets.is_empty() {
                     agg.targets[0].field_name.as_ref()
                 } else {
                     None
                 };
+
+                // Go decomposes average into sumNode + countNode + averageNode
+                if agg.aggregate_type == AggregateType::Average {
+                    // 1. sumNode with sources (includes childFieldName)
+                    let sum_source = if let Some(field_name) = child_field_name {
+                        serde_json::json!({
+                            "fieldName": select.collection_name,
+                            "childFieldName": field_name,
+                            "filter": filter_value
+                        })
+                    } else {
+                        serde_json::json!({
+                            "fieldName": select.collection_name,
+                            "filter": filter_value
+                        })
+                    };
+                    top_level_children.push(serde_json::json!({
+                        "sumNode": {
+                            "sources": [sum_source]
+                        }
+                    }));
+
+                    // 2. countNode with sources (no childFieldName)
+                    let count_source = serde_json::json!({
+                        "fieldName": select.collection_name,
+                        "filter": filter_value
+                    });
+                    top_level_children.push(serde_json::json!({
+                        "countNode": {
+                            "sources": [count_source]
+                        }
+                    }));
+
+                    // 3. averageNode (empty)
+                    top_level_children.push(serde_json::json!({
+                        "averageNode": {}
+                    }));
+                    continue;
+                }
 
                 let source = if let Some(field_name) = child_field_name {
                     serde_json::json!({

@@ -26,8 +26,8 @@ pub use groupby::{DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;
 pub use lens_node::LensNode;
 pub use limit::LimitNode;
-pub use max::MaxNode;
-pub use min::MinNode;
+pub use max::{MaxNode, MaxSourceMeta};
+pub use min::{MinNode, MinSourceMeta};
 pub use mutation::{
     CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertAction, UpsertInput,
     UpsertNode,
@@ -37,7 +37,7 @@ pub use permission_filter::PermissionFilterNode;
 pub use scan::ScanNode;
 pub use select::SelectNode;
 pub use similarity::SimilarityNode;
-pub use sum::SumNode;
+pub use sum::{SumNode, SumSourceMeta};
 pub use type_join::{
     compare_json_values, resolve_nested_field, JoinDirection, JoinSide, RelationFilter,
     TypeJoinMany, TypeJoinOne,

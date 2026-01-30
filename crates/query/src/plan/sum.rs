@@ -8,6 +8,17 @@ use crate::error::Result;
 use crate::mapper::{Filter, Limit};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
+/// Source metadata for explain output.
+#[derive(Debug, Clone)]
+pub struct SumSourceMeta {
+    /// Field name (collection name or relation field name)
+    pub field_name: String,
+    /// Optional child field name for field-level aggregates
+    pub child_field_name: Option<String>,
+    /// Optional filter on this source
+    pub filter: Option<Filter>,
+}
+
 /// SumNode computes the sum of a numeric field from its source.
 ///
 /// Operates in two modes:
@@ -43,6 +54,8 @@ pub struct SumNode {
     child_aggregate_source: Option<(usize, String)>,
     /// Execution statistics for explain execute mode
     exec_info: ExecInfo,
+    /// Source metadata for explain output
+    sources: Vec<SumSourceMeta>,
 }
 
 impl SumNode {
@@ -68,6 +81,7 @@ impl SumNode {
             aggregate_limit: None,
             child_aggregate_source: None,
             exec_info: ExecInfo::default(),
+            sources: Vec::new(),
         }
     }
 
@@ -83,6 +97,11 @@ impl SumNode {
 
     pub fn with_limit(mut self, limit: Limit) -> Self {
         self.aggregate_limit = Some(limit);
+        self
+    }
+
+    pub fn with_sources(mut self, sources: Vec<SumSourceMeta>) -> Self {
+        self.sources = sources;
         self
     }
 
@@ -289,6 +308,53 @@ impl PlanNode for SumNode {
         "sumNode"
     }
 
+    fn explain_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        // sources: array of objects with fieldName, childFieldName, and filter
+        let sources: Vec<JsonValue> = self
+            .sources
+            .iter()
+            .map(|s| {
+                let mut source_obj = serde_json::Map::new();
+                source_obj.insert(
+                    "fieldName".to_string(),
+                    JsonValue::String(s.field_name.clone()),
+                );
+                if let Some(ref child_name) = s.child_field_name {
+                    source_obj.insert(
+                        "childFieldName".to_string(),
+                        JsonValue::String(child_name.clone()),
+                    );
+                }
+                if let Some(ref filter) = s.filter {
+                    let conditions = filter.conditions();
+                    if conditions.is_empty() {
+                        source_obj.insert("filter".to_string(), serde_json::Value::Null);
+                    } else {
+                        source_obj.insert("filter".to_string(), serde_json::json!(conditions));
+                    }
+                } else {
+                    source_obj.insert("filter".to_string(), serde_json::Value::Null);
+                }
+                JsonValue::Object(source_obj)
+            })
+            .collect();
+        obj.insert("sources".to_string(), JsonValue::Array(sources));
+
+        // Include child nodes
+        if let Some(source) = self.source() {
+            let child_explain = source.explain();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        serde_json::Value::Object(obj)
+    }
+
     fn current_group_docs(&self) -> Option<&[Doc]> {
         // Pass through from source for stacked aggregates
         self.source.current_group_docs()
@@ -305,13 +371,11 @@ impl PlanNode for SumNode {
     fn explain_execute_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
 
-        // Recursively explain child node with execution info
         let child_explain = self.source.explain_execute();
         if let Some(child_obj) = child_explain.as_object() {
             for (key, value) in child_obj {
