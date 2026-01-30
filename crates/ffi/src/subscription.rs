@@ -168,6 +168,40 @@ pub unsafe extern "C" fn create_subscription(
     CreateSubscriptionResult::success(handle)
 }
 
+/// Create a subscription to P2P merge complete events.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+///
+/// # Returns
+///
+/// A handle that can be used with `poll_subscription` and `close_subscription`.
+/// Events will contain merge complete data (doc_id, cid, collection_id, by_peer).
+#[no_mangle]
+pub extern "C" fn create_merge_complete_subscription(
+    node_ptr: usize,
+) -> CreateSubscriptionResult {
+    // Get the event bus from the node
+    let subscription = match NODES.get(node_ptr, |state| {
+        state
+            .event_bus
+            .subscribe(&[events::EventName::MergeComplete])
+    }) {
+        Some(sub) => sub,
+        None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let state = SubscriptionState {
+        subscription,
+        node_handle: node_ptr,
+        collection_filter: None,
+    };
+
+    let handle = SUBSCRIPTIONS.insert(state);
+    CreateSubscriptionResult::success(handle)
+}
+
 /// Poll a subscription for the next event (non-blocking).
 ///
 /// # Arguments
@@ -271,6 +305,18 @@ fn message_to_json(message: &events::Message) -> String {
             "collection_id": update.collection_id,
             "is_retry": update.is_retry,
             "is_relay": update.is_relay
+        })
+        .to_string();
+    }
+
+    // Check if this is a MergeComplete event with data
+    if let Some(mc) = message.as_merge_complete() {
+        return serde_json::json!({
+            "type": "merge_complete",
+            "doc_id": mc.doc_id,
+            "cid": mc.cid.to_string(),
+            "collection_id": mc.collection_id,
+            "by_peer": mc.by_peer
         })
         .to_string();
     }

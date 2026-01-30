@@ -15,6 +15,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 
 use blockstore::DefraBlockstore;
 use p2p::bitswap::BitswapStoreAdapter;
+use p2p::sync::{ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator};
 use p2p::P2PHost;
 
 /// Parsed multiaddr containing peer ID and transport address.
@@ -111,12 +112,20 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         // Create blockstore for P2P/Bitswap
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
-        let bitswap_store = BitswapStoreAdapter::new(blockstore);
+        let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
         // Create P2P host
-        let (host, handle, _event_rx, _replicator_registry) = P2PHost::new(bitswap_store)
+        let (host, handle, event_rx, _replicator_registry) = P2PHost::new(bitswap_store.clone())
             .await
             .map_err(|e| format!("failed to create P2P host: {}", e))?;
+
+        // Spawn the P2P host event loop BEFORE sending any commands.
+        // The host must be running to process commands like Listen/Dial.
+        // Without this, handle.listen() below would deadlock because the
+        // command channel has no consumer.
+        tokio::spawn(async move {
+            host.run().await;
+        });
 
         // Parse and start listening on the address
         let addr: libp2p::Multiaddr = listen_addr_str
@@ -128,14 +137,137 @@ pub unsafe extern "C" fn new_node_with_p2p(
             .await
             .map_err(|e| format!("failed to start listening: {}", e))?;
 
-        // Spawn the P2P host event loop
-        let host_handle = handle.clone();
-        tokio::spawn(async move {
-            host.run().await;
+        // Create SyncCoordinator for processing incoming P2P sync messages
+        let (coordinator, sync_events_rx) =
+            SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
+                .await
+                .map_err(|e| format!("failed to create sync coordinator: {}", e))?;
+        let coordinator = Arc::new(coordinator);
+
+        // Create DbMergeHandler for merging CRDT blocks into the database
+        let merge_handler = Arc::new(db::DbMergeHandler::new(
+            database.clone(),
+            blockstore.clone(),
+        ));
+
+        // Task 1: Host event loop - reads HostEvents and feeds them to the coordinator
+        let coord_for_events = coordinator.clone();
+        let host_event_task = tokio::spawn(async move {
+            let mut rx = event_rx;
+            while let Some(event) = rx.recv().await {
+                if let Err(e) = coord_for_events.handle_host_event(event).await {
+                    tracing::debug!("Error handling host event: {}", e);
+                }
+            }
+            tracing::debug!("Host event loop exiting - channel closed");
         });
 
-        // Create P2P state
-        let p2p_state = Arc::new(P2PState::new(host_handle));
+        // Task 2: Replication loop - processes sync events and publishes MergeComplete
+        let coord_for_repl = coordinator.clone();
+        let handler_for_repl = merge_handler.clone();
+        let event_bus_for_repl = event_bus.clone();
+        let replication_task = tokio::spawn(async move {
+            let config = ReplicationConfig::default();
+            let mut events = sync_events_rx;
+            loop {
+                let result = ReplicationLoop::process_next(
+                    &coord_for_repl,
+                    &mut events,
+                    handler_for_repl.as_ref(),
+                    &config,
+                )
+                .await;
+
+                match &result {
+                    ReplicationResult::Merged {
+                        cid,
+                        doc_id,
+                        collection_id,
+                    } => {
+                        tracing::info!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            collection_id = %collection_id,
+                            "Block merged - publishing MergeComplete event"
+                        );
+                        let mc = events::MergeCompleteData {
+                            doc_id: doc_id.clone(),
+                            cid: *cid,
+                            collection_id: collection_id.clone(),
+                            by_peer: coord_for_repl.local_peer_id().to_string(),
+                        };
+                        event_bus_for_repl.publish(events::Message::merge_complete(mc));
+                    }
+                    ReplicationResult::MergedButBroadcastFailed {
+                        cid,
+                        doc_id,
+                        collection_id,
+                        ..
+                    } => {
+                        // Merge succeeded, still publish MergeComplete
+                        tracing::info!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            "Block merged (broadcast failed) - publishing MergeComplete event"
+                        );
+                        let mc = events::MergeCompleteData {
+                            doc_id: doc_id.clone(),
+                            cid: *cid,
+                            collection_id: collection_id.clone(),
+                            by_peer: coord_for_repl.local_peer_id().to_string(),
+                        };
+                        event_bus_for_repl.publish(events::Message::merge_complete(mc));
+                    }
+                    ReplicationResult::ChannelClosed => {
+                        tracing::info!("Sync event channel closed, stopping replication loop");
+                        break;
+                    }
+                    ReplicationResult::Failed { cid, error } => {
+                        tracing::error!(cid = %cid, error = %error, "Block merge failed");
+                    }
+                    _ => {}
+                }
+            }
+            tracing::info!("FFI replication loop stopped");
+        });
+
+        // Task 3: Local update broadcaster - broadcasts local mutations to P2P network
+        let coord_for_broadcast = coordinator.clone();
+        let event_bus_for_broadcast = event_bus.clone();
+        let broadcast_task = tokio::spawn(async move {
+            let mut sub = event_bus_for_broadcast.subscribe(&[events::EventName::Update]);
+            while let Some(msg) = sub.recv().await {
+                if let Some(update) = msg.as_update() {
+                    // Skip relay updates (already from P2P)
+                    if update.is_relay {
+                        continue;
+                    }
+                    let cid = update.cid;
+                    let block = &update.block;
+                    let doc_id = &update.doc_id;
+                    let collection_id = &update.collection_id;
+                    if let Err(e) = coord_for_broadcast
+                        .broadcast_local_update(&cid, block, doc_id, collection_id)
+                        .await
+                    {
+                        tracing::debug!(
+                            doc_id = %doc_id,
+                            error = %e,
+                            "Failed to broadcast local update"
+                        );
+                    }
+                }
+            }
+            tracing::debug!("Broadcast task exiting - subscription closed");
+        });
+
+        // Create P2P state with sync pipeline abort handles
+        let p2p_state = Arc::new(P2PState::with_sync_pipeline(
+            handle.clone(),
+            host_event_task.abort_handle(),
+            replication_task.abort_handle(),
+            broadcast_task.abort_handle(),
+        ));
 
         // Create lensed auto-committing fetcher
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());

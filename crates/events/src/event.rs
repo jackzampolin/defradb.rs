@@ -36,6 +36,19 @@ impl std::fmt::Display for EventName {
     }
 }
 
+/// P2P merge complete event data.
+#[derive(Debug, Clone)]
+pub struct MergeCompleteData {
+    /// Document ID that was merged.
+    pub doc_id: String,
+    /// CID of the merged block.
+    pub cid: Cid,
+    /// Collection ID the document belongs to.
+    pub collection_id: String,
+    /// Peer ID that sent this block.
+    pub by_peer: String,
+}
+
 /// Document update event data.
 #[derive(Debug, Clone)]
 pub struct Update {
@@ -90,6 +103,8 @@ pub enum MessageData {
     None,
     /// Document update data.
     Update(Update),
+    /// P2P merge complete data.
+    MergeComplete(MergeCompleteData),
 }
 
 impl Message {
@@ -109,11 +124,11 @@ impl Message {
         }
     }
 
-    /// Create a new MergeComplete message (signal only, no data).
-    pub fn merge_complete() -> Self {
+    /// Create a new MergeComplete message with data.
+    pub fn merge_complete(data: MergeCompleteData) -> Self {
         Self {
             name: EventName::MergeComplete,
-            data: MessageData::None,
+            data: MessageData::MergeComplete(data),
         }
     }
 
@@ -121,6 +136,14 @@ impl Message {
     pub fn as_update(&self) -> Option<&Update> {
         match &self.data {
             MessageData::Update(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    /// Get the MergeCompleteData if this is a MergeComplete message.
+    pub fn as_merge_complete(&self) -> Option<&MergeCompleteData> {
+        match &self.data {
+            MessageData::MergeComplete(d) => Some(d),
             _ => None,
         }
     }
@@ -157,5 +180,16 @@ mod tests {
         let merge_msg = Message::merge();
         assert_eq!(merge_msg.name, EventName::Merge);
         assert!(merge_msg.as_update().is_none());
+
+        let mc_data = MergeCompleteData {
+            doc_id: "doc-789".to_string(),
+            cid: Cid::default(),
+            collection_id: "col-abc".to_string(),
+            by_peer: "peer-xyz".to_string(),
+        };
+        let mc_msg = Message::merge_complete(mc_data);
+        assert_eq!(mc_msg.name, EventName::MergeComplete);
+        assert!(mc_msg.as_merge_complete().is_some());
+        assert_eq!(mc_msg.as_merge_complete().unwrap().doc_id, "doc-789");
     }
 }

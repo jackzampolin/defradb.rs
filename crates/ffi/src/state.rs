@@ -123,12 +123,18 @@ fn hash_policy_fields(policy: &ParsedPolicy) -> Vec<u8> {
 /// P2P state for FFI nodes.
 ///
 /// This wraps the P2P host handle and tracks P2P-specific state like
-/// subscribed collections.
+/// subscribed collections and background task handles.
 pub struct P2PState {
     /// Handle to communicate with the P2P host.
     pub handle: P2PHostHandle,
     /// Collections subscribed for P2P replication.
     pub collections: RwLock<HashSet<String>>,
+    /// Abort handle for the host event loop task.
+    pub host_event_handle: Option<tokio::task::AbortHandle>,
+    /// Abort handle for the replication loop task.
+    pub replication_handle: Option<tokio::task::AbortHandle>,
+    /// Abort handle for the local update broadcast task.
+    pub broadcast_handle: Option<tokio::task::AbortHandle>,
 }
 
 impl P2PState {
@@ -137,6 +143,38 @@ impl P2PState {
         Self {
             handle,
             collections: RwLock::new(HashSet::new()),
+            host_event_handle: None,
+            replication_handle: None,
+            broadcast_handle: None,
+        }
+    }
+
+    /// Create new P2P state with sync pipeline abort handles.
+    pub fn with_sync_pipeline(
+        handle: P2PHostHandle,
+        host_event_handle: tokio::task::AbortHandle,
+        replication_handle: tokio::task::AbortHandle,
+        broadcast_handle: tokio::task::AbortHandle,
+    ) -> Self {
+        Self {
+            handle,
+            collections: RwLock::new(HashSet::new()),
+            host_event_handle: Some(host_event_handle),
+            replication_handle: Some(replication_handle),
+            broadcast_handle: Some(broadcast_handle),
+        }
+    }
+
+    /// Abort all background tasks.
+    pub fn abort_all_tasks(&self) {
+        if let Some(ref h) = self.host_event_handle {
+            h.abort();
+        }
+        if let Some(ref h) = self.replication_handle {
+            h.abort();
+        }
+        if let Some(ref h) = self.broadcast_handle {
+            h.abort();
         }
     }
 

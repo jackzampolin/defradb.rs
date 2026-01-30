@@ -132,6 +132,14 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
+    // Shutdown P2P host if enabled
+    if let Some(ref p2p) = state.p2p {
+        // Abort all background sync pipeline tasks
+        p2p.abort_all_tasks();
+        // Send shutdown command to P2P host
+        let _ = rt.block_on(async { p2p.handle.shutdown().await });
+    }
+
     // Close the event bus
     state.event_bus.close();
 

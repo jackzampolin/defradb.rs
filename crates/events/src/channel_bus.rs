@@ -277,7 +277,12 @@ mod tests {
 
         // Publish different events
         bus.publish(Message::merge());
-        bus.publish(Message::merge_complete());
+        bus.publish(Message::merge_complete(crate::MergeCompleteData {
+            doc_id: "test-doc".to_string(),
+            cid: cid::Cid::default(),
+            collection_id: "test-col".to_string(),
+            by_peer: "test-peer".to_string(),
+        }));
 
         // Should receive both
         let msg1 = sub.recv().await.unwrap();
