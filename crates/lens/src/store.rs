@@ -116,7 +116,9 @@ impl TransformStore for MemoryTransformStore {
 
         let result = transforms
             .iter()
-            .map(|(id, config)| (id.to_string(), config.lens.clone()))
+            .filter_map(|(id, config)| {
+                config.lens().cloned().map(|l| (id.to_string(), l))
+            })
             .collect();
 
         Ok(result)

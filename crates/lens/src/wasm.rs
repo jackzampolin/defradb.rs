@@ -179,7 +179,11 @@ impl Default for WasmTransformStore {
 #[async_trait]
 impl TransformStore for WasmTransformStore {
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
-        let module = self.load_module(&config.lens)?;
+        let first_lens = config
+            .lens()
+            .cloned()
+            .unwrap_or_default();
+        let module = self.load_module(&first_lens)?;
         let id = TransformId::new(format!(
             "lens_{}",
             self.next_id
@@ -188,7 +192,7 @@ impl TransformStore for WasmTransformStore {
 
         let compiled = CompiledModule {
             module,
-            arguments: config.lens.arguments.clone(),
+            arguments: first_lens.arguments.clone(),
         };
 
         self.modules.write().insert(id.clone(), compiled);
@@ -201,7 +205,9 @@ impl TransformStore for WasmTransformStore {
         let configs = self.configs.read();
         let result = configs
             .iter()
-            .map(|(id, config)| (id.to_string(), config.lens.clone()))
+            .filter_map(|(id, config)| {
+                config.lens().cloned().map(|l| (id.to_string(), l))
+            })
             .collect();
         Ok(result)
     }
@@ -728,7 +734,8 @@ mod tests {
         let store = WasmTransformStore::new().unwrap();
         let config = LensConfig::new("v1", "v2", LensModule::default());
 
-        let result = store.load_module(&config.lens);
+        let first_lens = config.lens().cloned().unwrap_or_default();
+        let result = store.load_module(&first_lens);
         assert!(matches!(result, Err(Error::InvalidConfig(_))));
     }
 }
