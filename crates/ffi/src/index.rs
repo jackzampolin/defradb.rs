@@ -109,9 +109,15 @@ pub unsafe extern "C" fn create_index(
 
             // Create the index
             let index_desc = index_manager
-                .create_index(&datastore, index_input.name, fields, index_input.unique)
+                .create_index(
+                    &datastore,
+                    &collection_name_str,
+                    index_input.name,
+                    fields,
+                    index_input.unique,
+                )
                 .await
-                .map_err(|e| format!("failed to create index: {}", e))?;
+                .map_err(|e| format!("{}", e))?;
 
             // Update the collection schema with the new index
             let mut updated_schema = collection.schema().clone();
@@ -256,7 +262,10 @@ pub unsafe extern "C" fn drop_index(
                 .map_err(|e| format!("failed to drop index: {}", e))?;
 
             if !dropped {
-                return Err(format!("index '{}' not found", index_name_str));
+                return Err(format!(
+                    "index with name doesn't exists. Name: {}",
+                    index_name_str
+                ));
             }
 
             // Update the collection schema to remove the index
