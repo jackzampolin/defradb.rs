@@ -835,6 +835,50 @@ impl<S: Store> DB<S> {
         }
     }
 
+    /// Create multiple collections atomically within a single transaction.
+    ///
+    /// All collections are created within a single transaction: if any collection
+    /// creation fails, the entire operation is rolled back. This is used by `add_view`
+    /// to ensure view collections (type + interface) are created atomically.
+    pub async fn create_collections_atomic(
+        &self,
+        schemas: Vec<CollectionVersion>,
+    ) -> Result<Vec<CollectionVersion>> {
+        let mut txn = self.new_txn(false).await?;
+        let mut created = Vec::new();
+
+        for schema in schemas {
+            match self.create_collection_with_txn(&mut txn, schema).await {
+                Ok(updated_schema) => {
+                    created.push(updated_schema);
+                }
+                Err(e) => {
+                    if let Err(discard_err) = txn.discard() {
+                        tracing::warn!(
+                            error = %discard_err,
+                            original_error = %e,
+                            "Transaction discard failed after atomic create_collections error"
+                        );
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        txn.commit().await?;
+
+        // Update process-wide cache with all created schemas
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(error = ?e, "Collection cache lock poisoned during atomic create");
+            Error::CacheUpdateFailedAfterCommit("atomic create_collections".into())
+        })?;
+        for schema in &created {
+            cache.insert(schema.name.clone(), Collection::new(schema.clone()));
+        }
+
+        Ok(created)
+    }
+
     /// Delete a collection and all its documents within an existing transaction.
     ///
     /// The collection is deleted from the store and removed from the transaction's cache.
