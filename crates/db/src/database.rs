@@ -1683,13 +1683,15 @@ impl<S: Store> DB<S> {
             .collect();
 
         // Sort fields for deterministic ordering: _docID first, then alphabetically
-        // Filter out secondary relations and empty-id fields (same as Go)
+        // Include all fields with non-empty FieldID in the CID.
+        // Self-ref relation objects (both primary and secondary) have field IDs.
+        // Non-self-ref secondary relations have empty IDs and are excluded.
         let field_indices: Vec<usize> = {
             let mut indices: Vec<usize> = schema
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| !f.is_secondary_relation() && !f.id.is_empty())
+                .filter(|(_, f)| !f.id.is_empty())
                 .map(|(i, _)| i)
                 .collect();
             indices.sort_by(|&a, &b| {

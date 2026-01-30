@@ -162,6 +162,7 @@ pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) ->
 pub unsafe extern "C" fn exec_request_in_txn(
     node_ptr: usize,
     txn_id: *const c_char,
+    _identity_did: *const c_char,
     request_query: *const c_char,
     operation_name: *const c_char,
     variables: *const c_char,

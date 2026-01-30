@@ -419,6 +419,33 @@ impl Planner {
             stripped
         });
 
+        // Convert doc_ids to a _docID filter and merge with the explicit filter.
+        // The docID parameter (e.g., User(docID: "...")) must be applied as a real
+        // filter condition, not just used for explain output.
+        let filter_for_plan = if let Some(ref doc_ids) = select.doc_ids {
+            let doc_ids_filter = if doc_ids.len() == 1 {
+                let mut conditions = HashMap::new();
+                conditions.insert(
+                    "_docID".to_string(),
+                    serde_json::json!({"_eq": doc_ids[0]}),
+                );
+                Filter::from_conditions(conditions)
+            } else {
+                let mut conditions = HashMap::new();
+                conditions.insert(
+                    "_docID".to_string(),
+                    serde_json::json!({"_in": doc_ids}),
+                );
+                Filter::from_conditions(conditions)
+            };
+            match filter_for_plan {
+                Some(existing) => Some(doc_ids_filter.and(existing)),
+                None => Some(doc_ids_filter),
+            }
+        } else {
+            filter_for_plan
+        };
+
         // Check if filter is complex (has relation conditions inside logical operators)
         // or has multi-level relation paths (e.g., {author: {published: {rating: ...}}})
         let is_complex_filter = filter_for_plan

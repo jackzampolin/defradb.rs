@@ -738,10 +738,14 @@ impl<'a> SdlParser<'a> {
                 // Only consider relations to other types in the schema
                 if type_names.contains(target) {
                     // Key: (source_type, target_type) -> has_primary directive
-                    result.insert(
-                        (type_name.clone(), target.clone()),
-                        field.directives.is_primary,
-                    );
+                    // Use OR logic: if ANY field in this (source, target) pair has @primary, it's true.
+                    // This handles self-referencing types where multiple fields share the same key.
+                    let entry = result
+                        .entry((type_name.clone(), target.clone()))
+                        .or_insert(false);
+                    if field.directives.is_primary {
+                        *entry = true;
+                    }
                 }
             }
         }
@@ -1196,10 +1200,11 @@ impl<'a> SdlParser<'a> {
                 CType::LwwRegister
             };
 
-            // Generate field ID using actual kind and CRDT type
-            // Go uses empty FieldID for:
-            // - Self-reference relation object fields (always)
-            // - SECONDARY relation fields (counterpart has @primary)
+            // Generate field ID using actual kind and CRDT type.
+            // Go assigns empty FieldID to:
+            // - Secondary (non-primary) relation object fields
+            // - Self-referencing relation object fields with empty RelativeID
+            //   (Go's Delta() skips them because strconv.Atoi("") fails)
             let field_id = if is_self_ref_relation || (kind.is_relation() && !is_primary) {
                 String::new()
             } else {
@@ -1246,13 +1251,14 @@ impl<'a> SdlParser<'a> {
                     let id_field_kind = FieldKind::doc_id();
                     let id_field_crdt = CType::LwwRegister;
 
-                    // FK field has empty FieldID if secondary, otherwise generated
+                    // FK field gets a FieldID only if primary.
+                    // Go's Delta() skips secondary fields: RelationName.HasValue() && !IsPrimary.
+                    // This applies to both self-ref and cross-type secondary FK fields.
                     let id_field_id = if is_primary {
                         generate_field_id(&id_field_name, &id_field_kind, id_field_crdt)
                     } else {
                         String::new()
                     };
-
                     // FK field has same is_primary status as relation object field
                     let mut id_field =
                         FieldDescription::new(&id_field_id, &id_field_name.clone(), id_field_kind)
@@ -1520,13 +1526,12 @@ fn generate_collection_id(
     headstore: &HashMap<String, (Cid, u64)>,
 ) -> String {
     // Sort fields to match Go's order: _docID first, then alphabetically by name
-    // Skip:
-    // - Secondary relation fields (array relations - Go skips these)
-    // - Fields with empty id (self-reference relation fields)
-    // Include primary relation object fields AND their FK fields
+    // Include fields with non-empty FieldID in the CID.
+    // Go's Delta() excludes: secondary relations, self-ref with empty relative_id.
+    // All excluded fields have empty FieldIDs, so filtering on !id.is_empty() suffices.
     let mut sorted_fields: Vec<&FieldDescription> = fields
         .iter()
-        .filter(|f| !f.is_secondary_relation() && !f.id.is_empty())
+        .filter(|f| !f.id.is_empty())
         .collect();
     sorted_fields.sort_by(|a, b| {
         // _docID always comes first
@@ -1544,7 +1549,7 @@ fn generate_collection_id(
     let field_cids: Vec<Cid> = sorted_fields
         .iter()
         .filter_map(|f| {
-            schema::generate_field_cid_with_priority(f, 1).ok() // Priority=1 for all
+            schema::generate_field_cid_with_priority(f, 1).ok()
         })
         .collect();
 

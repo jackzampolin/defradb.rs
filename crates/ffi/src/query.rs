@@ -33,6 +33,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 #[no_mangle]
 pub unsafe extern "C" fn exec_request(
     node_ptr: usize,
+    _identity_did: *const c_char,
     request_query: *const c_char,
     operation_name: *const c_char,
     variables: *const c_char,
