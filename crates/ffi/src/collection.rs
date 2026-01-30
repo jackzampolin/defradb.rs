@@ -33,6 +33,10 @@ fn select_to_go_json(select: &query::Select) -> serde_json::Value {
                 serde_json::Value::Object(m)
             }
             query::mapper::Requestable::Select(sub) => select_to_go_json(sub),
+            query::mapper::Requestable::Similarity(_) => {
+                // Similarity fields are not used in view query serialization
+                serde_json::Value::Null
+            }
             query::mapper::Requestable::Aggregate(agg) => {
                 let mut m = serde_json::Map::new();
                 m.insert(
