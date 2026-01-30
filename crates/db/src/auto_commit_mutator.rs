@@ -105,7 +105,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // The stores must be dropped before commit, so scope them
-                let commit_cid: Option<Cid> = {
+                let commit_result: Option<(Cid, Vec<u8>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -163,7 +163,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 }
                             }
 
-                            Some(block_result.cid)
+                            Some((block_result.cid, block_result.block))
                         }
                         Err(e) => {
                             warn!(
@@ -193,20 +193,24 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                 // Emit update event for subscriptions
                 if let Some(bus) = self.db.event_bus() {
+                    let (cid, block) = commit_result
+                        .as_ref()
+                        .map(|(c, b)| (*c, b.clone()))
+                        .unwrap_or_default();
                     let update = Update::new(
                         doc_id.to_string(),
-                        commit_cid.unwrap_or_default(),
-                        collection.name().to_string(),
-                        vec![], // Block data not available at this layer
-                        false,  // is_retry
-                        false,  // is_relay (local mutation)
+                        cid,
+                        collection.collection_id().to_string(),
+                        block,
+                        false, // is_retry
+                        false, // is_relay (local mutation)
                     );
                     bus.publish(Message::update(update));
                 }
 
                 // Return result with commit CID if available
-                match commit_cid {
-                    Some(cid) => Ok(CreateResult::with_commit_cid(doc_id, doc, cid)),
+                match commit_result {
+                    Some((cid, _)) => Ok(CreateResult::with_commit_cid(doc_id, doc, cid)),
                     None => Ok(CreateResult::new(doc_id, doc)),
                 }
             }
@@ -272,7 +276,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
             Ok(()) => {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
-                {
+                let commit_result: Option<(Cid, Vec<u8>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -329,6 +333,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     );
                                 }
                             }
+                            Some((block_result.cid, block_result.block))
                         }
                         Err(e) => {
                             warn!(
@@ -337,9 +342,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 "Failed to write document blocks - commits queries may not work"
                             );
                             // Don't fail the mutation, just log the warning
+                            None
                         }
                     }
-                } // blockstore and headstore dropped here
+                }; // blockstore and headstore dropped here
 
                 // Commit the transaction (all store references now dropped)
                 if let Err(e) = txn.commit().await {
@@ -357,11 +363,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 // Emit update event for subscriptions
                 if let Some(bus) = self.db.event_bus() {
                     if let Some(doc_id) = doc.id() {
+                        let (cid, block) = commit_result
+                            .as_ref()
+                            .map(|(c, b)| (*c, b.clone()))
+                            .unwrap_or_default();
                         let update = Update::new(
                             doc_id.to_string(),
-                            Cid::default(),
-                            collection.name().to_string(),
-                            vec![],
+                            cid,
+                            collection.collection_id().to_string(),
+                            block,
                             false, // is_retry
                             false, // is_relay (local mutation)
                         );
@@ -433,7 +443,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         match result {
             Ok(existed) => {
                 // Build delete block (composite with status=2) in a scoped block
-                let commit_cid: Option<Cid> = {
+                let commit_result: Option<(Cid, Vec<u8>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -482,7 +492,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 }
                             }
 
-                            Some(composite_cid)
+                            Some((composite_cid, block_result.block))
                         }
                         Err(e) => {
                             warn!(
@@ -510,11 +520,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                 // Emit update event for subscriptions (deletes are also "updates")
                 if let Some(bus) = self.db.event_bus() {
+                    let (cid, block) = commit_result
+                        .as_ref()
+                        .map(|(c, b)| (*c, b.clone()))
+                        .unwrap_or_default();
                     let update = Update::new(
                         doc_id.to_string(),
-                        commit_cid.unwrap_or_default(),
-                        collection.name().to_string(),
-                        vec![],
+                        cid,
+                        collection.collection_id().to_string(),
+                        block,
                         false, // is_retry
                         false, // is_relay (local mutation)
                     );
