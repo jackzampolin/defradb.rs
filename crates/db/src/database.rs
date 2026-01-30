@@ -23,6 +23,7 @@ use std::sync::{Arc, RwLock};
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{
     CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
+    IndexIDSequenceKey,
 };
 
 /// Database options.
@@ -714,6 +715,36 @@ impl<S: Store> DB<S> {
         // Assign sequential short ID (matches Go's monotonic counter)
         let short_id = Self::next_collection_short_id(&systemstore).await?;
         schema.root_id = short_id;
+
+        // Re-assign index IDs from the persistent sequence so they start at 1.
+        // The SDL parser assigns placeholder IDs based on field_id_counter, but
+        // Go assigns them via IndexManager.next_index_id() which uses a per-collection
+        // sequence key. We replicate that here so IDs match Go exactly.
+        if !schema.indexes.is_empty() {
+            let col_short_id =
+                crate::collection::collection_short_id(collection_id.as_str());
+            let seq_key = IndexIDSequenceKey::new(format!("{}", col_short_id));
+            let key_bytes = seq_key.bytes();
+            let mut current: u32 =
+                match systemstore.get(&key_bytes).await.map_err(Error::Storage)? {
+                    Some(bytes) => {
+                        if bytes.len() == 4 {
+                            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                        } else {
+                            0
+                        }
+                    }
+                    None => 0,
+                };
+            for idx in &mut schema.indexes {
+                current += 1;
+                idx.id = current;
+            }
+            systemstore
+                .set(&key_bytes, &current.to_be_bytes())
+                .await
+                .map_err(Error::Storage)?;
+        }
 
         // Store short ID mapping at /collection/shortID/{collection_id}
         let short_id_key = CollectionID::new(collection_id.as_str());

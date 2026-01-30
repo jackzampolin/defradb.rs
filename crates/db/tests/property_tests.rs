@@ -51,6 +51,7 @@ proptest! {
             manager
                 .create_index(
                     &datastore,
+                    "users",
                     "idx_name".to_string(),
                     vec![IndexedFieldDescription {
                         name: "name".to_string(),
@@ -108,6 +109,7 @@ proptest! {
             manager
                 .create_index(
                     &datastore,
+                    "users",
                     "idx_name".to_string(),
                     vec![IndexedFieldDescription {
                         name: "name".to_string(),
@@ -183,6 +185,7 @@ proptest! {
             manager
                 .create_index(
                     &datastore,
+                    "users",
                     "idx_name".to_string(),
                     vec![IndexedFieldDescription {
                         name: "name".to_string(),
@@ -260,6 +263,7 @@ proptest! {
             manager
                 .create_index(
                     &datastore,
+                    "users",
                     "idx_name".to_string(),
                     vec![IndexedFieldDescription {
                         name: "name".to_string(),
@@ -322,6 +326,7 @@ proptest! {
             manager
                 .create_index(
                     &datastore,
+                    "users",
                     "idx_name_unique".to_string(),
                     vec![IndexedFieldDescription {
                         name: "name".to_string(),
@@ -384,6 +389,7 @@ proptest! {
             manager
                 .create_index(
                     &datastore,
+                    "users",
                     "idx_name".to_string(),
                     vec![IndexedFieldDescription {
                         name: "name".to_string(),
@@ -458,7 +464,7 @@ proptest! {
 
             // Attempt to create index with empty fields
             let result = manager
-                .create_index(&datastore, name, vec![], false)
+                .create_index(&datastore, "users", name, vec![], false)
                 .await;
 
             // Property: Empty fields should always be rejected
@@ -494,13 +500,13 @@ proptest! {
 
             // First creation should succeed
             let result1 = manager
-                .create_index(&datastore, name.clone(), fields.clone(), false)
+                .create_index(&datastore, "users", name.clone(), fields.clone(), false)
                 .await;
             assert!(result1.is_ok(), "First creation should succeed");
 
             // Second creation with same name should fail
             let result2 = manager
-                .create_index(&datastore, name, fields, false)
+                .create_index(&datastore, "users", name, fields, false)
                 .await;
             assert!(result2.is_err(), "Duplicate name should be rejected");
         });
