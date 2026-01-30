@@ -39,6 +39,7 @@ pub use select::SelectNode;
 pub use similarity::SimilarityNode;
 pub use sum::SumNode;
 pub use type_join::{
-    compare_json_values, JoinDirection, JoinSide, RelationFilter, TypeJoinMany, TypeJoinOne,
+    compare_json_values, resolve_nested_field, JoinDirection, JoinSide, RelationFilter,
+    TypeJoinMany, TypeJoinOne,
 };
 pub use view::ViewNode;

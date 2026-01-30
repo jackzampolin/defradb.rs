@@ -1493,6 +1493,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For aggregates like _count(books: {}), compute the value from joined data
         let results = self.compute_relation_aggregates(results, select)?;
 
+        // Strip fields from relation data that were added for filter evaluation
+        // but not explicitly requested in the selection set.
+        let results = Self::clean_filter_only_relation_fields(results, select);
+
         // Apply deferred limit/offset to relation fields.
         // TypeJoinMany stores ALL children (for aggregates to count), so we apply
         // the select's limit/offset here after aggregates have been computed.
@@ -1586,7 +1590,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
                         }
                     }
-                    Some((s.field.name.clone(), fields))
+                    Some((s.field.output_name().to_string(), fields))
                 } else {
                     None
                 }
@@ -1602,6 +1606,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Build a mapping from relation field name → output name for aliased relation selections.
+        // When a query uses `NewestPublishersBook: book(...)`, the JSON key is "NewestPublishersBook"
+        // but the aggregate target references "book". We need to resolve these aliases.
+        let relation_alias_map: std::collections::HashMap<&str, &str> = select
+            .fields
+            .iter()
+            .filter_map(|f| {
+                if let Requestable::Select(s) = f {
+                    let name = s.field.name.as_str();
+                    let output = s.field.output_name();
+                    if name != output {
+                        Some((name, output))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Process each result
         for result in &mut results {
             if let JsonValue::Object(ref mut obj) = result {
@@ -1613,7 +1638,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let relation_name = &target.host_name;
                         let field_name = target.field_name.as_deref();
 
-                        if let Some(relation_data) = obj.get(relation_name) {
+                        // Try the direct relation name first, then fall back to alias
+                        let relation_data = obj
+                            .get(relation_name.as_str())
+                            .or_else(|| {
+                                relation_alias_map
+                                    .get(relation_name.as_str())
+                                    .and_then(|alias| obj.get(*alias))
+                            });
+                        if let Some(relation_data) = relation_data {
                             if let JsonValue::Array(items) = relation_data {
                                 // Array data: relation or inline array aggregate
                                 // Step 1: Apply filter to array elements
@@ -1651,33 +1684,43 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                                 // Step 2: Apply order (sort array elements before limit/offset)
                                 // The order field may differ from the aggregate field (e.g., order by "name", sum "rating")
+                                // Supports nested paths (e.g., order: {publisher: {yearOpened: ASC}})
                                 let mut ordered_items = filtered_items;
                                 if let Some(ref order) = target.order {
                                     if let Some(condition) = order.conditions.first() {
-                                        let order_field =
-                                            condition.fields.first().map(|s| s.as_str());
+                                        let fields = &condition.fields;
                                         let desc = matches!(
                                             condition.direction,
                                             crate::mapper::OrderDirection::Desc
                                         );
                                         ordered_items.sort_by(|a, b| {
-                                            let a_val = match order_field {
-                                                Some(f) => a
-                                                    .as_object()
-                                                    .and_then(|o| o.get(f))
-                                                    .unwrap_or(&JsonValue::Null),
-                                                None => *a,
-                                            };
-                                            let b_val = match order_field {
-                                                Some(f) => b
-                                                    .as_object()
-                                                    .and_then(|o| o.get(f))
-                                                    .unwrap_or(&JsonValue::Null),
-                                                None => *b,
-                                            };
+                                            let resolve_value =
+                                                |item: &&JsonValue| -> Option<JsonValue> {
+                                                    if fields.is_empty() {
+                                                        return Some((*item).clone());
+                                                    }
+                                                    // Start with the first field
+                                                    let first = &fields[0];
+                                                    let mut current = item
+                                                        .as_object()
+                                                        .and_then(|o| o.get(first.as_str()))
+                                                        .cloned()?;
+                                                    // Resolve remaining nested fields
+                                                    for key in &fields[1..] {
+                                                        current = match current {
+                                                            JsonValue::Object(ref obj) => {
+                                                                obj.get(key.as_str())?.clone()
+                                                            }
+                                                            _ => return None,
+                                                        };
+                                                    }
+                                                    Some(current)
+                                                };
+                                            let a_val = resolve_value(a);
+                                            let b_val = resolve_value(b);
                                             let cmp = crate::plan::compare_json_values(
-                                                Some(a_val),
-                                                Some(b_val),
+                                                a_val.as_ref(),
+                                                b_val.as_ref(),
                                             );
                                             if desc {
                                                 cmp.reverse()
@@ -1823,10 +1866,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     obj.insert(output_name.clone(), computed_value);
                 }
 
-                // Deferred cleanup: remove relation data only used for aggregation
+                // Deferred cleanup: remove relation data only used for aggregation.
+                // When a selection uses an alias (e.g., `books2020: book(...)`), the
+                // aggregate's raw relation data ("book") must also be removed since
+                // the display data is at the alias key ("books2020").
                 for relation_name in &aggregate_relation_names {
-                    if !selected_relations.contains(relation_name) {
-                        obj.remove(relation_name);
+                    let selected_with_same_key = select.fields.iter().any(|f| {
+                        if let Requestable::Select(s) = f {
+                            s.field.name == *relation_name
+                                && s.field.output_name() == relation_name
+                        } else {
+                            false
+                        }
+                    });
+                    if !selected_with_same_key {
+                        obj.remove(relation_name.as_str());
                     }
                 }
 
@@ -1980,6 +2034,78 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(results)
+    }
+
+    /// Strip filter-only fields from relation data in query results.
+    ///
+    /// When the planner adds relation joins for filter evaluation (e.g., filtering
+    /// Author by book.publisher.yearOpened), those relations get render_keys so
+    /// the filter can evaluate on rendered JSON. This causes the relation field to
+    /// appear in output even though the user didn't request it. This function
+    /// retains only the fields explicitly listed in each nested Select.
+    fn clean_filter_only_relation_fields(
+        mut results: Vec<JsonValue>,
+        select: &Select,
+    ) -> Vec<JsonValue> {
+        // Build map of relation output_name → allowed sub-field names
+        let mut relation_allowed_fields: Vec<(String, HashSet<String>)> = Vec::new();
+
+        for requestable in &select.fields {
+            if let Requestable::Select(nested_select) = requestable {
+                if nested_select.field.name == "_group" {
+                    continue;
+                }
+                let mut allowed = HashSet::new();
+                // _docID is always implicit
+                allowed.insert("_docID".to_string());
+                for sub_field in &nested_select.fields {
+                    match sub_field {
+                        Requestable::Field(f) => {
+                            allowed.insert(f.output_name().to_string());
+                        }
+                        Requestable::Select(s) => {
+                            allowed.insert(s.field.output_name().to_string());
+                        }
+                        Requestable::Aggregate(a) => {
+                            allowed.insert(a.output_name().to_string());
+                        }
+                        Requestable::Similarity(s) => {
+                            allowed.insert(s.output_name().to_string());
+                        }
+                    }
+                }
+                relation_allowed_fields
+                    .push((nested_select.field.output_name().to_string(), allowed));
+            }
+        }
+
+        if relation_allowed_fields.is_empty() {
+            return results;
+        }
+
+        for result in &mut results {
+            if let JsonValue::Object(ref mut obj) = result {
+                for (relation_name, allowed_fields) in &relation_allowed_fields {
+                    if let Some(relation_data) = obj.get_mut(relation_name.as_str()) {
+                        match relation_data {
+                            JsonValue::Array(items) => {
+                                for item in items.iter_mut() {
+                                    if let JsonValue::Object(item_obj) = item {
+                                        item_obj.retain(|k, _| allowed_fields.contains(k));
+                                    }
+                                }
+                            }
+                            JsonValue::Object(item_obj) => {
+                                item_obj.retain(|k, _| allowed_fields.contains(k));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     /// Apply deferred limit/offset to relation fields in query results.

@@ -854,7 +854,7 @@ impl PlanNode for TypeJoinMany {
 /// Resolve a nested field path within a JSON value.
 /// For example, given a JSON object `{"name": "Math"}` and path `["name"]`,
 /// returns `Some(JsonValue::String("Math"))`.
-fn resolve_nested_field(value: Option<&JsonValue>, path: &[String]) -> Option<JsonValue> {
+pub fn resolve_nested_field(value: Option<&JsonValue>, path: &[String]) -> Option<JsonValue> {
     let mut current = value?.clone();
     for key in path {
         match current {
