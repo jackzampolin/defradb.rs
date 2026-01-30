@@ -609,17 +609,20 @@ pub unsafe extern "C" fn add_view(
             query_source = query_source.with_transform(t);
         }
 
-        // Create each collection with the query source attached
-        let mut created_versions = Vec::new();
-        for mut col_version in collections {
-            col_version.query = Some(query_source.clone());
-            let version = col_version.clone();
-            database
-                .create_collection(col_version)
-                .await
-                .map_err(|e| format!("failed to create view collection: {}", e))?;
-            created_versions.push(version);
-        }
+        // Attach query source to all collections
+        let view_collections: Vec<_> = collections
+            .into_iter()
+            .map(|mut col_version| {
+                col_version.query = Some(query_source.clone());
+                col_version
+            })
+            .collect();
+
+        // Create all view collections atomically (all-or-nothing)
+        let created_versions = database
+            .create_collections_atomic(view_collections)
+            .await
+            .map_err(|e| format!("failed to create view collection: {}", e))?;
 
         let json = serde_json::to_string(&created_versions)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
