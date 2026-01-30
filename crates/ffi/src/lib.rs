@@ -87,7 +87,7 @@ pub use collection::{
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use lens::{lens_add, lens_list};
-pub use node::{basic_export, basic_import, new_node, node_close};
+pub use node::{new_node, node_close};
 pub use p2p::{
     new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_connect, p2p_delete_replicator,
     p2p_get_all_collections, p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections,
