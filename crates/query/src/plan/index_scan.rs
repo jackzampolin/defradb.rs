@@ -19,7 +19,7 @@ use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::planner::index_selection::IndexScanParams;
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, ExecInfo, PlanNode};
 
 /// IndexScanNode scans documents retrieved via index lookup.
 ///
@@ -51,6 +51,10 @@ pub struct IndexScanNode {
     docs_provided: bool,
     /// Number of index key lookups performed (for explain output)
     index_fetches: u64,
+    /// Execution statistics for explain execute mode
+    exec_info: ExecInfo,
+    /// Number of fields per document (for fieldFetches calculation)
+    fields_per_doc: usize,
 }
 
 impl IndexScanNode {
@@ -60,6 +64,7 @@ impl IndexScanNode {
         document_mapping: DocumentMapping,
         index_params: IndexScanParams,
     ) -> Self {
+        let fields_per_doc = document_mapping.field_count();
         Self {
             collection,
             document_mapping,
@@ -73,6 +78,8 @@ impl IndexScanNode {
             fetcher: None,
             docs_provided: false,
             index_fetches: 0,
+            exec_info: ExecInfo::default(),
+            fields_per_doc,
         }
     }
 
@@ -131,6 +138,8 @@ impl IndexScanNode {
 impl PlanNode for IndexScanNode {
     async fn init(&mut self) -> Result<()> {
         self.position = 0;
+        // Reset execution stats
+        self.exec_info = ExecInfo::default();
 
         // If docs weren't provided and we have a fetcher, load documents via index
         if !self.docs_provided {
@@ -168,6 +177,9 @@ impl PlanNode for IndexScanNode {
             ));
         }
 
+        // Track iteration (Go counts each call to next, including final false)
+        self.exec_info.iterations += 1;
+
         loop {
             if self.position >= self.docs.len() {
                 return Ok(false);
@@ -175,6 +187,11 @@ impl PlanNode for IndexScanNode {
 
             let doc = &self.docs[self.position];
             self.position += 1;
+
+            // Track document fetch
+            self.exec_info.docs_fetched += 1;
+            // Track field fetches (each field in the document)
+            self.exec_info.fields_fetched += self.fields_per_doc as u64;
 
             // Skip deleted docs if not showing deleted
             if !self.show_deleted && doc.is_deleted() {
@@ -249,6 +266,33 @@ impl PlanNode for IndexScanNode {
         if self.show_deleted {
             obj.insert("showDeleted".to_string(), serde_json::Value::Bool(true));
         }
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn exec_info(&self) -> ExecInfo {
+        self.exec_info.clone()
+    }
+
+    fn explain_execute_inner(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+
+        obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.exec_info.iterations as u64),
+        );
+        obj.insert(
+            "docFetches".to_string(),
+            serde_json::json!(self.exec_info.docs_fetched as u64),
+        );
+        obj.insert(
+            "fieldFetches".to_string(),
+            serde_json::json!(self.exec_info.fields_fetched as u64),
+        );
+        obj.insert(
+            "indexFetches".to_string(),
+            serde_json::json!(self.index_fetches),
+        );
 
         serde_json::Value::Object(obj)
     }
