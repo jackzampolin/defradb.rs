@@ -72,17 +72,18 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
                 .map_err(|e| format!("failed to parse lens config: {}", e))?]
         };
 
-        let mut last_id = String::new();
+        let mut all_ids = Vec::new();
         for lens_module in modules {
             let config = LensConfig::new("", "", lens_module);
             let lens_id = lens_store
                 .add(config)
                 .await
                 .map_err(|e| format!("failed to add lens: {}", e))?;
-            last_id = lens_id.to_string();
+            all_ids.push(lens_id.to_string());
         }
 
-        Ok::<String, String>(last_id)
+        // Return comma-joined IDs so chained transforms are preserved
+        Ok::<String, String>(all_ids.join(","))
     });
 
     match result {

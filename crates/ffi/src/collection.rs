@@ -552,6 +552,21 @@ pub unsafe extern "C" fn add_view(
         }
         let select_json = select_to_go_json(&selects[0]);
 
+        // Validate transform CID exists in the lens store if provided
+        if let Some(ref t) = transform_opt {
+            let lens_store = database.lens_store();
+            // Check each transform ID (may be comma-separated for chained transforms)
+            for cid in t.split(',') {
+                let cid = cid.trim();
+                if !cid.is_empty() {
+                    let tid = lens::TransformId::new(cid);
+                    if !lens_store.has_transform(&tid) {
+                        return Err("lens CID not found".to_string());
+                    }
+                }
+            }
+        }
+
         // Build the query source with Go-compatible Select JSON
         let mut query_source = schema::QuerySource::new(select_json);
         if let Some(ref t) = transform_opt {
