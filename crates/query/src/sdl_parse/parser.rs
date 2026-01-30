@@ -2426,6 +2426,39 @@ mod tests {
     }
 
     #[test]
+    fn test_self_ref_collection_id_matches_go() {
+        // Go's TestSchemaSelfReferenceSimple expects this CID for `type User { boss: User }`
+        let sdl = r#"
+            type User {
+                boss: User
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        assert_eq!(
+            collections[0].collection_id,
+            "bafyreicuxpdrri4wwdknhbchhdii6tu4myqlhspv3s2c3pci7jt7qc3zua",
+        );
+    }
+
+    #[test]
+    fn test_self_ref_complex_collection_id_matches_go() {
+        // Self-ref schema with multiple relation fields and @primary
+        let sdl = r#"
+            type User {
+                name: String
+                age: Int
+                boss: User @primary @relation(name: "boss_minion")
+                minion: User @relation(name: "boss_minion")
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        assert_eq!(
+            collections[0].collection_id,
+            "bafyreibgdepgcg4y4odgoju4ac6bu5u2jejta6jg6pvzxblm5fnovsa3gi",
+        );
+    }
+
+    #[test]
     fn test_index_descending_direction() {
         let sdl = r#"
             type Event {
