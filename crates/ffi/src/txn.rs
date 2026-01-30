@@ -151,6 +151,7 @@ pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) ->
 ///
 /// * `node_ptr` - Handle to the node
 /// * `txn_id` - Transaction ID from `begin_txn`
+/// * `identity_did` - Optional DID of the caller for ACP permission checks (null for anonymous)
 /// * `request_query` - GraphQL query string (required)
 /// * `operation_name` - Optional operation name (null if not used)
 /// * `variables` - Optional JSON string of variables (null if not used)
@@ -162,6 +163,7 @@ pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) ->
 pub unsafe extern "C" fn exec_request_in_txn(
     node_ptr: usize,
     txn_id: *const c_char,
+    identity_did: *const c_char,
     request_query: *const c_char,
     operation_name: *const c_char,
     variables: *const c_char,
@@ -172,6 +174,9 @@ pub unsafe extern "C" fn exec_request_in_txn(
         Some(s) => s,
         None => return FfiResult::error("txn_id is null"),
     };
+
+    // Accept identity_did for ACP (not yet used in Rust implementation)
+    let _identity = c_str_to_string(identity_did);
 
     let query_str = match c_str_to_string(request_query) {
         Some(s) => s,

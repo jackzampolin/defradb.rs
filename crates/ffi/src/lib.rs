@@ -180,7 +180,7 @@ mod tests {
             r#"mutation { create_Person(input: {name: "Bob", age: 30}) { _docID name age } }"#,
         )
         .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "mutation failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "should contain Bob");
@@ -188,7 +188,7 @@ mod tests {
 
         // Query people
         let query_str = CString::new("{ Person { name age } }").unwrap();
-        let result = unsafe { exec_request(node, query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "query failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "query should return Bob");
