@@ -529,6 +529,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
+        // Embedded-only types (interface types from view SDL) are not root-queryable
+        if collection.is_embedded_only {
+            return Err(QueryError::parse(format!(
+                "Cannot query field \"{}\" on type \"Query\".",
+                select.collection_name
+            )));
+        }
+
         let fetcher = self.fetcher.as_ref();
 
         // Check if we can use an index (filter-based or ordering-based)
@@ -579,7 +587,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let collections: Vec<CollectionVersion> =
                 collections_map.values().map(|c| (**c).clone()).collect();
 
-            let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            if let Some(ref lens_store) = self.lens_store {
+                planner = planner.with_lens_store(lens_store.clone());
+            }
             let plan_result = planner.plan_with_index_info(select)?;
             let mut plan = plan_result.plan;
 
@@ -787,8 +798,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
-        if has_nested || has_ordering_index || has_filter_index || has_relation_aggregates {
-            // Use the Planner for queries with nested selections, index usage, or relation aggregates
+        let is_view = collection.query.is_some();
+
+        if is_view || has_nested || has_ordering_index || has_filter_index || has_relation_aggregates
+        {
+            // Use the Planner for views, nested selections, index usage, or relation aggregates
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
@@ -811,7 +825,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        let planner = Planner::new(collections);
+        let mut planner = Planner::new(collections);
+        if let Some(ref lens_store) = self.lens_store {
+            planner = planner.with_lens_store(lens_store.clone());
+        }
         let plan_result = planner.plan_with_index_info(select)?;
         let plan = plan_result.plan;
 
@@ -1168,6 +1185,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get collection schema on-demand from provider
         let collection = self.get_collection(&select.collection_name).await?;
 
+        // Embedded-only types (interface types from view SDL) are not root-queryable
+        if collection.is_embedded_only {
+            return Err(QueryError::parse(format!(
+                "Cannot query field \"{}\" on type \"Query\".",
+                select.collection_name
+            )));
+        }
+
         // Validate unsupported features and field references
         plan::validate_select(select, &collection)?;
 
@@ -1335,10 +1360,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Views must always use the planner because they don't store data directly -
+        // the planner creates a ViewNode that executes the underlying query.
+        let is_view = collection.query.is_some();
+
         // Use Planner if there are nested selections, filter through relations,
         // order through relations, aggregates on relations, secondary relation ID fields,
-        // similarity computations, or when an index can provide ordering
-        let needs_planner = has_nested
+        // similarity computations, when an index can provide ordering, or when querying a view
+        let needs_planner = is_view
+            || has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
@@ -1410,7 +1440,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
-        let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        if let Some(ref lens_store) = self.lens_store {
+            planner = planner.with_lens_store(lens_store.clone());
+        }
         let plan_result = planner.plan_with_index_info(select)?;
         let mut plan = plan_result.plan;
         let ordering_only_fields = plan_result.ordering_only_fields;
@@ -2338,8 +2371,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|o| o.has_relation_order())
             .unwrap_or(false);
 
+        // Views always need the planner (they execute queries, not storage reads)
+        let is_view = collection.query.is_some();
+
         // Execute the query for document data (without _version)
-        let result = if has_nested || filter_has_relations || order_has_relations {
+        let result = if is_view || has_nested || filter_has_relations || order_has_relations {
             self.execute_nested_select_with_planner(
                 &select_without_version,
                 fetcher,

@@ -50,21 +50,40 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
     };
 
     let result = rt.block_on(async {
-        // Parse the LensModule from JSON
-        let lens_module: LensModule = serde_json::from_str(&lens_str)
-            .map_err(|e| format!("failed to parse lens config: {}", e))?;
+        // Try parsing as Go's model.Lens format ({"Lenses": [...]}) first,
+        // then fall back to single LensModule
+        let modules: Vec<LensModule> = if let Ok(lens_obj) =
+            serde_json::from_str::<serde_json::Value>(&lens_str)
+        {
+            if let Some(lenses_arr) = lens_obj.get("Lenses").and_then(|v| v.as_array()) {
+                lenses_arr
+                    .iter()
+                    .map(|v| {
+                        serde_json::from_value::<LensModule>(v.clone())
+                            .map_err(|e| format!("failed to parse lens module: {}", e))
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            } else {
+                vec![serde_json::from_str::<LensModule>(&lens_str)
+                    .map_err(|e| format!("failed to parse lens config: {}", e))?]
+            }
+        } else {
+            vec![serde_json::from_str::<LensModule>(&lens_str)
+                .map_err(|e| format!("failed to parse lens config: {}", e))?]
+        };
 
-        // Create a LensConfig with empty version IDs (just for storing the module)
-        // This matches Go's behavior where AddLens just stores the transform
-        let config = LensConfig::new("", "", lens_module);
+        let mut all_ids = Vec::new();
+        for lens_module in modules {
+            let config = LensConfig::new("", "", lens_module);
+            let lens_id = lens_store
+                .add(config)
+                .await
+                .map_err(|e| format!("failed to add lens: {}", e))?;
+            all_ids.push(lens_id.to_string());
+        }
 
-        // Register the lens in the store
-        let lens_id = lens_store
-            .add(config)
-            .await
-            .map_err(|e| format!("failed to add lens: {}", e))?;
-
-        Ok::<String, String>(lens_id.to_string())
+        // Return comma-joined IDs so chained transforms are preserved
+        Ok::<String, String>(all_ids.join(","))
     });
 
     match result {

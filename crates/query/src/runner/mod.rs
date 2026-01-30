@@ -53,6 +53,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) default_identity: Option<Did>,
     /// Encryption key for CRDT delta encryption (optional).
     pub(crate) encryption_key: Option<Vec<u8>>,
+    /// Optional lens transform store for view queries with transforms
+    pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -69,6 +71,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             acp: None,
             default_identity: None,
             encryption_key: None,
+            lens_store: None,
         }
     }
 
@@ -85,6 +88,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             acp: None,
             default_identity: None,
             encryption_key: None,
+            lens_store: None,
         }
     }
 }
@@ -103,6 +107,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             acp: None,
             default_identity: None,
             encryption_key: None,
+            lens_store: None,
         }
     }
 
@@ -124,6 +129,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             acp: None,
             default_identity: None,
             encryption_key: None,
+            lens_store: None,
         }
     }
 
@@ -141,6 +147,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Collections with a policy will have ACP enforced; others are unaffected.
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         self.acp = Some(acp);
+        self
+    }
+
+    /// Set the lens transform store for view queries with transforms.
+    pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
+        self.lens_store = Some(store);
         self
     }
 

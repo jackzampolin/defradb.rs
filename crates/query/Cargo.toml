@@ -17,6 +17,7 @@ crdt = { path = "../crdt" }
 blockstore = { path = "../blockstore" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
+lens = { path = "../lens", default-features = false }
 
 # Async runtime
 async-trait.workspace = true

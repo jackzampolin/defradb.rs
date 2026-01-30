@@ -112,6 +112,13 @@ impl DocumentMapping {
         self.render_keys.push(RenderKey::new(index, key));
     }
 
+    /// Iterate over all field name → index entries
+    pub fn indexes_by_name_iter(&self) -> impl Iterator<Item = (&str, &[usize])> {
+        self.indexes_by_name
+            .iter()
+            .map(|(name, indexes)| (name.as_str(), indexes.as_slice()))
+    }
+
     /// Try to find the name of a field by its index
     pub fn try_find_name_from_index(&self, target_index: usize) -> Option<&str> {
         for (name, indexes) in &self.indexes_by_name {

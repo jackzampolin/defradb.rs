@@ -50,7 +50,7 @@ pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::{parse_mutations, parse_query, parse_request, ExplainType, ParsedOperation};
 pub use rest::{RestError, RestOperations, RestOperationsImpl, RestResult};
 pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
-pub use sdl_parse::parse_sdl;
+pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
 pub use txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionContext, TransactionGuard,
     TransactionHandle, TransactionRegistry,

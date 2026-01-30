@@ -59,8 +59,10 @@ impl WasmTransformStore {
 
     /// Load a WASM module from the given lens configuration.
     fn load_module(&self, lens: &LensModule) -> Result<Module> {
-        if let Some(ref path) = lens.path {
-            let path = Path::new(path);
+        if let Some(ref path_str) = lens.path {
+            // Strip file:// URL scheme if present (Go sends paths as file:// URLs)
+            let clean_path = path_str.strip_prefix("file://").unwrap_or(path_str);
+            let path = Path::new(clean_path);
             Module::from_file(&self.engine, path).map_err(|e| {
                 Error::WasmLoad(format!(
                     "failed to load WASM from {}: {}",
