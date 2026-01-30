@@ -187,10 +187,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 })?;
 
                             if !has_permission {
-                                return Err(QueryError::permission_denied(format!(
-                                    "caller_identity does not have update permission on document '{}'",
-                                    doc_id
-                                )));
+                                return Err(QueryError::document_not_found(
+                                    "document not found or not authorized to access",
+                                ));
                             }
                         }
                     } else {
@@ -227,10 +226,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 })?;
 
                             if !has_permission {
-                                return Err(QueryError::permission_denied(format!(
-                                    "caller_identity does not have delete permission on document '{}'",
-                                    doc_id
-                                )));
+                                return Err(QueryError::document_not_found(
+                                    "document not found or not authorized to access",
+                                ));
                             }
                         }
                     } else {
@@ -349,13 +347,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         };
 
-        // Execute the plan
-        plan.init().await?;
-        plan.start().await?;
+        // Execute the plan.
+        // When ACP is active, wrap DocumentNotFound errors to match Go's generic message
+        // (security best practice: don't reveal whether document exists vs unauthorized).
+        let has_acp = self.acp.is_some() && collection.policy.is_some();
+        let map_doc_not_found = |e: QueryError| -> QueryError {
+            if has_acp {
+                if let QueryError::DocumentNotFound(_) = &e {
+                    return QueryError::document_not_found(
+                        "document not found or not authorized to access",
+                    );
+                }
+            }
+            e
+        };
+
+        plan.init().await.map_err(&map_doc_not_found)?;
+        plan.start().await.map_err(&map_doc_not_found)?;
 
         let mut results = Vec::new();
 
-        while plan.next().await? {
+        while plan.next().await.map_err(&map_doc_not_found)? {
             let doc = plan.value();
             let json = self.doc_to_json(doc, &mapping)?;
             results.push(json);
@@ -364,7 +376,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Clear encryption config after plan execution
         defra_core::encryption::set_encryption_config(None);
 
-        plan.close().await?;
+        plan.close().await.map_err(&map_doc_not_found)?;
 
         // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
         if matches!(

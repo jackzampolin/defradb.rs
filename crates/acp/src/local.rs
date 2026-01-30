@@ -26,14 +26,8 @@ use crate::relation::{
 };
 use crate::store::AcpStore;
 
-/// Known valid relation names that can be added.
-/// Owner relation is excluded because it's immutable (set at registration time).
-const VALID_ADDABLE_RELATIONS: &[&str] = &[READER_RELATION, UPDATER_RELATION, DELETER_RELATION];
-
-/// Check if a relation name is valid for adding.
-fn is_valid_relation(relation: &str) -> bool {
-    VALID_ADDABLE_RELATIONS.contains(&relation)
-}
+// Relation validation is done at the FFI/caller layer against the policy definition.
+// LocalDocumentACP only rejects the immutable "owner" relation.
 
 /// Local document ACP implementation using in-memory storage.
 ///
@@ -220,14 +214,6 @@ impl DocumentACP for LocalDocumentACP {
             return Err(Error::InvalidRelation(
                 "cannot add owner relation".to_string(),
             ));
-        }
-
-        // Validate relation name against known valid relations
-        if !is_valid_relation(relation) {
-            return Err(Error::InvalidRelation(format!(
-                "unknown relation '{}', valid relations are: reader, updater, deleter",
-                relation
-            )));
         }
 
         let tuple = RelationTuple::new(target.clone(), relation, collection_id, doc_id);

@@ -538,11 +538,49 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         );
     }
 
-    // Validate node handle before entering async block
-    let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
-        Some(acp) => acp,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    // Validate node handle and get database, document_acp, and policy_store
+    let (database, document_acp, policy_store) =
+        match NODES.get(node_ptr, |state| {
+            (state.database.clone(), state.document_acp.clone(), state.policy_store.clone())
+        }) {
+            Some(tuple) => tuple,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+
+    // Resolve collection name → policy resource_name and policy_id
+    let (resource_name, policy_id) = match database.get_collection(&collection_id_str) {
+        Ok(Some(col)) => match col.schema().policy {
+            Some(ref policy) => (policy.resource_name.clone(), policy.id.clone()),
+            None => {
+                return FfiResult::error(
+                    "operation requires ACP, but collection has no policy",
+                );
+            }
+        },
+        Ok(None) => {
+            return FfiResult::error(format!(
+                "collection '{}' does not exist",
+                collection_id_str
+            ));
+        }
+        Err(e) => {
+            return FfiResult::error(format!("failed to get collection '{}': {}", collection_id_str, e));
+        }
     };
+
+    // Validate relation against policy definition (matches Go behavior)
+    if let Some(policy_yaml) = policy_store.get_policy(&policy_id) {
+        if let Ok(parsed) = crate::policy_yaml::parse_policy_yaml(&policy_yaml) {
+            if let Some(resource) = parsed.find_resource(&resource_name) {
+                if !resource.has_relation(&relation_str) {
+                    return FfiResult::error(format!(
+                        "relation '{}' not found in policy resource '{}'",
+                        relation_str, resource_name
+                    ));
+                }
+            }
+        }
+    }
 
     let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
@@ -554,7 +592,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             .add_actor_relationship(
                 &requestor,
                 &target,
-                &collection_id_str,
+                &resource_name,
                 &doc_id_str,
                 &relation_str,
             )
@@ -635,11 +673,49 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
         );
     }
 
-    // Validate node handle before entering async block
-    let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
-        Some(acp) => acp,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    // Validate node handle and get database, document_acp, and policy_store
+    let (database, document_acp, policy_store) =
+        match NODES.get(node_ptr, |state| {
+            (state.database.clone(), state.document_acp.clone(), state.policy_store.clone())
+        }) {
+            Some(tuple) => tuple,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+
+    // Resolve collection name → policy resource_name and policy_id
+    let (resource_name, policy_id) = match database.get_collection(&collection_id_str) {
+        Ok(Some(col)) => match col.schema().policy {
+            Some(ref policy) => (policy.resource_name.clone(), policy.id.clone()),
+            None => {
+                return FfiResult::error(
+                    "operation requires ACP, but collection has no policy",
+                );
+            }
+        },
+        Ok(None) => {
+            return FfiResult::error(format!(
+                "collection '{}' does not exist",
+                collection_id_str
+            ));
+        }
+        Err(e) => {
+            return FfiResult::error(format!("failed to get collection '{}': {}", collection_id_str, e));
+        }
     };
+
+    // Validate relation against policy definition (matches Go behavior)
+    if let Some(policy_yaml) = policy_store.get_policy(&policy_id) {
+        if let Ok(parsed) = crate::policy_yaml::parse_policy_yaml(&policy_yaml) {
+            if let Some(resource) = parsed.find_resource(&resource_name) {
+                if !resource.has_relation(&relation_str) {
+                    return FfiResult::error(format!(
+                        "relation '{}' not found in policy resource '{}'",
+                        relation_str, resource_name
+                    ));
+                }
+            }
+        }
+    }
 
     let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
@@ -651,7 +727,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             .delete_actor_relationship(
                 &requestor,
                 &target,
-                &collection_id_str,
+                &resource_name,
                 &doc_id_str,
                 &relation_str,
             )

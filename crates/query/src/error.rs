@@ -209,6 +209,11 @@ impl QueryError {
         Self::CollectionNotFound(name.into())
     }
 
+    /// Create a document not found error
+    pub fn document_not_found(msg: impl Into<String>) -> Self {
+        Self::DocumentNotFound(msg.into())
+    }
+
     /// Create an execution error
     pub fn execution(msg: impl Into<String>) -> Self {
         Self::Execution(msg.into())

@@ -722,6 +722,29 @@ pub unsafe extern "C" fn set_migration(node_ptr: usize, config: *const c_char) -
     }
 }
 
+/// Truncate a collection (delete all documents, preserve schema).
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `name` - The collection name to truncate
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn truncate_collection(
+    _node_ptr: usize,
+    _name: *const c_char,
+) -> FfiResult {
+    FfiResult::error("truncate_collection is not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
