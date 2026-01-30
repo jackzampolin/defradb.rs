@@ -367,17 +367,14 @@ pub(crate) fn build_plan(
     // First check select.filter, then fall back to aggregate target filter
     let filter_for_scan = select.filter.clone().or_else(|| {
         // For top-level aggregates, the filter might be on the aggregate target
-        select
-            .fields
-            .iter()
-            .find_map(|f| {
-                if let Requestable::Aggregate(agg) = f {
-                    if !agg.targets.is_empty() {
-                        return agg.targets[0].filter.clone();
-                    }
+        select.fields.iter().find_map(|f| {
+            if let Requestable::Aggregate(agg) = f {
+                if !agg.targets.is_empty() {
+                    return agg.targets[0].filter.clone();
                 }
-                None
-            })
+            }
+            None
+        })
     });
     if let Some(ref filter) = filter_for_scan {
         scan = scan.with_filter(filter.clone());

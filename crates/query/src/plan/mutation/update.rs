@@ -67,7 +67,8 @@ impl UpdateInput {
             let field_def =
                 collection.and_then(|c| c.fields.iter().find(|f| f.name == *field_name));
             let field_kind = field_def.map(|f| &f.kind);
-            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
+            let normal_value =
+                json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
 
             // Counter CRDT fields use increment semantics
             if let Some(fd) = field_def {
@@ -385,7 +386,11 @@ impl PlanNode for UpdateNode {
 
                 if let Some(mut doc) = doc_opt {
                     // Apply update input with schema-aware coercion and request time
-                    self.input.apply_to_with_time(&mut doc, self.collection.as_deref(), self.request_time)?;
+                    self.input.apply_to_with_time(
+                        &mut doc,
+                        self.collection.as_deref(),
+                        self.request_time,
+                    )?;
 
                     // Collect the modified field names for block creation
                     let modified_fields: std::collections::HashSet<String> =
@@ -473,7 +478,12 @@ impl PlanNode for UpdateNode {
         if let Some(ref doc_ids) = self.doc_ids {
             obj.insert(
                 "docID".to_string(),
-                JsonValue::Array(doc_ids.iter().map(|id| JsonValue::String(id.clone())).collect()),
+                JsonValue::Array(
+                    doc_ids
+                        .iter()
+                        .map(|id| JsonValue::String(id.clone()))
+                        .collect(),
+                ),
             );
         } else {
             obj.insert("docID".to_string(), JsonValue::Null);

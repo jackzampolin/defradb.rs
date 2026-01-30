@@ -12,12 +12,12 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
+use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef,
     JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
     SimilarityNode, SumNode, TypeJoinMany, TypeJoinOne,
 };
-use crate::plan::groupby::ChildSelectMeta;
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
     IndexScanType,
@@ -792,7 +792,8 @@ impl Planner {
                     Some(filter.clone())
                 };
                 if let Some(f) = pre_agg_filter {
-                    let mut select_node = SelectNode::new(plan, scan_mapping.clone()).with_filter(f);
+                    let mut select_node =
+                        SelectNode::new(plan, scan_mapping.clone()).with_filter(f);
                     if let Some(ref doc_ids) = select.doc_ids {
                         select_node = select_node.with_doc_ids(doc_ids.clone());
                     }
@@ -1479,33 +1480,33 @@ impl Planner {
                         ))
                     })?;
 
-                // For self-referential relations (empty relative_id), use the parent collection
-                let target_collection = if target_collection_id.is_empty() {
-                    // Self-reference: target is the same collection as parent
-                    Arc::new(parent_collection.clone())
-                } else {
-                    self.get_collection(target_collection_id)
-                        .or_else(|| {
-                            // CID lookup failed - try to find target by matching relation_name.
-                            // Handles CID mismatch from circular schema set-based versioning.
-                            let rel_name = relation_field.relation_name.as_deref().unwrap_or("");
-                            if rel_name.is_empty() {
-                                return None;
+            // For self-referential relations (empty relative_id), use the parent collection
+            let target_collection = if target_collection_id.is_empty() {
+                // Self-reference: target is the same collection as parent
+                Arc::new(parent_collection.clone())
+            } else {
+                self.get_collection(target_collection_id)
+                    .or_else(|| {
+                        // CID lookup failed - try to find target by matching relation_name.
+                        // Handles CID mismatch from circular schema set-based versioning.
+                        let rel_name = relation_field.relation_name.as_deref().unwrap_or("");
+                        if rel_name.is_empty() {
+                            return None;
+                        }
+                        for coll in self.collections.values() {
+                            if coll.name == parent_collection.name {
+                                continue;
                             }
-                            for coll in self.collections.values() {
-                                if coll.name == parent_collection.name {
-                                    continue;
-                                }
-                                for f in &coll.fields {
-                                    if f.relation_name.as_deref() == Some(rel_name) {
-                                        return Some(coll.clone());
-                                    }
+                            for f in &coll.fields {
+                                if f.relation_name.as_deref() == Some(rel_name) {
+                                    return Some(coll.clone());
                                 }
                             }
-                            None
-                        })
-                        .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
-                };
+                        }
+                        None
+                    })
+                    .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
+            };
 
             // Build child mapping for rendering (only selected fields)
             let child_render_mapping = self.build_mapping(nested_select, &target_collection)?;

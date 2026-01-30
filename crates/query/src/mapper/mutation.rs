@@ -162,7 +162,11 @@ impl Mutation {
         if let Some(ref alias) = self.alias {
             alias.clone()
         } else {
-            format!("{}_{}", self.mutation_type.as_prefix(), self.collection_name)
+            format!(
+                "{}_{}",
+                self.mutation_type.as_prefix(),
+                self.collection_name
+            )
         }
     }
 

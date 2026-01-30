@@ -196,14 +196,10 @@ impl<S: ZanzibarStore> NodeACP<S> {
         let status = *self.status.read().await;
         match status {
             NacStatus::NotConfigured => {
-                return Err(Error::InvalidPolicy(
-                    "node acp is not configured".into(),
-                ));
+                return Err(Error::InvalidPolicy("node acp is not configured".into()));
             }
             NacStatus::DisabledTemporarily => {
-                return Err(Error::InvalidPolicy(
-                    "node acp is already disabled".into(),
-                ));
+                return Err(Error::InvalidPolicy("node acp is already disabled".into()));
             }
             NacStatus::Enabled => {} // proceed
         }
@@ -233,14 +229,10 @@ impl<S: ZanzibarStore> NodeACP<S> {
         let status = *self.status.read().await;
         match status {
             NacStatus::NotConfigured => {
-                return Err(Error::InvalidPolicy(
-                    "node acp is not configured".into(),
-                ));
+                return Err(Error::InvalidPolicy("node acp is not configured".into()));
             }
             NacStatus::Enabled => {
-                return Err(Error::InvalidPolicy(
-                    "node acp is already enabled".into(),
-                ));
+                return Err(Error::InvalidPolicy("node acp is already enabled".into()));
             }
             NacStatus::DisabledTemporarily => {} // proceed
         }

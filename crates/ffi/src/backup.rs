@@ -10,10 +10,7 @@ use crate::types::FfiResult;
 ///
 /// `config_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn basic_export(
-    _node_ptr: usize,
-    _config_json: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn basic_export(_node_ptr: usize, _config_json: *const c_char) -> FfiResult {
     FfiResult::error("basic_export not yet implemented")
 }
 
@@ -23,9 +20,6 @@ pub unsafe extern "C" fn basic_export(
 ///
 /// `filepath` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn basic_import(
-    _node_ptr: usize,
-    _filepath: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn basic_import(_node_ptr: usize, _filepath: *const c_char) -> FfiResult {
     FfiResult::error("basic_import not yet implemented")
 }

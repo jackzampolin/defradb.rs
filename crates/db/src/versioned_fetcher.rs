@@ -5,6 +5,7 @@
 //! 2. Collecting all blocks in the path
 //! 3. Replaying CRDT deltas forward to reconstruct document state
 
+use async_lock::Mutex as TokioMutex;
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta};
 use document::{Document, NormalValue};
@@ -12,7 +13,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::Store;
-use async_lock::Mutex as TokioMutex;
 
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;

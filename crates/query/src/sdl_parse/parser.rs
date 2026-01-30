@@ -74,15 +74,75 @@ fn graphql_schema_value_to_json(
     }
 }
 
-/// Parse @policy directive arguments
+/// Parse @policy directive arguments with Go-compatible error messages.
 fn parse_policy_directive(directive: &Directive<'_, String>) -> Result<PolicyConfig> {
-    let id = get_directive_string(directive, "id")
-        .ok_or_else(|| QueryError::parse("@policy directive requires 'id' argument"))?;
+    let id_raw = get_directive_arg(directive, "id");
+    let resource_raw = get_directive_arg(directive, "resource");
 
-    let resource = get_directive_string(directive, "resource")
-        .ok_or_else(|| QueryError::parse("@policy directive requires 'resource' argument"))?;
+    // Check for non-string argument types first (Go's graphql-go reports these)
+    if let Some(v) = id_raw {
+        if !matches!(v, graphql_parser::schema::Value::String(_)) {
+            return Err(QueryError::parse(format!(
+                "Argument \"id\" has invalid value {}",
+                format_graphql_value(v)
+            )));
+        }
+    }
+    if let Some(v) = resource_raw {
+        if !matches!(v, graphql_parser::schema::Value::String(_)) {
+            return Err(QueryError::parse(format!(
+                "Argument \"resource\" has invalid value {}",
+                format_graphql_value(v)
+            )));
+        }
+    }
 
-    Ok(PolicyConfig { id, resource })
+    // Extract string values (None if argument not present)
+    let id = id_raw.and_then(|v| match v {
+        graphql_parser::schema::Value::String(s) => Some(s.clone()),
+        _ => None,
+    });
+    let resource = resource_raw.and_then(|v| match v {
+        graphql_parser::schema::Value::String(s) => Some(s.clone()),
+        _ => None,
+    });
+
+    let id_empty = id.as_ref().map_or(true, |s| s.is_empty());
+    let resource_empty = resource.as_ref().map_or(true, |s| s.is_empty());
+
+    if id_empty && resource_empty {
+        return Err(QueryError::parse(
+            "missing policy arguments, must have both id and resource",
+        ));
+    }
+    if id_empty {
+        return Err(QueryError::parse("policyID must not be empty"));
+    }
+    if resource_empty {
+        return Err(QueryError::parse("resource name must not be empty"));
+    }
+
+    Ok(PolicyConfig {
+        id: id.unwrap(),
+        resource: resource.unwrap(),
+    })
+}
+
+/// Format a GraphQL value for error messages (matches Go's graphql-go formatting).
+fn format_graphql_value(value: &graphql_parser::schema::Value<'_, String>) -> String {
+    match value {
+        graphql_parser::schema::Value::Int(n) => {
+            n.as_i64().map_or("0".to_string(), |v| v.to_string())
+        }
+        graphql_parser::schema::Value::Float(f) => f.to_string(),
+        graphql_parser::schema::Value::Boolean(b) => b.to_string(),
+        graphql_parser::schema::Value::String(s) => format!("\"{}\"", s),
+        graphql_parser::schema::Value::Null => "null".to_string(),
+        graphql_parser::schema::Value::Enum(s) => s.clone(),
+        graphql_parser::schema::Value::List(_) => "[list]".to_string(),
+        graphql_parser::schema::Value::Object(_) => "{object}".to_string(),
+        graphql_parser::schema::Value::Variable(v) => format!("${}", v),
+    }
 }
 
 /// SDL parser for DefraDB schemas
@@ -133,9 +193,7 @@ impl Default for ParsedTypeDirectives {
 }
 
 /// Policy configuration from @policy directive
-/// Fields are validated during parsing but not yet wired to CollectionVersion
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct PolicyConfig {
     id: String,
     resource: String,
@@ -1462,6 +1520,12 @@ impl<'a> SdlParser<'a> {
         collection.indexes = indexes;
         collection.is_materialized = type_def.directives.is_materialized;
         collection.is_branchable = type_def.directives.is_branchable;
+        if let Some(ref policy_config) = type_def.directives.policy {
+            collection.policy = Some(schema::PolicyDescription::new(
+                &policy_config.id,
+                &policy_config.resource,
+            ));
+        }
 
         Ok(collection)
     }
@@ -2723,7 +2787,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("requires 'id' argument"),
+            err.contains("policyID must not be empty"),
             "error should mention missing id argument: {}",
             err
         );
@@ -2741,7 +2805,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("requires 'resource' argument"),
+            err.contains("resource name must not be empty"),
             "error should mention missing resource argument: {}",
             err
         );
