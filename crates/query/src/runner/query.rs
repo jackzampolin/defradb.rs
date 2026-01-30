@@ -529,6 +529,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
+        // Embedded-only types (interface types from view SDL) are not root-queryable
+        if collection.is_embedded_only {
+            return Err(QueryError::parse(format!(
+                "Cannot query field \"{}\" on type \"Query\".",
+                select.collection_name
+            )));
+        }
+
         let fetcher = self.fetcher.as_ref();
 
         // Check if we can use an index (filter-based or ordering-based)
@@ -1176,6 +1184,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Get collection schema on-demand from provider
         let collection = self.get_collection(&select.collection_name).await?;
+
+        // Embedded-only types (interface types from view SDL) are not root-queryable
+        if collection.is_embedded_only {
+            return Err(QueryError::parse(format!(
+                "Cannot query field \"{}\" on type \"Query\".",
+                select.collection_name
+            )));
+        }
 
         // Validate unsupported features and field references
         plan::validate_select(select, &collection)?;

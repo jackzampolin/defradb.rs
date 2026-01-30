@@ -29,7 +29,7 @@ pub fn build_introspection_schema(
 
     // Create object types for each collection and add query fields
     for collection in collections {
-        // Create object type for this collection
+        // Create object type for this collection (always register for type system)
         let obj_type = build_collection_type(collection, &id_to_name);
         schema_builder = schema_builder.register(obj_type);
 
@@ -44,6 +44,17 @@ pub fn build_introspection_schema(
         // Create Field enum for this collection (e.g., UserField)
         let field_enum = build_field_enum(collection);
         schema_builder = schema_builder.register(field_enum);
+
+        // Add mutation input types (needed even for embedded types since
+        // non-embedded types may reference them in their mutation inputs)
+        let mutation_input = build_mutation_input_type(collection);
+        schema_builder = schema_builder.register(mutation_input);
+
+        // Embedded-only types (interface types from view SDL) are registered in the type
+        // system but not as root query fields - they can only be accessed via relations.
+        if collection.is_embedded_only {
+            continue;
+        }
 
         // Add query field for this collection (e.g., User)
         let collection_name = collection.name.clone();
@@ -76,9 +87,6 @@ pub fn build_introspection_schema(
             .argument(InputValue::new("cid", TypeRef::named("String"))),
         );
 
-        // Add mutation input types
-        let mutation_input = build_mutation_input_type(collection);
-        schema_builder = schema_builder.register(mutation_input);
     }
 
     // Register standard scalars and filter types
@@ -119,20 +127,47 @@ fn build_collection_type(
     id_to_name: &HashMap<String, String>,
 ) -> Object {
     let mut obj = Object::new(&collection.name);
+    let is_view = collection.query.is_some();
 
-    // Add _docID field (always present)
-    obj = obj.field(Field::new("_docID", TypeRef::named_nn("ID"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
+    if is_view {
+        // View types have aggregate fields (before regular fields for correct ordering)
+        obj = obj.field(Field::new("_avg", TypeRef::named("Float"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
+        obj = obj.field(Field::new("_count", TypeRef::named("Int"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
+        obj = obj.field(Field::new(
+            "_group",
+            TypeRef::named_list(&collection.name),
+            |_| FieldFuture::new(async { Ok(Some(GqlValue::Null)) }),
+        ));
+        obj = obj.field(Field::new("_max", TypeRef::named("Float"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
+        obj = obj.field(Field::new("_min", TypeRef::named("Float"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
+        obj = obj.field(Field::new("_similarity", TypeRef::named("Float"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
+        obj = obj.field(Field::new("_sum", TypeRef::named("Float"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
+    } else {
+        // Regular collections have _docID and _deleted fields
+        obj = obj.field(Field::new("_docID", TypeRef::named_nn("ID"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
 
-    // Add _deleted field (always present, used with showDeleted queries)
-    obj = obj.field(Field::new("_deleted", TypeRef::named("Boolean"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
+        obj = obj.field(Field::new("_deleted", TypeRef::named("Boolean"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        }));
+    }
 
     // Add fields from collection definition
     for field in &collection.fields {
-        // Skip _docID since we add it explicitly above
+        // Skip _docID since we add it explicitly above (regular collections only)
         if field.name == "_docID" {
             continue;
         }
@@ -333,6 +368,11 @@ fn build_mutation_type(collections: &[CollectionVersion]) -> Object {
     let mut mutation = Object::new("Mutation").description("Root mutation type");
 
     for collection in collections {
+        // Embedded-only types don't have mutation fields
+        if collection.is_embedded_only {
+            continue;
+        }
+
         let coll_name = collection.name.clone();
         let input_type = format!("{}MutationInputArg", coll_name);
 

@@ -33,8 +33,44 @@ fn select_to_go_json(select: &query::Select) -> serde_json::Value {
                 serde_json::Value::Object(m)
             }
             query::mapper::Requestable::Select(sub) => select_to_go_json(sub),
-            query::mapper::Requestable::Aggregate(_agg) => {
-                serde_json::Value::Object(serde_json::Map::new())
+            query::mapper::Requestable::Aggregate(agg) => {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "Name".into(),
+                    serde_json::Value::String(agg.aggregate_type.as_str().to_string()),
+                );
+                m.insert(
+                    "Alias".into(),
+                    agg.alias
+                        .as_ref()
+                        .map(|a| serde_json::Value::String(a.clone()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                let targets: Vec<serde_json::Value> = agg
+                    .targets
+                    .iter()
+                    .map(|t| {
+                        let mut tm = serde_json::Map::new();
+                        tm.insert(
+                            "HostName".into(),
+                            serde_json::Value::String(t.host_name.clone()),
+                        );
+                        tm.insert(
+                            "ChildName".into(),
+                            t.field_name
+                                .as_ref()
+                                .map(|n| serde_json::Value::String(n.clone()))
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                        tm.insert("Filter".into(), serde_json::Value::Null);
+                        tm.insert("Limit".into(), serde_json::Value::Null);
+                        tm.insert("Offset".into(), serde_json::Value::Null);
+                        tm.insert("OrderBy".into(), serde_json::Value::Null);
+                        serde_json::Value::Object(tm)
+                    })
+                    .collect();
+                m.insert("Targets".into(), serde_json::Value::Array(targets));
+                serde_json::Value::Object(m)
             }
         })
         .collect();
