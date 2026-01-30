@@ -5,6 +5,7 @@
 //! 2. Collecting all blocks in the path
 //! 3. Replaying CRDT deltas forward to reconstruct document state
 
+use async_lock::Mutex as TokioMutex;
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta};
 use document::{Document, NormalValue};
@@ -12,7 +13,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::Store;
-use async_lock::Mutex as TokioMutex;
 
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
@@ -41,6 +41,26 @@ impl<S: Store> VersionedFetcher<S> {
         cid_str: &str,
         expected_doc_id: Option<&str>,
     ) -> Result<Document> {
+        let docs = self
+            .get_documents_at_cid(cid_str, expected_doc_id)
+            .await?;
+        docs.into_iter().next().ok_or_else(|| {
+            Error::Serialization(
+                "cid either does not exist or belong to document".to_string(),
+            )
+        })
+    }
+
+    /// Reconstruct documents at the specified CID.
+    ///
+    /// For document-level CIDs, returns a single document.
+    /// For collection-level CIDs (branchable collections), walks the collection DAG
+    /// and returns all documents visible at that collection state.
+    pub async fn get_documents_at_cid(
+        &self,
+        cid_str: &str,
+        expected_doc_id: Option<&str>,
+    ) -> Result<Vec<Document>> {
         let mut guard = self.txn.lock().await;
         let txn = guard.as_mut().ok_or(Error::TxnNotActive)?;
 
@@ -50,7 +70,14 @@ impl<S: Store> VersionedFetcher<S> {
         // Load the target block first to validate and get doc info
         let target_block = self.load_block(txn, &target_cid).await?;
 
-        // Extract and validate document ID
+        // Check if this is a collection block (branchable collection CID)
+        if matches!(&target_block.delta, CrdtDelta::Collection(_)) {
+            return self
+                .get_documents_at_collection_cid(txn, &target_cid, &target_block)
+                .await;
+        }
+
+        // Regular document CID path
         let doc_id = Self::extract_doc_id(&target_block.delta)?;
 
         if let Some(expected) = expected_doc_id {
@@ -73,7 +100,95 @@ impl<S: Store> VersionedFetcher<S> {
         // Replay deltas to reconstruct document
         let document = self.replay_deltas(&sorted_blocks, &doc_id)?;
 
-        Ok(document)
+        Ok(vec![document])
+    }
+
+    /// Reconstruct documents from a collection-level CID.
+    ///
+    /// Walks the collection DAG backwards to find all document composite CIDs,
+    /// then reconstructs each unique document at its latest version up to
+    /// the target collection state.
+    async fn get_documents_at_collection_cid(
+        &self,
+        txn: &mut DbTxn<S>,
+        start_cid: &Cid,
+        start_block: &Block,
+    ) -> Result<Vec<Document>> {
+        // Walk the collection DAG backwards to find all document composite CIDs.
+        // Each collection block links to one document composite block.
+        // We track doc_id → (priority, composite_cid) keeping highest priority per doc.
+        let mut doc_composites: HashMap<String, (u64, Cid)> = HashMap::new();
+        let mut visited = HashSet::new();
+        let mut queue: VecDeque<(Cid, Block)> = VecDeque::new();
+
+        visited.insert(start_cid.to_string());
+        queue.push_back((*start_cid, start_block.clone()));
+
+        while let Some((_col_cid, col_block)) = queue.pop_front() {
+            // Extract document composite CID from collection block's links
+            if let Some(ref links) = col_block.links {
+                for link in links {
+                    let doc_composite_cid = link.link;
+                    // Load the document composite block to get its doc_id and priority
+                    if let Ok(doc_block) = self.load_block(txn, &doc_composite_cid).await {
+                        if let Ok(doc_id) = Self::extract_doc_id(&doc_block.delta) {
+                            let priority = doc_block.delta.priority();
+                            match doc_composites.get(&doc_id) {
+                                None => {
+                                    doc_composites
+                                        .insert(doc_id, (priority, doc_composite_cid));
+                                }
+                                Some((existing_priority, _)) => {
+                                    if priority > *existing_priority {
+                                        doc_composites
+                                            .insert(doc_id, (priority, doc_composite_cid));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Traverse collection heads (previous collection blocks)
+            if let Some(ref heads) = col_block.heads {
+                for head_cid in heads {
+                    let head_str = head_cid.to_string();
+                    if !visited.contains(&head_str) {
+                        visited.insert(head_str);
+                        if let Ok(head_block) = self.load_block(txn, head_cid).await {
+                            queue.push_back((*head_cid, head_block));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reconstruct each document at its specific composite CID
+        let mut documents = Vec::new();
+        for (_doc_id, (_priority, composite_cid)) in &doc_composites {
+            let composite_block = match self.load_block(txn, composite_cid).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let doc_id = match Self::extract_doc_id(&composite_block.delta) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
+            // Collect all blocks from this composite back to genesis
+            let blocks = self
+                .collect_blocks_to_genesis(txn, composite_cid, &composite_block)
+                .await?;
+
+            let mut sorted_blocks: Vec<(Cid, Block)> = blocks.into_iter().collect();
+            sorted_blocks.sort_by_key(|(_, block)| block.delta.priority());
+
+            let document = self.replay_deltas(&sorted_blocks, &doc_id)?;
+            documents.push(document);
+        }
+
+        Ok(documents)
     }
 
     /// Parse a CID string, returning appropriate errors for invalid/unknown CIDs.
@@ -205,6 +320,8 @@ impl<S: Store> VersionedFetcher<S> {
     /// Blocks should be sorted by priority (ascending) before calling this method.
     fn replay_deltas(&self, blocks: &[(Cid, Block)], doc_id: &str) -> Result<Document> {
         let mut field_values: HashMap<String, (u64, NormalValue)> = HashMap::new();
+        let mut is_deleted = false;
+        let mut max_composite_priority: u64 = 0;
 
         for (_cid, block) in blocks {
             match &block.delta {
@@ -265,13 +382,9 @@ impl<S: Store> VersionedFetcher<S> {
                     let field_name = &payload.field_name;
 
                     // Counter: accumulate increments
-                    // Note: Counter replay needs nonce tracking for idempotency
-                    // For now, we apply all deltas (may double-count on concurrent updates)
                     if !payload.data.is_empty() {
-                        // Try decoding as NormalValue to handle both Int and Float counters
                         match ciborium::from_reader::<NormalValue, _>(&payload.data[..]) {
                             Ok(increment_value) => {
-                                // Handle both Int and Float counter values
                                 match &increment_value {
                                     NormalValue::Int(increment) => {
                                         let current: i64 = field_values
@@ -325,9 +438,13 @@ impl<S: Store> VersionedFetcher<S> {
                         }
                     }
                 }
-                CrdtDelta::Composite(_) => {
-                    // Composite blocks link to field blocks, they don't contain data themselves
-                    // The field blocks are already collected via the links traversal
+                CrdtDelta::Composite(payload) => {
+                    // Track document status from composite blocks.
+                    // The highest-priority composite determines the final status.
+                    if payload.priority >= max_composite_priority {
+                        max_composite_priority = payload.priority;
+                        is_deleted = payload.status == 2;
+                    }
                 }
                 _ => {
                     // Collection and schema definition deltas are not relevant for document reconstruction
@@ -344,6 +461,11 @@ impl<S: Store> VersionedFetcher<S> {
         // Set document ID
         if let Ok(doc_id_obj) = document::DocID::from_string(doc_id) {
             document.set_id(doc_id_obj);
+        }
+
+        // Set deleted status from composite block
+        if is_deleted {
+            document.set_deleted(true);
         }
 
         Ok(document)

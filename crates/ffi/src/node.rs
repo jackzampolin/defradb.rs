@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+
 use crate::get_runtime;
 use crate::state::{NodeState, PolicyStore, NODES};
 use crate::types::{FfiResult, NewNodeResult, NodeInitOptions};
@@ -64,11 +65,16 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
         let nac_config = db::NacConfig::new().with_dev_mode();
         let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
 
-        // Create query runner with transaction, mutation, and ACP support
+        // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
+        let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+
+        // Create query runner with transaction, mutation, ACP, lens, and encryption support
         let query_runner =
             query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
                 .with_mutator(mutator)
-                .with_acp(document_acp.clone());
+                .with_acp(document_acp.clone())
+                .with_encryption_key(encryption_key)
+                .with_lens_store(database.lens_store().clone());
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
@@ -137,6 +143,7 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
         Err(e) => FfiResult::error(format!("failed to close database: {}", e)),
     }
 }
+
 
 #[cfg(test)]
 mod tests {

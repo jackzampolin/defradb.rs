@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, Utc};
 use document::{DocID, Document};
-use schema::CollectionVersion;
+use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
 use tracing;
 
@@ -69,7 +69,8 @@ impl UpsertInput {
                     .find(|f| f.name == *field_name)
                     .map(|f| &f.kind)
             });
-            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
+            let normal_value =
+                json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
             doc.set(field_name.clone(), normal_value);
             modified_count += 1;
         }
@@ -130,6 +131,10 @@ pub struct UpsertNode {
     mutator: Arc<dyn DocMutator>,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
+    /// Collection schema for schema-aware type coercion (e.g., DateTime/UTC_NOW)
+    collection: Option<Arc<CollectionVersion>>,
+    /// Pre-computed request time for UTC_NOW resolution (ensures consistency within a request)
+    request_time: Option<DateTime<FixedOffset>>,
     /// Input documents to upsert (for batch operations without docIDs)
     inputs: Vec<UpsertInput>,
     /// Document IDs to upsert (from resolved filter)
@@ -165,6 +170,8 @@ impl UpsertNode {
             collection_name: collection_name.into(),
             mutator,
             document_mapping,
+            collection: None,
+            request_time: None,
             inputs: Vec::new(),
             doc_ids: None,
             create_input: None,
@@ -177,6 +184,18 @@ impl UpsertNode {
             did_upsert: false,
             initialized: false,
         }
+    }
+
+    /// Set the collection schema for schema-aware type coercion.
+    pub fn with_collection(mut self, collection: Arc<CollectionVersion>) -> Self {
+        self.collection = Some(collection);
+        self
+    }
+
+    /// Set the pre-computed request time for UTC_NOW resolution.
+    pub fn with_request_time(mut self, request_time: DateTime<FixedOffset>) -> Self {
+        self.request_time = Some(request_time);
+        self
     }
 
     /// Set the create input (used when no matching document found).
@@ -257,7 +276,8 @@ impl UpsertNode {
                 "Upsert: updating existing document"
             );
 
-            input.apply_to(&mut doc, None, utc_now)?;
+            let collection_ref = self.collection.as_deref();
+            input.apply_to(&mut doc, collection_ref, utc_now)?;
 
             // Collect the modified field names for block creation
             let modified_fields: std::collections::HashSet<String> =
@@ -279,11 +299,32 @@ impl UpsertNode {
                 "Upsert: creating new document with specified ID"
             );
 
-            // Create document with the specified ID
+            // Create document with the specified ID, using schema-aware type coercion
             let mut doc = Document::with_id(doc_id);
+            if let Some(ref collection) = self.collection {
+                doc.set_collection((**collection).clone());
+            }
             for (field_name, value) in &input.fields {
-                let normal_value = json_to_normal_value_with_kind_and_time(value, None, Some(utc_now))?;
-                doc.set(field_name.clone(), normal_value);
+                let field_kind = self.collection.as_ref().and_then(|c| {
+                    c.fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|f| &f.kind)
+                });
+                let crdt_type = self.collection.as_ref().and_then(|c| {
+                    c.fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|f| f.crdt_type)
+                }).unwrap_or(CType::LwwRegister);
+                let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
+                doc.set_with_crdt(field_name.clone(), crdt_type, normal_value)
+                    .map_err(|e| {
+                        QueryError::execution(format!(
+                            "Failed to set field '{}' with CRDT type {:?}: {}",
+                            field_name, crdt_type, e
+                        ))
+                    })?;
             }
 
             let result = self.mutator.create(&self.collection_name, doc).await?;
@@ -299,7 +340,15 @@ impl UpsertNode {
     /// Create a new document (no ID specified - generates new ID).
     async fn create_new(&mut self, input: &UpsertInput) -> Result<()> {
         let create_input = input.to_create_input();
-        let doc = create_input.to_document()?;
+        let utc_now = self.request_time.unwrap_or_else(|| {
+            let utc_offset = FixedOffset::east_opt(0).unwrap();
+            Utc::now().with_timezone(&utc_offset)
+        });
+        let doc = if let Some(ref collection) = self.collection {
+            create_input.to_document_with_schema_and_time(collection, Some(utc_now))?
+        } else {
+            create_input.to_document()?
+        };
 
         let result = self.mutator.create(&self.collection_name, doc).await?;
 
@@ -357,9 +406,11 @@ impl PlanNode for UpsertNode {
 
         // On first call, perform all upserts
         if !self.did_upsert {
-            // Capture a single timestamp for all UTC_NOW values in this upsert
-            let utc_offset = FixedOffset::east_opt(0).unwrap();
-            let utc_now = Utc::now().with_timezone(&utc_offset);
+            // Use pre-computed request time for UTC_NOW consistency, or compute now
+            let utc_now = self.request_time.unwrap_or_else(|| {
+                let utc_offset = FixedOffset::east_opt(0).unwrap();
+                Utc::now().with_timezone(&utc_offset)
+            });
 
             // Go DefraDB upsert semantics (with create_input and update_input)
             if self.create_input.is_some() || self.update_input.is_some() {

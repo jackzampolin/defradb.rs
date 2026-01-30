@@ -112,7 +112,9 @@ mod tests {
         let store = LevelDbStore::open("test_discard").unwrap();
 
         let mut txn = store.new_txn(false).await.unwrap();
-        txn.set(b"rollback_key", b"should_not_persist").await.unwrap();
+        txn.set(b"rollback_key", b"should_not_persist")
+            .await
+            .unwrap();
         txn.discard();
 
         let txn = store.new_txn(true).await.unwrap();

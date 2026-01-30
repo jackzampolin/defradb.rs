@@ -76,7 +76,7 @@ impl<S: Store> CommitsFetcher<S> {
         })?;
 
         let block = self.load_block(txn, &cid).await?;
-        let commit_doc = self.block_to_commit_doc(&cid, &block)?;
+        let commit_doc = self.block_to_commit_doc(txn, &cid, &block).await?;
 
         // Verify docID matches if specified
         if let Some(ref expected_doc_id) = options.doc_id {
@@ -142,7 +142,7 @@ impl<S: Store> CommitsFetcher<S> {
                     }
                 }
 
-                let commit_doc = self.block_to_commit_doc(&current_cid, &block)?;
+                let commit_doc = self.block_to_commit_doc(txn, &current_cid, &block).await?;
                 commits.push(commit_doc);
 
                 // Check depth limit
@@ -232,7 +232,7 @@ impl<S: Store> CommitsFetcher<S> {
                     }
                 }
 
-                let commit_doc = self.block_to_commit_doc(head_cid, &head_block)?;
+                let commit_doc = self.block_to_commit_doc(txn, head_cid, &head_block).await?;
                 commits.push(commit_doc);
 
                 // Recurse
@@ -303,8 +303,16 @@ impl<S: Store> CommitsFetcher<S> {
             .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))
     }
 
-    /// Convert a block to a commit document
-    fn block_to_commit_doc(&self, cid: &Cid, block: &Block) -> Result<Document> {
+    /// Convert a block to a commit document.
+    ///
+    /// Loads linked blocks and head blocks to populate the `height` field
+    /// in nested link/head objects, matching Go DefraDB behavior.
+    async fn block_to_commit_doc(
+        &self,
+        txn: &mut DbTxn<S>,
+        cid: &Cid,
+        block: &Block,
+    ) -> Result<Document> {
         let mut map = HashMap::new();
 
         // cid
@@ -348,39 +356,39 @@ impl<S: Store> CommitsFetcher<S> {
                 .unwrap_or(JsonValue::Null),
         );
 
-        // links - array of {cid, fieldName}
-        let links: Vec<JsonValue> = block
-            .links
-            .as_ref()
-            .map(|links| {
-                links
-                    .iter()
-                    .map(|link| {
-                        json!({
-                            "cid": link.link.to_string(),
-                            "fieldName": link.name,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // links - array of {cid, fieldName, height}
+        // Load each linked block to get its priority/height
+        let mut links: Vec<JsonValue> = Vec::new();
+        if let Some(block_links) = &block.links {
+            for link in block_links {
+                let height = match self.load_block(txn, &link.link).await {
+                    Ok(linked_block) => json!(linked_block.delta.priority() as i64),
+                    Err(_) => JsonValue::Null,
+                };
+                links.push(json!({
+                    "cid": link.link.to_string(),
+                    "fieldName": link.name,
+                    "height": height,
+                }));
+            }
+        }
         map.insert("links".to_string(), json!(links));
 
-        // heads - array of {cid}
-        let heads: Vec<JsonValue> = block
-            .heads
-            .as_ref()
-            .map(|heads| {
-                heads
-                    .iter()
-                    .map(|head_cid| {
-                        json!({
-                            "cid": head_cid.to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // heads - array of {cid, height}
+        // Load each head block to get its priority/height
+        let mut heads: Vec<JsonValue> = Vec::new();
+        if let Some(block_heads) = &block.heads {
+            for head_cid in block_heads {
+                let height = match self.load_block(txn, head_cid).await {
+                    Ok(head_block) => json!(head_block.delta.priority() as i64),
+                    Err(_) => JsonValue::Null,
+                };
+                heads.push(json!({
+                    "cid": head_cid.to_string(),
+                    "height": height,
+                }));
+            }
+        }
         map.insert("heads".to_string(), json!(heads));
 
         // signature - null for now (handle signature blocks separately)
@@ -491,14 +499,12 @@ mod additional_tests {
     #[test]
     fn test_invalid_cid_parsing() {
         let result = Cid::from_str("fhbnjfahfhfhanfhga");
-        println!("Invalid CID result: {:?}", result);
         assert!(result.is_err(), "Invalid CID should fail to parse");
     }
 
     #[test]
     fn test_valid_cid_parsing() {
         let result = Cid::from_str("bafyreiajq6jmyblg2b6vupjdapzkaodbt7kkwqp4fijekdvydnyxvr4y7q");
-        println!("Valid CID result: {:?}", result);
         assert!(result.is_ok(), "Valid CID should parse");
     }
 
@@ -507,17 +513,14 @@ mod additional_tests {
         // This is the CID used in TestQueryCommitsWithUnknownCid
         // Go parses this successfully (lenient), Rust rejects it (strict)
         let result = Cid::from_str("bafybeid57gpbwi4i6bg7g35hhhhhhhhhhhhhhhhhhhhhhhdoesnotexist");
-        println!("Unknown CID result: {:?}", result);
-        if let Ok(cid) = &result {
-            println!("CID codec: {:?}, hash: {:?}", cid.codec(), cid.hash());
-        }
+        // Go parses this (lenient), Rust may reject it (stricter validation)
+        let _ = result;
     }
 
     #[test]
     fn test_truly_invalid_cid_parsing() {
         // This is the CID used in TestQueryCommitsWithInvalidCid
         let result = Cid::from_str("fhbnjfahfhfhanfhga");
-        println!("Truly invalid CID result: {:?}", result);
         assert!(result.is_err(), "Truly invalid CID should fail to parse");
     }
 

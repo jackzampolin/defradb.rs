@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::document::{document_to_plan_doc, DocumentMapping};
 use crate::error::{QueryError, Result};
-use crate::mapper::{Mutation, MutationType};
+use crate::mapper::{Mutation, MutationType, Requestable};
 use crate::mutator::DocMutator;
 use crate::plan::{
     CreateInput, CreateNode, DeleteNode, UpdateInput, UpdateNode, UpsertInput, UpsertNode,
@@ -99,7 +99,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         for mutation in mutations {
             let result = self
-                .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone(), request_time)
+                .execute_single_mutation(
+                    &mutation,
+                    mutator.clone(),
+                    caller_identity.clone(),
+                    request_time,
+                )
                 .await?;
             // Use alias if provided, otherwise full mutation name (e.g., "create_Users")
             let key = mutation.output_name();
@@ -121,6 +126,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Validate collection exists - resolve on-demand from provider
         let collection = self.get_collection(&mutation.collection_name).await?;
+
+        // Validate encryptFields if present
+        // Match Go's validation order: check existence first, then builtin prefix.
+        // _docID is in the field list (passes existence, hits builtin check).
+        // _version is NOT in the field list (fails existence check).
+        for field_name in &mutation.encrypt_fields {
+            let exists = collection.fields.iter().any(|f| f.name == *field_name);
+            if !exists {
+                return Err(QueryError::execution(format!(
+                    "the given field does not exist. Name: {}",
+                    field_name
+                )));
+            }
+            if field_name.starts_with('_') {
+                return Err(QueryError::execution(format!(
+                    "can not encrypt build-in field. Name: {}",
+                    field_name
+                )));
+            }
+        }
 
         // Build document mapping from requested fields
         let mapping = self.build_mutation_mapping(mutation)?;
@@ -223,6 +248,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Set encryption config for this mutation (thread-local, read by AutoCommitMutator)
+        if mutation.encrypt_doc || !mutation.encrypt_fields.is_empty() {
+            if let Some(ref key) = self.encryption_key {
+                defra_core::encryption::set_encryption_config(Some(
+                    defra_core::encryption::EncryptionConfig {
+                        encrypt_doc: mutation.encrypt_doc,
+                        encrypt_fields: mutation.encrypt_fields.clone(),
+                        encryption_key: key.clone(),
+                    },
+                ));
+            }
+        } else {
+            defra_core::encryption::set_encryption_config(None);
+        }
+
         // Build and execute the appropriate mutation plan
         let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {
             MutationType::Create => {
@@ -281,7 +321,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(node)
             }
             MutationType::Upsert => {
-                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone());
+                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone())
+                    .with_collection(collection.clone())
+                    .with_request_time(request_time);
 
                 // Set create_input (from Go's 'create' argument)
                 if !mutation.create_input.is_empty() {
@@ -318,6 +360,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let json = self.doc_to_json(doc, &mapping)?;
             results.push(json);
         }
+
+        // Clear encryption config after plan execution
+        defra_core::encryption::set_encryption_config(None);
 
         plan.close().await?;
 
@@ -402,6 +447,45 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Enrich results with _version data if requested.
+        // _version is a nested select (Requestable::Select) that returns commit history.
+        // This must happen after ACP blocks which also need _docID.
+        let version_select = mutation.fields.iter().find_map(|r| {
+            if let Requestable::Select(s) = r {
+                if s.field.name == "_version" {
+                    return Some(s.as_ref());
+                }
+            }
+            None
+        });
+
+        if let Some(version_sel) = version_select {
+            let fetcher: &dyn crate::fetcher::DocFetcher = self.fetcher.as_ref();
+            let output_name = version_sel.field.output_name().to_string();
+            let docid_explicitly_requested = mutation
+                .requested_fields()
+                .iter()
+                .any(|f| f.name == "_docID");
+
+            for result in &mut results {
+                if let JsonValue::Object(ref mut obj) = result {
+                    if let Some(doc_id) =
+                        obj.get("_docID").and_then(|v| v.as_str()).map(String::from)
+                    {
+                        let version_data = self
+                            .fetch_version_data(fetcher, &doc_id, version_sel, None)
+                            .await?;
+                        obj.insert(output_name.clone(), version_data);
+                    }
+
+                    // Remove _docID from output if it was only added internally for version lookup
+                    if !docid_explicitly_requested {
+                        obj.remove("_docID");
+                    }
+                }
+            }
+        }
+
         Ok(JsonValue::Array(results))
     }
 
@@ -449,16 +533,35 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
         let mut mapping = DocumentMapping::new();
 
-        // Add requested fields
+        // Always reserve index 0 for _docID (matches Go DefraDB DocumentMapping pattern).
+        // This ensures set_doc_id() at index 0 doesn't collide with requested field values.
+        mapping.add(0, "_docID");
+
+        // Add requested fields (starting at index 1+ since 0 is reserved for _docID)
+        let mut has_docid_render = false;
         for field in mutation.requested_fields() {
+            if field.name == "_docID" {
+                // _docID is already at index 0, just add render key
+                mapping.add_render_key(0, field.output_name());
+                has_docid_render = true;
+                continue;
+            }
             let index = mapping.next_index();
             mapping.add(index, &field.name);
             mapping.add_render_key(index, field.output_name());
         }
 
-        // If no fields specified, at minimum return _docID
-        if mapping.next_index() == 0 {
-            mapping.add(0, "_docID");
+        // When _version is requested, ensure _docID is always rendered
+        // (needed to look up version/commit data for each document)
+        let has_version = mutation.fields.iter().any(|r| {
+            matches!(r, Requestable::Select(s) if s.field.name == "_version")
+        });
+        if has_version && !has_docid_render {
+            mapping.add_render_key(0, "_docID");
+        }
+
+        // If no fields explicitly requested, render _docID by default
+        if mapping.render_keys.is_empty() {
             mapping.add_render_key(0, "_docID");
         }
 

@@ -168,6 +168,38 @@ pub unsafe extern "C" fn create_subscription(
     CreateSubscriptionResult::success(handle)
 }
 
+/// Create a subscription for merge-complete events (P2P sync completion).
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+///
+/// # Returns
+///
+/// A handle that can be used with `poll_subscription` and `close_subscription`.
+#[no_mangle]
+pub extern "C" fn create_merge_complete_subscription(
+    node_ptr: usize,
+) -> CreateSubscriptionResult {
+    let subscription = match NODES.get(node_ptr, |state| {
+        state
+            .event_bus
+            .subscribe(&[events::EventName::MergeComplete])
+    }) {
+        Some(sub) => sub,
+        None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let state = SubscriptionState {
+        subscription,
+        node_handle: node_ptr,
+        collection_filter: None,
+    };
+
+    let handle = SUBSCRIPTIONS.insert(state);
+    CreateSubscriptionResult::success(handle)
+}
+
 /// Poll a subscription for the next event (non-blocking).
 ///
 /// # Arguments
@@ -360,7 +392,7 @@ mod tests {
         // Perform a mutation
         let mutation =
             CString::new(r#"mutation { create_Book(input: {title: "Test"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -486,7 +518,7 @@ mod tests {
         let mutation =
             CString::new(r#"mutation { create_Article(input: {title: "Test"}) { _docID } }"#)
                 .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -502,7 +534,7 @@ mod tests {
         // Create an Author (should trigger subscription)
         let mutation =
             CString::new(r#"mutation { create_Author(input: {name: "Bob"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };

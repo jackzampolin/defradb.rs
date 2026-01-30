@@ -151,6 +151,7 @@ pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) ->
 ///
 /// * `node_ptr` - Handle to the node
 /// * `txn_id` - Transaction ID from `begin_txn`
+/// * `identity_did` - Optional DID of the caller for ACP permission checks (null for anonymous)
 /// * `request_query` - GraphQL query string (required)
 /// * `operation_name` - Optional operation name (null if not used)
 /// * `variables` - Optional JSON string of variables (null if not used)
@@ -162,6 +163,7 @@ pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) ->
 pub unsafe extern "C" fn exec_request_in_txn(
     node_ptr: usize,
     txn_id: *const c_char,
+    identity_did: *const c_char,
     request_query: *const c_char,
     operation_name: *const c_char,
     variables: *const c_char,
@@ -173,6 +175,7 @@ pub unsafe extern "C" fn exec_request_in_txn(
         None => return FfiResult::error("txn_id is null"),
     };
 
+    let identity_str = c_str_to_string(identity_did);
     let query_str = match c_str_to_string(request_query) {
         Some(s) => s,
         None => return FfiResult::error("request_query is null"),
@@ -180,6 +183,15 @@ pub unsafe extern "C" fn exec_request_in_txn(
 
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
+
+    // Parse identity DID if provided
+    let did = match identity_str {
+        Some(s) if !s.is_empty() => match identity::Did::new(&s) {
+            Ok(d) => Some(d),
+            Err(e) => return FfiResult::error(format!("invalid identity DID: {}", e)),
+        },
+        _ => None,
+    };
 
     // Validate node handle before entering async block
     let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
@@ -194,6 +206,9 @@ pub unsafe extern "C" fn exec_request_in_txn(
 
         // Build request
         let mut request = query::QueryRequest::new(query_str);
+        if did.is_some() {
+            request = request.with_identity(did);
+        }
         if let Some(op) = op_name {
             request = request.with_operation_name(op);
         }
@@ -259,6 +274,7 @@ mod tests {
             exec_request_in_txn(
                 node,
                 txn_id_cstr.as_ptr(),
+                std::ptr::null(),
                 mutation.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
@@ -301,6 +317,7 @@ mod tests {
             exec_request_in_txn(
                 node,
                 txn_id_cstr.as_ptr(),
+                std::ptr::null(),
                 mutation.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
@@ -358,6 +375,7 @@ mod tests {
             exec_request_in_txn(
                 node,
                 txn_id_cstr.as_ptr(),
+                std::ptr::null(),
                 query.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),

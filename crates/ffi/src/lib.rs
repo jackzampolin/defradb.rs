@@ -34,12 +34,14 @@
 //! - `defra_free_string()` - Free strings allocated by FFI functions
 
 pub mod acp;
+pub mod backup;
 pub mod collection;
 pub mod document;
 pub mod index;
 pub mod lens;
 pub mod node;
 pub mod p2p;
+mod policy_yaml;
 pub mod query;
 pub mod runtime;
 pub mod schema;
@@ -76,6 +78,7 @@ pub use acp::{
     delete_dac_actor_relationship, delete_nac_actor_relationship, disable_nac, enable_nac,
     get_dac_policy, get_nac_status, get_node_identity, list_dac_policies, re_enable_nac,
 };
+pub use backup::{basic_export, basic_import};
 pub use collection::{
     add_view, delete_collection, find_collection_by_id, get_collection_by_name,
     get_collection_by_version_id, has_collection, patch_collection, refresh_views,
@@ -104,6 +107,9 @@ pub use types::defra_free_string;
 pub extern "C" fn defra_init() {
     // Ignore return value - errors will surface when operations are attempted
     let _ = runtime::init_runtime();
+    // Enable deterministic nonce for testing (matches Go's init() detection)
+    crypto::encryption::nonce::USE_DETERMINISTIC_NONCE
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Get the library version.
@@ -177,7 +183,7 @@ mod tests {
             r#"mutation { create_Person(input: {name: "Bob", age: 30}) { _docID name age } }"#,
         )
         .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "mutation failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "should contain Bob");
@@ -185,7 +191,7 @@ mod tests {
 
         // Query people
         let query_str = CString::new("{ Person { name age } }").unwrap();
-        let result = unsafe { exec_request(node, query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0, "query failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "query should return Bob");

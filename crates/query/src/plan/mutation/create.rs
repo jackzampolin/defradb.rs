@@ -83,7 +83,8 @@ impl CreateInput {
             let crdt_type = field_def.map(|f| f.crdt_type).unwrap_or(CType::LwwRegister);
 
             // Convert JsonValue to appropriate NormalValue, using schema for type coercion
-            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
+            let normal_value =
+                json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
 
             // Use set_with_crdt to preserve the CRDT type from the schema
             // This is critical for Counter fields to generate correct block CIDs
@@ -92,6 +93,38 @@ impl CreateInput {
                     QueryError::execution(format!(
                         "Failed to set field '{}' with CRDT type {:?}: {}",
                         field_name, crdt_type, e
+                    ))
+                })?;
+        }
+
+        // Apply schema defaults for fields not present in the input.
+        // Go DefraDB applies @default directive values during document creation
+        // for any field not explicitly provided (but not for fields set to null).
+        for field_def in &collection.fields {
+            // Skip fields already in the input
+            if self.fields.contains_key(&field_def.name) {
+                continue;
+            }
+
+            // Skip fields without a default value
+            let default_value = match &field_def.default_value {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let field_kind = Some(&field_def.kind);
+            let crdt_type = field_def.crdt_type;
+
+            // Convert the default value using schema-aware coercion.
+            // This handles UTC_NOW for DateTime fields via json_to_normal_value_with_kind_and_time.
+            let normal_value =
+                json_to_normal_value_with_kind_and_time(default_value, field_kind, request_time)?;
+
+            doc.set_with_crdt(field_def.name.clone(), crdt_type, normal_value)
+                .map_err(|e| {
+                    QueryError::execution(format!(
+                        "Failed to set default value for field '{}' with CRDT type {:?}: {}",
+                        field_def.name, crdt_type, e
                     ))
                 })?;
         }

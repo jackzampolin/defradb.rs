@@ -5,12 +5,12 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics.
 
+use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
 use query::runner::{DocFetcher, FetchByIdsResult};
 use std::sync::Arc;
 use storage::corekv::Store;
-use async_lock::Mutex as TokioMutex;
 use tracing::warn;
 
 use crate::database::DB;
@@ -267,6 +267,30 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()));
 
         // Clean up transaction
+        if let Some(txn) = txn_holder.lock().await.take() {
+            let _ = txn.discard();
+        }
+
+        result
+    }
+
+    async fn get_documents_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Vec<Document>> {
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
+
+        let versioned_fetcher = VersionedFetcher::new(txn_holder.clone());
+        let result = versioned_fetcher
+            .get_documents_at_cid(cid, expected_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()));
+
         if let Some(txn) = txn_holder.lock().await.take() {
             let _ = txn.discard();
         }

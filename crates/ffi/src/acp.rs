@@ -9,6 +9,9 @@ use std::ffi::c_char;
 use identity::Identity;
 
 use crate::get_runtime;
+use crate::policy_yaml::{
+    check_duplicate_yaml_keys, parse_policy_yaml, validate_policy_expressions,
+};
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -22,7 +25,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// Returns a JSON object with NAC status information:
 /// ```json
 /// {
-///   "status": "enabled" | "disabled_temporarily" | "not_configured",
+///   "status": "enabled" | "disabled temporarily" | "not configured",
 ///   "configured_enabled": true | false,
 ///   "dev_mode": true | false,
 ///   "owner": "did:key:..." | null
@@ -75,13 +78,27 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
     };
 
     let result = rt.block_on(async {
+        // Check NAC state before validating DID (Go checks state first)
+        let status = nac_manager.status().await;
+        if status == acp::nac::NacStatus::NotConfigured {
+            return Err("node acp is not configured".to_string());
+        }
+        if status == acp::nac::NacStatus::DisabledTemporarily {
+            return Err("node acp is already disabled".to_string());
+        }
+
+        // Empty DID means no identity - not authorized
+        if requestor_str.is_empty() {
+            return Err("not authorized to perform operation".to_string());
+        }
+
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid DID '{}': {}", requestor_str, e))?;
 
         nac_manager
             .disable(&requestor)
             .await
-            .map_err(|e| format!("failed to disable NAC: {}", e))?;
+            .map_err(|e| e.to_string())?;
 
         Ok::<(), String>(())
     });
@@ -115,13 +132,27 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
     };
 
     let result = rt.block_on(async {
+        // Check NAC state before validating DID (Go checks state first)
+        let status = nac_manager.status().await;
+        if status == acp::nac::NacStatus::NotConfigured {
+            return Err("node acp is not configured".to_string());
+        }
+        if status == acp::nac::NacStatus::Enabled {
+            return Err("node acp is already enabled".to_string());
+        }
+
+        // Empty DID means no identity - not authorized
+        if requestor_str.is_empty() {
+            return Err("not authorized to perform operation".to_string());
+        }
+
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid DID '{}': {}", requestor_str, e))?;
 
         nac_manager
             .re_enable(&requestor)
             .await
-            .map_err(|e| format!("failed to re-enable NAC: {}", e))?;
+            .map_err(|e| e.to_string())?;
 
         Ok::<(), String>(())
     });
@@ -208,6 +239,17 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
     };
 
     let result = rt.block_on(async {
+        // Check NAC state before validating DID (Go checks state first)
+        let status = nac_manager.status().await;
+        if status == acp::nac::NacStatus::NotConfigured {
+            return Err("node acp is not configured".to_string());
+        }
+
+        // Empty DID means no identity - not authorized
+        if requestor_str.is_empty() {
+            return Err("not authorized to perform operation".to_string());
+        }
+
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
         let target = identity::Did::new(&target_str)
@@ -216,7 +258,7 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
         let added = nac_manager
             .add_admin(&requestor, &target)
             .await
-            .map_err(|e| format!("failed to add NAC actor relationship: {}", e))?;
+            .map_err(|e| e.to_string())?;
 
         let json = serde_json::json!({ "added": added }).to_string();
         Ok::<String, String>(json)
@@ -264,6 +306,17 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
     };
 
     let result = rt.block_on(async {
+        // Check NAC state before validating DID (Go checks state first)
+        let status = nac_manager.status().await;
+        if status == acp::nac::NacStatus::NotConfigured {
+            return Err("node acp is not configured".to_string());
+        }
+
+        // Empty DID means no identity - not authorized
+        if requestor_str.is_empty() {
+            return Err("not authorized to perform operation".to_string());
+        }
+
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
         let target = identity::Did::new(&target_str)
@@ -272,7 +325,7 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
         let deleted = nac_manager
             .remove_admin(&requestor, &target)
             .await
-            .map_err(|e| format!("failed to delete NAC actor relationship: {}", e))?;
+            .map_err(|e| e.to_string())?;
 
         let json = serde_json::json!({ "deleted": deleted }).to_string();
         Ok::<String, String>(json)
@@ -311,13 +364,45 @@ pub unsafe extern "C" fn add_dac_policy(
         None => return FfiResult::error("policy is null"),
     };
 
-    if policy_str.trim().is_empty() {
-        return FfiResult::error("policy cannot be empty");
+    let identity_str = match c_str_to_string(_identity_did) {
+        Some(s) => s,
+        None => String::new(),
+    };
+
+    if identity_str.is_empty() {
+        return FfiResult::error("policy creator can not be empty");
     }
 
+    // Check for empty/null policy data
+    if policy_str.is_empty() {
+        return FfiResult::error("policy data can not be empty");
+    }
+
+    // Step 1: Check for duplicate YAML map keys (Go rejects these via YAMLToJSONStrict)
+    if let Err(e) = check_duplicate_yaml_keys(&policy_str) {
+        return FfiResult::error(e);
+    }
+
+    // Step 2: Parse the policy YAML
+    let parsed = match parse_policy_yaml(&policy_str) {
+        Ok(p) => p,
+        Err(e) => return FfiResult::error(e),
+    };
+
+    // Step 3: Validate name is present (Go's BasicRequirement)
+    if parsed.name.is_empty() {
+        return FfiResult::error("name required");
+    }
+
+    // Step 4: Validate permission expressions
+    if let Err(e) = validate_policy_expressions(&parsed) {
+        return FfiResult::error(e);
+    }
+
+    // Step 5: Store with Go-compatible ID generation
     let result = NODES
         .get(node_ptr, |state| {
-            let policy_id = state.policy_store.add_policy(&policy_str);
+            let policy_id = state.policy_store.add_policy(&policy_str, &parsed);
             serde_json::json!({
                 "PolicyID": policy_id
             })
@@ -437,6 +522,22 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         None => return FfiResult::error("relation is null"),
     };
 
+    // Go checks collection name first (via GetCollectionByName)
+    if collection_id_str.is_empty() {
+        return FfiResult::error("collection name can't be empty");
+    }
+
+    // Then validates remaining required arguments (matches Go bridge.go validation)
+    if requestor_str.is_empty()
+        || target_str.is_empty()
+        || doc_id_str.is_empty()
+        || relation_str.is_empty()
+    {
+        return FfiResult::error(
+            "missing a required argument needed to add doc actor relationship.",
+        );
+    }
+
     // Validate node handle before entering async block
     let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
         Some(acp) => acp,
@@ -517,6 +618,22 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
         Some(s) => s,
         None => return FfiResult::error("relation is null"),
     };
+
+    // Go checks collection name first (via GetCollectionByName)
+    if collection_id_str.is_empty() {
+        return FfiResult::error("collection name can't be empty");
+    }
+
+    // Then validates remaining required arguments (matches Go bridge.go validation)
+    if requestor_str.is_empty()
+        || target_str.is_empty()
+        || doc_id_str.is_empty()
+        || relation_str.is_empty()
+    {
+        return FfiResult::error(
+            "missing a required argument needed to delete doc actor relationship.",
+        );
+    }
 
     // Validate node handle before entering async block
     let document_acp = match NODES.get(node_ptr, |state| state.document_acp.clone()) {
@@ -667,7 +784,7 @@ mod tests {
 
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(
-            value.contains("not_configured"),
+            value.contains("not configured"),
             "NAC should not be configured initially"
         );
 
