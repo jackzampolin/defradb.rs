@@ -590,12 +590,6 @@ pub async fn write_document_blocks(
         .await
         .map_err(|e| format!("Failed to write composite head: {}", e))?;
 
-    eprintln!("DEBUG COMPOSITE_BLOCK: doc_id={}, cid={}, priority={}, status=1, field_count={}, heads={:?}, links={:?}, cbor_hex={}",
-        doc_id_str, composite_cid, priority, field_cids.len(),
-        composite_block.heads.as_ref().map(|h| h.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap_or_default(),
-        composite_block.links.as_ref().map(|l| l.iter().map(|d| format!("{}:{}", d.name, d.link)).collect::<Vec<_>>()).unwrap_or_default(),
-        composite_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>());
-
     tracing::info!(
         doc_id = %doc_id_str,
         cid = %composite_cid,
@@ -677,11 +671,6 @@ pub async fn write_delete_block(
         .set(&composite_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
-
-    eprintln!("DEBUG DELETE_BLOCK: doc_id={}, cid={}, priority={}, heads={:?}, status=2, cbor_hex={}",
-        doc_id, composite_cid, priority,
-        composite_block.heads.as_ref().map(|h| h.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap_or_default(),
-        composite_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>());
 
     tracing::info!(
         doc_id = %doc_id,
@@ -794,11 +783,6 @@ pub async fn write_collection_block(
         .set(&col_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write collection head: {}", e))?;
-
-    eprintln!("DEBUG COLLECTION_BLOCK: collection_id={}, cid={}, priority={}, doc_composite_cid={}, heads={:?}, cbor_hex={}",
-        collection_short_id, collection_cid, priority, doc_composite_cid,
-        collection_block.heads.as_ref().map(|h| h.iter().map(|c| c.to_string()).collect::<Vec<_>>()).unwrap_or_default(),
-        collection_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>());
 
     tracing::info!(
         collection_id = collection_short_id,
