@@ -567,6 +567,53 @@ pub unsafe extern "C" fn get_collection_by_version_id(
     }
 }
 
+/// Truncate a collection: delete all documents while preserving the schema.
+///
+/// This removes all document data, CRDT heads, blocks, and index entries
+/// for the collection. The collection schema remains intact.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `name` - The collection name to truncate
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn truncate_collection(node_ptr: usize, name: *const c_char) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let name_str = match c_str_to_string(name) {
+        Some(s) => s,
+        None => return FfiResult::error("name is null"),
+    };
+
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        database
+            .truncate_collection(&name_str)
+            .await
+            .map_err(|e| format!("failed to truncate collection: {}", e))?;
+
+        Ok::<String, String>("{}".to_string())
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
 // =============================================================================
 // View and Migration APIs
 // =============================================================================
