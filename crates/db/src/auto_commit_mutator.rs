@@ -200,7 +200,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let update = Update::new(
                         doc_id.to_string(),
                         cid,
-                        collection.collection_id().to_string(),
+                        collection.name().to_string(),
                         block,
                         false, // is_retry
                         false, // is_relay (local mutation)
@@ -370,7 +370,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         let update = Update::new(
                             doc_id.to_string(),
                             cid,
-                            collection.collection_id().to_string(),
+                            collection.name().to_string(),
                             block,
                             false, // is_retry
                             false, // is_relay (local mutation)
@@ -527,7 +527,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let update = Update::new(
                         doc_id.to_string(),
                         cid,
-                        collection.collection_id().to_string(),
+                        collection.name().to_string(),
                         block,
                         false, // is_retry
                         false, // is_relay (local mutation)
