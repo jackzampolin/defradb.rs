@@ -933,6 +933,9 @@ impl<'a> SdlParser<'a> {
                 if !type_names.contains(target) || target == type_name {
                     continue; // Not a relation to another type in schema, or self-ref
                 }
+                if self.known_external_types.contains(target) {
+                    continue; // External type already exists, no CID dependency
+                }
 
                 // Check if this field is PRIMARY (included in CID calculation)
                 let is_array = field.field_type.is_list;
