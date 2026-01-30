@@ -3208,6 +3208,39 @@ impl Planner {
                 let inner_select = Select::new(inner_name.clone())
                     .with_field_name(inner_name);
                 source_select.fields.push(Requestable::Select(Box::new(inner_select)));
+            } else if field_json.get("Targets").is_some() {
+                // Aggregate field (e.g., _count, _sum)
+                let agg_type = crate::mapper::AggregateType::parse(field_name)
+                    .unwrap_or(crate::mapper::AggregateType::Count);
+                let mut agg = crate::mapper::Aggregate {
+                    aggregate_type: agg_type,
+                    targets: Vec::new(),
+                    filter: None,
+                    alias: field_json
+                        .get("Alias")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                };
+                if let Some(targets) = field_json.get("Targets").and_then(|v| v.as_array()) {
+                    for target in targets {
+                        let host_name = target
+                            .get("HostName")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let field_name = target
+                            .get("ChildName")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let target = if let Some(fname) = field_name {
+                            crate::mapper::AggregateTarget::with_field(host_name, fname)
+                        } else {
+                            crate::mapper::AggregateTarget::new(host_name)
+                        };
+                        agg.targets.push(target);
+                    }
+                }
+                source_select.fields.push(Requestable::Aggregate(agg));
             } else {
                 // Simple field
                 let alias = field_json

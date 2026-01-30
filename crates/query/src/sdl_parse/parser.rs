@@ -106,6 +106,8 @@ struct ParsedTypeDef {
     name: String,
     fields: Vec<ParsedField>,
     directives: ParsedTypeDirectives,
+    /// Whether this type was defined with the `interface` keyword (not directly queryable)
+    is_interface: bool,
 }
 
 /// Type-level directives
@@ -255,6 +257,7 @@ impl<'a> SdlParser<'a> {
                 name,
                 fields,
                 directives: type_directives,
+                is_interface: false,
             },
         );
 
@@ -294,6 +297,7 @@ impl<'a> SdlParser<'a> {
                 name,
                 fields,
                 directives: type_directives,
+                is_interface: true,
             },
         );
 
@@ -986,6 +990,11 @@ impl<'a> SdlParser<'a> {
             if let Some(pass1_id) = all_collection_ids.get(type_name) {
                 collection.collection_id = pass1_id.clone();
                 collection.version_id = pass1_id.clone();
+            }
+
+            // Interface types are embedded-only (not root-queryable)
+            if type_def.is_interface {
+                collection.is_embedded_only = true;
             }
 
             collections.push(collection);
