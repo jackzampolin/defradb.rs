@@ -9,6 +9,9 @@ use std::ffi::c_char;
 use identity::Identity;
 
 use crate::get_runtime;
+use crate::policy_yaml::{
+    check_duplicate_yaml_keys, parse_policy_yaml, validate_policy_expressions,
+};
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -370,13 +373,36 @@ pub unsafe extern "C" fn add_dac_policy(
         return FfiResult::error("policy creator can not be empty");
     }
 
-    if policy_str.trim().is_empty() {
+    // Check for empty/null policy data
+    if policy_str.is_empty() {
         return FfiResult::error("policy data can not be empty");
     }
 
+    // Step 1: Check for duplicate YAML map keys (Go rejects these via YAMLToJSONStrict)
+    if let Err(e) = check_duplicate_yaml_keys(&policy_str) {
+        return FfiResult::error(e);
+    }
+
+    // Step 2: Parse the policy YAML
+    let parsed = match parse_policy_yaml(&policy_str) {
+        Ok(p) => p,
+        Err(e) => return FfiResult::error(e),
+    };
+
+    // Step 3: Validate name is present (Go's BasicRequirement)
+    if parsed.name.is_empty() {
+        return FfiResult::error("name required");
+    }
+
+    // Step 4: Validate permission expressions
+    if let Err(e) = validate_policy_expressions(&parsed) {
+        return FfiResult::error(e);
+    }
+
+    // Step 5: Store with Go-compatible ID generation
     let result = NODES
         .get(node_ptr, |state| {
-            let policy_id = state.policy_store.add_policy(&policy_str);
+            let policy_id = state.policy_store.add_policy(&policy_str, &parsed);
             serde_json::json!({
                 "PolicyID": policy_id
             })
