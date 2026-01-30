@@ -99,7 +99,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         for mutation in mutations {
             let result = self
-                .execute_single_mutation(&mutation, mutator.clone(), caller_identity.clone(), request_time)
+                .execute_single_mutation(
+                    &mutation,
+                    mutator.clone(),
+                    caller_identity.clone(),
+                    request_time,
+                )
                 .await?;
             // Use alias if provided, otherwise full mutation name (e.g., "create_Users")
             let key = mutation.output_name();
@@ -121,6 +126,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Validate collection exists - resolve on-demand from provider
         let collection = self.get_collection(&mutation.collection_name).await?;
+
+        // Validate encryptFields if present
+        // Match Go's validation order: check existence first, then builtin prefix.
+        // _docID is in the field list (passes existence, hits builtin check).
+        // _version is NOT in the field list (fails existence check).
+        for field_name in &mutation.encrypt_fields {
+            let exists = collection.fields.iter().any(|f| f.name == *field_name);
+            if !exists {
+                return Err(QueryError::execution(format!(
+                    "the given field does not exist. Name: {}",
+                    field_name
+                )));
+            }
+            if field_name.starts_with('_') {
+                return Err(QueryError::execution(format!(
+                    "can not encrypt build-in field. Name: {}",
+                    field_name
+                )));
+            }
+        }
 
         // Build document mapping from requested fields
         let mapping = self.build_mutation_mapping(mutation)?;
@@ -223,6 +248,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Set encryption config for this mutation (thread-local, read by AutoCommitMutator)
+        if mutation.encrypt_doc || !mutation.encrypt_fields.is_empty() {
+            if let Some(ref key) = self.encryption_key {
+                defra_core::encryption::set_encryption_config(Some(
+                    defra_core::encryption::EncryptionConfig {
+                        encrypt_doc: mutation.encrypt_doc,
+                        encrypt_fields: mutation.encrypt_fields.clone(),
+                        encryption_key: key.clone(),
+                    },
+                ));
+            }
+        } else {
+            defra_core::encryption::set_encryption_config(None);
+        }
+
         // Build and execute the appropriate mutation plan
         let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {
             MutationType::Create => {
@@ -320,6 +360,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let json = self.doc_to_json(doc, &mapping)?;
             results.push(json);
         }
+
+        // Clear encryption config after plan execution
+        defra_core::encryption::set_encryption_config(None);
 
         plan.close().await?;
 

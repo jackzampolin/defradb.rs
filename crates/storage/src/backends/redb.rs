@@ -1018,7 +1018,10 @@ impl Txn for RedbTxn {
         // Check for write-write conflicts before applying
         if !pending.is_empty() {
             let write_set: HashSet<Vec<u8>> = pending.keys().cloned().collect();
-            if let Err(e) = self.conflict_tracker.check_and_record(self.read_version, write_set) {
+            if let Err(e) = self
+                .conflict_tracker
+                .check_and_record(self.read_version, write_set)
+            {
                 let on_error = std::mem::take(&mut *self.on_error.lock());
                 let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
                 Self::execute_callbacks(on_error);

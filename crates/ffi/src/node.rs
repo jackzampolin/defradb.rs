@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use std::ffi::c_char;
 
 use crate::get_runtime;
 use crate::state::{NodeState, PolicyStore, NODES};
@@ -66,11 +65,16 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
         let nac_config = db::NacConfig::new().with_dev_mode();
         let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
 
-        // Create query runner with transaction, mutation, and ACP support
+        // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
+        let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+
+        // Create query runner with transaction, mutation, ACP, lens, and encryption support
         let query_runner =
             query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
                 .with_mutator(mutator)
-                .with_acp(document_acp.clone());
+                .with_acp(document_acp.clone())
+                .with_encryption_key(encryption_key)
+                .with_lens_store(database.lens_store().clone());
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
@@ -140,39 +144,6 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
     }
 }
 
-/// Export the database to a JSON file.
-///
-/// # Safety
-///
-/// `node_ptr` must be a valid handle from `new_node`.
-/// `config_json` must be a valid null-terminated C string.
-#[no_mangle]
-pub extern "C" fn basic_export(node_ptr: usize, _config_json: *const c_char) -> FfiResult {
-    let _rt = get_runtime!(FfiResult);
-
-    if NODES.get(node_ptr, |_| ()).is_none() {
-        return FfiResult::error(ERR_INVALID_NODE_HANDLE);
-    }
-
-    FfiResult::error("basic_export is not yet implemented")
-}
-
-/// Import documents from a JSON backup file.
-///
-/// # Safety
-///
-/// `node_ptr` must be a valid handle from `new_node`.
-/// `filepath` must be a valid null-terminated C string.
-#[no_mangle]
-pub extern "C" fn basic_import(node_ptr: usize, _filepath: *const c_char) -> FfiResult {
-    let _rt = get_runtime!(FfiResult);
-
-    if NODES.get(node_ptr, |_| ()).is_none() {
-        return FfiResult::error(ERR_INVALID_NODE_HANDLE);
-    }
-
-    FfiResult::error("basic_import is not yet implemented")
-}
 
 #[cfg(test)]
 mod tests {

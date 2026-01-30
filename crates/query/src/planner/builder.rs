@@ -12,12 +12,12 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
+use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef,
     JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
-    SumNode, TypeJoinMany, TypeJoinOne,
+    SimilarityNode, SumNode, TypeJoinMany, TypeJoinOne,
 };
-use crate::plan::groupby::ChildSelectMeta;
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
     IndexScanType,
@@ -63,6 +63,8 @@ pub struct Planner {
     collections_by_id: HashMap<String, Arc<CollectionVersion>>,
     /// Optional fetcher for ScanNodes to load data on-demand
     fetcher: Option<Arc<dyn DocFetcher>>,
+    /// Optional lens transform store for view queries with transforms
+    lens_store: Option<Arc<dyn lens::TransformStore>>,
 }
 
 impl Planner {
@@ -88,6 +90,7 @@ impl Planner {
             collections,
             collections_by_id,
             fetcher: None,
+            lens_store: None,
         }
     }
 
@@ -97,6 +100,12 @@ impl Planner {
     /// to load documents during initialization if no docs are pre-loaded.
     pub fn with_fetcher(mut self, fetcher: Arc<dyn DocFetcher>) -> Self {
         self.fetcher = Some(fetcher);
+        self
+    }
+
+    /// Set a lens transform store for view queries with transforms.
+    pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
+        self.lens_store = Some(store);
         self
     }
 
@@ -131,6 +140,11 @@ impl Planner {
             .get(&select.collection_name)
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?
             .clone();
+
+        // If this collection is a non-materialized view, build a view plan instead
+        if let Some(ref query_source) = collection.query {
+            return self.build_view_plan(select, &collection, query_source);
+        }
 
         // Build the document mapping for this query (controls which fields appear in output)
         let render_mapping = self.build_mapping(select, &collection)?;
@@ -319,14 +333,17 @@ impl Planner {
 
         // Add aggregate fields to scan_mapping if present in render_mapping.
         // Aggregates are virtual fields (not in schema) that need explicit copying.
+        // Each aliased aggregate gets its own index/render_key, even if they share
+        // the same type (e.g., sum1: _sum(...) and sum2: _sum(...) need separate slots).
         for field in &select.fields {
             if let Requestable::Aggregate(agg) = field {
                 let agg_type_name = agg.aggregate_type.as_str();
-                // Add the aggregate type name if not already in scan_mapping
-                if scan_mapping.first_index_of_name(agg_type_name).is_none() {
+                let output_name = agg.output_name();
+                // Add a new index if this specific output name isn't already registered
+                if scan_mapping.try_find_index_from_render_key(&output_name).is_none() {
                     let scan_index = scan_mapping.next_index();
                     scan_mapping.add(scan_index, agg_type_name);
-                    scan_mapping.add_render_key(scan_index, agg.output_name());
+                    scan_mapping.add_render_key(scan_index, output_name);
                 }
 
                 // Always add aggregate target fields if present (even if aggregate type exists)
@@ -360,6 +377,34 @@ impl Planner {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Add similarity fields to scan_mapping.
+        // Similarity results are virtual computed fields stored at specific indices.
+        for field in &select.fields {
+            if let Requestable::Similarity(sim) = field {
+                // Add the _similarity output slot
+                let output_name = sim.output_name();
+                if scan_mapping
+                    .try_find_index_from_render_key(output_name)
+                    .is_none()
+                {
+                    let scan_index = scan_mapping.next_index();
+                    scan_mapping.add(scan_index, "_similarity");
+                    scan_mapping.add_render_key(scan_index, output_name);
+                }
+
+                // Ensure the target field (document's vector) is in scan_mapping
+                if scan_mapping
+                    .first_index_of_name(&sim.target_field)
+                    .is_none()
+                {
+                    if collection.field_by_name(&sim.target_field).is_some() {
+                        let idx = scan_mapping.next_index();
+                        scan_mapping.add(idx, &sim.target_field);
                     }
                 }
             }
@@ -399,23 +444,24 @@ impl Planner {
 
         // Check if filter is complex (has relation conditions inside logical operators)
         // or has multi-level relation paths (e.g., {author: {published: {rating: ...}}})
-        // Collect aggregate output names to detect _alias conditions that should be deferred
-        let aggregate_names: Vec<&str> = select
+        // Collect aggregate and similarity output names to detect _alias conditions that should be deferred
+        let mut computed_field_names: Vec<&str> = select
             .fields
             .iter()
-            .filter_map(|f| {
-                if let Requestable::Aggregate(agg) = f {
-                    Some(agg.output_name())
-                } else {
-                    None
-                }
+            .filter_map(|f| match f {
+                Requestable::Aggregate(agg) => Some(agg.output_name()),
+                Requestable::Similarity(sim) => Some(sim.output_name()),
+                _ => None,
             })
             .collect();
+        // Deduplicate (in case of name collisions)
+        computed_field_names.sort_unstable();
+        computed_field_names.dedup();
 
-        // Strip _alias conditions that reference computed aggregates from the filter.
-        // These must be evaluated after aggregates are computed, not during plan execution.
+        // Strip _alias conditions that reference computed fields (aggregates/similarity) from the filter.
+        // These must be evaluated after the computed fields are set, not during plan execution.
         let filter_for_plan = select.filter.as_ref().map(|f| {
-            let (stripped, _) = f.strip_aggregate_alias_conditions(&aggregate_names);
+            let (stripped, _) = f.strip_aggregate_alias_conditions(&computed_field_names);
             stripped
         });
 
@@ -746,11 +792,50 @@ impl Planner {
                     Some(filter.clone())
                 };
                 if let Some(f) = pre_agg_filter {
-                    let mut select_node = SelectNode::new(plan, scan_mapping.clone()).with_filter(f);
+                    let mut select_node =
+                        SelectNode::new(plan, scan_mapping.clone()).with_filter(f);
                     if let Some(ref doc_ids) = select.doc_ids {
                         select_node = select_node.with_doc_ids(doc_ids.clone());
                     }
                     plan = Box::new(select_node);
+                }
+            }
+        }
+
+        // 4c. Add SimilarityNodes for _similarity fields.
+        // These compute per-document dot product before filters/ordering can reference results.
+        plan = self.add_similarity_nodes(plan, select, &scan_mapping)?;
+
+        // 4d. Apply deferred _alias filter for similarity results (non-grouped queries only).
+        // Only apply alias conditions that do NOT reference aggregate fields.
+        // Aggregate alias conditions (e.g., _alias: {publishedCount: {_gt: 0}}) must wait
+        // until after aggregate nodes compute their values (handled by compute_relation_aggregates).
+        if select.group_by.is_none() {
+            if let Some(ref filter) = select.filter {
+                let (_non_alias, alias_filter) = filter.split_alias();
+                if let Some(alias_f) = alias_filter {
+                    // Build a list of aggregate-only output names (not similarity).
+                    // Similarity alias conditions CAN be applied here (after SimilarityNode),
+                    // but aggregate alias conditions must be deferred.
+                    let aggregate_only_names: Vec<&str> = select
+                        .fields
+                        .iter()
+                        .filter_map(|f| {
+                            if let Requestable::Aggregate(agg) = f {
+                                Some(agg.output_name())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let (stripped_alias, _) =
+                        alias_f.strip_aggregate_alias_conditions(&aggregate_only_names);
+                    // Only apply alias filter if there are non-aggregate alias conditions remaining
+                    if !stripped_alias.conditions().is_empty() {
+                        plan = Box::new(
+                            SelectNode::new(plan, scan_mapping.clone()).with_filter(stripped_alias),
+                        );
+                    }
                 }
             }
         }
@@ -998,16 +1083,27 @@ impl Planner {
                 }
             }
 
-            // 7. Count aggregates to determine if we need AllDocsNode
-            let aggregate_count = select
+            // 7. Count simple (non-per-row) aggregates to determine if we need AllDocsNode.
+            // Relation-based and inline-array aggregates use child_aggregate_source and
+            // operate per-row (each parent gets its own aggregate). They do NOT need
+            // AllDocsNode. Only simple field aggregates (e.g., _sum(Age: {})) need it
+            // because they accumulate across all documents.
+            let simple_aggregate_count = select
                 .fields
                 .iter()
-                .filter(|f| matches!(f, Requestable::Aggregate(_)))
+                .filter(|f| {
+                    if let Requestable::Aggregate(agg) = f {
+                        // Simple aggregate: all targets have empty host_name
+                        agg.targets.iter().all(|t| t.host_name.is_empty())
+                    } else {
+                        false
+                    }
+                })
                 .count();
 
-            // If there are multiple aggregates, wrap in AllDocsNode so they all
+            // If there are multiple simple aggregates, wrap in AllDocsNode so they all
             // can access the original documents via current_group_docs()
-            if aggregate_count > 1 {
+            if simple_aggregate_count > 1 {
                 plan = Box::new(AllDocsNode::new(plan, scan_mapping.clone()));
             }
 
@@ -1025,6 +1121,50 @@ impl Planner {
     /// Add aggregate nodes to the plan based on the select's aggregate fields.
     ///
     /// Handles three types of aggregates:
+    /// Add SimilarityNode(s) to the plan for each _similarity field in the select.
+    ///
+    /// Each _similarity computes a dot product between the document's vector field
+    /// and the query vector, storing the result at the designated index.
+    fn add_similarity_nodes(
+        &self,
+        mut plan: Box<dyn PlanNode>,
+        select: &Select,
+        mapping: &DocumentMapping,
+    ) -> Result<Box<dyn PlanNode>> {
+        for field in &select.fields {
+            if let Requestable::Similarity(sim) = field {
+                // Find the target field index (document's vector)
+                let field_index = mapping
+                    .first_index_of_name(&sim.target_field)
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "similarity target field '{}' not found in mapping",
+                            sim.target_field
+                        ))
+                    })?;
+
+                // Find the similarity result index
+                let similarity_index = mapping
+                    .try_find_index_from_render_key(sim.output_name())
+                    .ok_or_else(|| {
+                        QueryError::internal(format!(
+                            "similarity output '{}' not found in mapping render keys",
+                            sim.output_name()
+                        ))
+                    })?;
+
+                plan = Box::new(SimilarityNode::new(
+                    plan,
+                    mapping.clone(),
+                    field_index,
+                    similarity_index,
+                    sim.vector.clone(),
+                ));
+            }
+        }
+        Ok(plan)
+    }
+
     /// - Simple field aggregates (e.g., _sum(field: age))
     /// - Group aggregates (e.g., _sum(_group: {field: age}))
     /// - Relation aggregates (e.g., _sum(articles: {field: pages}))
@@ -1053,9 +1193,12 @@ impl Planner {
                     })?;
 
                 // Detect the aggregate source type and set up accordingly:
-                // 1. Child aggregate: host_name="_group" (iterate _group array)
+                // 1. Child aggregate: host_name="_group" AND target is an inner aggregate
+                //    name (e.g., _count, _sum) or a field not in the parent mapping.
+                //    These read pre-computed values from the _group JSON array.
                 // 2. Relation aggregate: host_name is a relation field (iterate relation array)
-                // 3. Simple aggregate: no host_name or host_name is non-relation field
+                // 3. Simple/grouped aggregate: target field exists in parent mapping,
+                //    or count with no field. These use grouped mode which applies filters.
                 let mut is_array_aggregate = false;
                 let mut array_field_index = 0usize;
                 let mut target_field_name = String::new();
@@ -1066,10 +1209,33 @@ impl Planner {
                     let host_name = &target.host_name;
 
                     if host_name == "_group" {
-                        // Child aggregate within _group
-                        is_array_aggregate = true;
-                        array_field_index = mapping.first_index_of_name("_group").unwrap_or(0);
-                        target_field_name = target.field_name.clone().unwrap_or_default();
+                        // Only use child aggregate (array) mode when the target field
+                        // is an inner aggregate name or doesn't exist in the parent
+                        // mapping. Regular fields (e.g., Age) that exist in the parent
+                        // mapping use grouped mode, which properly applies filters/limits.
+                        if let Some(ref fname) = target.field_name {
+                            let is_aggregate_name = matches!(
+                                fname.as_str(),
+                                "_count" | "_sum" | "_avg" | "_min" | "_max"
+                            );
+                            if is_aggregate_name
+                                || mapping.first_index_of_name(fname).is_none()
+                            {
+                                is_array_aggregate = true;
+                                array_field_index =
+                                    mapping.first_index_of_name("_group").unwrap_or(0);
+                                target_field_name = fname.clone();
+                            } else {
+                                field_index =
+                                    mapping.first_index_of_name(fname).ok_or_else(|| {
+                                        QueryError::execution(format!(
+                                            "aggregate target field '{}' not found in mapping",
+                                            fname
+                                        ))
+                                    })?;
+                            }
+                        }
+                        // else: count with no field_name → stays in grouped mode
                     } else if !host_name.is_empty() {
                         // Relation or inline-array aggregate (e.g., _sum(articles: {field: pages}))
                         // Get the relation/array field index
@@ -1335,33 +1501,33 @@ impl Planner {
                         ))
                     })?;
 
-                // For self-referential relations (empty relative_id), use the parent collection
-                let target_collection = if target_collection_id.is_empty() {
-                    // Self-reference: target is the same collection as parent
-                    Arc::new(parent_collection.clone())
-                } else {
-                    self.get_collection(target_collection_id)
-                        .or_else(|| {
-                            // CID lookup failed - try to find target by matching relation_name.
-                            // Handles CID mismatch from circular schema set-based versioning.
-                            let rel_name = relation_field.relation_name.as_deref().unwrap_or("");
-                            if rel_name.is_empty() {
-                                return None;
+            // For self-referential relations (empty relative_id), use the parent collection
+            let target_collection = if target_collection_id.is_empty() {
+                // Self-reference: target is the same collection as parent
+                Arc::new(parent_collection.clone())
+            } else {
+                self.get_collection(target_collection_id)
+                    .or_else(|| {
+                        // CID lookup failed - try to find target by matching relation_name.
+                        // Handles CID mismatch from circular schema set-based versioning.
+                        let rel_name = relation_field.relation_name.as_deref().unwrap_or("");
+                        if rel_name.is_empty() {
+                            return None;
+                        }
+                        for coll in self.collections.values() {
+                            if coll.name == parent_collection.name {
+                                continue;
                             }
-                            for coll in self.collections.values() {
-                                if coll.name == parent_collection.name {
-                                    continue;
-                                }
-                                for f in &coll.fields {
-                                    if f.relation_name.as_deref() == Some(rel_name) {
-                                        return Some(coll.clone());
-                                    }
+                            for f in &coll.fields {
+                                if f.relation_name.as_deref() == Some(rel_name) {
+                                    return Some(coll.clone());
                                 }
                             }
-                            None
-                        })
-                        .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
-                };
+                        }
+                        None
+                    })
+                    .ok_or_else(|| QueryError::collection_not_found(target_collection_id))?
+            };
 
             // Build child mapping for rendering (only selected fields)
             let child_render_mapping = self.build_mapping(nested_select, &target_collection)?;
@@ -2066,6 +2232,8 @@ impl Planner {
         // Relation aggregates (e.g., _count(books: {})) need joins to fetch data.
         // Inline array aggregates (e.g., _count(favouriteIntegers: {})) need the
         // array field added to the render mapping so the data appears in output.
+        let mut aggregate_joined_relations: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for requestable in &select.fields {
             if let Requestable::Aggregate(agg) = requestable {
                 for target in &agg.targets {
@@ -2076,14 +2244,19 @@ impl Planner {
 
                     let relation_field_name = &target.host_name;
 
-                    // Check if this field is already being selected
-                    let already_joined = select.fields.iter().any(|f| {
-                        if let Requestable::Select(s) = f {
-                            s.field.name == *relation_field_name
-                        } else {
-                            false
-                        }
-                    });
+                    // Check if this field is already being selected or joined by a
+                    // prior aggregate. Multiple aggregates on the same relation share
+                    // one TypeJoinMany; compute_relation_aggregates() handles per-aggregate
+                    // limit/offset/order in post-processing.
+                    let already_joined = aggregate_joined_relations
+                        .contains(relation_field_name.as_str())
+                        || select.fields.iter().any(|f| {
+                            if let Requestable::Select(s) = f {
+                                s.field.name == *relation_field_name
+                            } else {
+                                false
+                            }
+                        });
 
                     // Find the field in the parent collection
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
@@ -2349,6 +2522,8 @@ impl Planner {
                         child_side,
                         mapping.clone(),
                     )?);
+
+                    aggregate_joined_relations.insert(relation_field_name.to_string());
                 }
             }
         }
@@ -2938,6 +3113,11 @@ impl Planner {
                     // Use alias if provided, otherwise use the aggregate name
                     mapping.add_render_key(index, agg.output_name());
                 }
+                Requestable::Similarity(sim) => {
+                    let index = mapping.next_index();
+                    mapping.add(index, "_similarity");
+                    mapping.add_render_key(index, sim.output_name());
+                }
             }
         }
 
@@ -3038,6 +3218,9 @@ impl Planner {
                 Requestable::Aggregate(_) => {
                     // Aggregates within _group are not currently supported
                 }
+                Requestable::Similarity(_) => {
+                    // Similarity within _group is not supported
+                }
             }
         }
 
@@ -3047,6 +3230,220 @@ impl Planner {
     /// Get a collection schema by name.
     pub fn collection(&self, name: &str) -> Option<&Arc<CollectionVersion>> {
         self.collections.get(name)
+    }
+
+    /// Build a plan for a non-materialized view.
+    ///
+    /// Instead of scanning storage (which is empty for views), this parses the
+    /// stored query, builds a plan for it, and wraps it in a ViewNode that
+    /// remaps fields from the source query's mapping to the view's mapping.
+    fn build_view_plan(
+        &self,
+        select: &Select,
+        collection: &CollectionVersion,
+        query_source: &schema::QuerySource,
+    ) -> Result<PlanResult> {
+        // Extract the source collection name from the stored Select JSON
+        let source_name = query_source
+            .query
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                QueryError::execution("view QuerySource.Query missing 'Name' field")
+            })?;
+
+        // Build a Select for the underlying query from the stored JSON
+        let source_fields_json = query_source
+            .query
+            .get("Fields")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                QueryError::execution("view QuerySource.Query missing 'Fields' array")
+            })?;
+
+        let mut source_select = Select::new(source_name.to_string());
+        for field_json in source_fields_json {
+            let field_name = field_json
+                .get("Name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+
+            if let Some(inner_fields) = field_json.get("Fields").and_then(|v| v.as_array()) {
+                // Nested select (relation)
+                let inner_name = field_name.to_string();
+                let mut inner_select = Select::new(inner_name.clone())
+                    .with_field_name(inner_name);
+                // Populate inner fields from stored JSON.
+                // Use original field names only (no aliases) on the source select.
+                // The ViewNode's child_mapping handles renaming via render keys.
+                for inner_field_json in inner_fields {
+                    let inner_field_name = inner_field_json
+                        .get("Name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if inner_field_json.get("Fields").is_some() {
+                        // Deeper nested select (relation within relation)
+                        let deep_name = inner_field_name.to_string();
+                        let deep_select = Select::new(deep_name.clone())
+                            .with_field_name(deep_name);
+                        inner_select.fields.push(Requestable::Select(Box::new(deep_select)));
+                    } else {
+                        let field = crate::mapper::Field::new(inner_field_name);
+                        inner_select.fields.push(Requestable::Field(field));
+                    }
+                }
+                source_select.fields.push(Requestable::Select(Box::new(inner_select)));
+            } else if field_json.get("Targets").is_some() {
+                // Aggregate field (e.g., _count, _sum)
+                let agg_type = crate::mapper::AggregateType::parse(field_name)
+                    .unwrap_or(crate::mapper::AggregateType::Count);
+                let mut agg = crate::mapper::Aggregate {
+                    aggregate_type: agg_type,
+                    targets: Vec::new(),
+                    filter: None,
+                    alias: field_json
+                        .get("Alias")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                };
+                if let Some(targets) = field_json.get("Targets").and_then(|v| v.as_array()) {
+                    for target in targets {
+                        let host_name = target
+                            .get("HostName")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let field_name = target
+                            .get("ChildName")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let target = if let Some(fname) = field_name {
+                            crate::mapper::AggregateTarget::with_field(host_name, fname)
+                        } else {
+                            crate::mapper::AggregateTarget::new(host_name)
+                        };
+                        agg.targets.push(target);
+                    }
+                }
+                source_select.fields.push(Requestable::Aggregate(agg));
+            } else {
+                // Simple field
+                let alias = field_json
+                    .get("Alias")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let field = if let Some(a) = alias {
+                    crate::mapper::Field::with_alias(field_name, a)
+                } else {
+                    crate::mapper::Field::new(field_name)
+                };
+                source_select.fields.push(Requestable::Field(field));
+            }
+        }
+
+        // Reconstruct filter from stored JSON if present
+        if let Some(filter_json) = query_source.query.get("Filter") {
+            if !filter_json.is_null() {
+                if let Some(conditions) = filter_json.get("Conditions").and_then(|c| c.as_object())
+                {
+                    let conditions_map: std::collections::HashMap<String, serde_json::Value> =
+                        conditions
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                    if !conditions_map.is_empty() {
+                        source_select.filter =
+                            Some(crate::mapper::Filter::from_conditions(conditions_map));
+                    }
+                }
+            }
+        }
+
+        // Build the source plan
+        let source_plan_result = self.plan_with_index_info(&source_select)?;
+        let source_mapping = source_plan_result.plan.document_map().clone();
+
+        // Build the target (view) mapping
+        let mut target_mapping = self.build_mapping(select, collection)?;
+
+        // Build child mappings for nested selects (relations) in the view.
+        // We use the stored Select JSON inner fields because they preserve
+        // the original source field names (Name) and aliases (Alias), which
+        // are needed for correct field renaming during JSON filtering.
+        for field_json in source_fields_json {
+            if let Some(inner_fields) = field_json.get("Fields").and_then(|v| v.as_array()) {
+                let field_name = field_json
+                    .get("Name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if let Some(field_index) = target_mapping.first_index_of_name(field_name) {
+                    let mut child_mapping = DocumentMapping::new();
+                    for inner_field in inner_fields {
+                        let name = inner_field
+                            .get("Name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let alias = inner_field.get("Alias").and_then(|v| v.as_str());
+                        let output_name = alias.unwrap_or(name);
+                        let idx = child_mapping.next_index();
+                        child_mapping.add(idx, name);
+                        child_mapping.add_render_key(idx, output_name);
+                    }
+                    target_mapping.set_child_at(field_index, child_mapping);
+                }
+            }
+        }
+
+        // Build the view plan. When a lens transform is present, the LensNode
+        // converts source docs to JSON, applies the transform, and converts back
+        // using target_mapping. The ViewNode then does field filtering (identity
+        // mapping for scalars, nested JSON filtering for relations).
+        let has_lens = query_source.transform.is_some() && self.lens_store.is_some();
+
+        let (effective_source, view_source_mapping): (Box<dyn PlanNode>, DocumentMapping) =
+            if let Some(ref transform_cid) = query_source.transform {
+                if let Some(ref lens_store) = self.lens_store {
+                    let transform_id = lens::TransformId::new(transform_cid.as_str());
+                    let lens_node = Box::new(crate::plan::lens_node::LensNode::new(
+                        source_plan_result.plan,
+                        source_mapping,
+                        target_mapping.clone(),
+                        lens_store.clone(),
+                        transform_id,
+                    ));
+                    // LensNode output is in target format, so ViewNode does
+                    // identity mapping (but still filters nested JSON)
+                    (lens_node, target_mapping.clone())
+                } else {
+                    (source_plan_result.plan, source_mapping)
+                }
+            } else {
+                (source_plan_result.plan, source_mapping)
+            };
+
+        let view_plan: Box<dyn PlanNode> = Box::new(crate::plan::view::ViewNode::new(
+            effective_source,
+            view_source_mapping,
+            target_mapping.clone(),
+        ));
+
+        // Apply the user's query-level filter on top of the view if present.
+        // The view's stored query filter is already applied in the source plan;
+        // this handles additional filters specified by the caller.
+        let plan: Box<dyn PlanNode> = if let Some(ref filter) = select.filter {
+            Box::new(
+                SelectNode::new(view_plan, target_mapping)
+                    .with_filter(filter.clone()),
+            )
+        } else {
+            view_plan
+        };
+
+        Ok(PlanResult {
+            plan,
+            index_scan: None,
+            ordering_only_fields: Vec::new(),
+        })
     }
 }
 

@@ -668,7 +668,8 @@ impl Node {
                 registry,
             )
             .with_mutator(mutator)
-            .with_acp(document_acp);
+            .with_acp(document_acp)
+            .with_lens_store(database.lens_store().clone());
 
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {

@@ -161,8 +161,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut operation_children: Vec<JsonValue> = Vec::new();
 
                 for mutation in mutations {
-                    let mutation_explain =
-                        self.explain_single_mutation(&mutation, explain_type).await?;
+                    let mutation_explain = self
+                        .explain_single_mutation(&mutation, explain_type)
+                        .await?;
                     operation_children.push(mutation_explain);
                 }
 
@@ -278,7 +279,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Build mutation node with iterations
         let mut mutation_inner = serde_json::Map::new();
         mutation_inner.insert("iterations".to_string(), serde_json::json!(iterations));
-        mutation_inner.insert("selectTopNode".to_string(), select_top_node["selectTopNode"].clone());
+        mutation_inner.insert(
+            "selectTopNode".to_string(),
+            select_top_node["selectTopNode"].clone(),
+        );
 
         let mutation_node = serde_json::json!({
             node_kind: mutation_inner
@@ -363,8 +367,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     if conditions.is_empty() {
                         mutation_attrs.insert("filter".to_string(), JsonValue::Null);
                     } else {
-                        mutation_attrs
-                            .insert("filter".to_string(), serde_json::json!(conditions));
+                        mutation_attrs.insert("filter".to_string(), serde_json::json!(conditions));
                     }
                 } else {
                     mutation_attrs.insert("filter".to_string(), JsonValue::Null);
@@ -399,8 +402,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     if conditions.is_empty() {
                         mutation_attrs.insert("filter".to_string(), JsonValue::Null);
                     } else {
-                        mutation_attrs
-                            .insert("filter".to_string(), serde_json::json!(conditions));
+                        mutation_attrs.insert("filter".to_string(), serde_json::json!(conditions));
                     }
                 } else {
                     mutation_attrs.insert("filter".to_string(), JsonValue::Null);
@@ -460,8 +462,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             {
                 Ok((explanation, doc_count, exec_count)) => {
                     // Ensure selectNode wrapper
-                    let select_node_content =
-                        Self::ensure_select_node_wrapper(explanation, &select, ExplainType::Execute);
+                    let select_node_content = Self::ensure_select_node_wrapper(
+                        explanation,
+                        &select,
+                        ExplainType::Execute,
+                    );
 
                     if is_top_level_aggregate {
                         // Top-level aggregates use topLevelNode wrapper
@@ -529,6 +534,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
 
+        // Embedded-only types (interface types from view SDL) are not root-queryable
+        if collection.is_embedded_only {
+            return Err(QueryError::parse(format!(
+                "Cannot query field \"{}\" on type \"Query\".",
+                select.collection_name
+            )));
+        }
+
         let fetcher = self.fetcher.as_ref();
 
         // Check if we can use an index (filter-based or ordering-based)
@@ -579,7 +592,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let collections: Vec<CollectionVersion> =
                 collections_map.values().map(|c| (**c).clone()).collect();
 
-            let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            if let Some(ref lens_store) = self.lens_store {
+                planner = planner.with_lens_store(lens_store.clone());
+            }
             let plan_result = planner.plan_with_index_info(select)?;
             let mut plan = plan_result.plan;
 
@@ -726,7 +742,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-
     /// Generate an explanation of a single Select operation.
     async fn explain_select(
         &self,
@@ -787,8 +802,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
-        if has_nested || has_ordering_index || has_filter_index || has_relation_aggregates {
-            // Use the Planner for queries with nested selections, index usage, or relation aggregates
+        let is_view = collection.query.is_some();
+
+        if is_view || has_nested || has_ordering_index || has_filter_index || has_relation_aggregates
+        {
+            // Use the Planner for views, nested selections, index usage, or relation aggregates
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
@@ -811,7 +829,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        let planner = Planner::new(collections);
+        let mut planner = Planner::new(collections);
+        if let Some(ref lens_store) = self.lens_store {
+            planner = planner.with_lens_store(lens_store.clone());
+        }
         let plan_result = planner.plan_with_index_info(select)?;
         let plan = plan_result.plan;
 
@@ -822,7 +843,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Ensure result is wrapped in selectNode (Go format)
-        Ok(Self::ensure_select_node_wrapper(explain, select, explain_type))
+        Ok(Self::ensure_select_node_wrapper(
+            explain,
+            select,
+            explain_type,
+        ))
     }
 
     /// Generate an explanation for a simple query without nested selections.
@@ -845,7 +870,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Ensure result is wrapped in selectNode (Go format)
-        Ok(Self::ensure_select_node_wrapper(explain, select, explain_type))
+        Ok(Self::ensure_select_node_wrapper(
+            explain,
+            select,
+            explain_type,
+        ))
     }
 
     /// Process explain output for Go format compatibility.
@@ -872,7 +901,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Generate an explanation for a _commits system collection query.
     ///
     /// Returns a dagScanNode structure matching Go's explain output for commits queries.
-    fn explain_commits_select(&self, select: &Select, explain_type: ExplainType) -> Result<JsonValue> {
+    fn explain_commits_select(
+        &self,
+        select: &Select,
+        explain_type: ExplainType,
+    ) -> Result<JsonValue> {
         // For Debug mode, return empty inner objects
         if matches!(explain_type, ExplainType::Debug) {
             return Ok(serde_json::json!({
@@ -924,13 +957,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Aggregate node kind names that can wrap a selectNode in the plan explain.
-    const AGGREGATE_NODE_KINDS: &'static [&'static str] = &[
-        "countNode",
-        "sumNode",
-        "averageNode",
-        "minNode",
-        "maxNode",
-    ];
+    const AGGREGATE_NODE_KINDS: &'static [&'static str] =
+        &["countNode", "sumNode", "averageNode", "minNode", "maxNode"];
 
     /// Aggregate-specific explain fields that should be stripped when unwrapping aggregate nodes.
     const AGGREGATE_EXPLAIN_FIELDS: [&'static str; 1] = ["sources"];
@@ -1168,6 +1196,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get collection schema on-demand from provider
         let collection = self.get_collection(&select.collection_name).await?;
 
+        // Embedded-only types (interface types from view SDL) are not root-queryable
+        if collection.is_embedded_only {
+            return Err(QueryError::parse(format!(
+                "Cannot query field \"{}\" on type \"Query\".",
+                select.collection_name
+            )));
+        }
+
         // Validate unsupported features and field references
         plan::validate_select(select, &collection)?;
 
@@ -1264,15 +1300,92 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 })
                 .unwrap_or(false);
 
+        // Check if any similarity fields are present (require SimilarityNode in planner)
+        let has_similarity = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Similarity(_)));
+
+        // Validate similarity fields against the collection schema
+        if has_similarity {
+            for field in &select.fields {
+                if let Requestable::Similarity(sim) = field {
+                    let target = &sim.target_field;
+                    let schema_field = collection.field_by_name(target);
+                    // Check that the target field exists and is a numeric array
+                    let element_kind = schema_field.and_then(|f| {
+                        if let schema::FieldKind::ScalarArray(arr) = &f.kind {
+                            let ek = arr.element_kind();
+                            match ek {
+                                schema::ScalarKind::Int
+                                | schema::ScalarKind::Float32
+                                | schema::ScalarKind::Float64 => Some(ek),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    });
+
+                    let element_kind = match element_kind {
+                        Some(ek) => ek,
+                        None => {
+                            return Err(QueryError::execution(format!(
+                                "Unknown argument \"{}\" on field \"_similarity\" of type \"{}\".",
+                                target, collection.name
+                            )));
+                        }
+                    };
+
+                    // For Int fields, validate that vector values are integers
+                    if element_kind == schema::ScalarKind::Int {
+                        let non_int_values: Vec<String> = sim
+                            .vector
+                            .iter()
+                            .filter(|v| v.fract() != 0.0)
+                            .map(|v| format!("{}", v))
+                            .collect();
+                        if !non_int_values.is_empty() {
+                            let vector_repr = format!(
+                                "[{}]",
+                                sim.vector
+                                    .iter()
+                                    .map(|v| format!("{}", v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            let mut msg = format!(
+                                "Argument \"{}\" has invalid value {{vector: {}}}.",
+                                target, vector_repr
+                            );
+                            for v in &non_int_values {
+                                msg.push_str(&format!(
+                                    "\nIn field \"vector\": In element #1: Expected type \"Int\", found {}.",
+                                    v
+                                ));
+                            }
+                            return Err(QueryError::execution(msg));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Views must always use the planner because they don't store data directly -
+        // the planner creates a ViewNode that executes the underlying query.
+        let is_view = collection.query.is_some();
+
         // Use Planner if there are nested selections, filter through relations,
         // order through relations, aggregates on relations, secondary relation ID fields,
-        // or when an index can provide ordering
-        let needs_planner = has_nested
+        // similarity computations, when an index can provide ordering, or when querying a view
+        let needs_planner = is_view
+            || has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
             || has_secondary_relation_id
-            || has_ordering_index;
+            || has_ordering_index
+            || has_similarity;
 
         // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
         // See issue #114 for tracking the full fix.
@@ -1338,7 +1451,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
-        let planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        if let Some(ref lens_store) = self.lens_store {
+            planner = planner.with_lens_store(lens_store.clone());
+        }
         let plan_result = planner.plan_with_index_info(select)?;
         let mut plan = plan_result.plan;
         let ordering_only_fields = plan_result.ordering_only_fields;
@@ -1464,6 +1580,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
                             Requestable::Aggregate(agg) => {
                                 fields.insert(agg.output_name().to_string());
+                            }
+                            Requestable::Similarity(sim) => {
+                                fields.insert(sim.output_name().to_string());
                             }
                         }
                     }
@@ -2047,7 +2166,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// by walking the merkle DAG backwards and replaying CRDT deltas.
     ///
     /// CID queries require `cid` argument and optionally `docID` for validation.
-    /// Returns a single-element array containing the document at that version.
+    /// For document CIDs, returns a single-element array. For collection CIDs
+    /// (branchable collections), returns all documents visible at that state.
     async fn execute_cid_query_with_version(
         &self,
         select: &Select,
@@ -2062,13 +2182,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get expected docID from select.doc_ids (optional validation)
         let expected_doc_id = select.doc_ids.as_ref().and_then(|ids| ids.first());
 
-        // Fetch document at the specified CID
-        // If docID validation fails, Go DefraDB returns empty results instead of an error
-        let document = match fetcher
-            .get_document_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
+        // Fetch document(s) at the specified CID.
+        // For collection-level CIDs (branchable), this returns multiple documents.
+        // For document-level CIDs, this returns a single document.
+        let documents = match fetcher
+            .get_documents_at_cid(cid, expected_doc_id.map(|s| s.as_str()))
             .await
         {
-            Ok(doc) => doc,
+            Ok(docs) => docs,
             Err(e) => {
                 let err_msg = e.to_string();
                 // docID mismatch: Go returns empty results
@@ -2110,76 +2231,85 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Build mapping for scalar fields only
         let mapping = plan::build_mapping(&select_for_mapping, &collection)?;
 
-        // Convert the document to JSON with only the requested scalar fields
-        let mut obj = serde_json::Map::new();
+        // Process each document into a JSON object
+        let mut result_array = Vec::new();
 
-        for render_key in &mapping.render_keys {
-            let field_name = mapping
-                .try_find_name_from_index(render_key.index)
-                .unwrap_or("");
+        for document in &documents {
+            // Convert the document to JSON with only the requested scalar fields
+            let mut obj = serde_json::Map::new();
 
-            let value = if field_name == "__typename" {
-                JsonValue::String(select.collection_name.clone())
-            } else if field_name == "_docID" {
-                document
-                    .id()
-                    .map(|id| JsonValue::String(id.to_string()))
-                    .unwrap_or(JsonValue::Null)
-            } else if let Some(nv) = document.get(field_name) {
-                crate::json_convert::normal_value_to_json(nv).unwrap_or(JsonValue::Null)
-            } else {
-                JsonValue::Null
-            };
+            for render_key in &mapping.render_keys {
+                let field_name = mapping
+                    .try_find_name_from_index(render_key.index)
+                    .unwrap_or("");
 
-            obj.insert(render_key.key.clone(), value);
-        }
+                let value = if field_name == "__typename" {
+                    JsonValue::String(select.collection_name.clone())
+                } else if field_name == "_docID" {
+                    document
+                        .id()
+                        .map(|id| JsonValue::String(id.to_string()))
+                        .unwrap_or(JsonValue::Null)
+                } else if field_name == "_deleted" {
+                    JsonValue::Bool(document.is_deleted())
+                } else if let Some(nv) = document.get(field_name) {
+                    crate::json_convert::normal_value_to_json(nv).unwrap_or(JsonValue::Null)
+                } else {
+                    JsonValue::Null
+                };
 
-        // Resolve nested selects (relation fields like `author { name }`)
-        for nested_select in &nested_selects {
-            let relation_name = &nested_select.field.name;
-            let output_name = nested_select.field.output_name();
-            let related_collection = &nested_select.collection_name;
+                obj.insert(render_key.key.clone(), value);
+            }
 
-            // Many-to-one: parent has FK field (e.g., Book._authorID → Author)
-            let fk_field_name = CollectionVersion::relation_id_field_name(relation_name);
-            if let Some(fk_value) = document.get(&fk_field_name) {
-                let fk_doc_id = crate::json_convert::normal_value_to_json(fk_value)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_default();
+            // Resolve nested selects (relation fields like `author { name }`)
+            for nested_select in &nested_selects {
+                let relation_name = &nested_select.field.name;
+                let output_name = nested_select.field.output_name();
+                let related_collection = &nested_select.collection_name;
 
-                if !fk_doc_id.is_empty() {
-                    let result = fetcher.get_by_ids(related_collection, &[fk_doc_id]).await?;
+                // Many-to-one: parent has FK field (e.g., Book._authorID → Author)
+                let fk_field_name = CollectionVersion::relation_id_field_name(relation_name);
+                if let Some(fk_value) = document.get(&fk_field_name) {
+                    let fk_doc_id = crate::json_convert::normal_value_to_json(fk_value)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
 
-                    if let Some(related_doc) = result.docs().first() {
-                        let related_obj = self.render_document_fields(related_doc, nested_select);
-                        obj.insert(output_name.to_string(), JsonValue::Object(related_obj));
+                    if !fk_doc_id.is_empty() {
+                        let result = fetcher.get_by_ids(related_collection, &[fk_doc_id]).await?;
+
+                        if let Some(related_doc) = result.docs().first() {
+                            let related_obj =
+                                self.render_document_fields(related_doc, nested_select);
+                            obj.insert(output_name.to_string(), JsonValue::Object(related_obj));
+                        } else {
+                            obj.insert(output_name.to_string(), JsonValue::Null);
+                        }
                     } else {
                         obj.insert(output_name.to_string(), JsonValue::Null);
                     }
                 } else {
+                    // One-to-many or no FK found: return null for now
                     obj.insert(output_name.to_string(), JsonValue::Null);
                 }
-            } else {
-                // One-to-many or no FK found: return null for now
-                obj.insert(output_name.to_string(), JsonValue::Null);
             }
+
+            // Add _version data if requested
+            if let Some(version_select) = version_selection {
+                let doc_id = document.id().map(|id| id.to_string());
+                if let Some(doc_id_str) = doc_id {
+                    let version_data = self
+                        .fetch_version_data(fetcher, &doc_id_str, version_select, Some(cid))
+                        .await?;
+                    let output_name = version_select.field.output_name();
+                    obj.insert(output_name.to_string(), version_data);
+                }
+            }
+
+            result_array.push(JsonValue::Object(obj));
         }
 
-        // Add _version data if requested
-        if let Some(version_select) = version_selection {
-            let doc_id = document.id().map(|id| id.to_string());
-            if let Some(doc_id_str) = doc_id {
-                let version_data = self
-                    .fetch_version_data(fetcher, &doc_id_str, version_select, Some(cid))
-                    .await?;
-                let output_name = version_select.field.output_name();
-                obj.insert(output_name.to_string(), version_data);
-            }
-        }
-
-        // Return as single-element array (Go compatibility)
-        Ok(JsonValue::Array(vec![JsonValue::Object(obj)]))
+        Ok(JsonValue::Array(result_array))
     }
 
     /// Execute a regular query with _version field support.
@@ -2252,8 +2382,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|o| o.has_relation_order())
             .unwrap_or(false);
 
+        // Views always need the planner (they execute queries, not storage reads)
+        let is_view = collection.query.is_some();
+
         // Execute the query for document data (without _version)
-        let result = if has_nested || filter_has_relations || order_has_relations {
+        let result = if is_view || has_nested || filter_has_relations || order_has_relations {
             self.execute_nested_select_with_planner(
                 &select_without_version,
                 fetcher,
@@ -2526,6 +2659,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     } else {
                         obj.insert(output_name.to_string(), JsonValue::Number(1.into()));
                     }
+                }
+                Requestable::Similarity(_) => {
+                    // Similarity is not applicable in commit context
                 }
             }
         }
@@ -3092,6 +3228,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         } else {
                             obj.insert(output_name.to_string(), JsonValue::Array(vec![]));
                         }
+                    }
+                    Requestable::Similarity(_) => {
+                        // Similarity is not applicable in commit context
                     }
                 }
             }

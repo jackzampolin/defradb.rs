@@ -161,11 +161,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let nac_config = db::NacConfig::new().with_dev_mode();
         let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
 
-        // Create query runner
+        // Create query runner with lens support
         let query_runner =
             query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
                 .with_mutator(mutator)
-                .with_acp(document_acp.clone());
+                .with_acp(document_acp.clone())
+                .with_lens_store(database.lens_store().clone());
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
@@ -210,7 +211,7 @@ pub extern "C" fn p2p_peer_info(node_ptr: usize) -> FfiResult {
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Ok("[]".to_string()),
             };
 
             rt.block_on(async {

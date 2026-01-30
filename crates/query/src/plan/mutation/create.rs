@@ -83,7 +83,8 @@ impl CreateInput {
             let crdt_type = field_def.map(|f| f.crdt_type).unwrap_or(CType::LwwRegister);
 
             // Convert JsonValue to appropriate NormalValue, using schema for type coercion
-            let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
+            let normal_value =
+                json_to_normal_value_with_kind_and_time(value, field_kind, request_time)?;
 
             // Use set_with_crdt to preserve the CRDT type from the schema
             // This is critical for Counter fields to generate correct block CIDs

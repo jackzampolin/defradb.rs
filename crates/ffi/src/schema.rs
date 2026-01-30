@@ -4,9 +4,11 @@
 //! Go's cbindings/schema.go behavior.
 
 use std::ffi::c_char;
+use std::sync::Arc;
 
 use crate::get_runtime;
-use crate::state::NODES;
+use crate::policy_yaml;
+use crate::state::{PolicyStore, NODES};
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
@@ -37,9 +39,11 @@ pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) 
         None => return FfiResult::error("schema_sdl is null"),
     };
 
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
+    // Validate node handle and get both database and policy store
+    let (database, policy_store) = match NODES.get(node_ptr, |state| {
+        (state.database.clone(), state.policy_store.clone())
+    }) {
+        Some(pair) => pair,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
@@ -47,6 +51,13 @@ pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) 
         // Parse the SDL into collection versions
         let collections =
             query::parse_sdl(&schema_str).map_err(|e| format!("failed to parse schema: {}", e))?;
+
+        // Validate policies on collections before creating them
+        for collection in &collections {
+            if let Some(ref policy) = collection.policy {
+                validate_collection_policy(policy, &policy_store)?;
+            }
+        }
 
         // Create each collection
         let mut created_versions = Vec::new();
@@ -118,6 +129,35 @@ pub extern "C" fn get_collections(node_ptr: usize) -> FfiResult {
         Ok(json) => FfiResult::success(json),
         Err(e) => FfiResult::error(e),
     }
+}
+
+/// Validate that a collection's policy references a valid, well-formed policy.
+fn validate_collection_policy(
+    policy: &schema::PolicyDescription,
+    store: &Arc<PolicyStore>,
+) -> Result<(), String> {
+    // 1. Check policy exists in the store
+    let policy_yaml = store
+        .get_policy(&policy.id)
+        .ok_or("policyID specified does not exist with acp")?;
+
+    // 2. Parse the YAML to inspect structure
+    let parsed = policy_yaml::parse_policy_yaml(&policy_yaml)
+        .map_err(|e| format!("failed to parse policy: {}", e))?;
+
+    // 3. Check the referenced resource exists
+    let resource = parsed
+        .find_resource(&policy.resource_name)
+        .ok_or("resource does not exist on the specified policy")?;
+
+    // 4. Check required permissions (read, update, delete)
+    for required in &["read", "update", "delete"] {
+        if !resource.has_permission(required) {
+            return Err("resource is missing required permission on policy.".to_string());
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

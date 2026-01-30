@@ -66,9 +66,9 @@ pub async fn get_status(
             Ok(Json(info).into_response())
         }
         None => {
-            // NAC not configured - return status as "not_configured"
+            // NAC not configured
             let info = NacStatusInfo {
-                status: "not_configured".to_string(),
+                status: "not configured".to_string(),
                 owner: None,
             };
             Ok(Json(info).into_response())

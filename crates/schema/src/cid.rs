@@ -84,7 +84,11 @@ pub fn generate_collection_cid_with_priority_and_heads(
         .map(|cid| DAGLink::new("", *cid))
         .collect();
 
-    let block = Block::new(CrdtDelta::CollectionDefinition(delta), heads.to_vec(), links);
+    let block = Block::new(
+        CrdtDelta::CollectionDefinition(delta),
+        heads.to_vec(),
+        links,
+    );
     generate_block_cid(&block)
 }
 

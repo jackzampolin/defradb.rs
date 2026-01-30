@@ -51,6 +51,10 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     /// Used when a request doesn't include an explicit identity (e.g., no bearer token).
     /// Typically set from the `--identity` CLI flag.
     pub(crate) default_identity: Option<Did>,
+    /// Encryption key for CRDT delta encryption (optional).
+    pub(crate) encryption_key: Option<Vec<u8>>,
+    /// Optional lens transform store for view queries with transforms
+    pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -66,6 +70,8 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             acp: None,
             default_identity: None,
+            encryption_key: None,
+            lens_store: None,
         }
     }
 
@@ -81,6 +87,8 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             acp: None,
             default_identity: None,
+            encryption_key: None,
+            lens_store: None,
         }
     }
 }
@@ -98,6 +106,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             acp: None,
             default_identity: None,
+            encryption_key: None,
+            lens_store: None,
         }
     }
 
@@ -118,6 +128,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             acp: None,
             default_identity: None,
+            encryption_key: None,
+            lens_store: None,
         }
     }
 
@@ -138,6 +150,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         self
     }
 
+    /// Set the lens transform store for view queries with transforms.
+    pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
+        self.lens_store = Some(store);
+        self
+    }
+
     /// Set the default identity for ACP permission checks.
     ///
     /// This identity is used when a request doesn't include an explicit identity
@@ -148,6 +166,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// over the default.
     pub fn with_default_identity(mut self, identity: Did) -> Self {
         self.default_identity = Some(identity);
+        self
+    }
+
+    /// Set the encryption key for CRDT delta encryption.
+    pub fn with_encryption_key(mut self, key: Vec<u8>) -> Self {
+        self.encryption_key = Some(key);
         self
     }
 

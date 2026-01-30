@@ -284,10 +284,7 @@ impl PlanNode for DeleteNode {
 
         // filter: the filter expression (null if using doc IDs)
         if let Some(ref filter) = self.filter {
-            obj.insert(
-                "filter".to_string(),
-                serde_json::json!(filter.conditions()),
-            );
+            obj.insert("filter".to_string(), serde_json::json!(filter.conditions()));
         } else {
             obj.insert("filter".to_string(), serde_json::Value::Null);
         }

@@ -206,6 +206,21 @@ pub trait DocFetcher: MaybeSendSync {
             "CID-based time-travel queries are not supported by this fetcher".to_string(),
         ))
     }
+
+    /// Reconstruct documents at the specified CID.
+    ///
+    /// For document-level CIDs, returns a single document.
+    /// For collection-level CIDs (branchable collections), returns all
+    /// documents visible at that collection state.
+    async fn get_documents_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> Result<Vec<Document>> {
+        // Default: delegate to single-document method
+        let doc = self.get_document_at_cid(cid, expected_doc_id).await?;
+        Ok(vec![doc])
+    }
 }
 
 /// Options for _commits queries

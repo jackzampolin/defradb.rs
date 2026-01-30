@@ -129,7 +129,7 @@ pub enum QueryError {
     Schema(#[from] schema::SchemaError),
 
     /// Plan execution failed
-    #[error("plan execution failed: {0}")]
+    #[error("{0}")]
     Execution(String),
 
     /// Document not found

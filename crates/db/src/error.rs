@@ -21,7 +21,7 @@ pub enum Error {
     #[error("collection version not found: {0}")]
     CollectionVersionNotFound(String),
 
-    #[error("collection already exists: {0}")]
+    #[error("collection already exists. Name: {0}")]
     CollectionAlreadyExists(String),
 
     #[error("invalid patch: {0}")]

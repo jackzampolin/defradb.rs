@@ -7,7 +7,7 @@ use cid::Cid;
 
 use crate::error::{QueryError, Result};
 use graphql_parser::schema::{
-    Definition, Directive, Document, Field, ObjectType, Type, TypeDefinition,
+    Definition, Directive, Document, Field, InterfaceType, ObjectType, Type, TypeDefinition,
 };
 use schema::{
     CType, CollectionVersion, FieldDescription, FieldKind, IndexDescription,
@@ -28,12 +28,13 @@ use regex::Regex;
 /// graphql_parser requires at least one field per type, but Go DefraDB allows empty types.
 const EMPTY_TYPE_PLACEHOLDER: &str = "__defradb_empty_type_placeholder__";
 
-/// Preprocess SDL to handle empty type definitions.
+/// Preprocess SDL to handle empty type/interface definitions.
 /// graphql_parser doesn't allow empty types, so we insert a placeholder field.
 fn preprocess_empty_types(sdl: &str) -> String {
-    // Match patterns like `type Name @directive(...)* {}` or `type Name {}`
-    // This regex finds `{` followed by optional whitespace then `}` in type definitions
-    let re = Regex::new(r"(\btype\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
+    // Match patterns like `type Name @directive(...)* {}` or `interface Name {}`
+    // This regex finds `{` followed by optional whitespace then `}` in type/interface definitions
+    let re =
+        Regex::new(r"(\b(?:type|interface)\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
 
     re.replace_all(sdl, |caps: &regex::Captures| {
         format!("{}{{ {}: String }}", &caps[1], EMPTY_TYPE_PLACEHOLDER)
@@ -73,15 +74,75 @@ fn graphql_schema_value_to_json(
     }
 }
 
-/// Parse @policy directive arguments
+/// Parse @policy directive arguments with Go-compatible error messages.
 fn parse_policy_directive(directive: &Directive<'_, String>) -> Result<PolicyConfig> {
-    let id = get_directive_string(directive, "id")
-        .ok_or_else(|| QueryError::parse("@policy directive requires 'id' argument"))?;
+    let id_raw = get_directive_arg(directive, "id");
+    let resource_raw = get_directive_arg(directive, "resource");
 
-    let resource = get_directive_string(directive, "resource")
-        .ok_or_else(|| QueryError::parse("@policy directive requires 'resource' argument"))?;
+    // Check for non-string argument types first (Go's graphql-go reports these)
+    if let Some(v) = id_raw {
+        if !matches!(v, graphql_parser::schema::Value::String(_)) {
+            return Err(QueryError::parse(format!(
+                "Argument \"id\" has invalid value {}",
+                format_graphql_value(v)
+            )));
+        }
+    }
+    if let Some(v) = resource_raw {
+        if !matches!(v, graphql_parser::schema::Value::String(_)) {
+            return Err(QueryError::parse(format!(
+                "Argument \"resource\" has invalid value {}",
+                format_graphql_value(v)
+            )));
+        }
+    }
 
-    Ok(PolicyConfig { id, resource })
+    // Extract string values (None if argument not present)
+    let id = id_raw.and_then(|v| match v {
+        graphql_parser::schema::Value::String(s) => Some(s.clone()),
+        _ => None,
+    });
+    let resource = resource_raw.and_then(|v| match v {
+        graphql_parser::schema::Value::String(s) => Some(s.clone()),
+        _ => None,
+    });
+
+    let id_empty = id.as_ref().map_or(true, |s| s.is_empty());
+    let resource_empty = resource.as_ref().map_or(true, |s| s.is_empty());
+
+    if id_empty && resource_empty {
+        return Err(QueryError::parse(
+            "missing policy arguments, must have both id and resource",
+        ));
+    }
+    if id_empty {
+        return Err(QueryError::parse("policyID must not be empty"));
+    }
+    if resource_empty {
+        return Err(QueryError::parse("resource name must not be empty"));
+    }
+
+    Ok(PolicyConfig {
+        id: id.unwrap(),
+        resource: resource.unwrap(),
+    })
+}
+
+/// Format a GraphQL value for error messages (matches Go's graphql-go formatting).
+fn format_graphql_value(value: &graphql_parser::schema::Value<'_, String>) -> String {
+    match value {
+        graphql_parser::schema::Value::Int(n) => {
+            n.as_i64().map_or("0".to_string(), |v| v.to_string())
+        }
+        graphql_parser::schema::Value::Float(f) => f.to_string(),
+        graphql_parser::schema::Value::Boolean(b) => b.to_string(),
+        graphql_parser::schema::Value::String(s) => format!("\"{}\"", s),
+        graphql_parser::schema::Value::Null => "null".to_string(),
+        graphql_parser::schema::Value::Enum(s) => s.clone(),
+        graphql_parser::schema::Value::List(_) => "[list]".to_string(),
+        graphql_parser::schema::Value::Object(_) => "{object}".to_string(),
+        graphql_parser::schema::Value::Variable(v) => format!("${}", v),
+    }
 }
 
 /// SDL parser for DefraDB schemas
@@ -95,6 +156,9 @@ pub struct SdlParser<'a> {
     warnings: Vec<ParseWarning>,
     /// Current type being parsed (for warning context)
     current_type: Option<String>,
+    /// External type names (e.g. existing collection types) that can be referenced
+    /// in field types but are not defined in the SDL being parsed.
+    known_external_types: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -102,6 +166,8 @@ struct ParsedTypeDef {
     name: String,
     fields: Vec<ParsedField>,
     directives: ParsedTypeDirectives,
+    /// Whether this type was defined with the `interface` keyword (not directly queryable)
+    is_interface: bool,
 }
 
 /// Type-level directives
@@ -127,9 +193,7 @@ impl Default for ParsedTypeDirectives {
 }
 
 /// Policy configuration from @policy directive
-/// Fields are validated during parsing but not yet wired to CollectionVersion
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct PolicyConfig {
     id: String,
     resource: String,
@@ -165,7 +229,14 @@ impl<'a> SdlParser<'a> {
             definition_order: Vec::new(),
             warnings: Vec::new(),
             current_type: None,
+            known_external_types: std::collections::HashSet::new(),
         }
+    }
+
+    /// Set external type names that can be referenced but aren't defined in the SDL.
+    pub fn with_known_types(mut self, types: std::collections::HashSet<String>) -> Self {
+        self.known_external_types = types;
+        self
     }
 
     /// Parse the SDL and return collection versions
@@ -190,10 +261,16 @@ impl<'a> SdlParser<'a> {
         let doc: Document<'_, String> = graphql_parser::parse_schema(&preprocessed)
             .map_err(|e| QueryError::parse(e.to_string()))?;
 
-        // First pass: collect all type definitions
+        // First pass: collect all type definitions (both `type` and `interface` keywords)
         for def in &doc.definitions {
-            if let Definition::TypeDefinition(TypeDefinition::Object(obj)) = def {
-                self.parse_object_type(obj)?;
+            match def {
+                Definition::TypeDefinition(TypeDefinition::Object(obj)) => {
+                    self.parse_object_type(obj)?;
+                }
+                Definition::TypeDefinition(TypeDefinition::Interface(iface)) => {
+                    self.parse_interface_type(iface)?;
+                }
+                _ => {}
             }
         }
 
@@ -238,6 +315,47 @@ impl<'a> SdlParser<'a> {
                 name,
                 fields,
                 directives: type_directives,
+                is_interface: false,
+            },
+        );
+
+        self.current_type = None;
+        Ok(())
+    }
+
+    /// Parse an interface type definition.
+    /// Go's SDL parser treats `interface` the same as `type` for view embedded schemas.
+    fn parse_interface_type(&mut self, iface: &InterfaceType<'_, String>) -> Result<()> {
+        let name = iface.name.clone();
+
+        if self.type_defs.contains_key(&name) {
+            return Err(QueryError::parse(format!(
+                "collection already exists. Name: {}",
+                name
+            )));
+        }
+
+        self.current_type = Some(name.clone());
+        let mut fields = Vec::new();
+
+        for field in &iface.fields {
+            if field.name == EMPTY_TYPE_PLACEHOLDER {
+                continue;
+            }
+            let parsed_field = self.parse_field(field)?;
+            fields.push(parsed_field);
+        }
+
+        let type_directives = self.parse_type_directives(&iface.directives)?;
+
+        self.definition_order.push(name.clone());
+        self.type_defs.insert(
+            name.clone(),
+            ParsedTypeDef {
+                name,
+                fields,
+                directives: type_directives,
+                is_interface: true,
             },
         );
 
@@ -754,8 +872,9 @@ impl<'a> SdlParser<'a> {
     }
 
     fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
-        // Build collection names set for relation detection
-        let type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
+        // Build collection names set for relation detection, including external types
+        let mut type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
+        type_names.extend(self.known_external_types.iter().cloned());
 
         // Collect @primary directive information for determining actual primaryness
         let primary_directives = self.collect_primary_directives(&type_names);
@@ -933,6 +1052,11 @@ impl<'a> SdlParser<'a> {
             if let Some(pass1_id) = all_collection_ids.get(type_name) {
                 collection.collection_id = pass1_id.clone();
                 collection.version_id = pass1_id.clone();
+            }
+
+            // Interface types are embedded-only (not root-queryable)
+            if type_def.is_interface {
+                collection.is_embedded_only = true;
             }
 
             collections.push(collection);
@@ -1267,21 +1391,36 @@ impl<'a> SdlParser<'a> {
                     if is_primary {
                         id_field = id_field.as_primary();
 
-                        // Go DefraDB automatically creates a unique index on the _*ID field
-                        // for primary one-to-one relations. This enforces that each target
-                        // document can only be linked to once (one-to-one constraint).
+                        // Only create a unique index for true one-to-one relations.
+                        // One-to-one means the counterpart type has a non-array field
+                        // pointing back to this type. No back-reference (join tables)
+                        // or array back-reference (one-to-many) means no unique index.
                         // See Go's ensureOneToOneUniqueIndex() in collection_define.go
-                        let idx_name = format!("{}_{}_unique", type_def.name, id_field_name);
-                        indexes.push(IndexDescription {
-                            name: idx_name,
-                            id: field_id_counter,
-                            fields: vec![IndexedFieldDescription {
-                                name: id_field_name.clone(),
-                                descending: false,
-                            }],
-                            unique: true,
-                        });
-                        field_id_counter += 1;
+                        let is_one_to_one = self
+                            .type_defs
+                            .get(&parsed_field.field_type.base_type)
+                            .map(|target_def| {
+                                target_def.fields.iter().any(|f| {
+                                    f.field_type.base_type == type_def.name
+                                        && !f.field_type.is_list
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        if is_one_to_one {
+                            let idx_name =
+                                format!("{}_{}_unique", type_def.name, id_field_name);
+                            indexes.push(IndexDescription {
+                                name: idx_name,
+                                id: field_id_counter,
+                                fields: vec![IndexedFieldDescription {
+                                    name: id_field_name.clone(),
+                                    descending: false,
+                                }],
+                                unique: true,
+                            });
+                            field_id_counter += 1;
+                        }
                     }
                     fields.push(id_field);
                     field_id_counter += 1;
@@ -1381,6 +1520,12 @@ impl<'a> SdlParser<'a> {
         collection.indexes = indexes;
         collection.is_materialized = type_def.directives.is_materialized;
         collection.is_branchable = type_def.directives.is_branchable;
+        if let Some(ref policy_config) = type_def.directives.policy {
+            collection.policy = Some(schema::PolicyDescription::new(
+                &policy_config.id,
+                &policy_config.resource,
+            ));
+        }
 
         Ok(collection)
     }
@@ -1650,6 +1795,19 @@ fn generate_relation_name(from_type: &str, _field_name: &str, to_type: &str) -> 
 /// unimplemented features, use [`parse_sdl_with_warnings`] instead.
 pub fn parse_sdl(sdl: &str) -> Result<Vec<CollectionVersion>> {
     let mut parser = SdlParser::new(sdl);
+    parser.parse()
+}
+
+/// Parse SDL with knowledge of existing collection type names.
+///
+/// External types referenced in the SDL (e.g. `books: [Book]` where `Book` is
+/// an existing collection) will be resolved as named relations instead of
+/// producing "no type found" errors.
+pub fn parse_sdl_with_known_types(
+    sdl: &str,
+    known_types: std::collections::HashSet<String>,
+) -> Result<Vec<CollectionVersion>> {
+    let mut parser = SdlParser::new(sdl).with_known_types(known_types);
     parser.parse()
 }
 
@@ -2268,6 +2426,39 @@ mod tests {
     }
 
     #[test]
+    fn test_self_ref_collection_id_matches_go() {
+        // Go's TestSchemaSelfReferenceSimple expects this CID for `type User { boss: User }`
+        let sdl = r#"
+            type User {
+                boss: User
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        assert_eq!(
+            collections[0].collection_id,
+            "bafyreicuxpdrri4wwdknhbchhdii6tu4myqlhspv3s2c3pci7jt7qc3zua",
+        );
+    }
+
+    #[test]
+    fn test_self_ref_complex_collection_id_matches_go() {
+        // Self-ref schema with multiple relation fields and @primary
+        let sdl = r#"
+            type User {
+                name: String
+                age: Int
+                boss: User @primary @relation(name: "boss_minion")
+                minion: User @relation(name: "boss_minion")
+            }
+        "#;
+        let collections = parse_sdl(sdl).unwrap();
+        assert_eq!(
+            collections[0].collection_id,
+            "bafyreibgdepgcg4y4odgoju4ac6bu5u2jejta6jg6pvzxblm5fnovsa3gi",
+        );
+    }
+
+    #[test]
     fn test_index_descending_direction() {
         let sdl = r#"
             type Event {
@@ -2629,7 +2820,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("requires 'id' argument"),
+            err.contains("policyID must not be empty"),
             "error should mention missing id argument: {}",
             err
         );
@@ -2647,7 +2838,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("requires 'resource' argument"),
+            err.contains("resource name must not be empty"),
             "error should mention missing resource argument: {}",
             err
         );

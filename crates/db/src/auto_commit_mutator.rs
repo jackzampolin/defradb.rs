@@ -14,7 +14,8 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
-use crate::block_builder::write_document_blocks;
+use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
+use defra_core::encryption::{get_encryption_config, store_doc_encryption, get_doc_encryption};
 use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
@@ -118,8 +119,11 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         ))
                     })?;
 
-                    // Use collection_id as schema_version_id (matches how Go stores it)
-                    let schema_version_id = collection.collection_id();
+                    // Use version_id for collectionVersionID (matches Go's VersionID())
+                    let schema_version_id = collection.version_id();
+
+                    // Get encryption config from thread-local (set by plan nodes)
+                    let enc_config = get_encryption_config();
 
                     // For create operations, all fields are new - pass None for modified_fields
                     match write_document_blocks(
@@ -128,10 +132,39 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         &doc,
                         schema_version_id,
                         None,
+                        enc_config.as_ref(),
                     )
                     .await
                     {
-                        Ok(block_result) => Some(block_result.cid),
+                        Ok(block_result) => {
+                            // Store encryption config per-document so updates re-apply it
+                            if let Some(ref config) = enc_config {
+                                store_doc_encryption(&doc_id.to_string(), config.clone());
+                            }
+
+                            // For branchable collections, create a collection-level block
+                            if collection.schema().is_branchable {
+                                let short_id =
+                                    collection_short_id(collection.collection_id());
+                                if let Err(e) = write_collection_block(
+                                    &blockstore,
+                                    &headstore,
+                                    short_id,
+                                    schema_version_id,
+                                    block_result.cid,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        collection = %collection_name,
+                                        error = %e,
+                                        "Failed to write collection block for branchable create"
+                                    );
+                                }
+                            }
+
+                            Some(block_result.cid)
+                        }
                         Err(e) => {
                             warn!(
                                 collection = %collection_name,
@@ -253,26 +286,58 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         ))
                     })?;
 
-                    // Use collection_id as schema_version_id (matches how Go stores it)
-                    let schema_version_id = collection.collection_id();
+                    // Use version_id for collectionVersionID (matches Go's VersionID())
+                    let schema_version_id = collection.version_id();
+
+                    // Get encryption config: first try thread-local (explicit in mutation),
+                    // then fall back to per-document stored config (from create with encryption).
+                    // This matches Go's behavior where encryption propagates through the DAG.
+                    let enc_config = get_encryption_config().or_else(|| {
+                        doc.id().and_then(|id| get_doc_encryption(&id.to_string()))
+                    });
 
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
-                    if let Err(e) = write_document_blocks(
+                    match write_document_blocks(
                         &blockstore,
                         &headstore,
                         &doc,
                         schema_version_id,
                         Some(&modified_fields),
+                        enc_config.as_ref(),
                     )
                     .await
                     {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write document blocks - commits queries may not work"
-                        );
-                        // Don't fail the mutation, just log the warning
+                        Ok(block_result) => {
+                            // For branchable collections, create a collection-level block
+                            if collection.schema().is_branchable {
+                                let short_id =
+                                    collection_short_id(collection.collection_id());
+                                if let Err(e) = write_collection_block(
+                                    &blockstore,
+                                    &headstore,
+                                    short_id,
+                                    schema_version_id,
+                                    block_result.cid,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        collection = %collection_name,
+                                        error = %e,
+                                        "Failed to write collection block for branchable update"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                collection = %collection_name,
+                                error = %e,
+                                "Failed to write document blocks - commits queries may not work"
+                            );
+                            // Don't fail the mutation, just log the warning
+                        }
                     }
                 } // blockstore and headstore dropped here
 
@@ -367,6 +432,69 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
         match result {
             Ok(existed) => {
+                // Build delete block (composite with status=2) in a scoped block
+                let commit_cid: Option<Cid> = {
+                    let blockstore = txn.blockstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get blockstore: {}",
+                            e
+                        ))
+                    })?;
+                    let headstore = txn.headstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get headstore: {}",
+                            e
+                        ))
+                    })?;
+
+                    let schema_version_id = collection.version_id();
+                    let doc_id_str = doc_id.to_string();
+
+                    match write_delete_block(
+                        &blockstore,
+                        &headstore,
+                        &doc_id_str,
+                        schema_version_id,
+                    )
+                    .await
+                    {
+                        Ok(block_result) => {
+                            let composite_cid = block_result.cid;
+
+                            // For branchable collections, also create a collection-level block
+                            if collection.schema().is_branchable {
+                                let short_id =
+                                    collection_short_id(collection.collection_id());
+                                if let Err(e) = write_collection_block(
+                                    &blockstore,
+                                    &headstore,
+                                    short_id,
+                                    schema_version_id,
+                                    composite_cid,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        collection = %collection_name,
+                                        error = %e,
+                                        "Failed to write collection block for branchable delete"
+                                    );
+                                }
+                            }
+
+                            Some(composite_cid)
+                        }
+                        Err(e) => {
+                            warn!(
+                                collection = %collection_name,
+                                error = %e,
+                                "Failed to write delete block - commits queries may not work"
+                            );
+                            None
+                        }
+                    }
+                }; // blockstore and headstore dropped here
+
                 // Commit the transaction (datastore reference is now dropped)
                 if let Err(e) = txn.commit().await {
                     warn!(
@@ -384,7 +512,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 if let Some(bus) = self.db.event_bus() {
                     let update = Update::new(
                         doc_id.to_string(),
-                        Cid::default(),
+                        commit_cid.unwrap_or_default(),
                         collection.name().to_string(),
                         vec![],
                         false, // is_retry

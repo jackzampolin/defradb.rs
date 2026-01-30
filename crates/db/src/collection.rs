@@ -61,6 +61,13 @@ impl Collection {
         &self.def.collection_id
     }
 
+    /// Get the collection version ID (content hash of this schema version).
+    ///
+    /// Go uses `VersionID()` for the `collectionVersionID` field in CRDT delta blocks.
+    pub fn version_id(&self) -> &str {
+        &self.def.version_id
+    }
+
     /// Get the collection schema.
     pub fn schema(&self) -> &CollectionVersion {
         &self.def

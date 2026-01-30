@@ -204,7 +204,8 @@ impl TypeJoinMany {
 
         let mut children: Vec<Doc> = docs.iter().map(|d| d.deep_clone()).collect();
 
-        // Apply ordering if specified
+        // Apply ordering if specified, otherwise default to _docID order
+        // for deterministic results matching Go DefraDB's storage scan order.
         if let Some(ref order_by) = self.child_order_by {
             let child_mapping = self.child_plan.document_map();
             children.sort_by(|a, b| {
@@ -215,7 +216,22 @@ impl TypeJoinMany {
                     if let Some(idx) = field_idx {
                         let val_a = a.get(idx);
                         let val_b = b.get(idx);
-                        let cmp = compare_json_values(val_a, val_b);
+
+                        // Resolve nested field paths (e.g., ["course", "name"])
+                        let (resolved_a, resolved_b) = if condition.fields.len() > 1 {
+                            let nested_path = &condition.fields[1..];
+                            (
+                                resolve_nested_field(val_a, nested_path),
+                                resolve_nested_field(val_b, nested_path),
+                            )
+                        } else {
+                            (val_a.cloned(), val_b.cloned())
+                        };
+
+                        let cmp = compare_json_values(
+                            resolved_a.as_ref(),
+                            resolved_b.as_ref(),
+                        );
                         let cmp = match condition.direction {
                             OrderDirection::Asc => cmp,
                             OrderDirection::Desc => cmp.reverse(),
@@ -226,6 +242,11 @@ impl TypeJoinMany {
                     }
                 }
                 Ordering::Equal
+            });
+        } else {
+            // Default: sort by _docID (index 0) for deterministic ordering
+            children.sort_by(|a, b| {
+                compare_json_values(a.get(0), b.get(0))
             });
         }
 
@@ -671,7 +692,8 @@ impl PlanNode for TypeJoinMany {
                 serde_json::Value::Number(self.child_offset.into()),
             );
             limit_node.insert("selectNode".to_string(), inner_content);
-            inner_content = serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
+            inner_content =
+                serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
         } else {
             // No limit, wrap selectNode directly
             inner_content = serde_json::json!({ "selectNode": inner_content });
@@ -703,7 +725,8 @@ impl PlanNode for TypeJoinMany {
                     order_node.insert(key.clone(), value.clone());
                 }
             }
-            inner_content = serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
+            inner_content =
+                serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
         }
 
         // Wrap everything in selectTopNode
@@ -761,7 +784,8 @@ impl PlanNode for TypeJoinMany {
                     order_node_content.insert(key.clone(), value.clone());
                 }
             }
-            inner_content = serde_json::json!({ "orderNode": serde_json::Value::Object(order_node_content) });
+            inner_content =
+                serde_json::json!({ "orderNode": serde_json::Value::Object(order_node_content) });
         }
 
         // Wrap everything in selectTopNode
@@ -825,6 +849,22 @@ impl PlanNode for TypeJoinMany {
 
         serde_json::Value::Object(obj)
     }
+}
+
+/// Resolve a nested field path within a JSON value.
+/// For example, given a JSON object `{"name": "Math"}` and path `["name"]`,
+/// returns `Some(JsonValue::String("Math"))`.
+fn resolve_nested_field(value: Option<&JsonValue>, path: &[String]) -> Option<JsonValue> {
+    let mut current = value?.clone();
+    for key in path {
+        match current {
+            JsonValue::Object(ref obj) => {
+                current = obj.get(key.as_str())?.clone();
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
 }
 
 /// Compare two JSON values for ordering.

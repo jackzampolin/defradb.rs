@@ -360,7 +360,7 @@ mod tests {
         // Perform a mutation
         let mutation =
             CString::new(r#"mutation { create_Book(input: {title: "Test"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -486,7 +486,7 @@ mod tests {
         let mutation =
             CString::new(r#"mutation { create_Article(input: {title: "Test"}) { _docID } }"#)
                 .unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -502,7 +502,7 @@ mod tests {
         // Create an Author (should trigger subscription)
         let mutation =
             CString::new(r#"mutation { create_Author(input: {name: "Bob"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };

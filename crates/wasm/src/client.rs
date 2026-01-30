@@ -182,27 +182,25 @@ impl DefraClient {
 
         // Create LevelDB store with OPFS persistence
         let db_name = config.db_name.as_deref().unwrap_or("defradb");
-        let store = LevelDbStore::open_with_opfs(db_name).await.map_err(|e| {
-            WasmError::Storage(format!("Failed to open LevelDB store: {}", e))
-        })?;
+        let store = LevelDbStore::open_with_opfs(db_name)
+            .await
+            .map_err(|e| WasmError::Storage(format!("Failed to open LevelDB store: {}", e)))?;
 
         // Create the database
-        let db = DB::new(store).map_err(|e| {
-            WasmError::Storage(format!("Failed to create database: {}", e))
-        })?;
+        let db = DB::new(store)
+            .map_err(|e| WasmError::Storage(format!("Failed to create database: {}", e)))?;
 
         // Load existing collections from storage
-        db.load_collections().await.map_err(|e| {
-            WasmError::Storage(format!("Failed to load collections: {}", e))
-        })?;
+        db.load_collections()
+            .await
+            .map_err(|e| WasmError::Storage(format!("Failed to load collections: {}", e)))?;
 
         let db = Arc::new(db);
 
         let fetcher = LensedAutoCommitFetcher::new(Arc::clone(&db));
         let provider = DbCollectionProvider::new_arc(Arc::clone(&db));
         let mutator = Arc::new(AutoCommitMutator::new(Arc::clone(&db)));
-        let runner = QueryRunner::with_provider(fetcher, provider)
-            .with_mutator(mutator);
+        let runner = QueryRunner::with_provider(fetcher, provider).with_mutator(mutator);
 
         Ok(Self {
             db: Some(db),
@@ -220,9 +218,10 @@ impl DefraClient {
 
     async fn persist_impl(&self) -> Result<()> {
         let db = self.ensure_open()?;
-        db.store().persist().await.map_err(|e| {
-            WasmError::Storage(format!("Persist failed: {}", e))
-        })?;
+        db.store()
+            .persist()
+            .await
+            .map_err(|e| WasmError::Storage(format!("Persist failed: {}", e)))?;
         Ok(())
     }
 
@@ -237,9 +236,9 @@ impl DefraClient {
         let mut added = Vec::new();
         for collection in collections {
             let name = collection.name.clone();
-            db.create_collection(collection)
-                .await
-                .map_err(|e| WasmError::Schema(format!("Failed to create collection '{}': {}", name, e)))?;
+            db.create_collection(collection).await.map_err(|e| {
+                WasmError::Schema(format!("Failed to create collection '{}': {}", name, e))
+            })?;
             added.push(name);
         }
 
@@ -302,9 +301,9 @@ impl DefraClient {
         let db = self.ensure_open()?;
 
         // Get collection names from the database
-        let names = db.list_collections().map_err(|e| {
-            WasmError::Storage(format!("Failed to list collections: {}", e))
-        })?;
+        let names = db
+            .list_collections()
+            .map_err(|e| WasmError::Storage(format!("Failed to list collections: {}", e)))?;
 
         // Get each collection's info
         let mut collections = Vec::new();
@@ -377,13 +376,17 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_client_creation() {
-        let client = DefraClient::create(test_config("test_creation")).await.unwrap();
+        let client = DefraClient::create(test_config("test_creation"))
+            .await
+            .unwrap();
         assert!(!client.closed);
     }
 
     #[wasm_bindgen_test]
     async fn test_close_is_idempotent() {
-        let mut client = DefraClient::create(test_config("test_close_idem")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_close_idem"))
+            .await
+            .unwrap();
         client.close().await.unwrap();
         assert!(client.closed);
         client.close().await.unwrap();
@@ -391,7 +394,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_query_after_close_fails() {
-        let mut client = DefraClient::create(test_config("test_query_closed")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_query_closed"))
+            .await
+            .unwrap();
         client.close().await.unwrap();
         let result = client.query("{ User { name } }").await;
         assert!(result.is_err());
@@ -399,7 +404,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_persist_after_close_fails() {
-        let mut client = DefraClient::create(test_config("test_persist_closed")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_persist_closed"))
+            .await
+            .unwrap();
         client.close().await.unwrap();
         let result = client.persist().await;
         assert!(result.is_err());
@@ -407,7 +414,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_mutate_no_schema_fails() {
-        let mut client = DefraClient::create(test_config("test_mutate_no_schema")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_mutate_no_schema"))
+            .await
+            .unwrap();
         let result = client
             .mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#)
             .await;
@@ -416,22 +425,30 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_empty_mutation_fails() {
-        let mut client = DefraClient::create(test_config("test_empty_mut")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_empty_mut"))
+            .await
+            .unwrap();
         let result = client.mutate("").await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     async fn test_mutate_after_close_fails() {
-        let mut client = DefraClient::create(test_config("test_mut_closed")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_mut_closed"))
+            .await
+            .unwrap();
         client.close().await.unwrap();
-        let result = client.mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#).await;
+        let result = client
+            .mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#)
+            .await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     async fn test_empty_query_fails() {
-        let client = DefraClient::create(test_config("test_empty_q")).await.unwrap();
+        let client = DefraClient::create(test_config("test_empty_q"))
+            .await
+            .unwrap();
         let result = client.query("").await;
         assert!(result.is_err());
     }
@@ -445,7 +462,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_fresh_db_has_no_user_collections() {
-        let client = DefraClient::create(test_config("test_fresh_db")).await.unwrap();
+        let client = DefraClient::create(test_config("test_fresh_db"))
+            .await
+            .unwrap();
         let result = client.get_collections().unwrap();
         let collections: Vec<CollectionInfo> = serde_wasm_bindgen::from_value(result).unwrap();
         // A fresh DB should have no user-defined collections (may have system ones)
@@ -462,7 +481,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_add_schema_and_get_collections() {
-        let mut client = DefraClient::create(test_config("test_add_schema")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_add_schema"))
+            .await
+            .unwrap();
 
         let sdl = "type User { name: String, email: String }";
         client.add_schema(sdl).await.unwrap();
@@ -476,14 +497,18 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_add_schema_invalid_sdl_fails() {
-        let mut client = DefraClient::create(test_config("test_bad_sdl")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_bad_sdl"))
+            .await
+            .unwrap();
         let result = client.add_schema("not valid graphql {{{{").await;
         assert!(result.is_err());
     }
 
     #[wasm_bindgen_test]
     async fn test_add_duplicate_schema_fails() {
-        let mut client = DefraClient::create(test_config("test_dup_schema")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_dup_schema"))
+            .await
+            .unwrap();
 
         let sdl = "type Item { name: String }";
         client.add_schema(sdl).await.unwrap();
@@ -493,7 +518,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_add_multiple_schemas() {
-        let mut client = DefraClient::create(test_config("test_multi_schema")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_multi_schema"))
+            .await
+            .unwrap();
 
         client
             .add_schema("type Book { title: String }")
@@ -513,7 +540,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_query_empty_collection() {
-        let mut client = DefraClient::create(test_config("test_query_empty")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_query_empty"))
+            .await
+            .unwrap();
 
         client
             .add_schema("type Product { name: String, price: Int }")
@@ -527,7 +556,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_persist_succeeds() {
-        let mut client = DefraClient::create(test_config("test_persist_ok")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_persist_ok"))
+            .await
+            .unwrap();
 
         client
             .add_schema("type Note { text: String }")
@@ -541,29 +572,46 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_create_and_query_document() {
-        let mut client = DefraClient::create(test_config("test_create_query")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_create_query"))
+            .await
+            .unwrap();
         client
             .add_schema("type User { name: String, age: Int }")
             .await
             .unwrap();
 
         let result = client
-            .mutate(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
+            .mutate(
+                r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID name age } }"#,
+            )
             .await
             .unwrap();
         let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
-        assert!(response.get("data").is_some(), "Mutation should return data");
+        assert!(
+            response.get("data").is_some(),
+            "Mutation should return data"
+        );
 
         let result = client.query("{ User { name age } }").await.unwrap();
         let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
         let data_str = response["data"].to_string();
-        assert!(data_str.contains("Alice"), "Query should find Alice, got: {}", data_str);
-        assert!(data_str.contains("30"), "Query should find age 30, got: {}", data_str);
+        assert!(
+            data_str.contains("Alice"),
+            "Query should find Alice, got: {}",
+            data_str
+        );
+        assert!(
+            data_str.contains("30"),
+            "Query should find age 30, got: {}",
+            data_str
+        );
     }
 
     #[wasm_bindgen_test]
     async fn test_create_multiple_documents() {
-        let mut client = DefraClient::create(test_config("test_create_multi")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_create_multi"))
+            .await
+            .unwrap();
         client
             .add_schema("type Person { name: String }")
             .await
@@ -581,13 +629,23 @@ mod tests {
         let result = client.query("{ Person { name } }").await.unwrap();
         let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
         let data_str = response["data"].to_string();
-        assert!(data_str.contains("Bob"), "Should find Bob, got: {}", data_str);
-        assert!(data_str.contains("Carol"), "Should find Carol, got: {}", data_str);
+        assert!(
+            data_str.contains("Bob"),
+            "Should find Bob, got: {}",
+            data_str
+        );
+        assert!(
+            data_str.contains("Carol"),
+            "Should find Carol, got: {}",
+            data_str
+        );
     }
 
     #[wasm_bindgen_test]
     async fn test_create_returns_doc_id() {
-        let mut client = DefraClient::create(test_config("test_create_docid")).await.unwrap();
+        let mut client = DefraClient::create(test_config("test_create_docid"))
+            .await
+            .unwrap();
         client
             .add_schema("type Widget { label: String }")
             .await
@@ -599,7 +657,11 @@ mod tests {
             .unwrap();
         let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
         let data_str = response["data"].to_string();
-        assert!(data_str.contains("_docID"), "Mutation result should include _docID, got: {}", data_str);
+        assert!(
+            data_str.contains("_docID"),
+            "Mutation result should include _docID, got: {}",
+            data_str
+        );
     }
 
     #[wasm_bindgen_test]

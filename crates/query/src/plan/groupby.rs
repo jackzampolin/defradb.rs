@@ -934,7 +934,10 @@ impl PlanNode for GroupByNode {
             .iter()
             .map(|f| JsonValue::String(f.clone()))
             .collect();
-        obj.insert("groupByFields".to_string(), JsonValue::Array(group_by_fields));
+        obj.insert(
+            "groupByFields".to_string(),
+            JsonValue::Array(group_by_fields),
+        );
 
         // childSelects: array of objects with child selection metadata
         if self.child_selects.is_empty() {

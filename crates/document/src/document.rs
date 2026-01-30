@@ -69,6 +69,12 @@ pub struct Document {
     /// Whether this document has been soft-deleted (marked with DeletedObjectMarker).
     #[serde(skip)]
     deleted: bool,
+
+    /// Raw counter increment deltas for update operations.
+    /// For counter CRDT fields, the block builder needs the raw increment
+    /// (not the accumulated value). Populated during UpdateInput::apply_to.
+    #[serde(skip)]
+    counter_deltas: HashMap<String, NormalValue>,
 }
 
 impl Document {
@@ -83,6 +89,7 @@ impl Document {
             collection: None,
             schema_version_id: None,
             deleted: false,
+            counter_deltas: HashMap::new(),
         }
     }
 
@@ -98,6 +105,7 @@ impl Document {
             collection: Some(collection),
             schema_version_id: Some(version_id),
             deleted: false,
+            counter_deltas: HashMap::new(),
         }
     }
 
@@ -112,6 +120,7 @@ impl Document {
             collection: None,
             schema_version_id: None,
             deleted: false,
+            counter_deltas: HashMap::new(),
         }
     }
 
@@ -329,6 +338,16 @@ impl Document {
     /// Get all values.
     pub fn values(&self) -> &HashMap<String, FieldValue> {
         &self.values
+    }
+
+    /// Store a raw counter increment delta for a field.
+    pub fn set_counter_delta(&mut self, field: String, value: NormalValue) {
+        self.counter_deltas.insert(field, value);
+    }
+
+    /// Get the raw counter increment delta for a field (if any).
+    pub fn get_counter_delta(&self, field: &str) -> Option<&NormalValue> {
+        self.counter_deltas.get(field)
     }
 
     /// Get all dirty fields.
