@@ -66,11 +66,15 @@ pub extern "C" fn new_node(_options: NodeInitOptions) -> NewNodeResult {
         let nac_config = db::NacConfig::new().with_dev_mode();
         let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
 
+        // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
+        let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+
         // Create query runner with transaction, mutation, and ACP support
         let query_runner =
             query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
                 .with_mutator(mutator)
-                .with_acp(document_acp.clone());
+                .with_acp(document_acp.clone())
+                .with_encryption_key(encryption_key);
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 

@@ -15,6 +15,7 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::write_document_blocks;
+use defra_core::encryption::{get_encryption_config, store_doc_encryption, get_doc_encryption};
 use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
@@ -118,8 +119,11 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         ))
                     })?;
 
-                    // Use collection_id as schema_version_id (matches how Go stores it)
-                    let schema_version_id = collection.collection_id();
+                    // Use version_id for collectionVersionID (matches Go's VersionID())
+                    let schema_version_id = collection.version_id();
+
+                    // Get encryption config from thread-local (set by plan nodes)
+                    let enc_config = get_encryption_config();
 
                     // For create operations, all fields are new - pass None for modified_fields
                     match write_document_blocks(
@@ -128,10 +132,17 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         &doc,
                         schema_version_id,
                         None,
+                        enc_config.as_ref(),
                     )
                     .await
                     {
-                        Ok(block_result) => Some(block_result.cid),
+                        Ok(block_result) => {
+                            // Store encryption config per-document so updates re-apply it
+                            if let Some(ref config) = enc_config {
+                                store_doc_encryption(&doc_id.to_string(), config.clone());
+                            }
+                            Some(block_result.cid)
+                        }
                         Err(e) => {
                             warn!(
                                 collection = %collection_name,
@@ -253,8 +264,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         ))
                     })?;
 
-                    // Use collection_id as schema_version_id (matches how Go stores it)
-                    let schema_version_id = collection.collection_id();
+                    // Use version_id for collectionVersionID (matches Go's VersionID())
+                    let schema_version_id = collection.version_id();
+
+                    // Get encryption config: first try thread-local (explicit in mutation),
+                    // then fall back to per-document stored config (from create with encryption).
+                    // This matches Go's behavior where encryption propagates through the DAG.
+                    let enc_config = get_encryption_config().or_else(|| {
+                        doc.id().and_then(|id| get_doc_encryption(&id.to_string()))
+                    });
 
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
@@ -264,6 +282,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         &doc,
                         schema_version_id,
                         Some(&modified_fields),
+                        enc_config.as_ref(),
                     )
                     .await
                     {

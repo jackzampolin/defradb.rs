@@ -1804,8 +1804,26 @@ fn parse_field_to_mutation(
                 }
             }
 
-            // Encryption arguments: accepted but not yet implemented in Rust
-            (_, "encrypt") | (_, "encryptFields") => {}
+            // Encryption: encrypt entire document
+            (_, "encrypt") => {
+                if let Value::Boolean(b) = arg_value {
+                    mutation.encrypt_doc = *b;
+                }
+            }
+
+            // Encryption: encrypt specific fields
+            (_, "encryptFields") => {
+                if let Value::List(fields) = arg_value {
+                    mutation.encrypt_fields = fields
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Enum(name) => Some(name.clone()),
+                            Value::String(name) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                }
+            }
 
             // Unknown argument
             _ => {
