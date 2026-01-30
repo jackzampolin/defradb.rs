@@ -312,18 +312,22 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     pub async fn handle_host_event(&self, event: HostEvent) -> Result<()> {
         match event {
             HostEvent::PeerConnected(peer_id) => {
+                eprintln!("[COORDINATOR] Peer connected: {}", peer_id);
                 tracing::debug!(peer_id = %peer_id, "Peer connected");
                 self.peer_state.peer_connected(peer_id);
             }
             HostEvent::PeerDisconnected(peer_id) => {
+                eprintln!("[COORDINATOR] Peer disconnected: {}", peer_id);
                 tracing::debug!(peer_id = %peer_id, "Peer disconnected");
                 self.peer_state.peer_disconnected(&peer_id);
             }
             HostEvent::PeerSubscribed { peer_id, topic } => {
+                eprintln!("[COORDINATOR] Peer subscribed: peer={}, topic={}", peer_id, topic);
                 tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
                 self.peer_state.peer_subscribed(&peer_id, topic);
             }
             HostEvent::PeerUnsubscribed { peer_id, topic } => {
+                eprintln!("[COORDINATOR] Peer unsubscribed: peer={}, topic={}", peer_id, topic);
                 tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer unsubscribed from topic");
                 self.peer_state.peer_unsubscribed(&peer_id, &topic);
             }
@@ -333,6 +337,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 topic,
                 ..
             } => {
+                eprintln!(
+                    "[COORDINATOR] Received GossipSub message: doc_id={}, collection_id={}, topic={}, from={}",
+                    message.doc_id, message.collection_id, topic, propagation_source
+                );
                 tracing::debug!(
                     doc_id = %message.doc_id,
                     collection_id = %message.collection_id,
@@ -371,7 +379,16 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     }
                 }
 
-                self.manager.process_pushlog(&message).await?;
+                eprintln!("[COORDINATOR] Calling manager.process_pushlog for GossipSub message");
+                match self.manager.process_pushlog(&message).await {
+                    Ok(()) => {
+                        eprintln!("[COORDINATOR] process_pushlog succeeded for GossipSub message");
+                    }
+                    Err(e) => {
+                        eprintln!("[COORDINATOR] process_pushlog FAILED for GossipSub message: {}", e);
+                        return Err(e);
+                    }
+                }
             }
             HostEvent::PushLogRequest {
                 peer_id,
@@ -855,9 +872,15 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         doc_id: &str,
         collection_id: &str,
     ) -> Result<super::BroadcastResult> {
+        eprintln!(
+            "[COORDINATOR] broadcast_local_update: cid={}, doc_id={}, collection_id={}, block_len={}, local_peer={}",
+            cid, doc_id, collection_id, block.len(), self.local_peer_id
+        );
         let broadcast =
             Broadcaster::create_broadcast(cid, block, doc_id, collection_id, &self.local_peer_id);
-        self.broadcaster.broadcast_update(&broadcast).await
+        let result = self.broadcaster.broadcast_update(&broadcast).await;
+        eprintln!("[COORDINATOR] broadcast_update result: {:?}", result);
+        result
     }
 
     /// Mark a block as merged.

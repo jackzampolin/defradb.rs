@@ -19,6 +19,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 use blockstore::DefraBlockstore;
 use p2p::bitswap::BitswapStoreAdapter;
 use p2p::sync::{ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator};
+use p2p::topics::DefraTopic;
 use p2p::P2PHost;
 
 /// Parsed multiaddr containing peer ID and transport address.
@@ -156,13 +157,17 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Task 1: Host event loop - reads HostEvents and feeds them to the coordinator
         let coord_for_events = coordinator.clone();
         let host_event_task = tokio::spawn(async move {
+            eprintln!("[FFI-HOST-EVENTS] Host event loop started");
             let mut rx = event_rx;
+            let mut count = 0u64;
             while let Some(event) = rx.recv().await {
+                count += 1;
+                eprintln!("[FFI-HOST-EVENTS] Received host event #{}: {:?}", count, std::mem::discriminant(&event));
                 if let Err(e) = coord_for_events.handle_host_event(event).await {
-                    tracing::debug!("Error handling host event: {}", e);
+                    eprintln!("[FFI-HOST-EVENTS] Error handling host event #{}: {}", count, e);
                 }
             }
-            tracing::debug!("Host event loop exiting - channel closed");
+            eprintln!("[FFI-HOST-EVENTS] Host event loop exiting - channel closed (processed {} events)", count);
         });
 
         // Task 2: Replication loop - processes sync events and publishes MergeComplete
@@ -170,9 +175,13 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let handler_for_repl = merge_handler.clone();
         let event_bus_for_repl = event_bus.clone();
         let replication_task = tokio::spawn(async move {
+            eprintln!("[FFI-REPL-LOOP] Replication loop started");
             let config = ReplicationConfig::default();
             let mut events = sync_events_rx;
+            let mut iteration = 0u64;
             loop {
+                iteration += 1;
+                eprintln!("[FFI-REPL-LOOP] Waiting for sync event (iteration #{})", iteration);
                 let result = ReplicationLoop::process_next(
                     &coord_for_repl,
                     &mut events,
@@ -181,6 +190,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 )
                 .await;
 
+                eprintln!("[FFI-REPL-LOOP] process_next returned: {:?}", std::mem::discriminant(&result));
                 match &result {
                     ReplicationResult::Merged {
                         cid,
@@ -235,33 +245,71 @@ pub unsafe extern "C" fn new_node_with_p2p(
         });
 
         // Task 3: Local update broadcaster - broadcasts local mutations to P2P network
+        // Retries with backoff when GossipSub mesh hasn't formed yet (InsufficientPeers).
         let coord_for_broadcast = coordinator.clone();
         let event_bus_for_broadcast = event_bus.clone();
         let broadcast_task = tokio::spawn(async move {
+            eprintln!("[FFI-BROADCAST] Broadcast task started, subscribing to Update events");
             let mut sub = event_bus_for_broadcast.subscribe(&[events::EventName::Update]);
+            let mut msg_count = 0u64;
             while let Some(msg) = sub.recv().await {
+                msg_count += 1;
                 if let Some(update) = msg.as_update() {
+                    eprintln!(
+                        "[FFI-BROADCAST] Received Update event #{}: doc_id={}, collection_id={}, cid={}, block_len={}, is_relay={}",
+                        msg_count, update.doc_id, update.collection_id, update.cid, update.block.len(), update.is_relay
+                    );
                     // Skip relay updates (already from P2P)
                     if update.is_relay {
+                        eprintln!("[FFI-BROADCAST] Skipping relay update #{}", msg_count);
                         continue;
                     }
                     let cid = update.cid;
-                    let block = &update.block;
-                    let doc_id = &update.doc_id;
-                    let collection_id = &update.collection_id;
-                    if let Err(e) = coord_for_broadcast
-                        .broadcast_local_update(&cid, block, doc_id, collection_id)
-                        .await
-                    {
-                        tracing::debug!(
-                            doc_id = %doc_id,
-                            error = %e,
-                            "Failed to broadcast local update"
-                        );
+                    let block = update.block.clone();
+                    let doc_id = update.doc_id.clone();
+                    let collection_id = update.collection_id.clone();
+
+                    // Retry loop for GossipSub mesh formation.
+                    // After peers connect, GossipSub needs ~1 heartbeat interval
+                    // to form the mesh. Retry with backoff up to ~5 seconds total.
+                    let max_retries = 10u32;
+                    let mut attempt = 0u32;
+                    loop {
+                        attempt += 1;
+                        match coord_for_broadcast
+                            .broadcast_local_update(&cid, &block, &doc_id, &collection_id)
+                            .await
+                        {
+                            Ok(result) => {
+                                eprintln!("[FFI-BROADCAST] Broadcast succeeded (attempt {}): {:?}", attempt, result);
+                                break;
+                            }
+                            Err(e) => {
+                                let err_str = e.to_string();
+                                if err_str.contains("InsufficientPeers") && attempt <= max_retries {
+                                    let delay_ms = 100 * (1u64 << attempt.min(5));
+                                    eprintln!(
+                                        "[FFI-BROADCAST] InsufficientPeers (attempt {}/{}), retrying in {}ms: doc_id={}, collection_id={}",
+                                        attempt, max_retries, delay_ms, doc_id, collection_id
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                                    continue;
+                                }
+                                eprintln!("[FFI-BROADCAST] Broadcast failed (attempt {}): {}", attempt, e);
+                                tracing::debug!(
+                                    doc_id = %doc_id,
+                                    error = %e,
+                                    "Failed to broadcast local update"
+                                );
+                                break;
+                            }
+                        }
                     }
+                } else {
+                    eprintln!("[FFI-BROADCAST] Received non-Update event #{}, ignoring", msg_count);
                 }
             }
-            tracing::debug!("Broadcast task exiting - subscription closed");
+            eprintln!("[FFI-BROADCAST] Broadcast task exiting - subscription closed (processed {} messages)", msg_count);
         });
 
         // Create P2P state with sync pipeline abort handles
@@ -713,11 +761,19 @@ pub unsafe extern "C" fn p2p_add_collections(
                 None => return Err("P2P not enabled for this node".to_string()),
             };
 
-            for name in collections {
-                p2p.add_collection(&name);
-            }
-
-            Ok(())
+            rt.block_on(async {
+                for name in &collections {
+                    // Subscribe to the GossipSub topic for this collection
+                    let topic = DefraTopic::collection(name);
+                    if let Err(e) = p2p.handle.subscribe(topic).await {
+                        eprintln!("[FFI-P2P] WARNING: Failed to subscribe to GossipSub topic for collection '{}': {}", name, e);
+                    } else {
+                        eprintln!("[FFI-P2P] Subscribed to GossipSub topic for collection '{}'", name);
+                    }
+                    p2p.add_collection(name);
+                }
+                Ok(())
+            })
         })
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
@@ -767,11 +823,17 @@ pub unsafe extern "C" fn p2p_remove_collections(
                 None => return Err("P2P not enabled for this node".to_string()),
             };
 
-            for name in collections {
-                p2p.remove_collection(&name);
-            }
-
-            Ok(())
+            rt.block_on(async {
+                for name in &collections {
+                    // Unsubscribe from the GossipSub topic for this collection
+                    let topic = DefraTopic::collection(name);
+                    if let Err(e) = p2p.handle.unsubscribe(topic).await {
+                        eprintln!("[FFI-P2P] WARNING: Failed to unsubscribe from GossipSub topic for collection '{}': {}", name, e);
+                    }
+                    p2p.remove_collection(name);
+                }
+                Ok(())
+            })
         })
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);

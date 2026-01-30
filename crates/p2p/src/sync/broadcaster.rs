@@ -101,9 +101,16 @@ impl Broadcaster {
         let doc_topic = DefraTopic::document(&broadcast.doc_id);
         let collection_topic = DefraTopic::collection(&broadcast.collection_id);
 
+        eprintln!(
+            "[BROADCASTER] Publishing to doc_topic={}, collection_topic={}, doc_id={}, collection_id={}, block_len={}",
+            doc_topic, collection_topic, broadcast.doc_id, broadcast.collection_id, broadcast.block.len()
+        );
+
         // Try to publish to both topics
         let doc_result = self.host.publish(doc_topic, broadcast.clone()).await;
+        eprintln!("[BROADCASTER] doc_topic publish result: {:?}", doc_result.as_ref().map(|_| "ok").map_err(|e| e.to_string()));
         let collection_result = self.host.publish(collection_topic, broadcast.clone()).await;
+        eprintln!("[BROADCASTER] collection_topic publish result: {:?}", collection_result.as_ref().map(|_| "ok").map_err(|e| e.to_string()));
 
         // Return appropriate result based on what succeeded
         match (&doc_result, &collection_result) {
