@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use acp::DocumentACP;
+use identity::Did;
 use schema::CollectionVersion;
 use tracing::{debug, warn};
 
@@ -14,10 +16,10 @@ use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
-    AllDocsNode, AvgSourceMeta, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, IndexScanNode,
-    InnerAggregateDef, JoinSide, LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta,
-    OrderByNode, RelationFilter, ScanNode, SelectNode, SimilarityNode, SumNode, SumSourceMeta,
-    TypeJoinMany, TypeJoinOne,
+    AllDocsNode, AvgSourceMeta, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
+    IndexScanNode, InnerAggregateDef, JoinSide, LimitNode, MaxNode, MaxSourceMeta, MinNode,
+    MinSourceMeta, OrderByNode, PermissionFilterNode, RelationFilter, ScanNode, SelectNode,
+    SimilarityNode, SumNode, SumSourceMeta, TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
@@ -66,6 +68,10 @@ pub struct Planner {
     fetcher: Option<Arc<dyn DocFetcher>>,
     /// Optional lens transform store for view queries with transforms
     lens_store: Option<Arc<dyn lens::TransformStore>>,
+    /// Optional ACP for permission filtering in plans
+    acp: Option<Arc<dyn DocumentACP>>,
+    /// Identity for ACP permission checks
+    identity_did: Option<Did>,
 }
 
 impl Planner {
@@ -92,6 +98,8 @@ impl Planner {
             collections_by_id,
             fetcher: None,
             lens_store: None,
+            acp: None,
+            identity_did: None,
         }
     }
 
@@ -108,6 +116,32 @@ impl Planner {
     pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
         self.lens_store = Some(store);
         self
+    }
+
+    /// Set ACP and identity for permission filtering in plans.
+    pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>, identity_did: Option<Did>) -> Self {
+        self.acp = Some(acp);
+        self.identity_did = identity_did;
+        self
+    }
+
+    /// Conditionally wrap a plan with a PermissionFilterNode if the collection has an ACP policy.
+    fn maybe_wrap_with_acp_filter(
+        &self,
+        plan: Box<dyn PlanNode>,
+        collection: &CollectionVersion,
+    ) -> Box<dyn PlanNode> {
+        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            Box::new(PermissionFilterNode::from_optional_did(
+                plan,
+                acp.clone(),
+                self.identity_did.clone(),
+                &policy.id,
+                &policy.resource_name,
+            ))
+        } else {
+            plan
+        }
     }
 
     /// Get a collection by name or CollectionID.
@@ -870,6 +904,10 @@ impl Planner {
                 }
             }
         }
+
+        // Insert ACP permission filter for the root collection (if ACP-protected).
+        // Position: after Select/joins/similarity but before GroupBy/Aggregates/OrderBy/Limit.
+        plan = self.maybe_wrap_with_acp_filter(plan, &collection);
 
         // Check if we have GROUP BY - this affects the order of operations
         let has_group_by = select.group_by.is_some();
@@ -2226,6 +2264,9 @@ impl Planner {
                 );
             }
 
+            // Insert ACP permission filter for the child collection (if ACP-protected).
+            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
+
             // Update parent mapping with the final child mapping (after sub-joins)
             // This ensures the nested relation mappings are included
             mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
@@ -3079,6 +3120,9 @@ impl Planner {
                             }
                         }
                     }
+
+                    // Insert ACP permission filter for the aggregate child collection (if ACP-protected).
+                    child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
                     // Set up child mapping in parent for TypeJoin (after sub-join modifications)
                     mapping.set_child_at(effective_relation_index, child_scan_mapping.clone());

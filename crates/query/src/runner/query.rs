@@ -1867,37 +1867,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             || has_ordering_index
             || has_similarity;
 
-        // SECURITY: Block nested queries on ACP-protected collections until Planner ACP is implemented.
-        // See issue #114 for tracking the full fix.
-        if needs_planner && self.acp.is_some() {
-            // Check root collection for ACP
-            if collection.policy.is_some() {
-                return Err(QueryError::execution(format!(
-                    "Nested queries on ACP-protected collections are not yet supported. \
-                     Collection '{}' has an ACP policy. Remove nested selections or use \
-                     separate queries. See issue #114 for tracking.",
-                    collection.name
-                )));
-            }
-
-            // Check nested collections by resolving relation targets from parent collection
-            if let Some(acp_coll) = self
-                .find_acp_collection_in_nested(select, &collection)
-                .await?
-            {
-                return Err(QueryError::execution(format!(
-                    "Nested queries on ACP-protected collections are not yet supported. \
-                     Collection '{}' has an ACP policy. Remove nested selections or use \
-                     separate queries. See issue #114 for tracking.",
-                    acp_coll
-                )));
-            }
-        }
-
         if needs_planner {
             // Use the Planner for queries with nested selections (joins) or relation filters.
-            // Note: ACP filtering for nested queries is not yet implemented.
-            // Queries on ACP-protected collections are blocked above.
             self.execute_nested_select_with_planner(select, fetcher, caller_identity)
                 .await
         } else {
@@ -1911,15 +1882,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// The Planner builds a proper join plan with TypeJoinOne/TypeJoinMany nodes.
     /// ScanNodes fetch their own data via the attached fetcher.
-    ///
-    /// Note: This path does NOT enforce ACP permissions. Queries involving
-    /// ACP-protected collections are blocked at the caller level (execute_select_internal).
-    /// The identity parameter is accepted for future use when Planner ACP is implemented.
+    /// ACP permission filtering is applied per-collection via PermissionFilterNode in the plan.
     async fn execute_nested_select_with_planner(
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
-        _identity: Option<Did>,
+        identity: Option<Did>,
     ) -> Result<JsonValue> {
         // Create a fetcher wrapper that can be shared across plan nodes
         // We need to wrap the reference in an Arc-compatible struct
@@ -1932,6 +1900,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collections_map.values().map(|c| (**c).clone()).collect();
 
         let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        if let Some(ref acp) = self.acp {
+            planner = planner.with_acp(acp.clone(), identity);
+        }
         if let Some(ref lens_store) = self.lens_store {
             planner = planner.with_lens_store(lens_store.clone());
         }
