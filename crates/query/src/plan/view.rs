@@ -198,4 +198,36 @@ impl PlanNode for ViewNode {
     fn kind(&self) -> &'static str {
         "viewNode"
     }
+
+    fn explain_inner(&self) -> serde_json::Value {
+        let child_explain = self.source.explain();
+        // Wrap the inner source plan in selectTopNode (Go's view pipeline convention).
+        // If source is a lensNode, it handles the wrapping instead.
+        if self.source.kind() == "lensNode" {
+            let mut obj = serde_json::Map::new();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+            serde_json::Value::Object(obj)
+        } else {
+            serde_json::json!({ "selectTopNode": child_explain })
+        }
+    }
+
+    fn explain_debug_inner(&self) -> serde_json::Value {
+        let child_explain = self.source.explain_debug();
+        if self.source.kind() == "lensNode" {
+            let mut obj = serde_json::Map::new();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+            serde_json::Value::Object(obj)
+        } else {
+            serde_json::json!({ "selectTopNode": child_explain })
+        }
+    }
 }

@@ -499,7 +499,17 @@ impl Planner {
                 Filter::from_conditions(conditions)
             };
             match filter_for_plan {
-                Some(existing) => Some(doc_ids_filter.and(existing)),
+                Some(existing) => {
+                    // Flat-merge _docID into existing conditions instead of wrapping in _and.
+                    // Using .and() would create {_and: [conditions, {_docID: ...}]} which defeats
+                    // split_by_relation() — the entire _and block gets classified as "relation"
+                    // if any inner condition references a relation field.
+                    let mut merged = existing.conditions().clone();
+                    for (k, v) in doc_ids_filter.conditions() {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    Some(Filter::from_conditions(merged))
+                }
                 None => Some(doc_ids_filter),
             }
         } else {
@@ -1616,6 +1626,24 @@ impl Planner {
             }
         }
 
+        // Collect info about selection joins so aggregates can share when compatible.
+        // Go shares joins when: same relation, same filter, no limit on selection.
+        struct SelectionJoinInfo {
+            filter_json: Option<String>,
+            has_limit: bool,
+        }
+        let selection_join_info: std::collections::HashMap<String, SelectionJoinInfo> =
+            selects_to_process
+                .iter()
+                .map(|(s, _)| {
+                    let filter_json = s.filter.as_ref().map(|f| {
+                        serde_json::to_string(f.conditions()).unwrap_or_default()
+                    });
+                    let has_limit = s.limit.as_ref().map_or(false, |l| l.limit.is_some());
+                    (s.field.name.clone(), SelectionJoinInfo { filter_json, has_limit })
+                })
+                .collect();
+
         for (nested_select, group_index) in selects_to_process {
             let relation_field_name = &nested_select.field.name;
             let output_name = nested_select.field.output_name();
@@ -2661,15 +2689,31 @@ impl Planner {
 
                     let relation_field_name = &target.host_name;
 
-                    // Check if this relation is already joined by a prior aggregate.
-                    // Multiple aggregates on the same relation share one TypeJoinMany;
-                    // compute_relation_aggregates() handles per-aggregate limit/offset/order
-                    // in post-processing.
-                    // NOTE: We intentionally do NOT share with selection joins because
-                    // selections may apply their own filter/order/limit that restricts
-                    // the data. Aggregates need independent access to all children.
+                    // Check if this relation is already joined by a prior aggregate
+                    // or by a selection. Multiple aggregates on the same relation share
+                    // one TypeJoinMany; compute_relation_aggregates() handles per-aggregate
+                    // limit/offset/order in post-processing.
+                    // Go also shares joins between selections and aggregates targeting
+                    // the same relation (e.g., books(filter: X) + _count(books: {filter: X})).
                     let already_joined =
-                        aggregate_joined_relations.contains(relation_field_name.as_str());
+                        aggregate_joined_relations.contains(relation_field_name.as_str())
+                            || selection_join_info.get(relation_field_name.as_str()).map_or(false, |info| {
+                                if info.has_limit {
+                                    return false;
+                                }
+                                // If aggregate has no filter but specifies a field_name, it's a
+                                // field-level operation (e.g. _avg(books: {field: rating})) that
+                                // piggybacks on the selection's join. Share unconditionally.
+                                if target.filter.is_none() {
+                                    return target.field_name.is_some();
+                                }
+                                // If aggregate has a filter, share only if it matches the
+                                // selection's filter exactly.
+                                let agg_filter_json = target.filter.as_ref().map(|f| {
+                                    serde_json::to_string(f.conditions()).unwrap_or_default()
+                                });
+                                info.filter_json == agg_filter_json
+                            });
 
                     // Find the field in the parent collection
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
@@ -4009,16 +4053,15 @@ impl Planner {
             target_mapping.clone(),
         ));
 
-        // Apply the user's query-level filter on top of the view if present.
-        // The view's stored query filter is already applied in the source plan;
-        // this handles additional filters specified by the caller.
+        // Always wrap viewNode in SelectNode (Go always has selectNode → viewNode).
+        // Apply user's query-level filter if present.
         let plan: Box<dyn PlanNode> = if let Some(ref filter) = select.filter {
             Box::new(
                 SelectNode::new(view_plan, target_mapping)
                     .with_filter(filter.clone()),
             )
         } else {
-            view_plan
+            Box::new(SelectNode::new(view_plan, target_mapping))
         };
 
         Ok(PlanResult {
