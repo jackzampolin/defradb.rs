@@ -8,7 +8,7 @@
 use std::ffi::c_char;
 use std::sync::Arc;
 
-use acp::nac::NodePermission;
+use acp::nac::{NacStatus, NodePermission};
 
 use crate::state::{FfiNacManager, NODES};
 use crate::types::{c_str_to_string, FfiResult};
@@ -28,8 +28,12 @@ pub fn check_nac_permission(
     identity_did: *const c_char,
     permission: NodePermission,
 ) -> Result<(), FfiResult> {
-    let is_enabled = rt.block_on(nac_manager.is_enabled());
-    if !is_enabled {
+    // Check runtime NAC status directly rather than is_enabled(),
+    // because is_enabled() also requires config.enabled which is a
+    // startup flag. FFI nodes start with config.enabled=false and
+    // enable NAC at runtime via enable_nac().
+    let status = rt.block_on(nac_manager.status());
+    if status != NacStatus::Enabled {
         return Ok(());
     }
 
