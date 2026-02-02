@@ -326,7 +326,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         cid: &Cid,
         block: &Block,
         payload: &defra_core::block::CompositeDeltaPayload,
-        _metadata: &BlockMetadata<'_>,
+        metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
@@ -336,8 +336,58 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             priority = payload.priority,
             status = payload.status,
             links = ?block.links,
+            heads = ?block.heads,
             "Processing Composite delta (document-level)"
         );
+
+        // Recursively merge parent composites referenced in `heads` before
+        // processing this block.  This matches Go's processLog which walks
+        // the DAG backwards and merges from oldest to newest, ensuring all
+        // prior CRDT deltas are applied before the current one.
+        if let Some(heads) = &block.heads {
+            for head_cid in heads {
+                // Load the parent block from blockstore
+                let head_data = match self.blockstore.get(head_cid).await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        tracing::debug!(
+                            parent_cid = %head_cid,
+                            child_cid = %cid,
+                            "Parent composite not in blockstore, skipping"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            parent_cid = %head_cid,
+                            error = %e,
+                            "Failed to load parent composite, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                let head_block = match Block::from_dag_cbor(&head_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+
+                if let CrdtDelta::Composite(head_payload) = &head_block.delta {
+                    tracing::info!(
+                        parent_cid = %head_cid,
+                        child_cid = %cid,
+                        "Recursively merging parent composite before current"
+                    );
+                    // Recursive call — the parent will in turn merge its own parents.
+                    // Each composite opens its own transaction so ordering is safe.
+                    // Box::pin is required because recursive async fns are unsized.
+                    let _ = Box::pin(
+                        self.process_composite_delta(head_cid, &head_block, head_payload, metadata),
+                    )
+                    .await;
+                }
+            }
+        }
 
         // Create a SINGLE transaction for all field merges AND document storage
         let txn = self.db.new_txn(false).await?;
@@ -442,6 +492,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                     &mut datastore,
                                     link_cid,
                                     counter_payload,
+                                    metadata.collection_id,
                                 )
                                 .await
                             {
@@ -480,9 +531,21 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
             // Store the reconstructed document within the same transaction
             if process_error.is_none() && !field_values.is_empty() {
-                // Find the collection by schema version ID
-                match self.db.find_collection_by_id(&payload.schema_version_id) {
-                    Ok(Some(collection)) => {
+                // Find the collection by schema version ID, with fallback to
+                // the P2P metadata's collection_id (handles cross-version sync
+                // where the incoming block's schema version differs from local)
+                let collection_lookup = self
+                    .db
+                    .find_collection_by_id(&payload.schema_version_id)
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        metadata
+                            .collection_id
+                            .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
+                    });
+                match collection_lookup {
+                    Some(collection) => {
                         // Build the document with WINNING field values
                         let mut doc = Document::new();
                         for (field_name, value) in &field_values {
@@ -515,14 +578,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             }
                         }
                     }
-                    Ok(None) => {
+                    None => {
                         process_error = Some(MergeError::MissingMetadata(format!(
                             "Collection not found for schema_version_id: {}",
                             payload.schema_version_id
                         )));
-                    }
-                    Err(e) => {
-                        process_error = Some(MergeError::Database(e));
                     }
                 }
             }
@@ -575,7 +635,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         &self,
         cid: &Cid,
         payload: &defra_core::block::CounterDeltaPayload,
-        _metadata: &BlockMetadata<'_>,
+        metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
@@ -588,10 +648,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Processing Counter delta"
         );
 
-        // Look up the collection to determine field kind and counter type
+        // Look up the collection to determine field kind and counter type,
+        // with fallback to metadata's collection_id for cross-version sync
         let collection = self
             .db
             .find_collection_by_id(&payload.schema_version_id)?
+            .or(metadata
+                .collection_id
+                .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten()))
             .ok_or_else(|| {
                 MergeError::MissingMetadata(format!(
                     "Collection not found for schema_version_id: {}",
@@ -693,6 +757,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         datastore: &mut NamespaceView,
         cid: &Cid,
         payload: &defra_core::block::CounterDeltaPayload,
+        fallback_collection_id: Option<&str>,
     ) -> std::result::Result<CounterMergeResult, MergeError> {
         tracing::debug!(
             cid = %cid,
@@ -702,10 +767,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Processing Counter delta in transaction"
         );
 
-        // Look up the collection to determine field kind and counter type
+        // Look up the collection to determine field kind and counter type,
+        // with fallback to metadata's collection_id for cross-version sync
         let collection = self
             .db
             .find_collection_by_id(&payload.schema_version_id)?
+            .or(fallback_collection_id
+                .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten()))
             .ok_or_else(|| {
                 MergeError::MissingMetadata(format!(
                     "Collection not found for schema_version_id: {}",
@@ -738,11 +806,34 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         )
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
+        // Seed counter CRDT from existing document if CRDT storage isn't initialized.
+        // Local document creation stores counter values in the document layer but not
+        // in CRDT accumulation storage, so we must seed before merging remote deltas.
+        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
+            if let Ok(Some(existing_doc)) =
+                collection.get_with_datastore(datastore, &doc_id).await
+            {
+                if let Some(field_value) = existing_doc.get(&payload.field_name) {
+                    match (numeric_kind, field_value) {
+                        (NumericKind::Int64, NormalValue::Int(v)) => {
+                            let _ = counter
+                                .seed_if_uninitialized_int64(datastore, *v)
+                                .await;
+                        }
+                        (NumericKind::Float64, NormalValue::Float64(v)) => {
+                            let _ = counter
+                                .seed_if_uninitialized_float64(datastore, *v)
+                                .await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // Create the CounterDelta from payload
         let delta = self.create_counter_delta(payload, numeric_kind)?;
-
-        // Create the context
-        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         let ctx = Context {
             doc_id: DocId::new(&doc_id_str),
             schema_version: payload.schema_version_id.clone(),

@@ -6,6 +6,7 @@
 //! - P2P collection management
 
 use std::ffi::c_char;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use acp::nac::NodePermission;
@@ -18,9 +19,11 @@ use crate::ERR_INVALID_NODE_HANDLE;
 
 use blockstore::DefraBlockstore;
 use p2p::bitswap::BitswapStoreAdapter;
+use p2p::message::PushLogRequest;
 use p2p::sync::{ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator};
 use p2p::topics::DefraTopic;
 use p2p::P2PHost;
+use storage::corekv::IterOptions;
 
 /// Parsed multiaddr containing peer ID and transport address.
 struct ParsedMultiaddr {
@@ -68,12 +71,17 @@ fn parse_multiaddr_with_peer_id(addr_str: &str) -> Result<ParsedMultiaddr, Strin
 /// Parse a JSON array of collection names.
 ///
 /// Expects format like: `["collection1", "collection2"]`
+/// Also handles JSON `null` (treated as empty array).
 fn parse_collections_json(json_str: &str) -> Result<Vec<String>, String> {
-    serde_json::from_str(json_str).map_err(|e| format!("invalid collections JSON: {}", e))
+    let opt: Option<Vec<String>> =
+        serde_json::from_str(json_str).map_err(|e| format!("invalid collections JSON: {}", e))?;
+    Ok(opt.unwrap_or_default())
 }
 
 fn parse_doc_ids_json(json_str: &str) -> Result<Vec<String>, String> {
-    serde_json::from_str(json_str).map_err(|e| format!("invalid doc_ids JSON: {}", e))
+    let opt: Option<Vec<String>> =
+        serde_json::from_str(json_str).map_err(|e| format!("invalid doc_ids JSON: {}", e))?;
+    Ok(opt.unwrap_or_default())
 }
 
 /// Create a new DefraDB node with P2P enabled.
@@ -237,8 +245,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
             tracing::info!("FFI replication loop stopped");
         });
 
-        // Task 3: Local update broadcaster - broadcasts local mutations to P2P network
-        // Retries with backoff when GossipSub mesh hasn't formed yet (InsufficientPeers).
+        // Task 3: Local update broadcaster - broadcasts local mutations to P2P network.
+        // Push to replicators is synchronous (fast, fire-and-forget per peer).
+        // GossipSub broadcast retries are spawned as background tasks so they
+        // don't block the event loop from processing subsequent Update events.
         let coord_for_broadcast = coordinator.clone();
         let event_bus_for_broadcast = event_bus.clone();
         let broadcast_task = tokio::spawn(async move {
@@ -254,34 +264,46 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     let doc_id = update.doc_id.clone();
                     let collection_id = update.collection_id.clone();
 
-                    // Retry loop for GossipSub mesh formation.
-                    // After peers connect, GossipSub needs ~1 heartbeat interval
-                    // to form the mesh. Retry with backoff up to ~5 seconds total.
-                    let max_retries = 10u32;
-                    let mut attempt = 0u32;
-                    loop {
-                        attempt += 1;
-                        match coord_for_broadcast
-                            .broadcast_local_update(&cid, &block, &doc_id, &collection_id)
-                            .await
-                        {
-                            Ok(_) => break,
-                            Err(e) => {
-                                let err_str = e.to_string();
-                                if err_str.contains("InsufficientPeers") && attempt <= max_retries {
-                                    let delay_ms = 100 * (1u64 << attempt.min(5));
-                                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                                    continue;
+                    // Push to replicator peers via direct PushLog.
+                    coord_for_broadcast
+                        .push_to_replicators(&cid, &block, &doc_id, &collection_id)
+                        .await;
+
+                    // Spawn GossipSub broadcast with retry as a background task.
+                    // This prevents the retry backoff from blocking subsequent events.
+                    let gossip_coord = coord_for_broadcast.clone();
+                    tokio::spawn(async move {
+                        let max_retries = 10u32;
+                        let mut attempt = 0u32;
+                        loop {
+                            attempt += 1;
+                            match gossip_coord
+                                .broadcast_local_update(&cid, &block, &doc_id, &collection_id)
+                                .await
+                            {
+                                Ok(_) => break,
+                                Err(e) => {
+                                    let err_str = e.to_string();
+                                    if err_str.contains("InsufficientPeers")
+                                        && attempt <= max_retries
+                                    {
+                                        let delay_ms = 100 * (1u64 << attempt.min(5));
+                                        tokio::time::sleep(
+                                            std::time::Duration::from_millis(delay_ms),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                    tracing::debug!(
+                                        doc_id = %doc_id,
+                                        error = %e,
+                                        "Failed to broadcast local update"
+                                    );
+                                    break;
                                 }
-                                tracing::debug!(
-                                    doc_id = %doc_id,
-                                    error = %e,
-                                    "Failed to broadcast local update"
-                                );
-                                break;
                             }
                         }
-                    }
+                    });
                 }
             }
         });
@@ -544,16 +566,63 @@ pub unsafe extern "C" fn p2p_set_replicator(
                 Some(p2p) => p2p,
                 None => return Err("P2P not enabled for this node".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
                 // Parse the multiaddr and extract peer ID
                 let parsed = parse_multiaddr_with_peer_id(&addr_str)?;
 
-                // Set the replicator
+                // Empty collections means "all collections" (Go behavior)
+                let effective_collections = if collections.is_empty() {
+                    db.list_collections()
+                        .map_err(|e| format!("failed to list collections: {}", e))?
+                } else {
+                    collections
+                };
+
+                // Dial the peer first (Go's SetReplicator connects automatically)
                 p2p.handle
-                    .set_replicator(parsed.peer_id, collections)
+                    .dial(parsed.peer_id, vec![parsed.transport_addr])
+                    .await
+                    .map_err(|e| format!("failed to connect to replicator peer: {}", e))?;
+
+                // Set the replicator with the effective collections
+                p2p.handle
+                    .set_replicator(parsed.peer_id, effective_collections.clone())
                     .await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;
+
+                // Auto-subscribe to collection topics (Go does this implicitly)
+                for name in &effective_collections {
+                    let topic = DefraTopic::collection(name);
+                    if let Err(e) = p2p.handle.subscribe(topic).await {
+                        tracing::warn!(collection = %name, error = %e, "Failed to subscribe to GossipSub topic for replicator");
+                    }
+                    p2p.add_collection(name);
+                }
+
+                // Push existing documents to the replicator peer (Go's pushHeadsForAllDocs).
+                // Documents created before the replicator was set up won't trigger
+                // Update events, so we push them directly here.
+                // Like Go, pushes run in background tasks (goroutines) and don't
+                // block SetReplicator from returning.
+                let push_handle = p2p.handle.clone();
+                let push_db = Arc::clone(db);
+                let push_peer_id = parsed.peer_id;
+                let push_collections = effective_collections;
+
+                tokio::spawn(async move {
+                    if let Err(e) = push_existing_docs(
+                        &push_handle,
+                        &push_db,
+                        push_peer_id,
+                        &push_collections,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, "Failed to push existing docs to replicator");
+                    }
+                });
 
                 Ok(())
             })
@@ -565,6 +634,158 @@ pub unsafe extern "C" fn p2p_set_replicator(
         Ok(()) => FfiResult::ok(),
         Err(e) => FfiResult::error(e),
     }
+}
+
+/// Push existing documents to a replicator peer.
+///
+/// Matches Go's `pushHeadsForAllDocs`: for each collection, iterate all docs,
+/// get composite heads from headstore, load blocks, send PushLog to peer.
+async fn push_existing_docs(
+    handle: &p2p::P2PHostHandle,
+    db: &crate::state::FfiDatabase,
+    peer_id: libp2p::PeerId,
+    collections: &[String],
+) -> Result<(), String> {
+    // Wait for the connection to be fully established (dial is non-blocking).
+    let conn_timeout = std::time::Duration::from_secs(5);
+    let conn_start = std::time::Instant::now();
+    loop {
+        let peers = handle.connected_peers().await.unwrap_or_default();
+        if peers.contains(&peer_id) {
+            break;
+        }
+        if conn_start.elapsed() > conn_timeout {
+            return Err("timeout waiting for peer connection before push".to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let local_peer_id = handle
+        .local_peer_id()
+        .await
+        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+
+    let txn = db
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("failed to create transaction: {}", e))?;
+
+    let headstore = txn
+        .headstore()
+        .map_err(|e| format!("failed to get headstore: {}", e))?;
+    let blockstore_view = txn
+        .blockstore()
+        .map_err(|e| format!("failed to get blockstore: {}", e))?;
+    let datastore = txn
+        .datastore()
+        .map_err(|e| format!("failed to get datastore: {}", e))?;
+
+    for col_name in collections {
+        let collection = match db
+            .get_collection(col_name)
+            .map_err(|e| format!("failed to get collection: {}", e))?
+        {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Iterate datastore keys-only to get doc IDs.
+        // Key format: /d/{collection_id}/{doc_id}
+        // Sub-keys like /d/{collection_id}/{doc_id}/v are filtered out.
+        let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
+        let opts = IterOptions::new()
+            .with_prefix(col_prefix)
+            .with_keys_only(true);
+        let mut doc_iter = datastore
+            .iterator(opts)
+            .await
+            .map_err(|e| format!("failed to iterate datastore: {}", e))?;
+
+        let mut doc_ids = Vec::new();
+        while let Some(pair) = doc_iter
+            .next()
+            .await
+            .map_err(|e| format!("datastore iteration error: {}", e))?
+        {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            let parts: Vec<&str> = key_str.split('/').collect();
+            // Exact doc key: ["", "d", collection_id, doc_id] = 4 parts
+            if parts.len() == 4 {
+                doc_ids.push(parts[3].to_string());
+            }
+        }
+        doc_iter
+            .close()
+            .await
+            .map_err(|e| format!("datastore close error: {}", e))?;
+
+        // For each document, push composite head blocks to the replicator.
+        for doc_id in &doc_ids {
+            let prefix =
+                storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
+            let opts = IterOptions::new().with_prefix(prefix);
+            let mut iter = headstore
+                .iterator(opts)
+                .await
+                .map_err(|e| format!("failed to iterate headstore: {}", e))?;
+
+            while let Some(pair) = iter
+                .next()
+                .await
+                .map_err(|e| format!("headstore iteration error: {}", e))?
+            {
+                // Parse CID from key: /d/{doc_id}/C/{cid}
+                let key_str = String::from_utf8_lossy(&pair.key);
+                let parts: Vec<&str> = key_str.split('/').collect();
+                if parts.len() < 5 {
+                    continue;
+                }
+                let head_cid = match cid::Cid::from_str(parts[4]) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // Read block data from blockstore
+                let block_key = head_cid.to_bytes();
+                let block_data = match blockstore_view.get(&block_key).await {
+                    Ok(Some(data)) => data,
+                    _ => continue,
+                };
+
+                let mut request = PushLogRequest::new(
+                    doc_id.clone(),
+                    head_cid.to_bytes(),
+                    col_name.clone(),
+                    local_peer_id.to_string(),
+                    block_data,
+                );
+
+                if let Err(e) =
+                    p2p::signing::sign_message(handle.keypair(), &mut request)
+                {
+                    tracing::warn!(error = %e, "Failed to sign PushLog request");
+                    continue;
+                }
+
+                // Await send with short timeout — data is delivered even if
+                // response times out.  We must NOT fire-and-forget here because
+                // the broadcast_task may send a subsequent Update for the same
+                // document; if that Update arrives first the receiver will have
+                // an incomplete CRDT state.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    handle.send_two_stream_request(peer_id, request),
+                )
+                .await;
+            }
+
+            iter.close()
+                .await
+                .map_err(|e| format!("headstore close error: {}", e))?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Delete a replicator.
@@ -734,8 +955,19 @@ pub unsafe extern "C" fn p2p_add_collections(
                 Some(p2p) => p2p,
                 None => return Err("P2P not enabled for this node".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
+                // Validate all collection names exist (atomic: all or nothing)
+                for name in &collections {
+                    let exists = db
+                        .has_collection(name)
+                        .map_err(|e| format!("failed to check collection: {}", e))?;
+                    if !exists {
+                        return Err("collection not found".to_string());
+                    }
+                }
+
                 for name in &collections {
                     // Subscribe to the GossipSub topic for this collection
                     let topic = DefraTopic::collection(name);
@@ -794,8 +1026,19 @@ pub unsafe extern "C" fn p2p_remove_collections(
                 Some(p2p) => p2p,
                 None => return Err("P2P not enabled for this node".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
+                // Validate all collection names exist (atomic: all or nothing)
+                for name in &collections {
+                    let exists = db
+                        .has_collection(name)
+                        .map_err(|e| format!("failed to check collection: {}", e))?;
+                    if !exists {
+                        return Err("collection not found".to_string());
+                    }
+                }
+
                 for name in &collections {
                     // Unsubscribe from the GossipSub topic for this collection
                     let topic = DefraTopic::collection(name);
@@ -894,6 +1137,15 @@ pub unsafe extern "C" fn p2p_add_documents(
             };
 
             rt.block_on(async {
+                // Validate all document IDs have valid format (atomic: all or nothing)
+                for doc_id in &doc_ids {
+                    if document::DocID::from_string(doc_id).is_err() {
+                        return Err(
+                            "malformed document ID, missing either version or cid".to_string(),
+                        );
+                    }
+                }
+
                 for doc_id in &doc_ids {
                     let topic = DefraTopic::document(doc_id);
                     if let Err(e) = p2p.handle.subscribe(topic).await {
@@ -953,6 +1205,15 @@ pub unsafe extern "C" fn p2p_remove_documents(
             };
 
             rt.block_on(async {
+                // Validate all document IDs have valid format (atomic: all or nothing)
+                for doc_id in &doc_ids {
+                    if document::DocID::from_string(doc_id).is_err() {
+                        return Err(
+                            "malformed document ID, missing either version or cid".to_string()
+                        );
+                    }
+                }
+
                 for doc_id in &doc_ids {
                     let topic = DefraTopic::document(doc_id);
                     if let Err(e) = p2p.handle.unsubscribe(topic).await {
@@ -997,7 +1258,8 @@ pub unsafe extern "C" fn p2p_get_all_documents(
                 None => return Err("P2P not enabled for this node".to_string()),
             };
 
-            let documents = p2p.get_documents();
+            let mut documents = p2p.get_documents();
+            documents.sort();
             serde_json::to_string(&documents)
                 .map_err(|e| format!("failed to serialize documents: {}", e))
         })

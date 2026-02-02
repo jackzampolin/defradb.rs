@@ -127,8 +127,8 @@ fn hash_policy_fields(policy: &ParsedPolicy) -> Vec<u8> {
 pub struct P2PState {
     /// Handle to communicate with the P2P host.
     pub handle: P2PHostHandle,
-    /// Collections subscribed for P2P replication.
-    pub collections: RwLock<HashSet<String>>,
+    /// Collections subscribed for P2P replication (insertion-ordered).
+    pub collections: RwLock<Vec<String>>,
     /// Documents subscribed for P2P replication (by doc ID).
     pub documents: RwLock<HashSet<String>>,
     /// Abort handle for the host event loop task.
@@ -144,7 +144,7 @@ impl P2PState {
     pub fn new(handle: P2PHostHandle) -> Self {
         Self {
             handle,
-            collections: RwLock::new(HashSet::new()),
+            collections: RwLock::new(Vec::new()),
             documents: RwLock::new(HashSet::new()),
             host_event_handle: None,
             replication_handle: None,
@@ -161,7 +161,7 @@ impl P2PState {
     ) -> Self {
         Self {
             handle,
-            collections: RwLock::new(HashSet::new()),
+            collections: RwLock::new(Vec::new()),
             documents: RwLock::new(HashSet::new()),
             host_event_handle: Some(host_event_handle),
             replication_handle: Some(replication_handle),
@@ -182,19 +182,28 @@ impl P2PState {
         }
     }
 
-    /// Add a collection to P2P.
+    /// Add a collection to P2P (preserves insertion order).
     pub fn add_collection(&self, name: &str) {
-        self.collections.write().insert(name.to_string());
+        let mut cols = self.collections.write();
+        if !cols.contains(&name.to_string()) {
+            cols.push(name.to_string());
+        }
     }
 
     /// Remove a collection from P2P.
     pub fn remove_collection(&self, name: &str) -> bool {
-        self.collections.write().remove(name)
+        let mut cols = self.collections.write();
+        if let Some(pos) = cols.iter().position(|c| c == name) {
+            cols.remove(pos);
+            true
+        } else {
+            false
+        }
     }
 
-    /// Get all P2P collections.
+    /// Get all P2P collections (in insertion order).
     pub fn get_collections(&self) -> Vec<String> {
-        self.collections.read().iter().cloned().collect()
+        self.collections.read().clone()
     }
 
     /// Add a document to P2P.

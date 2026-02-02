@@ -85,7 +85,7 @@ use libp2p::PeerId;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
-use crate::message::{PushLogBroadcast, PushLogReply};
+use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
 
@@ -858,6 +858,59 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         let broadcast =
             Broadcaster::create_broadcast(cid, block, doc_id, collection_id, &self.local_peer_id);
         self.broadcaster.broadcast_update(&broadcast).await
+    }
+
+    /// Push a local update to all registered replicator peers via direct PushLog.
+    ///
+    /// This complements `broadcast_local_update` (GossipSub) by sending the update
+    /// directly to each replicator peer that is registered for the given collection.
+    pub async fn push_to_replicators(
+        &self,
+        cid: &Cid,
+        block: &[u8],
+        doc_id: &str,
+        collection_id: &str,
+    ) {
+        let replicators = match self.host.get_all_replicators().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(error = %e, "Failed to get replicators for push");
+                return;
+            }
+        };
+
+        for rep in &replicators {
+            // Check if this replicator is registered for the collection
+            // Empty collections means "all collections" in Go semantics
+            if !rep.collections.is_empty() && !rep.collections.contains(&collection_id.to_string())
+            {
+                continue;
+            }
+
+            let peer_id = match rep.peer_id() {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let mut request = PushLogRequest::new(
+                doc_id.to_string(),
+                cid.to_bytes(),
+                collection_id.to_string(),
+                self.local_peer_id.clone(),
+                block.to_vec(),
+            );
+
+            if let Err(e) = sign_message(self.host.keypair(), &mut request) {
+                tracing::debug!(error = %e, "Failed to sign PushLog request");
+                continue;
+            }
+
+            // Fire-and-forget: spawn each push so we don't block the broadcast loop.
+            let host = self.host.clone();
+            tokio::spawn(async move {
+                let _ = host.send_two_stream_request(peer_id, request).await;
+            });
+        }
     }
 
     /// Mark a block as merged.
