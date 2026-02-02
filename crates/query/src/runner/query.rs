@@ -24,6 +24,28 @@ use super::fetcher::FetcherWrapper;
 use super::plan;
 use super::{DocFetcher, QueryRunner};
 
+/// Return a GraphQL-style error when ordering by a relation field.
+///
+/// Go rejects `order: {articles: {name: ASC}}` at the GraphQL schema level because
+/// relation fields are not valid order input fields. This reproduces the same error.
+fn reject_relation_order(order_by: &crate::mapper::OrderBy) -> QueryError {
+    for condition in &order_by.conditions {
+        if condition.fields.len() > 1 {
+            let relation_field = &condition.fields[0];
+            let child_field = &condition.fields[1];
+            let direction = match condition.direction {
+                crate::mapper::OrderDirection::Asc => "ASC",
+                crate::mapper::OrderDirection::Desc => "DESC",
+            };
+            return QueryError::parse(format!(
+                "Argument \"order\" has invalid value {{{}: {{{}: {}}}}}.\nIn field \"{}\": Unknown field.",
+                relation_field, child_field, direction, relation_field
+            ));
+        }
+    }
+    QueryError::parse("Argument \"order\" has invalid value.\nUnknown field.")
+}
+
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL query and return JSON results.
     pub async fn execute_query(&self, query: &str) -> Result<JsonValue> {
@@ -576,6 +598,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut execution_errors: Vec<String> = Vec::new();
 
         for select in selects {
+            // Go rejects ordering by relation fields at the GraphQL schema level.
+            // Check here so the error propagates as a top-level error, not executionErrors.
+            let order_has_relations = select
+                .order_by
+                .as_ref()
+                .map(|o| o.has_relation_order())
+                .unwrap_or(false);
+            if order_has_relations {
+                if let Some(ref order_by) = select.order_by {
+                    return Err(reject_relation_order(order_by));
+                }
+            }
+
             let is_top_level_aggregate = Self::is_top_level_aggregate(&select);
 
             // Execute the select and collect metrics
@@ -741,6 +776,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|o| o.has_relation_order())
             .unwrap_or(false);
 
+        // Go rejects ordering by relation fields at the GraphQL schema level.
+        if order_has_relations {
+            if let Some(ref order_by) = select.order_by {
+                return Err(reject_relation_order(order_by));
+            }
+        }
+
         let has_similarity = select
             .fields
             .iter()
@@ -750,7 +792,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             || has_relation_aggregates
             || has_nested
             || filter_has_relations
-            || order_has_relations
             || has_similarity
         {
             // Use Planner path for index-based queries, relation aggregates,
@@ -1001,6 +1042,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .as_ref()
             .map(|o| o.has_relation_order())
             .unwrap_or(false);
+
+        // Go rejects ordering by relation fields at the GraphQL schema level.
+        // Reproduce the same error for compatibility.
+        if order_has_relations {
+            if let Some(ref order_by) = select.order_by {
+                return Err(reject_relation_order(order_by));
+            }
+        }
 
         // Check if any similarity fields are present (require SimilarityNode in planner)
         let has_similarity = select
