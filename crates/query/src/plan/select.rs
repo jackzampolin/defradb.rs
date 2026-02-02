@@ -245,15 +245,8 @@ impl PlanNode for SelectNode {
         // Strip _docID conditions - Go handles doc_ids separately and doesn't show them as filters
         if let Some(ref filter) = self.filter {
             let conditions = filter.conditions();
-            let stripped: std::collections::BTreeMap<_, _> = conditions
-                .into_iter()
-                .filter(|(k, _)| k.as_str() != "_docID")
-                .collect();
-            if stripped.is_empty() {
-                obj.insert("filter".to_string(), serde_json::Value::Null);
-            } else {
-                obj.insert("filter".to_string(), serde_json::json!(stripped));
-            }
+            let stripped = super::strip_docid_from_conditions(conditions);
+            obj.insert("filter".to_string(), stripped);
         } else {
             obj.insert("filter".to_string(), serde_json::Value::Null);
         }

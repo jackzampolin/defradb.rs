@@ -1016,23 +1016,14 @@ impl Planner {
                                 group_by: nested.group_by.as_ref().map(|gb| gb.fields.clone()),
                             };
 
-                            // If this _group has a nested _group with further groupBy, merge it
-                            // with the outer groupBy (inner fields first, then outer fields)
-                            for inner_field in &nested.fields {
-                                if let Requestable::Select(inner_nested) = inner_field {
-                                    if inner_nested.field.name == "_group" {
-                                        if let Some(ref inner_gb) = inner_nested.group_by {
-                                            let mut merged = inner_gb.fields.clone();
-                                            if let Some(ref outer_fields) = meta.group_by {
-                                                for field in outer_fields {
-                                                    if !merged.contains(field) {
-                                                        merged.push(field.clone());
-                                                    }
-                                                }
-                                            }
-                                            meta.group_by = Some(merged);
+                            // Merge outer groupBy fields into the _group's groupBy.
+                            // Go convention: childSelects.groupBy = inner fields ++ outer fields.
+                            if let Some(ref outer_gb) = select.group_by {
+                                if let Some(ref mut inner_fields) = meta.group_by {
+                                    for field in &outer_gb.fields {
+                                        if !inner_fields.contains(field) {
+                                            inner_fields.push(field.clone());
                                         }
-                                        break;
                                     }
                                 }
                             }

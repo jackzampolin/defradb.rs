@@ -267,15 +267,8 @@ impl PlanNode for ScanNode {
             let conditions = filter.conditions();
             if self.doc_ids.is_some() {
                 // doc_ids provided → strip _docID (it's shown in prefixes)
-                let stripped: std::collections::BTreeMap<_, _> = conditions
-                    .into_iter()
-                    .filter(|(k, _)| k.as_str() != "_docID")
-                    .collect();
-                if stripped.is_empty() {
-                    obj.insert("filter".to_string(), serde_json::Value::Null);
-                } else {
-                    obj.insert("filter".to_string(), serde_json::json!(stripped));
-                }
+                let stripped = super::strip_docid_from_conditions(conditions);
+                obj.insert("filter".to_string(), stripped);
             } else if conditions.is_empty() {
                 obj.insert("filter".to_string(), serde_json::Value::Null);
             } else {
