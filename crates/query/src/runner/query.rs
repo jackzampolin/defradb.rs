@@ -694,9 +694,25 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<(JsonValue, usize, u64)> {
         // Handle _commits system collection (no real collection exists)
         if select.collection_name == "_commits" {
-            let explanation = self.explain_commits_select(select, ExplainType::Execute)?;
-            // _commits execute: return explanation with 0 metrics (no real execution)
-            return Ok((explanation, 0, 1));
+            // Actually execute the commits query to get real metrics
+            let results = self.execute_commits_query(select).await?;
+            let doc_count = results.as_array().map(|a| a.len()).unwrap_or(0);
+
+            // Build execute explain with real metrics matching Go's format:
+            // dagScanNode.iterations = doc_count + 1 (includes terminal Next()=false)
+            // selectNode.iterations = doc_count + 1
+            // selectNode.filterMatches = doc_count
+            let iterations = (doc_count as u64) + 1;
+            let explanation = serde_json::json!({
+                "selectNode": {
+                    "filterMatches": doc_count as u64,
+                    "iterations": iterations,
+                    "dagScanNode": {
+                        "iterations": iterations,
+                    }
+                }
+            });
+            return Ok((explanation, doc_count, 1));
         }
 
         // Get collection schema
