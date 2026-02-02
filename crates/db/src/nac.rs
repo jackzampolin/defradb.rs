@@ -189,6 +189,18 @@ impl<S: ZanzibarStore> NacManager<S> {
             .map_err(|e| Error::Acp(format!("admin check failed: {}", e)))
     }
 
+    /// Check if an identity is an admin based on stored relationships.
+    ///
+    /// Unlike `is_admin()`, this checks actual stored relationships regardless
+    /// of NAC status. Used for operations like re-enable where we verify admin
+    /// access even when NAC is temporarily disabled.
+    pub async fn is_admin_persisted(&self, identity: &Did) -> Result<bool> {
+        self.nac
+            .is_admin_persisted(identity)
+            .await
+            .map_err(|e| Error::Acp(format!("admin check failed: {}", e)))
+    }
+
     /// Check if an identity is the owner.
     pub async fn is_owner(&self, identity: &Did) -> bool {
         self.nac.is_owner(identity).await
@@ -221,10 +233,11 @@ impl<S: ZanzibarStore> NacManager<S> {
 
     /// Re-enable NAC after temporary disable.
     ///
-    /// The requestor must be an admin.
+    /// The requestor must be an admin. Uses persisted admin check since
+    /// NAC is disabled (is_admin returns true for everyone when disabled).
     pub async fn re_enable(&self, requestor: &Did) -> Result<()> {
-        // Only admins can re-enable
-        if !self.is_admin(requestor).await? {
+        // Use persisted check since is_admin returns true for everyone when disabled
+        if !self.is_admin_persisted(requestor).await? {
             return Err(Error::Acp("only admins can re-enable NAC".into()));
         }
 

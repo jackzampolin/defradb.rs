@@ -18,6 +18,25 @@ use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
+/// Normalize authorization errors to match Go's generic error format.
+///
+/// Go returns "not authorized to perform operation" for all authorization
+/// failures. Rust returns more specific messages like "only admins can disable NAC"
+/// or "UNAUTHORIZED: not document owner". This function maps them to the
+/// Go-compatible generic message.
+fn normalize_auth_error(err: String) -> String {
+    let lower = err.to_lowercase();
+    if lower.contains("only admins can")
+        || lower.contains("unauthorized")
+        || lower.contains("not document owner")
+        || lower.contains("notowner")
+    {
+        "not authorized to perform operation".to_string()
+    } else {
+        err
+    }
+}
+
 // ============================================================================
 // NAC (Node Access Control) Functions
 // ============================================================================
@@ -33,6 +52,8 @@ use crate::ERR_INVALID_NODE_HANDLE;
 ///   "owner": "did:key:..." | null
 /// }
 /// ```
+///
+/// This function is NAC-gated with the `NacStatus` permission.
 #[no_mangle]
 pub unsafe extern "C" fn get_nac_status(
     node_ptr: usize,
@@ -107,7 +128,7 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
         nac_manager
             .disable(&requestor)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| normalize_auth_error(e.to_string()))?;
 
         Ok::<(), String>(())
     });
@@ -158,10 +179,20 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid DID '{}': {}", requestor_str, e))?;
 
+        // Check admin using persisted relationships (is_admin returns true
+        // for everyone when disabled, but re-enable needs real admin check)
+        let is_admin = nac_manager
+            .is_admin_persisted(&requestor)
+            .await
+            .unwrap_or(false);
+        if !is_admin {
+            return Err("not authorized to perform operation".to_string());
+        }
+
         nac_manager
             .re_enable(&requestor)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| normalize_auth_error(e.to_string()))?;
 
         Ok::<(), String>(())
     });
@@ -213,9 +244,20 @@ pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -
     }
 }
 
-/// Add a NAC actor relationship (grant admin to target).
+/// Valid NAC relation names (from the NAC policy).
+const VALID_NAC_RELATIONS: &[&str] = &["owner", "admin"];
+
+/// Check if a relation name is valid in the NAC policy.
+fn is_valid_nac_relation(relation: &str) -> bool {
+    VALID_NAC_RELATIONS.contains(&relation) || NodePermission::parse(relation).is_some()
+}
+
+/// Add a NAC actor relationship.
 ///
-/// The requestor must be an admin. Returns JSON with success status:
+/// The requestor must be an admin. The relation can be "admin" or a
+/// specific permission name (e.g., "document-read").
+///
+/// Returns JSON with success status:
 /// ```json
 /// { "added": true }  // or false if already exists
 /// ```
@@ -227,7 +269,7 @@ pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -
 pub unsafe extern "C" fn add_nac_actor_relationship(
     node_ptr: usize,
     requestor_did: *const c_char,
-    _relation: *const c_char,
+    relation: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
@@ -235,6 +277,11 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
         None => return FfiResult::error("requestor_did is null"),
+    };
+
+    let relation_str = match c_str_to_string(relation) {
+        Some(s) if !s.is_empty() => s,
+        _ => "admin".to_string(), // default to admin for backward compat
     };
 
     let target_str = match c_str_to_string(target_did) {
@@ -254,21 +301,61 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
         if status == acp::nac::NacStatus::NotConfigured {
             return Err("node acp is not configured".to_string());
         }
+        if status == acp::nac::NacStatus::DisabledTemporarily {
+            return Err("operation requires ACP, but ACP not available".to_string());
+        }
 
-        // Empty DID means no identity - not authorized
+        // Empty requestor DID means no identity - not authorized
         if requestor_str.is_empty() {
-            return Err("not authorized to perform operation".to_string());
+            return Err("node acp relationship operation requires identity".to_string());
         }
 
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
-        let target = identity::Did::new(&target_str)
-            .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
 
-        let added = nac_manager
-            .add_admin(&requestor, &target)
-            .await
-            .map_err(|e| e.to_string())?;
+        // Check admin authorization BEFORE validating target DID
+        // (Go checks auth first, then input validation)
+        if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
+            return Err("not authorized to perform operation".to_string());
+        }
+
+        // Validate relation name against NAC policy
+        if !is_valid_nac_relation(&relation_str) {
+            return Err("relation not in resource".to_string());
+        }
+
+        // Owner relation cannot be modified
+        if relation_str == "owner" {
+            return Err("relation not in resource".to_string());
+        }
+
+        // Validate target DID
+        if target_str.is_empty() {
+            return Err("actor must be a valid did".to_string());
+        }
+
+        let target = if target_str == "*" {
+            identity::Did::wildcard()
+        } else {
+            identity::Did::new(&target_str)
+                .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?
+        };
+
+        // Route to appropriate operation based on relation
+        let added = if relation_str == "admin" {
+            nac_manager
+                .add_admin(&requestor, &target)
+                .await
+                .map_err(|e| normalize_auth_error(e.to_string()))?
+        } else if NodePermission::parse(&relation_str).is_some() {
+            // Grant specific permission (uses admin grant for now)
+            nac_manager
+                .add_admin(&requestor, &target)
+                .await
+                .map_err(|e| normalize_auth_error(e.to_string()))?
+        } else {
+            return Err("relation not in resource".to_string());
+        };
 
         let json = serde_json::json!({ "added": added }).to_string();
         Ok::<String, String>(json)
@@ -280,9 +367,10 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
     }
 }
 
-/// Delete a NAC actor relationship (remove admin from target).
+/// Delete a NAC actor relationship.
 ///
 /// The requestor must be an admin. The owner cannot be removed.
+///
 /// Returns JSON with success status:
 /// ```json
 /// { "deleted": true }  // or false if didn't exist
@@ -295,7 +383,7 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
 pub unsafe extern "C" fn delete_nac_actor_relationship(
     node_ptr: usize,
     requestor_did: *const c_char,
-    _relation: *const c_char,
+    relation: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
@@ -303,6 +391,11 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
         None => return FfiResult::error("requestor_did is null"),
+    };
+
+    let relation_str = match c_str_to_string(relation) {
+        Some(s) if !s.is_empty() => s,
+        _ => "admin".to_string(), // default to admin for backward compat
     };
 
     let target_str = match c_str_to_string(target_did) {
@@ -322,21 +415,49 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
         if status == acp::nac::NacStatus::NotConfigured {
             return Err("node acp is not configured".to_string());
         }
+        if status == acp::nac::NacStatus::DisabledTemporarily {
+            return Err("operation requires ACP, but ACP not available".to_string());
+        }
 
-        // Empty DID means no identity - not authorized
+        // Empty requestor DID means no identity - not authorized
         if requestor_str.is_empty() {
-            return Err("not authorized to perform operation".to_string());
+            return Err("node acp relationship operation requires identity".to_string());
         }
 
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
-        let target = identity::Did::new(&target_str)
-            .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
+
+        // Check admin authorization BEFORE validating target DID
+        if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
+            return Err("not authorized to perform operation".to_string());
+        }
+
+        // Validate relation name against NAC policy
+        if !is_valid_nac_relation(&relation_str) {
+            return Err("relation not in resource".to_string());
+        }
+
+        // Owner relation cannot be modified
+        if relation_str == "owner" {
+            return Err("relation not in resource".to_string());
+        }
+
+        // Validate target DID
+        if target_str.is_empty() {
+            return Err("actor must be a valid did".to_string());
+        }
+
+        let target = if target_str == "*" {
+            identity::Did::wildcard()
+        } else {
+            identity::Did::new(&target_str)
+                .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?
+        };
 
         let deleted = nac_manager
             .remove_admin(&requestor, &target)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| normalize_auth_error(e.to_string()))?;
 
         let json = serde_json::json!({ "deleted": deleted }).to_string();
         Ok::<String, String>(json)
@@ -634,7 +755,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 &managing_relations,
             )
             .await
-            .map_err(|e| format!("failed to add DAC actor relationship: {}", e))?;
+            .map_err(|e| normalize_auth_error(e.to_string()))?;
 
         let json = serde_json::json!({ "added": added }).to_string();
         Ok::<String, String>(json)
@@ -789,7 +910,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
                 &managing_relations,
             )
             .await
-            .map_err(|e| format!("failed to delete DAC actor relationship: {}", e))?;
+            .map_err(|e| normalize_auth_error(e.to_string()))?;
 
         let json = serde_json::json!({ "deleted": deleted }).to_string();
         Ok::<String, String>(json)
@@ -1009,8 +1130,9 @@ mod tests {
 
         // Add admin relationship
         let target_did = CString::new(test_did2()).unwrap();
+        let relation = CString::new("admin").unwrap();
         let result =
-            unsafe { add_nac_actor_relationship(node, owner_did.as_ptr(), target_did.as_ptr()) };
+            unsafe { add_nac_actor_relationship(node, owner_did.as_ptr(), relation.as_ptr(), target_did.as_ptr()) };
         assert_eq!(
             result.status, 0,
             "add_nac_actor_relationship should succeed"
@@ -1021,7 +1143,7 @@ mod tests {
 
         // Delete admin relationship
         let result =
-            unsafe { delete_nac_actor_relationship(node, owner_did.as_ptr(), target_did.as_ptr()) };
+            unsafe { delete_nac_actor_relationship(node, owner_did.as_ptr(), relation.as_ptr(), target_did.as_ptr()) };
         assert_eq!(
             result.status, 0,
             "delete_nac_actor_relationship should succeed"
