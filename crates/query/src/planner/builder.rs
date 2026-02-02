@@ -1137,9 +1137,11 @@ impl Planner {
                 }
             }
         } else {
-            // WITHOUT GROUP BY: OrderBy → Limit → [AllDocsNode] → Aggregates
+            // WITHOUT GROUP BY: OrderBy → [AllDocsNode] → Aggregates → Limit
+            // Go applies limit AFTER aggregates so limit restricts the final output,
+            // not the documents fed to aggregation.
 
-            // 5. Apply order by (before limit)
+            // 5. Apply order by (before aggregates)
             // Skip if index already provides the ordering
             if let Some(ref order_by) = select.order_by {
                 if !index_provides_ordering {
@@ -1151,18 +1153,7 @@ impl Planner {
                 }
             }
 
-            // 6. Apply limit/offset
-            if let Some(ref limit) = select.limit {
-                let effective_limit = match limit.limit {
-                    Some(0) => None, // limit: 0 means no limit (Go compatibility)
-                    other => other,
-                };
-                if effective_limit.is_some() || limit.offset > 0 {
-                    plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
-                }
-            }
-
-            // 7. Count simple (non-per-row) aggregates to determine if we need AllDocsNode.
+            // 6. Count simple (non-per-row) aggregates to determine if we need AllDocsNode.
             // Relation-based and inline-array aggregates use child_aggregate_source and
             // operate per-row (each parent gets its own aggregate). They do NOT need
             // AllDocsNode. Only simple field aggregates (e.g., _sum(Age: {})) need it
@@ -1186,8 +1177,19 @@ impl Planner {
                 plan = Box::new(AllDocsNode::new(plan, scan_mapping.clone()));
             }
 
-            // 8. Add aggregate nodes (for top-level aggregates without GROUP BY)
+            // 7. Add aggregate nodes (for top-level aggregates without GROUP BY)
             plan = self.add_aggregate_nodes(plan, select, &scan_mapping)?;
+
+            // 8. Apply limit/offset (AFTER aggregates, matching Go behavior)
+            if let Some(ref limit) = select.limit {
+                let effective_limit = match limit.limit {
+                    Some(0) => None, // limit: 0 means no limit (Go compatibility)
+                    other => other,
+                };
+                if effective_limit.is_some() || limit.offset > 0 {
+                    plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+                }
+            }
         }
 
         Ok(PlanResult {

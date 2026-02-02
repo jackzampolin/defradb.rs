@@ -514,19 +514,39 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
             MutationType::Upsert => {
-                // Upsert combines create and update semantics
-                let input_array: Vec<JsonValue> = mutation
-                    .create_input
-                    .iter()
-                    .map(|input| {
-                        let mut input_obj = serde_json::Map::new();
-                        for (field_name, value) in input {
-                            input_obj.insert(field_name.clone(), value.clone());
-                        }
-                        JsonValue::Object(input_obj)
-                    })
-                    .collect();
-                mutation_attrs.insert("input".to_string(), JsonValue::Array(input_array));
+                // Go format: separate create, filter, and update fields
+                // create: map of fields for new document creation
+                if !mutation.create_input.is_empty() {
+                    let mut create_obj = serde_json::Map::new();
+                    for (field_name, value) in &mutation.create_input[0] {
+                        create_obj.insert(field_name.clone(), value.clone());
+                    }
+                    mutation_attrs
+                        .insert("create".to_string(), JsonValue::Object(create_obj));
+                }
+
+                // filter: filter expression used to find existing documents
+                if let Some(ref filter) = mutation.filter {
+                    let conditions = filter.conditions();
+                    if conditions.is_empty() {
+                        mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                    } else {
+                        mutation_attrs
+                            .insert("filter".to_string(), serde_json::json!(conditions));
+                    }
+                } else {
+                    mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                }
+
+                // update: map of fields for updating existing document
+                if !mutation.update_input.is_empty() {
+                    let mut update_obj = serde_json::Map::new();
+                    for (field_name, value) in &mutation.update_input {
+                        update_obj.insert(field_name.clone(), value.clone());
+                    }
+                    mutation_attrs
+                        .insert("update".to_string(), JsonValue::Object(update_obj));
+                }
             }
         }
 

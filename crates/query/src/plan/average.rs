@@ -444,55 +444,11 @@ impl PlanNode for AverageNode {
     }
 
     fn explain_debug_inner(&self) -> JsonValue {
-        // Same structure for debug: averageNode → countNode → sumNode → source
+        // Debug mode: only show node hierarchy, no attributes (sources, filter, etc.)
+        // Structure: averageNode → countNode → sumNode → source
         let source_explain = self.source.explain_debug();
 
-        // Build sumNode sources (includes childFieldName)
-        let sum_sources: Vec<JsonValue> = self
-            .sources
-            .iter()
-            .map(|s| {
-                let mut source_obj = serde_json::Map::new();
-                source_obj.insert(
-                    "fieldName".to_string(),
-                    JsonValue::String(s.field_name.clone()),
-                );
-                match &s.child_field_name {
-                    Some(child_name) => {
-                        source_obj.insert(
-                            "childFieldName".to_string(),
-                            JsonValue::String(child_name.clone()),
-                        );
-                    }
-                    None => {
-                        source_obj.insert(
-                            "childFieldName".to_string(),
-                            serde_json::Value::Null,
-                        );
-                    }
-                }
-                source_obj.insert("filter".to_string(), Self::build_source_filter(s));
-                JsonValue::Object(source_obj)
-            })
-            .collect();
-
-        // Build countNode sources (NO childFieldName)
-        let count_sources: Vec<JsonValue> = self
-            .sources
-            .iter()
-            .map(|s| {
-                let mut source_obj = serde_json::Map::new();
-                source_obj.insert(
-                    "fieldName".to_string(),
-                    JsonValue::String(s.field_name.clone()),
-                );
-                source_obj.insert("filter".to_string(), Self::build_source_filter(s));
-                JsonValue::Object(source_obj)
-            })
-            .collect();
-
         let mut sum_inner = serde_json::Map::new();
-        sum_inner.insert("sources".to_string(), JsonValue::Array(sum_sources));
         if let Some(source_obj) = source_explain.as_object() {
             for (key, value) in source_obj {
                 sum_inner.insert(key.clone(), value.clone());
@@ -500,7 +456,6 @@ impl PlanNode for AverageNode {
         }
 
         let mut count_inner = serde_json::Map::new();
-        count_inner.insert("sources".to_string(), JsonValue::Array(count_sources));
         count_inner.insert("sumNode".to_string(), JsonValue::Object(sum_inner));
 
         let mut obj = serde_json::Map::new();

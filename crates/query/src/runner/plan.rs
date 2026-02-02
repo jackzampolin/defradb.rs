@@ -615,23 +615,13 @@ pub(crate) fn build_plan(
             }
         }
     } else {
-        // WITHOUT GROUP BY: OrderBy → Limit → [AllDocs if multiple aggs] → Aggregates
+        // WITHOUT GROUP BY: OrderBy → [AllDocs if multiple aggs] → Aggregates → Limit
+        // Go applies limit AFTER aggregates so limit restricts the final output,
+        // not the documents fed to aggregation.
 
-        // Add OrderByNode for sorting (after filtering, before limit)
+        // Add OrderByNode for sorting (after filtering, before aggregates)
         if let Some(ref order_by) = select.order_by {
             plan = Box::new(OrderByNode::new(plan, order_by.clone(), mapping.clone()));
-        }
-
-        // Add LimitNode
-        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
-        if let Some(ref limit) = select.limit {
-            let effective_limit = match limit.limit {
-                Some(0) => None,
-                other => other,
-            };
-            if effective_limit.is_some() || limit.offset > 0 {
-                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
-            }
         }
 
         // Count aggregates to determine if we need AllDocsNode
@@ -650,6 +640,18 @@ pub(crate) fn build_plan(
         // Add aggregate nodes
         // Without GROUP BY, aggregates return a single row for the entire result
         plan = add_aggregate_nodes(plan, select, &mapping)?;
+
+        // Add LimitNode (AFTER aggregates, matching Go behavior)
+        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
+        if let Some(ref limit) = select.limit {
+            let effective_limit = match limit.limit {
+                Some(0) => None,
+                other => other,
+            };
+            if effective_limit.is_some() || limit.offset > 0 {
+                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+            }
+        }
     }
 
     Ok(plan)
