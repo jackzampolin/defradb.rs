@@ -559,14 +559,18 @@ fn validate_field_not_duplicated(
 }
 
 /// Matches Go's validateCollectionMaterialized.
+///
+/// Go only rejects is_materialized=false on regular collections (no query source).
+/// Views (collections with a query source) CAN be non-materialized.
 fn validate_collection_materialized(
     new_state: &DefinitionState,
     _old_state: &DefinitionState,
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
-        // Go checks: if query source exists and is_materialized is false
-        if col.query.is_some() && !col.is_materialized {
+        // Non-materialized is only valid for views (has query source).
+        // Regular collections (no query source) must be materialized.
+        if !col.is_materialized && col.query.is_none() {
             errs.push(format!(
                 "non-materialized collections are not supported. Collection: {}",
                 col.name

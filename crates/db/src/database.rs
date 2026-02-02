@@ -106,6 +106,9 @@ pub struct DB<S: Store> {
     event_bus: Option<Arc<dyn Bus>>,
     /// Lens transform store for schema migrations.
     lens_store: Arc<dyn TransformStore>,
+    /// Pending migrations registered before their destination version exists.
+    /// Maps dest_version_id -> (source_version_id, transform_id_string).
+    pending_migrations: RwLock<HashMap<String, (String, String)>>,
 }
 
 impl<S: Store> DB<S> {
@@ -130,6 +133,7 @@ impl<S: Store> DB<S> {
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store,
+            pending_migrations: RwLock::new(HashMap::new()),
         })
     }
 
@@ -174,6 +178,7 @@ impl<S: Store> DB<S> {
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store,
+            pending_migrations: RwLock::new(HashMap::new()),
         })
     }
 
@@ -411,13 +416,26 @@ impl<S: Store> DB<S> {
                     )
                 }
                 None => {
-                    // Destination schema doesn't exist yet (e.g., registering for P2P)
-                    // This is allowed per Go behavior - transforms can be registered
-                    // before schemas exist
+                    // Destination schema doesn't exist yet (e.g., migration registered
+                    // before patch creates the version). Store as pending so
+                    // patch_collection can link it when the version is created.
                     tracing::debug!(
                         dest_version_id = %dest_version_id,
-                        "Destination schema not found, skipping schema update"
+                        source_version_id = %source_version_id,
+                        "Destination schema not found, storing as pending migration"
                     );
+                    {
+                        let mut pending = self.pending_migrations.write().map_err(|e| {
+                            tracing::error!(error = ?e, "Pending migrations lock poisoned");
+                            Error::LockPoisoned(
+                                "pending migrations lock poisoned during set_migration".into(),
+                            )
+                        })?;
+                        pending.insert(
+                            dest_version_id.clone(),
+                            (source_version_id.clone(), transform_id.to_string()),
+                        );
+                    }
                     (collection_key, None, String::new())
                 }
             }
@@ -1326,17 +1344,64 @@ impl<S: Store> DB<S> {
 
         // Create transaction and update the schema in the store
         let txn = self.new_txn(false).await?;
-        let key = CollectionNameKey::new(&name);
-        let data = serde_json::to_vec(&schema).map_err(|e| {
-            Error::Serialization(format!(
-                "failed to serialize schema for collection '{}': {}",
-                name, e
-            ))
-        })?;
-        txn.systemstore()?
-            .set(&key.bytes(), &data)
-            .await
-            .map_err(Error::Storage)?;
+        {
+            let systemstore = txn.systemstore()?;
+
+            // Deactivate the currently active version for the same collection_id (if any).
+            // Go's setActiveVersion deactivates the old version before activating the new one.
+            let all_versions = {
+                let mut versions = Vec::new();
+                let prefix = CollectionKey::collection_prefix();
+                let opts = IterOptions::new().with_prefix(prefix);
+                let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
+                while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                    if let Ok(v) = serde_json::from_slice::<CollectionVersion>(&pair.value) {
+                        versions.push((pair.key.to_vec(), v));
+                    }
+                }
+                iter.close().await.map_err(Error::Storage)?;
+                versions
+            };
+
+            for (stored_key, mut old_ver) in all_versions {
+                if old_ver.collection_id == schema.collection_id
+                    && old_ver.is_active
+                    && old_ver.version_id != schema.version_id
+                {
+                    old_ver.is_active = false;
+                    let old_data = serde_json::to_vec(&old_ver).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize old version for deactivation: {}",
+                            e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&stored_key, &old_data)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+            }
+
+            // Store the activated version
+            let version_key = CollectionKey::new(&schema.version_id);
+            let data = serde_json::to_vec(&schema).map_err(|e| {
+                Error::Serialization(format!(
+                    "failed to serialize schema for collection '{}': {}",
+                    name, e
+                ))
+            })?;
+            systemstore
+                .set(&version_key.bytes(), &data)
+                .await
+                .map_err(Error::Storage)?;
+
+            // Update name pointer
+            let name_key = CollectionNameKey::new(&name);
+            systemstore
+                .set(&name_key.bytes(), schema.version_id.as_bytes())
+                .await
+                .map_err(Error::Storage)?;
+        }
         txn.commit().await?;
 
         // Update the cache
@@ -1380,6 +1445,23 @@ impl<S: Store> DB<S> {
             .values()
             .find(|c| c.schema().version_id == version_id)
             .cloned())
+    }
+
+    /// Get a collection by version ID, searching both cache and KV store.
+    async fn get_collection_by_version_id_full(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<Collection>> {
+        // Check cache first
+        if let Some(c) = self.get_collection_by_version_id(version_id)? {
+            return Ok(Some(c));
+        }
+        // Search all stored versions (including inactive)
+        let all_versions = self.get_all_collection_versions().await?;
+        Ok(all_versions
+            .into_iter()
+            .find(|v| v.version_id == version_id)
+            .map(Collection::new))
     }
 
     /// Get all collection versions from storage (active and inactive).
@@ -1444,13 +1526,16 @@ impl<S: Store> DB<S> {
         let patch_ops: serde_json::Value =
             serde_json::from_str(patch).map_err(|e| Error::InvalidPatch(e.to_string()))?;
 
-        // Get the current schema - try by name first, then by version ID, then
-        // check for collection-level move/copy targeting a non-existent collection
+        // Get the current schema - try by name first, then by version ID (including KV store),
+        // then check for collection-level move/copy targeting a non-existent collection
         let collection = match self.get_collection(collection_name)? {
             Some(c) => c,
             None => {
-                // Try looking up by version ID (tests use CIDs as collection identifiers)
-                match self.get_collection_by_version_id(collection_name)? {
+                // Try looking up by version ID - search both cache and KV store
+                match self
+                    .get_collection_by_version_id_full(collection_name)
+                    .await?
+                {
                     Some(c) => c,
                     None => {
                         // Collection not found by name or version ID.
@@ -1510,15 +1595,22 @@ impl<S: Store> DB<S> {
                 let value = op.get("value");
 
                 // Strip collection name/version prefix from path if present (Go compatibility)
-                let path = raw_path.map(|p| {
-                    let stripped = Self::strip_collection_prefix(
+                let stripped_path = raw_path.map(|p| {
+                    Self::strip_collection_prefix(
                         p,
                         &collection_prefix,
                         actual_name_prefix.as_deref(),
-                    );
-                    // Go compatibility: substitute field names for indices in /Fields/<name> paths
-                    Self::substitute_field_name_in_path(&stripped, &schema_json)
+                    )
                 });
+
+                // Extract field name from path before substitution (for name mismatch validation)
+                let field_name_from_path = stripped_path
+                    .as_deref()
+                    .and_then(|p| Self::extract_field_name_from_path(p));
+
+                // Go compatibility: substitute field names for indices in /Fields/<name> paths
+                let path =
+                    stripped_path.map(|p| Self::substitute_field_name_in_path(&p, &schema_json));
 
                 match (operation, path.as_deref()) {
                     (Some("replace"), Some(path)) | (Some("add"), Some(path)) => {
@@ -1547,13 +1639,10 @@ impl<S: Store> DB<S> {
                                 )));
                             }
                             // Check if this CID exists as a known collection version
-                            let all_versions = self
-                                .get_all_collection_versions()
-                                .await
-                                .unwrap_or_default();
-                            let is_known = all_versions
-                                .iter()
-                                .any(|c| c.version_id == version_id_str);
+                            let all_versions =
+                                self.get_all_collection_versions().await.unwrap_or_default();
+                            let is_known =
+                                all_versions.iter().any(|c| c.version_id == version_id_str);
                             if !is_known {
                                 return Err(Error::InvalidPatch(
                                     "unknown CID, collection ids cannot be manually defined"
@@ -1568,13 +1657,34 @@ impl<S: Store> DB<S> {
                         // If path ends with /Fields/- or /Fields/<n> and value has Name but no FieldID
                         if path.contains("/Fields/") {
                             if let serde_json::Value::Object(ref mut map) = value {
+                                // Validate field name matches path index name (Go compatibility)
+                                if let Some(ref path_name) = field_name_from_path {
+                                    if let Some(value_name) =
+                                        map.get("Name").and_then(|n| n.as_str())
+                                    {
+                                        if !value_name.is_empty()
+                                            && value_name != path_name.as_str()
+                                        {
+                                            return Err(Error::InvalidPatch(format!(
+                                                "the index used does not match the given name. index: {}, name: {}",
+                                                path_name, value_name
+                                            )));
+                                        }
+                                    }
+                                    // If value doesn't have Name, set it from the path
+                                    if !map.contains_key("Name") {
+                                        map.insert(
+                                            "Name".to_string(),
+                                            serde_json::Value::String(path_name.clone()),
+                                        );
+                                    }
+                                }
+
                                 // Validate Kind value for new fields
                                 if let Some(kind_val) = map.get("Kind") {
                                     Self::validate_patch_field_kind(
                                         kind_val,
-                                        map.get("Name")
-                                            .and_then(|n| n.as_str())
-                                            .unwrap_or(""),
+                                        map.get("Name").and_then(|n| n.as_str()).unwrap_or(""),
                                         &known_collection_names,
                                     )?;
                                 }
@@ -1879,6 +1989,27 @@ impl<S: Store> DB<S> {
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
         new_schema.previous_version = Some(CollectionSource::new(&old_version_id));
+
+        // Check for pending migrations targeting this new version
+        {
+            let pending = self.pending_migrations.read().map_err(|e| {
+                tracing::error!(error = ?e, "Pending migrations lock poisoned");
+                Error::LockPoisoned(
+                    "pending migrations lock poisoned during patch_collection".into(),
+                )
+            })?;
+            if let Some((_source_id, transform_id)) = pending.get(&new_version_id) {
+                if let Some(ref mut prev) = new_schema.previous_version {
+                    prev.transform = Some(transform_id.clone());
+                    tracing::debug!(
+                        new_version = %new_version_id,
+                        transform_id = %transform_id,
+                        "Linked pending migration to new schema version"
+                    );
+                }
+            }
+        }
+
         new_schema.is_active = true;
 
         // Create old schema copy with is_active = false for storage
@@ -1952,6 +2083,15 @@ impl<S: Store> DB<S> {
 
         txn.commit().await?;
 
+        // Clean up any pending migration that was linked to this version
+        {
+            let mut pending = self.pending_migrations.write().map_err(|e| {
+                tracing::error!(error = ?e, "Pending migrations lock poisoned during cleanup");
+                Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
+            })?;
+            pending.remove(&new_version_id);
+        }
+
         // Update cache with new schema
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(
@@ -1971,12 +2111,11 @@ impl<S: Store> DB<S> {
 
     /// Generate a version ID (CID) from schema content during patching.
     ///
-    /// This generates a CID compatible with Go DefraDB's block-based approach:
-    /// - Existing fields (present in old_schema) reuse their existing CID (field.id)
-    /// - New fields get CIDs generated with priority = version_depth + 1
-    /// - The collection block uses the same priority as new fields
-    ///
-    /// Also updates field.id on new fields to their generated CID string.
+    /// Matches Go DefraDB's saveBlocks() behavior:
+    /// - Existing fields (present in old_schema) are SKIPPED entirely
+    /// - Only NEW fields get CIDs generated with priority=1 (empty headstore)
+    /// - The collection block gets priority=version_depth+1, heads=[old_version_CID],
+    ///   and links containing only new field CIDs
     fn generate_patch_version_id(
         schema: &mut CollectionVersion,
         old_schema: &CollectionVersion,
@@ -1986,28 +2125,35 @@ impl<S: Store> DB<S> {
         use sha2::{Digest, Sha256};
         use std::str::FromStr;
 
-        let new_priority = version_depth + 1;
+        let collection_priority = version_depth + 1;
 
-        // Build map of old field names → field.id (CID string) for reuse
-        let old_field_ids: std::collections::HashMap<&str, &str> = old_schema
+        // Build set of old field names for detecting which fields are new
+        let old_field_names: std::collections::HashSet<&str> = old_schema
             .fields
             .iter()
             .filter(|f| !f.id.is_empty())
-            .map(|f| (f.name.as_str(), f.id.as_str()))
+            .map(|f| f.name.as_str())
             .collect();
 
-        // Sort fields for deterministic ordering: _docID first, then alphabetically
-        // Include all fields with non-empty FieldID in the CID.
-        // Self-ref relation objects (both primary and secondary) have field IDs.
-        // Non-self-ref secondary relations have empty IDs and are excluded.
-        let field_indices: Vec<usize> = {
+        // Go's saveBlocks skips fields that already have a FieldID (existing fields).
+        // Only NEW fields (not in old_schema) get CID generation and DAGLink inclusion.
+        // Go also skips secondary relation fields (those have empty FieldID in old schema too,
+        // but Delta returns hasFieldChanged=false for them).
+        let new_field_indices: Vec<usize> = {
             let mut indices: Vec<usize> = schema
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| !f.id.is_empty())
+                .filter(|(_, f)| {
+                    // New field: not in old schema and not a secondary relation
+                    // (secondary relations have relation_name set and is_primary=false)
+                    let is_new = !old_field_names.contains(f.name.as_str());
+                    let is_secondary_relation = f.relation_name.is_some() && !f.is_primary;
+                    is_new && !is_secondary_relation
+                })
                 .map(|(i, _)| i)
                 .collect();
+            // Sort: _docID first, then alphabetically
             indices.sort_by(|&a, &b| {
                 let fa = &schema.fields[a];
                 let fb = &schema.fields[b];
@@ -2022,30 +2168,35 @@ impl<S: Store> DB<S> {
             indices
         };
 
-        // Generate CIDs for each field
+        // Generate CIDs only for NEW fields with priority=1 (matching Go's empty headstore)
         let mut field_cids: Vec<Cid> = Vec::new();
-        for &idx in &field_indices {
+        for &idx in &new_field_indices {
             let field = &schema.fields[idx];
-            let field_name = field.name.as_str();
-
-            // Try to reuse existing field CID from old schema
-            if let Some(&old_id) = old_field_ids.get(field_name) {
-                if let Ok(cid) = Cid::from_str(old_id) {
+            match schema::generate_field_cid_with_priority(field, 1) {
+                Ok(cid) => {
+                    schema.fields[idx].id = cid.to_string();
                     field_cids.push(cid);
-                    continue;
                 }
-            }
-
-            // New field: generate CID with new_priority
-            if let Ok(cid) = schema::generate_field_cid_with_priority(field, new_priority) {
-                schema.fields[idx].id = cid.to_string();
-                field_cids.push(cid);
+                Err(_e) => {}
             }
         }
 
-        // Generate collection CID with new_priority
-        match schema::generate_collection_cid_with_priority(&schema.name, &field_cids, new_priority)
-        {
+        // Generate collection CID with old version as head.
+        // Go's Delta only includes name when it changed. For field-only patches, name=None.
+        let name_changed = schema.name != old_schema.name;
+        let collection_name = if name_changed {
+            Some(schema.name.as_str())
+        } else {
+            None
+        };
+        let old_version_cid = Cid::from_str(&old_schema.version_id).ok();
+        let collection_heads: Vec<Cid> = old_version_cid.into_iter().collect();
+        match schema::generate_collection_cid_full(
+            collection_name,
+            &field_cids,
+            collection_priority,
+            &collection_heads,
+        ) {
             Ok(cid) => cid.to_string(),
             Err(_) => {
                 // Fallback to simple hash if CID generation fails
@@ -2097,12 +2248,29 @@ impl<S: Store> DB<S> {
                 // Known string kinds
                 let known = matches!(
                     s.as_str(),
-                    "ID" | "Boolean" | "Int" | "DateTime" | "Float" | "Float64"
-                    | "Float32" | "String" | "Blob" | "JSON"
-                    | "[Boolean]" | "[Boolean!]" | "[Int]" | "[Int!]"
-                    | "[Float]" | "[Float64]" | "[Float!]" | "[Float64!]"
-                    | "[Float32]" | "[Float32!]" | "[String]" | "[String!]"
-                    | "Self" | "[Self]"
+                    "ID" | "Boolean"
+                        | "Int"
+                        | "DateTime"
+                        | "Float"
+                        | "Float64"
+                        | "Float32"
+                        | "String"
+                        | "Blob"
+                        | "JSON"
+                        | "[Boolean]"
+                        | "[Boolean!]"
+                        | "[Int]"
+                        | "[Int!]"
+                        | "[Float]"
+                        | "[Float64]"
+                        | "[Float!]"
+                        | "[Float64!]"
+                        | "[Float32]"
+                        | "[Float32!]"
+                        | "[String]"
+                        | "[String!]"
+                        | "Self"
+                        | "[Self]"
                 );
                 if !known {
                     // Could be a collection name reference (e.g., "Users", "[Users]").
@@ -2323,6 +2491,22 @@ impl<S: Store> DB<S> {
         Err(Error::InvalidPatch("failed to remove value".to_string()))
     }
 
+    /// Extract a field name from a path like `/Fields/email` or `/Fields/email/Name`.
+    /// Returns None if the segment after /Fields/ is numeric, "-", or /Fields/ isn't present.
+    fn extract_field_name_from_path(path: &str) -> Option<String> {
+        let segments: Vec<&str> = path.split('/').collect();
+        for (i, seg) in segments.iter().enumerate() {
+            if *seg == "Fields" && i + 1 < segments.len() {
+                let next = segments[i + 1];
+                if next.parse::<usize>().is_ok() || next == "-" {
+                    return None;
+                }
+                return Some(next.to_string());
+            }
+        }
+        None
+    }
+
     /// Helper: Get a value at a JSON pointer path (for test operation).
     fn json_pointer_get(json: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -2370,7 +2554,7 @@ impl<S: Store> DB<S> {
                 if next_segment.parse::<usize>().is_ok() || next_segment == "-" {
                     result_segments.push(next_segment.to_string());
                 } else {
-                    // It's a field name - look up the index
+                    // It's a field name - look up the index in the existing Fields array
                     if let Some(fields) = schema_json.get("Fields").and_then(|f| f.as_array()) {
                         let mut found = false;
                         for (idx, field) in fields.iter().enumerate() {
@@ -2383,11 +2567,12 @@ impl<S: Store> DB<S> {
                             }
                         }
                         if !found {
-                            // Field name not found, keep as-is (will error later)
-                            result_segments.push(next_segment.to_string());
+                            // Field name not found in existing fields - treat as append
+                            // (Go interprets unknown field names as new field additions)
+                            result_segments.push("-".to_string());
                         }
                     } else {
-                        result_segments.push(next_segment.to_string());
+                        result_segments.push("-".to_string());
                     }
                 }
             } else {

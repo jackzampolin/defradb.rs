@@ -748,11 +748,7 @@ pub async fn write_collection_block(
     let links = vec![DAGLink::new(String::new(), doc_composite_cid)];
 
     // Create the collection block
-    let collection_block = Block::new(
-        CrdtDelta::Collection(collection_payload),
-        col_heads,
-        links,
-    );
+    let collection_block = Block::new(CrdtDelta::Collection(collection_payload), col_heads, links);
 
     // Serialize and generate CID
     let collection_bytes = collection_block

@@ -66,8 +66,7 @@ impl LocalDocumentACP {
             return Ok(true);
         }
         // Check wildcard relationship (target="*" means all actors)
-        let wildcard_tuple =
-            RelationTuple::new(Did::wildcard(), relation, collection_id, doc_id);
+        let wildcard_tuple = RelationTuple::new(Did::wildcard(), relation, collection_id, doc_id);
         self.store.has_tuple(&wildcard_tuple).await
     }
 }

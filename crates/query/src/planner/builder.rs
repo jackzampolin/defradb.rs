@@ -341,7 +341,10 @@ impl Planner {
                 let agg_type_name = agg.aggregate_type.as_str();
                 let output_name = agg.output_name();
                 // Add a new index if this specific output name isn't already registered
-                if scan_mapping.try_find_index_from_render_key(&output_name).is_none() {
+                if scan_mapping
+                    .try_find_index_from_render_key(&output_name)
+                    .is_none()
+                {
                     let scan_index = scan_mapping.next_index();
                     scan_mapping.add(scan_index, agg_type_name);
                     scan_mapping.add_render_key(scan_index, output_name);
@@ -372,16 +375,15 @@ impl Planner {
                                 // It's an inline array field — ensure it's in scan_mapping
                                 // with a render_key so data appears in output for
                                 // compute_relation_aggregates().
-                                let idx =
-                                    if let Some(existing) =
-                                        scan_mapping.first_index_of_name(host_name)
-                                    {
-                                        existing
-                                    } else {
-                                        let new_idx = scan_mapping.next_index();
-                                        scan_mapping.add(new_idx, host_name);
-                                        new_idx
-                                    };
+                                let idx = if let Some(existing) =
+                                    scan_mapping.first_index_of_name(host_name)
+                                {
+                                    existing
+                                } else {
+                                    let new_idx = scan_mapping.next_index();
+                                    scan_mapping.add(new_idx, host_name);
+                                    new_idx
+                                };
                                 if !scan_mapping
                                     .render_keys
                                     .iter()
@@ -485,17 +487,11 @@ impl Planner {
         let filter_for_plan = if let Some(ref doc_ids) = select.doc_ids {
             let doc_ids_filter = if doc_ids.len() == 1 {
                 let mut conditions = HashMap::new();
-                conditions.insert(
-                    "_docID".to_string(),
-                    serde_json::json!({"_eq": doc_ids[0]}),
-                );
+                conditions.insert("_docID".to_string(), serde_json::json!({"_eq": doc_ids[0]}));
                 Filter::from_conditions(conditions)
             } else {
                 let mut conditions = HashMap::new();
-                conditions.insert(
-                    "_docID".to_string(),
-                    serde_json::json!({"_in": doc_ids}),
-                );
+                conditions.insert("_docID".to_string(), serde_json::json!({"_in": doc_ids}));
                 Filter::from_conditions(conditions)
             };
             match filter_for_plan {
@@ -1225,14 +1221,15 @@ impl Planner {
         for field in &select.fields {
             if let Requestable::Similarity(sim) = field {
                 // Find the target field index (document's vector)
-                let field_index = mapping
-                    .first_index_of_name(&sim.target_field)
-                    .ok_or_else(|| {
-                        QueryError::internal(format!(
-                            "similarity target field '{}' not found in mapping",
-                            sim.target_field
-                        ))
-                    })?;
+                let field_index =
+                    mapping
+                        .first_index_of_name(&sim.target_field)
+                        .ok_or_else(|| {
+                            QueryError::internal(format!(
+                                "similarity target field '{}' not found in mapping",
+                                sim.target_field
+                            ))
+                        })?;
 
                 // Find the similarity result index
                 let similarity_index = mapping
@@ -1309,9 +1306,7 @@ impl Planner {
                                 fname.as_str(),
                                 "_count" | "_sum" | "_avg" | "_min" | "_max"
                             );
-                            if is_aggregate_name
-                                || mapping.first_index_of_name(fname).is_none()
-                            {
+                            if is_aggregate_name || mapping.first_index_of_name(fname).is_none() {
                                 is_array_aggregate = true;
                                 array_field_index =
                                     mapping.first_index_of_name("_group").unwrap_or(0);
@@ -2194,9 +2189,7 @@ impl Planner {
                     if filter_field.starts_with('_') {
                         continue;
                     }
-                    if let Some(filter_rel_field) =
-                        target_collection.field_by_name(&filter_field)
-                    {
+                    if let Some(filter_rel_field) = target_collection.field_by_name(&filter_field) {
                         if filter_rel_field.kind.is_relation() {
                             // Skip if already joined from selection or other sub-joins
                             if let Some(rel_idx) =
@@ -2810,8 +2803,7 @@ impl Planner {
                                             .iter()
                                             .any(|rk| rk.key == filter_field)
                                         {
-                                            child_mapping
-                                                .add_render_key(idx, &filter_field);
+                                            child_mapping.add_render_key(idx, &filter_field);
                                         }
                                     }
                                 }
@@ -2837,9 +2829,7 @@ impl Planner {
                                     if let Some(child_mapping) =
                                         mapping.child_at_mut(relation_field_index)
                                     {
-                                        if child_mapping
-                                            .first_index_of_name(order_field)
-                                            .is_none()
+                                        if child_mapping.first_index_of_name(order_field).is_none()
                                         {
                                             child_mapping.add(idx, order_field);
                                         }
@@ -3012,8 +3002,8 @@ impl Planner {
                                     target_collection.field_by_name(order_relation_name)
                                 {
                                     if order_rel_field.kind.is_relation() {
-                                        let (new_plan, new_mapping) =
-                                            self.apply_filter_relation_join(
+                                        let (new_plan, new_mapping) = self
+                                            .apply_filter_relation_join(
                                                 child_plan,
                                                 &target_collection,
                                                 order_rel_field,
@@ -3062,20 +3052,19 @@ impl Planner {
                                             continue;
                                         }
                                     }
-                                    let (new_plan, new_mapping) =
-                                        self.apply_filter_relation_join(
-                                            child_plan,
-                                            &target_collection,
-                                            filter_rel_field,
-                                            &filter_field,
-                                            child_scan_mapping.clone(),
-                                        )?;
+                                    let (new_plan, new_mapping) = self.apply_filter_relation_join(
+                                        child_plan,
+                                        &target_collection,
+                                        filter_rel_field,
+                                        &filter_field,
+                                        child_scan_mapping.clone(),
+                                    )?;
                                     child_plan = new_plan;
                                     child_scan_mapping = new_mapping;
                                     // Ensure render_key for the relation so it appears
                                     // in rendered JSON for post-processing filter
-                                    if let Some(rel_idx) = child_scan_mapping
-                                        .first_index_of_name(&filter_field)
+                                    if let Some(rel_idx) =
+                                        child_scan_mapping.first_index_of_name(&filter_field)
                                     {
                                         if !child_scan_mapping
                                             .render_keys
@@ -3529,16 +3518,12 @@ impl Planner {
             )));
         }
 
-        let target_collection_id =
-            first_field
-                .kind
-                .relation_collection_id()
-                .ok_or_else(|| {
-                    QueryError::internal(format!(
-                        "relation field '{}' has no target collection",
-                        first_name
-                    ))
-                })?;
+        let target_collection_id = first_field.kind.relation_collection_id().ok_or_else(|| {
+            QueryError::internal(format!(
+                "relation field '{}' has no target collection",
+                first_name
+            ))
+        })?;
 
         let target_collection = if target_collection_id.is_empty() {
             Arc::new(start_collection.clone())
@@ -3557,14 +3542,12 @@ impl Planner {
             m
         };
 
-        let relation_field_index = mapping
-            .first_index_of_name(first_name)
-            .ok_or_else(|| {
-                QueryError::internal(format!(
-                    "relation field '{}' not in parent mapping",
-                    first_name
-                ))
-            })?;
+        let relation_field_index = mapping.first_index_of_name(first_name).ok_or_else(|| {
+            QueryError::internal(format!(
+                "relation field '{}' not in parent mapping",
+                first_name
+            ))
+        })?;
 
         // Build child scan
         let mut child_scan =
@@ -3592,11 +3575,7 @@ impl Planner {
 
         // Find the other side of the relation
         let target_relation_field = if let Some(rel_name) = &first_field.relation_name {
-            target_collection.field_by_relation(
-                rel_name,
-                &start_collection.name,
-                first_name,
-            )
+            target_collection.field_by_relation(rel_name, &start_collection.name, first_name)
         } else {
             None
         };
@@ -3874,9 +3853,7 @@ impl Planner {
             .query
             .get("Name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                QueryError::execution("view QuerySource.Query missing 'Name' field")
-            })?;
+            .ok_or_else(|| QueryError::execution("view QuerySource.Query missing 'Name' field"))?;
 
         // Build a Select for the underlying query from the stored JSON
         let source_fields_json = query_source
@@ -3897,8 +3874,7 @@ impl Planner {
             if let Some(inner_fields) = field_json.get("Fields").and_then(|v| v.as_array()) {
                 // Nested select (relation)
                 let inner_name = field_name.to_string();
-                let mut inner_select = Select::new(inner_name.clone())
-                    .with_field_name(inner_name);
+                let mut inner_select = Select::new(inner_name.clone()).with_field_name(inner_name);
                 // Populate inner fields from stored JSON.
                 // Use original field names only (no aliases) on the source select.
                 // The ViewNode's child_mapping handles renaming via render keys.
@@ -3910,15 +3886,18 @@ impl Planner {
                     if inner_field_json.get("Fields").is_some() {
                         // Deeper nested select (relation within relation)
                         let deep_name = inner_field_name.to_string();
-                        let deep_select = Select::new(deep_name.clone())
-                            .with_field_name(deep_name);
-                        inner_select.fields.push(Requestable::Select(Box::new(deep_select)));
+                        let deep_select = Select::new(deep_name.clone()).with_field_name(deep_name);
+                        inner_select
+                            .fields
+                            .push(Requestable::Select(Box::new(deep_select)));
                     } else {
                         let field = crate::mapper::Field::new(inner_field_name);
                         inner_select.fields.push(Requestable::Field(field));
                     }
                 }
-                source_select.fields.push(Requestable::Select(Box::new(inner_select)));
+                source_select
+                    .fields
+                    .push(Requestable::Select(Box::new(inner_select)));
             } else if field_json.get("Targets").is_some() {
                 // Aggregate field (e.g., _count, _sum)
                 let agg_type = crate::mapper::AggregateType::parse(field_name)
@@ -4056,10 +4035,7 @@ impl Planner {
         // Always wrap viewNode in SelectNode (Go always has selectNode → viewNode).
         // Apply user's query-level filter if present.
         let plan: Box<dyn PlanNode> = if let Some(ref filter) = select.filter {
-            Box::new(
-                SelectNode::new(view_plan, target_mapping)
-                    .with_filter(filter.clone()),
-            )
+            Box::new(SelectNode::new(view_plan, target_mapping).with_filter(filter.clone()))
         } else {
             Box::new(SelectNode::new(view_plan, target_mapping))
         };

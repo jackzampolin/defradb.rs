@@ -344,12 +344,18 @@ async fn test_local_acp_stores_any_relation_name() {
     let result = acp
         .add_actor_relationship(&owner, &other, "users", "doc1", "reador", &[])
         .await;
-    assert!(result.is_ok(), "LocalDocumentACP stores tuples without validating relation names");
+    assert!(
+        result.is_ok(),
+        "LocalDocumentACP stores tuples without validating relation names"
+    );
 
     let result = acp
         .add_actor_relationship(&owner, &other, "users", "doc1", "admin", &[])
         .await;
-    assert!(result.is_ok(), "LocalDocumentACP stores tuples without validating relation names");
+    assert!(
+        result.is_ok(),
+        "LocalDocumentACP stores tuples without validating relation names"
+    );
 }
 
 #[tokio::test]

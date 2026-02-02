@@ -84,7 +84,6 @@ pub use auto_commit_mutator::AutoCommitMutator;
 #[allow(deprecated)]
 pub use block_builder::build_block_from_document;
 pub use block_builder::{build_blocks_from_document, BlockResult};
-pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 #[cfg(feature = "p2p")]
 pub use broadcast_mutator::BroadcastMutator;
 pub use collection::{collection_short_id, Collection};
@@ -99,6 +98,7 @@ pub use collection_provider::DbCollectionProvider;
 pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{DbOptions, DB};
+pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};

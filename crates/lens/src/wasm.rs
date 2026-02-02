@@ -179,10 +179,7 @@ impl Default for WasmTransformStore {
 #[async_trait]
 impl TransformStore for WasmTransformStore {
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
-        let first_lens = config
-            .lens()
-            .cloned()
-            .unwrap_or_default();
+        let first_lens = config.lens().cloned().unwrap_or_default();
         let module = self.load_module(&first_lens)?;
         let id = TransformId::new(format!(
             "lens_{}",
@@ -205,9 +202,7 @@ impl TransformStore for WasmTransformStore {
         let configs = self.configs.read();
         let result = configs
             .iter()
-            .filter_map(|(id, config)| {
-                config.lens().cloned().map(|l| (id.to_string(), l))
-            })
+            .filter_map(|(id, config)| config.lens().cloned().map(|l| (id.to_string(), l)))
             .collect();
         Ok(result)
     }

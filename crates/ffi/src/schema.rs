@@ -41,7 +41,8 @@ pub unsafe extern "C" fn add_schema(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 

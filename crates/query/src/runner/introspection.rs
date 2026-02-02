@@ -79,15 +79,10 @@ pub fn build_introspection_schema(
             Field::new(
                 &collection.name,
                 TypeRef::named_nn_list_nn(&collection.name),
-                move |_ctx| {
-                    FieldFuture::new(async move { Ok(Some(GqlValue::List(vec![]))) })
-                },
+                move |_ctx| FieldFuture::new(async move { Ok(Some(GqlValue::List(vec![]))) }),
             )
             .argument(InputValue::new("cid", TypeRef::named("String")))
-            .argument(InputValue::new(
-                "docID",
-                TypeRef::named_nn_list("ID"),
-            ))
+            .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
             .argument(InputValue::new(
                 "filter",
                 TypeRef::named(format!("{}FilterArg", collection_name)),
@@ -104,7 +99,6 @@ pub fn build_introspection_schema(
             ))
             .argument(InputValue::new("showDeleted", TypeRef::named("Boolean"))),
         );
-
     }
 
     // Register Commit type (used by _version virtual field)
@@ -242,20 +236,14 @@ fn build_collection_type(
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         })
         .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
-        .argument(InputValue::new(
-            "filter",
-            TypeRef::named(&group_filter),
-        ))
+        .argument(InputValue::new("filter", TypeRef::named(&group_filter)))
         .argument(InputValue::new(
             "groupBy",
             TypeRef::named_nn_list(&group_field_enum),
         ))
         .argument(InputValue::new("limit", TypeRef::named("Int")))
         .argument(InputValue::new("offset", TypeRef::named("Int")))
-        .argument(InputValue::new(
-            "order",
-            TypeRef::named_list(&group_order),
-        )),
+        .argument(InputValue::new("order", TypeRef::named_list(&group_order))),
     ));
 
     // _version field
@@ -293,10 +281,7 @@ fn build_collection_type(
                         field.name.clone(),
                         InputValue::new(
                             &field.name,
-                            TypeRef::named(format!(
-                                "{}__{}__CountSelector",
-                                coll_name, field.name
-                            )),
+                            TypeRef::named(format!("{}__{}__CountSelector", coll_name, field.name)),
                         ),
                     ));
                 }
@@ -1152,7 +1137,10 @@ fn build_int_list_operator_block() -> InputObject {
         .field(InputValue::new("_any", TypeRef::named("IntOperatorBlock")))
         .field(InputValue::new("_all", TypeRef::named("IntOperatorBlock")))
         .field(InputValue::new("_none", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_not_null_int_list_operator_block() -> InputObject {
@@ -1160,7 +1148,10 @@ fn build_not_null_int_list_operator_block() -> InputObject {
         .field(InputValue::new("_any", TypeRef::named("IntOperatorBlock")))
         .field(InputValue::new("_all", TypeRef::named("IntOperatorBlock")))
         .field(InputValue::new("_none", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_float64_list_operator_block() -> InputObject {
@@ -1177,7 +1168,10 @@ fn build_float64_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("Float64OperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_not_null_float64_list_operator_block() -> InputObject {
@@ -1194,7 +1188,10 @@ fn build_not_null_float64_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("Float64OperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_float32_list_operator_block() -> InputObject {
@@ -1211,7 +1208,10 @@ fn build_float32_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("Float32OperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_not_null_float32_list_operator_block() -> InputObject {
@@ -1228,7 +1228,10 @@ fn build_not_null_float32_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("Float32OperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_bool_list_operator_block() -> InputObject {
@@ -1245,7 +1248,10 @@ fn build_bool_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("BooleanOperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_not_null_bool_list_operator_block() -> InputObject {
@@ -1262,7 +1268,10 @@ fn build_not_null_bool_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("BooleanOperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_string_list_operator_block() -> InputObject {
@@ -1279,7 +1288,10 @@ fn build_string_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("StringOperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 fn build_not_null_string_list_operator_block() -> InputObject {
@@ -1296,7 +1308,10 @@ fn build_not_null_string_list_operator_block() -> InputObject {
             "_none",
             TypeRef::named("StringOperatorBlock"),
         ))
-        .field(InputValue::new("_count", TypeRef::named("IntOperatorBlock")))
+        .field(InputValue::new(
+            "_count",
+            TypeRef::named("IntOperatorBlock"),
+        ))
 }
 
 // --- Aggregate selector types ---
@@ -1450,14 +1465,12 @@ fn build_aggregate_types_for_collection(
                     }
                     _ => unreachable!(),
                 };
-                let similarity_selector = InputObject::new(format!(
-                    "{}__{}__SimilaritySelector",
-                    coll_name, field.name
-                ))
-                .field(InputValue::new(
-                    "vector",
-                    TypeRef::named_nn_list_nn(vector_type),
-                ));
+                let similarity_selector =
+                    InputObject::new(format!("{}__{}__SimilaritySelector", coll_name, field.name))
+                        .field(InputValue::new(
+                            "vector",
+                            TypeRef::named_nn_list_nn(vector_type),
+                        ));
                 types.push(similarity_selector);
             }
         }

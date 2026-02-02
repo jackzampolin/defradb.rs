@@ -882,7 +882,14 @@ mod tests {
             .unwrap();
 
         let result = acp
-            .add_actor_relationship(&owner, &target, "collection1", "doc1", "invalid_relation", &[])
+            .add_actor_relationship(
+                &owner,
+                &target,
+                "collection1",
+                "doc1",
+                "invalid_relation",
+                &[],
+            )
             .await;
 
         assert!(matches!(result, Err(Error::InvalidRelation(_))));

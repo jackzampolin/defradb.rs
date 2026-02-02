@@ -133,10 +133,7 @@ fn select_to_go_json(select: &query::Select) -> serde_json::Value {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 let mut filter_obj = serde_json::Map::new();
-                filter_obj.insert(
-                    "Conditions".into(),
-                    serde_json::Value::Object(conditions),
-                );
+                filter_obj.insert("Conditions".into(), serde_json::Value::Object(conditions));
                 serde_json::Value::Object(filter_obj)
             })
             .unwrap_or(serde_json::Value::Null),
@@ -294,7 +291,8 @@ pub unsafe extern "C" fn delete_collection(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -411,7 +409,8 @@ pub unsafe extern "C" fn set_active_collection_version(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -469,7 +468,8 @@ pub unsafe extern "C" fn patch_collection(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -593,7 +593,12 @@ pub unsafe extern "C" fn truncate_collection(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionTruncate) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionTruncate,
+    ) {
         return e;
     }
 
@@ -655,7 +660,8 @@ pub unsafe extern "C" fn add_view(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -802,7 +808,8 @@ pub unsafe extern "C" fn set_migration(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -1068,7 +1075,8 @@ mod tests {
 
         // Set active version (should succeed)
         let version_cstr = CString::new(version_id).unwrap();
-        let result = unsafe { set_active_collection_version(node, std::ptr::null(), version_cstr.as_ptr()) };
+        let result =
+            unsafe { set_active_collection_version(node, std::ptr::null(), version_cstr.as_ptr()) };
         assert_eq!(
             result.status, 0,
             "set_active_collection_version should succeed"
@@ -1088,7 +1096,8 @@ mod tests {
         let node = result.node_ptr;
 
         let version_id = CString::new("nonexistent-version-id").unwrap();
-        let result = unsafe { set_active_collection_version(node, std::ptr::null(), version_id.as_ptr()) };
+        let result =
+            unsafe { set_active_collection_version(node, std::ptr::null(), version_id.as_ptr()) };
         assert_eq!(result.status, 1, "should fail for non-existent version");
 
         unsafe { crate::types::defra_free_string(result.error) };
@@ -1117,7 +1126,8 @@ mod tests {
 
         // Get by version ID
         let version_cstr = CString::new(version_id).unwrap();
-        let result = unsafe { get_collection_by_version_id(node, std::ptr::null(), version_cstr.as_ptr()) };
+        let result =
+            unsafe { get_collection_by_version_id(node, std::ptr::null(), version_cstr.as_ptr()) };
         assert_eq!(
             result.status, 0,
             "get_collection_by_version_id should succeed"
@@ -1148,7 +1158,8 @@ mod tests {
         // Patch the collection - change is_active to false
         let patch = CString::new(r#"[{"op":"replace","path":"/IsActive","value":false}]"#).unwrap();
         let name = CString::new("Patchable").unwrap();
-        let result = unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
+        let result =
+            unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
         assert_eq!(result.status, 0, "patch_collection should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -1173,7 +1184,8 @@ mod tests {
 
         let patch = CString::new(r#"[{"op":"replace","path":"/IsActive","value":false}]"#).unwrap();
         let name = CString::new("NonExistent").unwrap();
-        let result = unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
+        let result =
+            unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
         assert_eq!(result.status, 1, "should fail for non-existent collection");
 
         unsafe { crate::types::defra_free_string(result.error) };
@@ -1198,7 +1210,8 @@ mod tests {
         // Invalid patch - not valid JSON
         let patch = CString::new("not valid json").unwrap();
         let name = CString::new("PatchTest").unwrap();
-        let result = unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
+        let result =
+            unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
         assert_eq!(result.status, 1, "should fail for invalid patch");
 
         unsafe { crate::types::defra_free_string(result.error) };
@@ -1252,8 +1265,15 @@ mod tests {
         let node = result.node_ptr;
 
         let view_sdl = CString::new("type V { name: String }").unwrap();
-        let result =
-            unsafe { add_view(node, std::ptr::null(), std::ptr::null(), view_sdl.as_ptr(), std::ptr::null()) };
+        let result = unsafe {
+            add_view(
+                node,
+                std::ptr::null(),
+                std::ptr::null(),
+                view_sdl.as_ptr(),
+                std::ptr::null(),
+            )
+        };
         assert_eq!(result.status, 1, "should fail with null query");
 
         unsafe { crate::types::defra_free_string(result.error) };

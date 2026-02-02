@@ -41,14 +41,20 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         Self { db }
     }
 
-    /// Check if a collection has migrations registered.
-    fn collection_has_migrations(collection: &Collection) -> bool {
-        if let Some(ref prev) = collection.schema().previous_version {
-            if prev.transform.is_some() {
-                return true;
-            }
-        }
-        false
+    /// Load migration context for a collection: checks full version history for transforms.
+    ///
+    /// Returns (has_migrations, optional pre-loaded history). This matches Go's
+    /// HasMigrations() which loads ALL versions via GetTargetedCollectionHistory()
+    /// and checks each one for transforms.
+    async fn load_migration_context(
+        &self,
+        collection: &Collection,
+    ) -> query::error::Result<(bool, Option<HashMap<String, TargetedHistoryLink>>)> {
+        let history = self.load_collection_history(collection).await.ok();
+        let has_migrations = history
+            .as_ref()
+            .is_some_and(|h| h.values().any(|link| link.transform.is_some()));
+        Ok((has_migrations, if has_migrations { history } else { None }))
     }
 
     /// Check if a document needs migration.
@@ -146,11 +152,14 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     }
 
     /// Process a document, applying migration if needed.
+    ///
+    /// Uses pre-loaded history when available to avoid redundant database lookups.
     async fn process_document(
         &self,
         doc: Document,
         collection: &Collection,
         has_migrations: bool,
+        preloaded_history: &Option<HashMap<String, TargetedHistoryLink>>,
     ) -> query::error::Result<Document> {
         let target_version_id = &collection.schema().version_id;
 
@@ -167,8 +176,11 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             "Document needs migration"
         );
 
-        // Load collection history
-        let history = self.load_collection_history(collection).await?;
+        // Use pre-loaded history or load on demand
+        let history = match preloaded_history {
+            Some(h) => h.clone(),
+            None => self.load_collection_history(collection).await?,
+        };
 
         // Check if we have a migration path
         if !history.contains_key(&doc_version) {
@@ -241,7 +253,9 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let has_migrations = Self::collection_has_migrations(&collection);
+        // Load migration context once for the whole collection
+        let (has_migrations, preloaded_history) = self.load_migration_context(&collection).await?;
+
         let target_version_id = &collection.schema().version_id;
 
         if has_migrations {
@@ -281,11 +295,11 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
             "Fetched documents"
         );
 
-        // Process each document
+        // Process each document with pre-loaded history
         let mut processed_docs = Vec::with_capacity(docs.len());
         for doc in docs {
             let processed = self
-                .process_document(doc, &collection, has_migrations)
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
                 .await?;
             processed_docs.push(processed);
         }
@@ -312,8 +326,8 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let has_migrations = Self::collection_has_migrations(&collection);
-        let target_version_id = &collection.schema().version_id;
+        // Load migration context once for the whole collection
+        let (has_migrations, preloaded_history) = self.load_migration_context(&collection).await?;
 
         // Create read-only transaction
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -335,7 +349,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         let mut processed_docs = Vec::with_capacity(docs_with_status.len());
         for (doc, is_deleted) in docs_with_status {
             let processed = self
-                .process_document(doc, &collection, has_migrations)
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
                 .await?;
             processed_docs.push((processed, is_deleted));
         }
@@ -354,7 +368,8 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let has_migrations = Self::collection_has_migrations(&collection);
+        // Load migration context once for the whole collection
+        let (has_migrations, preloaded_history) = self.load_migration_context(&collection).await?;
 
         // Create read-only transaction
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -392,11 +407,11 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
 
         let _ = txn.discard();
 
-        // Process documents
+        // Process documents with pre-loaded history
         let mut processed_docs = Vec::with_capacity(docs.len());
         for doc in docs {
             let processed = self
-                .process_document(doc, &collection, has_migrations)
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
                 .await?;
             processed_docs.push(processed);
         }
@@ -416,7 +431,8 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let has_migrations = Self::collection_has_migrations(&collection);
+        // Load migration context once for the whole collection
+        let (has_migrations, preloaded_history) = self.load_migration_context(&collection).await?;
 
         // Create read-only transaction
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -444,11 +460,11 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
             })
             .collect();
 
-        // Process documents
+        // Process documents with pre-loaded history
         let mut processed_docs = Vec::with_capacity(matching_docs.len());
         for doc in matching_docs {
             let processed = self
-                .process_document(doc, &collection, has_migrations)
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
                 .await?;
             processed_docs.push(processed);
         }

@@ -30,8 +30,20 @@ pub fn generate_field_cid_with_priority(
     field: &FieldDescription,
     priority: u64,
 ) -> crate::Result<Cid> {
+    generate_field_cid_with_priority_and_heads(field, priority, &[])
+}
+
+/// Generates a CID for a field definition with priority and heads.
+///
+/// During schema patching, existing fields get new blocks with their old CID as a head,
+/// matching Go's `AddDelta` behavior where each field's headstore provides previous CIDs.
+pub fn generate_field_cid_with_priority_and_heads(
+    field: &FieldDescription,
+    priority: u64,
+    heads: &[Cid],
+) -> crate::Result<Cid> {
     let delta = field_to_delta_with_priority(field, priority)?;
-    let block = Block::new(CrdtDelta::FieldDefinition(delta), vec![], vec![]);
+    let block = Block::new(CrdtDelta::FieldDefinition(delta), heads.to_vec(), vec![]);
     generate_block_cid(&block)
 }
 
@@ -67,16 +79,31 @@ pub fn generate_collection_cid_with_priority(
 
 /// Generate a collection CID with specific priority and head CIDs.
 ///
-/// This variant is needed to replicate Go's headstore prefix collision behavior,
-/// where some collections inadvertently inherit heads from other collections
-/// whose names share the same prefix (e.g., "Author" prefix-matches "AuthorContact").
+/// The `name` parameter is optional: Go's Delta only includes the name when it changed.
+/// For initial creation, pass `Some(name)`. For patches that only add fields, pass `None`.
 pub fn generate_collection_cid_with_priority_and_heads(
     name: &str,
     field_cids: &[Cid],
     priority: u64,
     heads: &[Cid],
 ) -> crate::Result<Cid> {
-    let delta = CollectionDefinitionDeltaPayload::new(priority).with_name(name);
+    generate_collection_cid_full(Some(name), field_cids, priority, heads)
+}
+
+/// Generate a collection CID with optional name, priority, and head CIDs.
+///
+/// Go's CollectionDefinition.Delta() only sets Name when it differs from the old version.
+/// For patches that only add fields (name unchanged), pass `name=None` to match Go.
+pub fn generate_collection_cid_full(
+    name: Option<&str>,
+    field_cids: &[Cid],
+    priority: u64,
+    heads: &[Cid],
+) -> crate::Result<Cid> {
+    let mut delta = CollectionDefinitionDeltaPayload::new(priority);
+    if let Some(n) = name {
+        delta = delta.with_name(n);
+    }
 
     // Convert field CIDs to DAGLinks (Go uses empty string as the link name for field definitions)
     let links: Vec<DAGLink> = field_cids
@@ -110,6 +137,7 @@ fn generate_block_cid(block: &Block) -> crate::Result<Cid> {
 
     // Create CIDv1 with DAG-CBOR codec
     let cid = Cid::new_v1(DAG_CBOR_CODEC, mh);
+
     Ok(cid)
 }
 

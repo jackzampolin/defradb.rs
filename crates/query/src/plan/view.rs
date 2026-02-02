@@ -82,7 +82,9 @@ fn convert_between_maps(src_map: &DocumentMapping, dst_map: &DocumentMapping, sr
 /// The child mapping stores both the underlying field name (in indexes_by_name)
 /// and the render key name (which may be an alias). For example, a field with
 /// `fullName: name` has underlying name "name" and render key "fullName".
-fn build_field_rename_map(child_mapping: &DocumentMapping) -> std::collections::HashMap<String, String> {
+fn build_field_rename_map(
+    child_mapping: &DocumentMapping,
+) -> std::collections::HashMap<String, String> {
     let mut rename_map = std::collections::HashMap::new();
     for rk in &child_mapping.render_keys {
         // Find the underlying field name for this render key's index
@@ -142,7 +144,9 @@ fn filter_json_object(
             for (key, val) in obj {
                 if let Some(output_name) = rename_map.get(key.as_str()) {
                     // Check for deeper nested child mappings
-                    if let Some(field_index) = child_mapping.try_find_index_from_render_key(output_name) {
+                    if let Some(field_index) =
+                        child_mapping.try_find_index_from_render_key(output_name)
+                    {
                         let nested_val = filter_nested_json(val, child_mapping, field_index);
                         filtered.insert(output_name.clone(), nested_val);
                     } else {

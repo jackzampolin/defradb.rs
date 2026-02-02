@@ -126,15 +126,9 @@ impl PlanNode for LensNode {
             let doc_stream: std::pin::Pin<Box<dyn futures::Stream<Item = LensDoc> + Send>> =
                 Box::pin(futures::stream::iter(current_docs));
 
-            let result_stream = self
-                .lens_store
-                .transform(tid, doc_stream)
-                .map_err(|e| {
-                    crate::error::QueryError::execution(format!(
-                        "lens transform failed: {}",
-                        e
-                    ))
-                })?;
+            let result_stream = self.lens_store.transform(tid, doc_stream).map_err(|e| {
+                crate::error::QueryError::execution(format!("lens transform failed: {}", e))
+            })?;
 
             let results: Vec<_> = result_stream.collect().await;
             current_docs = results.into_iter().filter_map(|r| r.ok()).collect();

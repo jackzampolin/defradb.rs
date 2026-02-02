@@ -142,7 +142,15 @@ mod tests {
 
         // Query (should return empty array)
         let query_str = CString::new("{ User { name } }").unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                query_str.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "exec_request should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -173,7 +181,15 @@ mod tests {
         let mutation =
             CString::new(r#"mutation { create_User(input: {name: "Alice"}) { _docID name } }"#)
                 .unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "mutation should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -184,7 +200,15 @@ mod tests {
 
         // Query to verify
         let query_str = CString::new("{ User { name } }").unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                query_str.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "query should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -208,7 +232,8 @@ mod tests {
         let node = result.node_ptr;
 
         // Null query should return error
-        let result = unsafe { exec_request(node, ptr::null(), ptr::null(), ptr::null(), ptr::null()) };
+        let result =
+            unsafe { exec_request(node, ptr::null(), ptr::null(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 1, "null query should fail");
         assert!(!result.error.is_null());
 
@@ -225,7 +250,8 @@ mod tests {
 
         // Query with invalid handle should return error
         let query_str = CString::new("{ User { name } }").unwrap();
-        let result = unsafe { exec_request(0, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result =
+            unsafe { exec_request(0, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
         assert_eq!(result.status, 1, "invalid handle should fail");
         assert!(!result.error.is_null());
 
@@ -253,8 +279,15 @@ mod tests {
         // Query with invalid JSON variables should return error
         let query_str = CString::new("{ User { name } }").unwrap();
         let invalid_json = CString::new("not valid json").unwrap();
-        let result =
-            unsafe { exec_request(node, ptr::null(), query_str.as_ptr(), ptr::null(), invalid_json.as_ptr()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                query_str.as_ptr(),
+                ptr::null(),
+                invalid_json.as_ptr(),
+            )
+        };
         assert_eq!(result.status, 1, "invalid JSON should fail");
         assert!(!result.error.is_null());
 

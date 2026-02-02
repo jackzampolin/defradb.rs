@@ -2046,9 +2046,7 @@ fn parse_similarity_field(
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Similarity> {
     if field.arguments.is_empty() {
-        return Err(QueryError::parse(
-            "_similarity requires a field argument",
-        ));
+        return Err(QueryError::parse("_similarity requires a field argument"));
     }
 
     let (target_field, value) = &field.arguments[0];

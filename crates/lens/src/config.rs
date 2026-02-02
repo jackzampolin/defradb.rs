@@ -13,10 +13,7 @@ pub struct LensConfig {
     /// ID of the collection version to migrate from.
     ///
     /// The source and destination versions must be adjacent in the version history.
-    #[serde(
-        rename = "SourceCollectionVersionID",
-        alias = "SourceSchemaVersionID"
-    )]
+    #[serde(rename = "SourceCollectionVersionID", alias = "SourceSchemaVersionID")]
     pub source_schema_version_id: String,
 
     /// ID of the collection version to migrate to.
