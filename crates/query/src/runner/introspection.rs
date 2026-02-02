@@ -22,7 +22,13 @@ pub fn build_introspection_schema(
         .collect();
 
     // Start with basic scalar types
-    let mut schema_builder = Schema::build("Query", None, None);
+    // Register Mutation root when collections exist so MutationInputArg types are reachable
+    let mutation_name = if collections.is_empty() {
+        None
+    } else {
+        Some("Mutation")
+    };
+    let mut schema_builder = Schema::build("Query", mutation_name, None);
 
     // Build a Query type with fields for each collection
     let mut query_type = Object::new("Query").description("Root query type");
@@ -67,34 +73,36 @@ pub fn build_introspection_schema(
         }
 
         // Add query field for this collection (e.g., User)
+        // Args sorted alphabetically to match Go introspection output
         let collection_name = collection.name.clone();
         query_type = query_type.field(
             Field::new(
                 &collection.name,
                 TypeRef::named_nn_list_nn(&collection.name),
                 move |_ctx| {
-                    // Introspection doesn't execute actual queries, just returns type info
                     FieldFuture::new(async move { Ok(Some(GqlValue::List(vec![]))) })
                 },
             )
+            .argument(InputValue::new("cid", TypeRef::named("String")))
+            .argument(InputValue::new(
+                "docID",
+                TypeRef::named_nn_list("ID"),
+            ))
             .argument(InputValue::new(
                 "filter",
                 TypeRef::named(format!("{}FilterArg", collection_name)),
             ))
             .argument(InputValue::new(
-                "order",
-                TypeRef::named(format!("{}OrderArg", collection_name)),
-            ))
-            .argument(InputValue::new("limit", TypeRef::named("Int")))
-            .argument(InputValue::new("offset", TypeRef::named("Int")))
-            .argument(InputValue::new("docID", TypeRef::named("ID")))
-            .argument(InputValue::new("docIDs", TypeRef::named_list("ID")))
-            .argument(InputValue::new(
                 "groupBy",
                 TypeRef::named_list(format!("{}Field", collection_name)),
             ))
-            .argument(InputValue::new("showDeleted", TypeRef::named("Boolean")))
-            .argument(InputValue::new("cid", TypeRef::named("String"))),
+            .argument(InputValue::new("limit", TypeRef::named("Int")))
+            .argument(InputValue::new("offset", TypeRef::named("Int")))
+            .argument(InputValue::new(
+                "order",
+                TypeRef::named_list(format!("{}OrderArg", collection_name)),
+            ))
+            .argument(InputValue::new("showDeleted", TypeRef::named("Boolean"))),
         );
 
     }
@@ -224,30 +232,12 @@ fn build_collection_type(
         }),
     ));
 
-    // _group field with args (filter, order, groupBy, limit, offset, docID)
-    let group_filter = format!("{}FilterArg", coll_name);
-    let group_order = format!("{}OrderArg", coll_name);
-    let group_field_enum = format!("{}Field", coll_name);
+    // _group field (no args in Go)
     named_fields.push((
         "_group".to_string(),
         Field::new("_group", TypeRef::named_list(coll_name), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-        })
-        .argument(InputValue::new("docID", TypeRef::named("ID")))
-        .argument(InputValue::new(
-            "filter",
-            TypeRef::named(&group_filter),
-        ))
-        .argument(InputValue::new(
-            "groupBy",
-            TypeRef::named_list(&group_field_enum),
-        ))
-        .argument(InputValue::new("limit", TypeRef::named("Int")))
-        .argument(InputValue::new("offset", TypeRef::named("Int")))
-        .argument(InputValue::new(
-            "order",
-            TypeRef::named(&group_order),
-        )),
+        }),
     ));
 
     // _version field
@@ -261,36 +251,49 @@ fn build_collection_type(
     // Build aggregate fields with args
 
     // _count: takes args for _group, _version, and each inline array/relation field
-    let mut count_field = Field::new("_count", TypeRef::named("Int"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    });
-    count_field = count_field.argument(InputValue::new(
-        "_group",
-        TypeRef::named(format!("{}__CountSelector", coll_name)),
-    ));
-    count_field = count_field.argument(InputValue::new(
-        "_version",
-        TypeRef::named(format!("{}___version__CountSelector", coll_name)),
-    ));
-    // Add per-field count selectors
-    for field in &collection.fields {
-        match &field.kind {
-            FieldKind::ScalarArray(_) => {
-                count_field = count_field.argument(InputValue::new(
-                    &field.name,
-                    TypeRef::named(format!("{}__{}__CountSelector", coll_name, field.name)),
-                ));
+    // Collect args and sort alphabetically
+    {
+        let mut count_args: Vec<(String, InputValue)> = Vec::new();
+        count_args.push((
+            "_group".to_string(),
+            InputValue::new(
+                "_group",
+                TypeRef::named(format!("{}__CountSelector", coll_name)),
+            ),
+        ));
+        count_args.push((
+            "_version".to_string(),
+            InputValue::new(
+                "_version",
+                TypeRef::named(format!("{}___version__CountSelector", coll_name)),
+            ),
+        ));
+        for field in &collection.fields {
+            match &field.kind {
+                FieldKind::ScalarArray(_) | FieldKind::Relation { is_array: true, .. } => {
+                    count_args.push((
+                        field.name.clone(),
+                        InputValue::new(
+                            &field.name,
+                            TypeRef::named(format!(
+                                "{}__{}__CountSelector",
+                                coll_name, field.name
+                            )),
+                        ),
+                    ));
+                }
+                _ => {}
             }
-            FieldKind::Relation { is_array: true, .. } => {
-                count_field = count_field.argument(InputValue::new(
-                    &field.name,
-                    TypeRef::named(format!("{}__{}__CountSelector", coll_name, field.name)),
-                ));
-            }
-            _ => {}
         }
+        count_args.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut count_field = Field::new("_count", TypeRef::named("Int"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        });
+        for (_, arg) in count_args {
+            count_field = count_field.argument(arg);
+        }
+        named_fields.push(("_count".to_string(), count_field));
     }
-    named_fields.push(("_count".to_string(), count_field));
 
     // _sum, _avg, _max, _min: take args for _group and each numeric inline array field
     for (agg_name, agg_type) in &[
@@ -299,14 +302,14 @@ fn build_collection_type(
         ("_max", "Float"),
         ("_min", "Float"),
     ] {
-        let mut agg_field = Field::new(*agg_name, TypeRef::named(*agg_type), |_| {
-            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-        });
-        agg_field = agg_field.argument(InputValue::new(
-            "_group",
-            TypeRef::named(format!("{}__NumericSelector", coll_name)),
+        let mut agg_args: Vec<(String, InputValue)> = Vec::new();
+        agg_args.push((
+            "_group".to_string(),
+            InputValue::new(
+                "_group",
+                TypeRef::named(format!("{}__NumericSelector", coll_name)),
+            ),
         ));
-        // Add per-field numeric selectors
         for field in &collection.fields {
             if let FieldKind::ScalarArray(arr) = &field.kind {
                 let is_numeric = matches!(
@@ -319,53 +322,73 @@ fn build_collection_type(
                         | ScalarArrayKind::NillableFloat32Array
                 );
                 if is_numeric {
-                    agg_field = agg_field.argument(InputValue::new(
-                        &field.name,
-                        TypeRef::named(format!(
-                            "{}__{}__NumericSelector",
-                            coll_name, field.name
-                        )),
+                    agg_args.push((
+                        field.name.clone(),
+                        InputValue::new(
+                            &field.name,
+                            TypeRef::named(format!(
+                                "{}__{}__NumericSelector",
+                                coll_name, field.name
+                            )),
+                        ),
                     ));
                 }
             }
+        }
+        agg_args.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut agg_field = Field::new(*agg_name, TypeRef::named(*agg_type), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        });
+        for (_, arg) in agg_args {
+            agg_field = agg_field.argument(arg);
         }
         named_fields.push((agg_name.to_string(), agg_field));
     }
 
     // _similarity: takes args for each numeric array field's similarity selector
-    let mut similarity_field = Field::new("_similarity", TypeRef::named("Float"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    });
-    for field in &collection.fields {
-        if let FieldKind::ScalarArray(arr) = &field.kind {
-            let is_numeric = matches!(
-                arr,
-                ScalarArrayKind::IntArray
-                    | ScalarArrayKind::Float64Array
-                    | ScalarArrayKind::Float32Array
-                    | ScalarArrayKind::NillableIntArray
-                    | ScalarArrayKind::NillableFloat64Array
-                    | ScalarArrayKind::NillableFloat32Array
-            );
-            if is_numeric {
-                similarity_field = similarity_field.argument(InputValue::new(
-                    &field.name,
-                    TypeRef::named(format!(
-                        "{}__{}__SimilaritySelector",
-                        coll_name, field.name
-                    )),
-                ));
+    {
+        let mut sim_args: Vec<(String, InputValue)> = Vec::new();
+        for field in &collection.fields {
+            if let FieldKind::ScalarArray(arr) = &field.kind {
+                let is_numeric = matches!(
+                    arr,
+                    ScalarArrayKind::IntArray
+                        | ScalarArrayKind::Float64Array
+                        | ScalarArrayKind::Float32Array
+                        | ScalarArrayKind::NillableIntArray
+                        | ScalarArrayKind::NillableFloat64Array
+                        | ScalarArrayKind::NillableFloat32Array
+                );
+                if is_numeric {
+                    sim_args.push((
+                        field.name.clone(),
+                        InputValue::new(
+                            &field.name,
+                            TypeRef::named(format!(
+                                "{}__{}__SimilaritySelector",
+                                coll_name, field.name
+                            )),
+                        ),
+                    ));
+                }
             }
         }
+        sim_args.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut similarity_field = Field::new("_similarity", TypeRef::named("Float"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        });
+        for (_, arg) in sim_args {
+            similarity_field = similarity_field.argument(arg);
+        }
+        named_fields.push(("_similarity".to_string(), similarity_field));
     }
-    named_fields.push(("_similarity".to_string(), similarity_field));
 
     // Add user-defined fields
     for field in &collection.fields {
         if field.name == "_docID" {
             continue;
         }
-        let type_ref = field_kind_to_type_ref(&field.kind, id_to_name);
+        let type_ref = field_kind_to_type_ref(&field.kind, id_to_name, &collection.name);
         named_fields.push((
             field.name.clone(),
             Field::new(&field.name, type_ref, |_| {
@@ -416,7 +439,12 @@ fn build_commit_type() -> Object {
 }
 
 /// Convert field kind to async-graphql TypeRef.
-fn field_kind_to_type_ref(kind: &FieldKind, id_to_name: &HashMap<String, String>) -> TypeRef {
+/// `current_name` is the name of the collection being built (for self-reference resolution).
+fn field_kind_to_type_ref(
+    kind: &FieldKind,
+    id_to_name: &HashMap<String, String>,
+    current_name: &str,
+) -> TypeRef {
     match kind {
         FieldKind::Scalar(scalar) => TypeRef::named(scalar_to_gql_name(scalar)),
         FieldKind::ScalarArray(array) => {
@@ -427,7 +455,6 @@ fn field_kind_to_type_ref(kind: &FieldKind, id_to_name: &HashMap<String, String>
             collection_id,
             is_array,
         } => {
-            // Resolve collection ID to name
             let type_name = id_to_name
                 .get(collection_id)
                 .cloned()
@@ -442,11 +469,15 @@ fn field_kind_to_type_ref(kind: &FieldKind, id_to_name: &HashMap<String, String>
             relative_id,
             is_array,
         } => {
-            // Resolve relative ID to name
-            let type_name = id_to_name
-                .get(relative_id)
-                .cloned()
-                .unwrap_or_else(|| relative_id.clone());
+            // Empty relative_id means self-reference within the same collection
+            let type_name = if relative_id.is_empty() {
+                current_name.to_string()
+            } else {
+                id_to_name
+                    .get(relative_id)
+                    .cloned()
+                    .unwrap_or_else(|| relative_id.clone())
+            };
             if *is_array {
                 TypeRef::named_list(type_name)
             } else {
@@ -454,7 +485,6 @@ fn field_kind_to_type_ref(kind: &FieldKind, id_to_name: &HashMap<String, String>
             }
         }
         FieldKind::Named { name, is_array } => {
-            // Named references might also be IDs that need resolution
             let type_name = id_to_name
                 .get(name)
                 .cloned()
@@ -492,28 +522,49 @@ fn build_filter_input_type(
     id_to_name: &HashMap<String, String>,
 ) -> InputObject {
     let type_name = format!("{}FilterArg", collection.name);
-    let mut input = InputObject::new(&type_name);
+    let mut fields: Vec<(String, InputValue)> = Vec::new();
 
-    // Add _alias, _and, _or, _not logical operators
-    input = input
-        .field(InputValue::new("_alias", TypeRef::named("JSON")))
-        .field(InputValue::new("_and", TypeRef::named_list(&type_name)))
-        .field(InputValue::new("_or", TypeRef::named_list(&type_name)))
-        .field(InputValue::new("_not", TypeRef::named(&type_name)));
-
-    // Add _docID filter
-    input = input.field(InputValue::new("_docID", TypeRef::named("IDOperatorBlock")));
+    // Add logical operators and _docID
+    fields.push((
+        "_alias".to_string(),
+        InputValue::new("_alias", TypeRef::named("JSON")),
+    ));
+    fields.push((
+        "_and".to_string(),
+        InputValue::new("_and", TypeRef::named_nn_list(&type_name)),
+    ));
+    fields.push((
+        "_docID".to_string(),
+        InputValue::new("_docID", TypeRef::named("IDOperatorBlock")),
+    ));
+    fields.push((
+        "_not".to_string(),
+        InputValue::new("_not", TypeRef::named(&type_name)),
+    ));
+    fields.push((
+        "_or".to_string(),
+        InputValue::new("_or", TypeRef::named_nn_list(&type_name)),
+    ));
 
     // Add filter fields for each collection field
     for field in &collection.fields {
-        // Skip _docID since we add it explicitly above
         if field.name == "_docID" {
             continue;
         }
-        let filter_type = get_filter_type_for_field(&field.kind, id_to_name);
-        input = input.field(InputValue::new(&field.name, TypeRef::named(&filter_type)));
+        let filter_type = get_filter_type_for_field(&field.kind, id_to_name, &collection.name);
+        fields.push((
+            field.name.clone(),
+            InputValue::new(&field.name, TypeRef::named(&filter_type)),
+        ));
     }
 
+    // Sort alphabetically to match Go introspection output
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut input = InputObject::new(&type_name);
+    for (_, field) in fields {
+        input = input.field(field);
+    }
     input
 }
 
@@ -523,20 +574,32 @@ fn build_order_input_type(
     _id_to_name: &HashMap<String, String>,
 ) -> InputObject {
     let type_name = format!("{}OrderArg", collection.name);
-    let mut input = InputObject::new(&type_name);
+    let mut fields: Vec<(String, InputValue)> = Vec::new();
 
     // Add _docID order
-    input = input.field(InputValue::new("_docID", TypeRef::named("Ordering")));
+    fields.push((
+        "_docID".to_string(),
+        InputValue::new("_docID", TypeRef::named("Ordering")),
+    ));
 
     // Add order fields for each collection field
     for field in &collection.fields {
-        // Skip _docID since we add it explicitly above
         if field.name == "_docID" {
             continue;
         }
-        input = input.field(InputValue::new(&field.name, TypeRef::named("Ordering")));
+        fields.push((
+            field.name.clone(),
+            InputValue::new(&field.name, TypeRef::named("Ordering")),
+        ));
     }
 
+    // Sort alphabetically to match Go introspection output
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut input = InputObject::new(&type_name);
+    for (_, field) in fields {
+        input = input.field(field);
+    }
     input
 }
 
@@ -663,17 +726,19 @@ fn build_mutation_type(collections: &[CollectionVersion]) -> Object {
 /// Build the ExplainType enum.
 fn build_explain_enum() -> Enum {
     Enum::new("ExplainType")
-        .description("The type of explanation to provide")
+        .description(
+            "ExplainType is an enum selecting the type of explanation done by the @explain directive.",
+        )
         .item(
             EnumItem::new("simple")
-                .description("Simple explanation showing query plan structure without execution"),
+                .description("Simple explanation - dump of the plan graph."),
         )
         .item(EnumItem::new("execute").description(
-            "Execute the query and return both the plan structure and execution metrics",
+            "Deeper explanation - insights gathered by executing the plan graph.",
         ))
         .item(
             EnumItem::new("debug")
-                .description("Debug mode showing all plan nodes including internal ones"),
+                .description("Like simple explain, but more verbose nodes (no attributes)."),
         )
 }
 
@@ -755,7 +820,11 @@ fn build_datetime_operator_block() -> InputObject {
 }
 
 /// Get the filter type name for a field kind.
-fn get_filter_type_for_field(kind: &FieldKind, id_to_name: &HashMap<String, String>) -> String {
+fn get_filter_type_for_field(
+    kind: &FieldKind,
+    id_to_name: &HashMap<String, String>,
+    current_name: &str,
+) -> String {
     match kind {
         FieldKind::Scalar(scalar) => match scalar {
             ScalarKind::String | ScalarKind::DocID => "StringOperatorBlock".to_string(),
@@ -769,13 +838,11 @@ fn get_filter_type_for_field(kind: &FieldKind, id_to_name: &HashMap<String, Stri
             }
         },
         FieldKind::ScalarArray(arr) => match arr {
-            // Non-nillable arrays [T!] use NotNull*ListOperatorBlock
             ScalarArrayKind::BoolArray => "NotNullBooleanListOperatorBlock".to_string(),
             ScalarArrayKind::IntArray => "NotNullIntListOperatorBlock".to_string(),
             ScalarArrayKind::Float64Array => "NotNullFloat64ListOperatorBlock".to_string(),
             ScalarArrayKind::Float32Array => "NotNullFloat32ListOperatorBlock".to_string(),
             ScalarArrayKind::StringArray => "NotNullStringListOperatorBlock".to_string(),
-            // Nillable arrays [T] use *ListOperatorBlock
             ScalarArrayKind::NillableBoolArray => "BooleanListOperatorBlock".to_string(),
             ScalarArrayKind::NillableIntArray => "IntListOperatorBlock".to_string(),
             ScalarArrayKind::NillableFloat64Array => "Float64ListOperatorBlock".to_string(),
@@ -783,7 +850,6 @@ fn get_filter_type_for_field(kind: &FieldKind, id_to_name: &HashMap<String, Stri
             ScalarArrayKind::NillableStringArray => "StringListOperatorBlock".to_string(),
         },
         FieldKind::Relation { collection_id, .. } => {
-            // For relations, use the related collection's filter type
             let type_name = id_to_name
                 .get(collection_id)
                 .cloned()
@@ -791,10 +857,15 @@ fn get_filter_type_for_field(kind: &FieldKind, id_to_name: &HashMap<String, Stri
             format!("{}FilterArg", type_name)
         }
         FieldKind::SelfRef { relative_id, .. } => {
-            let type_name = id_to_name
-                .get(relative_id)
-                .cloned()
-                .unwrap_or_else(|| relative_id.clone());
+            // Empty relative_id means self-reference within the same collection
+            let type_name = if relative_id.is_empty() {
+                current_name.to_string()
+            } else {
+                id_to_name
+                    .get(relative_id)
+                    .cloned()
+                    .unwrap_or_else(|| relative_id.clone())
+            };
             format!("{}FilterArg", type_name)
         }
         FieldKind::Named { name, .. } => {
