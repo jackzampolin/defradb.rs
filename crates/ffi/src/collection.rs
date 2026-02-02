@@ -586,8 +586,16 @@ pub unsafe extern "C" fn get_collection_by_version_id(
 ///
 /// `name` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn truncate_collection(node_ptr: usize, name: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn truncate_collection(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    name: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionTruncate) {
+        return e;
+    }
 
     let name_str = match c_str_to_string(name) {
         Some(s) => s,
@@ -827,30 +835,6 @@ pub unsafe extern "C" fn set_migration(
         Ok(transform_id) => FfiResult::success(&transform_id),
         Err(e) => FfiResult::error(&e),
     }
-}
-
-/// Truncate a collection (delete all documents, preserve schema).
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `name` - The collection name to truncate
-///
-/// # Returns
-///
-/// - Status 0: Success (value is "{}")
-/// - Status 1: Error (error field contains message)
-///
-/// # Safety
-///
-/// `name` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn truncate_collection(
-    _node_ptr: usize,
-    _identity_did: *const c_char,
-    _name: *const c_char,
-) -> FfiResult {
-    FfiResult::error("truncate_collection is not yet implemented")
 }
 
 #[cfg(test)]
