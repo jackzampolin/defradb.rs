@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexedFieldDescription {
     /// Name of the field being indexed.
-    #[serde(rename = "Name")]
+    #[serde(rename = "Name", default)]
     pub name: String,
 
     /// Whether the field is indexed in descending order.
@@ -22,7 +22,7 @@ pub struct IndexedFieldDescription {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexDescription {
     /// Name of the index.
-    #[serde(rename = "Name")]
+    #[serde(rename = "Name", default)]
     pub name: String,
 
     /// Local identifier for this index.

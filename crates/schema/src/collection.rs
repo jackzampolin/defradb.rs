@@ -27,15 +27,15 @@ where
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionVersion {
     /// Human-readable collection name
-    #[serde(rename = "Name")]
+    #[serde(rename = "Name", default)]
     pub name: String,
 
     /// Content hash of this version (immutable)
-    #[serde(rename = "VersionID")]
+    #[serde(rename = "VersionID", default)]
     pub version_id: String,
 
     /// Stable collection ID across versions
-    #[serde(rename = "CollectionID")]
+    #[serde(rename = "CollectionID", default)]
     pub collection_id: String,
 
     /// Information about this collection's membership in a collection set.

@@ -1281,7 +1281,14 @@ impl<S: Store> DB<S> {
     ///
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
     pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
-        // Find the collection by version_id in the cache
+        // Empty version ID is not allowed
+        if version_id.is_empty() {
+            return Err(Error::Other(
+                "collection version ID can't be empty".to_string(),
+            ));
+        }
+
+        // Find the collection by version_id - first check cache, then search all stored versions
         let (name, mut schema) = {
             let cache = self.collections.read().map_err(|e| {
                 tracing::error!(
@@ -1299,7 +1306,19 @@ impl<S: Store> DB<S> {
                 .find(|(_, c)| c.schema().version_id == version_id)
                 .map(|(n, c)| (n.clone(), c.schema().clone()));
 
-            found.ok_or_else(|| Error::CollectionVersionNotFound(version_id.to_string()))?
+            match found {
+                Some(pair) => pair,
+                None => {
+                    // Not in cache - search all stored versions (including inactive)
+                    drop(cache);
+                    let all_versions = self.get_all_collection_versions().await?;
+                    all_versions
+                        .into_iter()
+                        .find(|v| v.version_id == version_id)
+                        .map(|v| (v.name.clone(), v))
+                        .ok_or_else(|| Error::CollectionVersionNotFound(version_id.to_string()))?
+                }
+            }
         };
 
         // Set is_active to true
@@ -1777,6 +1796,44 @@ impl<S: Store> DB<S> {
         let mut new_schema: CollectionVersion = serde_json::from_value(schema_json)
             .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
 
+        // Go compatibility: check for removed/empty required fields after deserialization.
+        // Go's JSON unmarshaling uses zero values for missing fields; our serde defaults
+        // replicate this. Now check for invalid empty values that indicate patch corruption.
+        if new_schema.version_id.is_empty() {
+            return Err(Error::InvalidPatch(
+                "invalid cid: cid too short. VersionID: ".to_string(),
+            ));
+        }
+
+        // Check for field-level corruption from patches (empty names from removed fields)
+        {
+            let old_field_names: std::collections::HashSet<&str> =
+                old_schema.fields.iter().map(|f| f.name.as_str()).collect();
+            let mut field_errors = Vec::new();
+
+            for field in &new_schema.fields {
+                if field.name.is_empty() {
+                    if old_field_names.contains("") {
+                        // This shouldn't happen - old field shouldn't have empty name
+                        field_errors.push(
+                            "Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but '' was found"
+                                .to_string(),
+                        );
+                    } else {
+                        // A field name was removed by the patch
+                        field_errors.push(
+                            "mutating an existing field is not supported. ProposedName: "
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
+            if !field_errors.is_empty() {
+                return Err(Error::InvalidPatch(field_errors.join("\n")));
+            }
+        }
+
         // Go compatibility: default new fields with CType::None to CType::LwwRegister.
         // Go's patchCollection does this in collection_define.go for new fields that
         // don't have an explicit CRDT type. This must happen before CID generation.
@@ -2103,8 +2160,8 @@ impl<S: Store> DB<S> {
                 let from_raw = op.get("from").and_then(|v| v.as_str());
 
                 match operation {
-                    Some("copy") => {
-                        // Collection-level copy is not supported
+                    Some("copy") | Some("add") | Some("replace") => {
+                        // Adding/replacing collections via patch is not supported
                         return Err(Error::InvalidPatch(format!(
                             "adding collections via patch is not supported. Name: {}",
                             collection_name,
@@ -2125,8 +2182,11 @@ impl<S: Store> DB<S> {
             }
         }
 
-        // No move/copy fallback found - truly not found
-        Err(Error::CollectionNotFound(collection_name.to_string()))
+        // No recognized operation - adding collections via patch is not supported
+        Err(Error::InvalidPatch(format!(
+            "adding collections via patch is not supported. Name: {}",
+            collection_name,
+        )))
     }
 
     /// Helper: Set a value at a JSON pointer path.

@@ -655,7 +655,10 @@ impl<'a> SdlParser<'a> {
             "lwwregister" | "lww" | "lww_register" => Ok(CType::LwwRegister),
             "pncounter" | "counter" | "pn_counter" => Ok(CType::PnCounter),
             "pcounter" | "p_counter" => Ok(CType::PCounter),
-            other => Err(QueryError::parse(format!("unknown CRDT type: {}", other))),
+            other => Err(QueryError::parse(format!(
+                "Argument \"type\" has invalid value \"{}\"",
+                other
+            ))),
         }
     }
 
@@ -925,8 +928,12 @@ impl<'a> SdlParser<'a> {
                     ));
                 }
 
-                // NonNull list element types are not supported (e.g., [Dogs!])
-                if field.field_type.is_list && field.field_type.element_non_null {
+                // NonNull list element types are not supported for relation types (e.g., [Dogs!])
+                // Scalar array types like [Float32!], [Int!], [String!] are allowed
+                if field.field_type.is_list
+                    && field.field_type.element_non_null
+                    && all_type_names.contains(&field.field_type.base_type)
+                {
                     return Err(QueryError::parse(format!(
                         "NonNull variants for type are not supported. Type: {}",
                         field.field_type.base_type
@@ -1448,6 +1455,7 @@ impl<'a> SdlParser<'a> {
         for parsed_field in &type_def.fields {
             let kind = self.resolve_field_kind(
                 &parsed_field.field_type,
+                &parsed_field.name,
                 type_names,
                 &type_def.name,
                 collection_set,
@@ -1730,6 +1738,7 @@ impl<'a> SdlParser<'a> {
     fn resolve_field_kind(
         &self,
         parsed_type: &ParsedType,
+        field_name: &str,
         type_names: &std::collections::HashSet<String>,
         current_type: &str,
         collection_set: &std::collections::HashMap<String, i32>,
@@ -1787,8 +1796,8 @@ impl<'a> SdlParser<'a> {
 
         // Unknown type - error for Go compatibility
         Err(QueryError::parse(format!(
-            "no type found for given name. Name: {}",
-            base
+            "no type found for given name. Field: {}, Kind: {}",
+            field_name, base
         )))
     }
 }
@@ -2052,19 +2061,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_non_null_type() {
+    fn test_parse_non_null_type_returns_error() {
         let sdl = r#"
             type Post {
                 title: String!
             }
         "#;
 
-        let collections = parse_sdl(sdl).unwrap();
-        let post = &collections[0];
-
-        let title_field = post.field_by_name("title").unwrap();
-        // In DefraDB, all fields are nillable. Non-null is only used for array elements.
-        assert_eq!(title_field.kind, FieldKind::string());
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("NonNull fields are not currently supported"),
+            "error should reject NonNull: {}",
+            err
+        );
     }
 
     #[test]
@@ -2685,8 +2696,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("unknown CRDT type"),
-            "error should mention unknown CRDT type: {}",
+            err.contains("Argument \"type\" has invalid value"),
+            "error should mention invalid CRDT type argument: {}",
             err
         );
     }
