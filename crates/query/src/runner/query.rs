@@ -269,6 +269,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Execute a single mutation and return explain with metrics.
+    ///
+    /// Go's mutation plan runs as: mutationNode → selectTopNode → selectNode → scanNode.
+    /// The filter lives at the scanNode level (not selectNode). Metrics accumulate:
+    /// - Create: single pass AFTER creation
+    /// - Delete: single pass BEFORE deletion
+    /// - Update/Upsert: two passes (Phase 1: scan+mutate, Phase 2: scan+return), metrics sum
     async fn execute_single_mutation_with_metrics(
         &self,
         mutation: &crate::mapper::Mutation,
@@ -283,9 +289,31 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             MutationType::Upsert => "upsertNode",
         };
 
-        // Execute the mutation first so that the subsequent select sees the data.
-        // This mirrors Go's behavior where execute explain actually performs the
-        // mutation before collecting metrics from the inner select plan.
+        // Build a select with the mutation's filter/doc_ids for metric collection.
+        // Go puts the mutation filter on the scanNode; build_plan places the filter
+        // on both scanNode (for iteration/docFetch counting) and selectNode (for
+        // filterMatches counting), which matches Go's behavior.
+        let mut metric_select = Select::new(&mutation.collection_name);
+        if let Some(ref filter) = mutation.filter {
+            metric_select.filter = Some(filter.clone());
+        }
+        if let Some(ref doc_ids) = mutation.doc_ids {
+            metric_select.doc_ids = Some(doc_ids.clone());
+        }
+
+        // Phase 1: Collect metrics BEFORE mutation (delete, update, upsert).
+        // For delete: this is the only scan (single pass over original data).
+        // For update/upsert: Phase 1 captures the "find + mutate" scan metrics.
+        let phase1 = if mutation.mutation_type != MutationType::Create {
+            Some(
+                self.execute_select_with_metrics(&metric_select, caller_identity.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        // Execute the actual mutation
         if let Some(ref mutator) = self.mutator {
             use chrono::{FixedOffset, Utc};
             let utc_offset = FixedOffset::east_opt(0).unwrap();
@@ -389,33 +417,106 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.close().await?;
         }
 
-        // Now query the collection to collect execution metrics
-        let select = crate::mapper::Select::new(&mutation.collection_name);
+        // Phase 2: Collect metrics AFTER mutation (create, update, upsert).
+        // For create: this is the only scan (single pass over created data).
+        // For update/upsert: Phase 2 captures the "return results" scan metrics.
+        let phase2 = if mutation.mutation_type != MutationType::Delete {
+            Some(
+                self.execute_select_with_metrics(&metric_select, caller_identity.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
 
-        let (select_explain, doc_count, iterations) = self
-            .execute_select_with_metrics(&select, caller_identity)
-            .await?;
+        // Combine metrics from phases
+        let combined_explain = match (&phase1, &phase2) {
+            (Some((p1, _, _)), Some((p2, _, _))) => {
+                // Two-pass (update/upsert): merge by summing all numeric values
+                Self::merge_execute_metrics(p1, p2)
+            }
+            (Some((p1, _, _)), None) => p1.clone(),
+            (None, Some((p2, _, _))) => p2.clone(),
+            _ => unreachable!(),
+        };
 
         // Wrap in selectTopNode
-        let select_node_content =
-            Self::ensure_select_node_wrapper(select_explain, &select, ExplainType::Execute);
-        let select_top_node = serde_json::json!({
-            "selectTopNode": select_node_content
-        });
-
-        // Build mutation node with iterations
-        let mut mutation_inner = serde_json::Map::new();
-        mutation_inner.insert("iterations".to_string(), serde_json::json!(iterations));
-        mutation_inner.insert(
-            "selectTopNode".to_string(),
-            select_top_node["selectTopNode"].clone(),
+        let select_node_content = Self::ensure_select_node_wrapper(
+            combined_explain,
+            &metric_select,
+            ExplainType::Execute,
         );
+
+        // Build mutation node
+        let mut mutation_inner = serde_json::Map::new();
+
+        // Mutation-specific fields
+        match mutation.mutation_type {
+            MutationType::Create => {
+                let (_, _, plan_execs) = phase2.as_ref().unwrap();
+                mutation_inner
+                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+            }
+            MutationType::Delete => {
+                let (_, _, plan_execs) = phase1.as_ref().unwrap();
+                mutation_inner
+                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+            }
+            MutationType::Update => {
+                let (_, result_count, plan_execs) = phase1.as_ref().unwrap();
+                mutation_inner
+                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+                mutation_inner.insert(
+                    "updates".to_string(),
+                    serde_json::json!(*result_count as u64),
+                );
+            }
+            MutationType::Upsert => {
+                // Go's upsertNode returns empty map for execute explain (no iterations)
+            }
+        }
+
+        mutation_inner.insert("selectTopNode".to_string(), select_node_content);
 
         let mutation_node = serde_json::json!({
             node_kind: mutation_inner
         });
 
-        Ok((mutation_node, doc_count, iterations))
+        let doc_count = match (&phase1, &phase2) {
+            (_, Some((_, count, _))) => *count,
+            (Some((_, count, _)), None) => *count,
+            _ => 0,
+        };
+
+        Ok((mutation_node, doc_count, 1))
+    }
+
+    /// Recursively merge two execute explain JSON trees by summing numeric values.
+    /// Used to combine Phase 1 and Phase 2 metrics for update/upsert mutations.
+    fn merge_execute_metrics(phase1: &JsonValue, phase2: &JsonValue) -> JsonValue {
+        match (phase1, phase2) {
+            (JsonValue::Object(a), JsonValue::Object(b)) => {
+                let mut merged = serde_json::Map::new();
+                for (key, val_a) in a {
+                    if let Some(val_b) = b.get(key) {
+                        merged.insert(key.clone(), Self::merge_execute_metrics(val_a, val_b));
+                    } else {
+                        merged.insert(key.clone(), val_a.clone());
+                    }
+                }
+                for (key, val_b) in b {
+                    if !a.contains_key(key) {
+                        merged.insert(key.clone(), val_b.clone());
+                    }
+                }
+                JsonValue::Object(merged)
+            }
+            (JsonValue::Number(a), JsonValue::Number(b)) => {
+                let sum = a.as_u64().unwrap_or(0) + b.as_u64().unwrap_or(0);
+                serde_json::json!(sum)
+            }
+            _ => phase2.clone(),
+        }
     }
 
     /// Generate an explanation for a single mutation operation.
