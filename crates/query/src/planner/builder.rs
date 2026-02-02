@@ -673,7 +673,9 @@ impl Planner {
         // The `author` relation must be joined for the filter even though it's not selected.
         //
         // Skip relations that are part of multi-level paths (already handled above).
-        if filter_has_relations {
+        // Also skip when filter_for_joins was provided (non-complex filter) because
+        // apply_joins already handles relation filter joins via parent_filter.
+        if filter_has_relations && filter_for_joins.is_none() {
             // Get the names of relation fields already joined from selection
             let selected_relation_names: Vec<&str> = select
                 .fields
@@ -784,7 +786,12 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 select_node = select_node.with_doc_ids(doc_ids.clone());
             }
-            // Scalar filter is on ScanNode, not SelectNode (matches Go DefraDB)
+            // Set relation filter on SelectNode for explain display (matches Go DefraDB).
+            // The actual relation filtering is handled by TypeJoin's RelationFilter,
+            // but Go's selectNode stores the relation filter and shows it in explain output.
+            if let Some(ref rel_filter) = relation_filter {
+                select_node = select_node.with_filter(rel_filter.clone());
+            }
             plan = Box::new(select_node);
         } else if is_complex_filter && !select.fields.is_empty() {
             // For complex filters where there are no join-related fields,
@@ -1861,6 +1868,33 @@ impl Planner {
                 child_scan = child_scan.with_fetcher(fetcher.clone());
             }
 
+            // Apply aggregate target filters to the scan node.
+            // For example, _avg(books: {field: pages, filter: {pages: {_neq: null}}})
+            // should apply the filter {pages: {_neq: null}} to the books scan node.
+            // Go places these filters on the scanNode (not a wrapping SelectNode).
+            let mut agg_scan_filter: Option<Filter> = None;
+            for requestable in &select.fields {
+                if let Requestable::Aggregate(agg) = requestable {
+                    for target in &agg.targets {
+                        if target.host_name == *relation_field_name {
+                            if let Some(ref filter) = target.filter {
+                                // Only apply non-relation filters to scan node.
+                                // Relation filters need sub-joins (handled separately).
+                                if !filter.has_relation_filters() {
+                                    agg_scan_filter = Some(match agg_scan_filter {
+                                        Some(existing) => existing.and(filter.clone()),
+                                        None => filter.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(filter) = agg_scan_filter {
+                child_scan = child_scan.with_filter(filter);
+            }
+
             // Extract nested limit/offset and order_by for per-parent application in TypeJoin.
             let nested_limit = nested_select.limit.as_ref().and_then(|l| l.limit);
             let nested_offset = nested_select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
@@ -2875,6 +2909,49 @@ impl Planner {
                         ScanNode::new((*target_collection).clone(), child_scan_mapping.clone());
                     if let Some(ref fetcher) = self.fetcher {
                         child_scan = child_scan.with_fetcher(fetcher.clone());
+                    }
+                    // Apply aggregate target filter to the scan node.
+                    // Go places these filters on the scanNode in explain output.
+                    // Also synthesize {field: {_neq: null}} for Average aggregates
+                    // to exclude null values (matching Go behavior).
+                    let mut scan_filter = target.filter.clone();
+                    if agg.aggregate_type == AggregateType::Average {
+                        if let Some(ref field_name) = target.field_name {
+                            let neq_null_filter = Filter::from_conditions({
+                                let mut c = HashMap::new();
+                                c.insert(
+                                    field_name.clone(),
+                                    serde_json::json!({"_neq": serde_json::Value::Null}),
+                                );
+                                c
+                            });
+                            scan_filter = Some(match scan_filter {
+                                Some(existing) => {
+                                    // Merge {field: {_neq: null}} into existing conditions
+                                    let mut merged = existing.conditions().clone();
+                                    merged
+                                        .entry(field_name.clone())
+                                        .and_modify(|v| {
+                                            if let serde_json::Value::Object(ref mut ops) = v {
+                                                ops.insert(
+                                                    "_neq".to_string(),
+                                                    serde_json::Value::Null,
+                                                );
+                                            }
+                                        })
+                                        .or_insert(
+                                            serde_json::json!({"_neq": serde_json::Value::Null}),
+                                        );
+                                    Filter::from_conditions(merged)
+                                }
+                                None => neq_null_filter,
+                            });
+                        }
+                    }
+                    if let Some(ref filter) = scan_filter {
+                        if !filter.has_relation_filters() {
+                            child_scan = child_scan.with_filter(filter.clone());
+                        }
                     }
                     let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
 

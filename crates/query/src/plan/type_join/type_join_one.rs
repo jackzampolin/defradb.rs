@@ -468,18 +468,30 @@ impl PlanNode for TypeJoinOne {
         // subType: the child plan's explain wrapped in selectTopNode > selectNode
         // selectNode must include docID and filter attributes (Go always includes these)
         let child_explain = self.child_plan.explain();
-        let mut select_node_inner = serde_json::Map::new();
-        select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
-        select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
-        // Merge child explain (e.g., scanNode) into selectNode
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                select_node_inner.insert(key.clone(), value.clone());
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            // Child is SelectNode - extract inner content to avoid double wrapping
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
+            select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
+            // Merge child explain (e.g., scanNode) into selectNode
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
             }
-        }
+            serde_json::Value::Object(select_node_inner)
+        };
         let sub_type = serde_json::json!({
             "selectTopNode": {
-                "selectNode": serde_json::Value::Object(select_node_inner)
+                "selectNode": select_node_content
             }
         });
         obj.insert("subType".to_string(), sub_type);
@@ -497,16 +509,27 @@ impl PlanNode for TypeJoinOne {
 
         // subType: the child plan's explain_debug wrapped in selectTopNode > selectNode
         let child_explain = self.child_plan.explain_debug();
-        let mut select_node_inner = serde_json::Map::new();
-        // Merge child explain into selectNode
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                select_node_inner.insert(key.clone(), value.clone());
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            // Merge child explain into selectNode
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
             }
-        }
+            serde_json::Value::Object(select_node_inner)
+        };
         let sub_type = serde_json::json!({
             "selectTopNode": {
-                "selectNode": serde_json::Value::Object(select_node_inner)
+                "selectNode": select_node_content
             }
         });
         inner_obj.insert("subType".to_string(), sub_type);
