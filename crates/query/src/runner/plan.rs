@@ -8,11 +8,11 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
-use crate::mapper::{AggregateType, Requestable, Select};
+use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, LimitNode,
-    MaxNode, MaxSourceMeta, MinNode, MinSourceMeta, OrderByNode, PermissionFilterNode, ScanNode,
-    SelectNode, SumNode, SumSourceMeta,
+    AllDocsNode, AverageNode, ChildSelectMeta, CountNode, CountSourceMeta, GroupAlias,
+    GroupByNode, LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta, OrderByNode,
+    PermissionFilterNode, ScanNode, SelectNode, SumNode, SumSourceMeta,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -399,7 +399,7 @@ pub(crate) fn build_plan(
 
     // Pass filter and docIDs to ScanNode for explain output
     // First check select.filter, then fall back to aggregate target filter
-    let filter_for_scan = select.filter.clone().or_else(|| {
+    let mut filter_for_scan = select.filter.clone().or_else(|| {
         // For top-level aggregates, the filter might be on the aggregate target
         select.fields.iter().find_map(|f| {
             if let Requestable::Aggregate(agg) = f {
@@ -410,6 +410,46 @@ pub(crate) fn build_plan(
             None
         })
     });
+
+    // For top-level average with a field, Go adds {field: {_neq: null}} to exclude nulls.
+    // Merge this into the existing filter on the same field (not via _and wrapper).
+    for field in &select.fields {
+        if let Requestable::Aggregate(agg) = field {
+            if agg.aggregate_type == AggregateType::Average {
+                if let Some(field_name) = agg.targets.first().and_then(|t| t.field_name.as_ref())
+                {
+                    filter_for_scan = Some(match filter_for_scan {
+                        Some(existing) => {
+                            // Merge {field: {_neq: null}} into existing conditions
+                            let mut merged = existing.conditions().clone();
+                            merged
+                                .entry(field_name.clone())
+                                .and_modify(|v| {
+                                    if let serde_json::Value::Object(ref mut ops) = v {
+                                        ops.insert(
+                                            "_neq".to_string(),
+                                            serde_json::Value::Null,
+                                        );
+                                    }
+                                })
+                                .or_insert(
+                                    serde_json::json!({"_neq": serde_json::Value::Null}),
+                                );
+                            Filter::from_conditions(merged)
+                        }
+                        None => {
+                            let mut conditions = std::collections::HashMap::new();
+                            conditions.insert(
+                                field_name.clone(),
+                                serde_json::json!({"_neq": serde_json::Value::Null}),
+                            );
+                            Filter::from_conditions(conditions)
+                        }
+                    });
+                }
+            }
+        }
+    }
     if let Some(ref filter) = filter_for_scan {
         scan = scan.with_filter(filter.clone());
     }
@@ -452,7 +492,8 @@ pub(crate) fn build_plan(
 
         // Add GroupByNode
         if let Some(ref group_by) = select.group_by {
-            let mut group_node = GroupByNode::new(plan, group_by.clone(), mapping.clone());
+            let mut group_node = GroupByNode::new(plan, group_by.clone(), mapping.clone())
+                .with_collection_name(select.collection_name.clone());
             // Extract _group alias definitions with per-alias filter/limit/order
             let group_indices = mapping
                 .indexes_of_name("_group")
@@ -460,6 +501,7 @@ pub(crate) fn build_plan(
                 .unwrap_or_default();
             let mut group_aliases = Vec::new();
             let mut alias_count = 0;
+            let mut child_selects_meta: Vec<ChildSelectMeta> = Vec::new();
             for field in &select.fields {
                 if let Requestable::Select(nested) = field {
                     if nested.field.name == "_group" {
@@ -472,11 +514,83 @@ pub(crate) fn build_plan(
                             order: nested.order_by.clone(),
                             doc_ids: nested.doc_ids.clone(),
                         });
+                        let mut meta = ChildSelectMeta {
+                            collection_name: select.collection_name.clone(),
+                            doc_ids: nested.doc_ids.clone(),
+                            filter: nested.filter.clone(),
+                            limit: nested.limit.clone(),
+                            order: nested.order_by.clone(),
+                            group_by: nested.group_by.as_ref().map(|gb| gb.fields.clone()),
+                        };
+                        // Check nested _group for inner groupBy
+                        for inner_field in &nested.fields {
+                            if let Requestable::Select(inner_nested) = inner_field {
+                                if inner_nested.field.name == "_group" {
+                                    if let Some(ref inner_gb) = inner_nested.group_by {
+                                        meta.group_by = Some(inner_gb.fields.clone());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        child_selects_meta.push(meta);
                     }
                 }
             }
             if !group_aliases.is_empty() {
                 group_node = group_node.with_group_aliases(group_aliases);
+            }
+            // Go adds {field: {_neq: null}} to childSelects for average aggregates.
+            // Only regular fields (not aggregate refs like _avg) get the neq filter.
+            let mut avg_group_fields: Vec<String> = Vec::new();
+            for field in &select.fields {
+                if let Requestable::Aggregate(agg) = field {
+                    if agg.aggregate_type == AggregateType::Average {
+                        for target in &agg.targets {
+                            if target.host_name == "_group" {
+                                if let Some(ref field_name) = target.field_name {
+                                    if !field_name.starts_with('_') {
+                                        avg_group_fields.push(field_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !avg_group_fields.is_empty() {
+                if child_selects_meta.is_empty() {
+                    child_selects_meta.push(ChildSelectMeta {
+                        collection_name: select.collection_name.clone(),
+                        ..Default::default()
+                    });
+                }
+                for field_name in &avg_group_fields {
+                    for cs in &mut child_selects_meta {
+                        let mut conditions = cs
+                            .filter
+                            .as_ref()
+                            .map(|f| f.conditions().clone())
+                            .unwrap_or_default();
+                        conditions
+                            .entry(field_name.clone())
+                            .and_modify(|v| {
+                                if let serde_json::Value::Object(ref mut ops) = v {
+                                    ops.insert(
+                                        "_neq".to_string(),
+                                        serde_json::Value::Null,
+                                    );
+                                }
+                            })
+                            .or_insert(serde_json::json!({
+                                "_neq": serde_json::Value::Null
+                            }));
+                        cs.filter = Some(Filter::from_conditions(conditions));
+                    }
+                }
+            }
+            if !child_selects_meta.is_empty() {
+                group_node = group_node.with_child_selects(child_selects_meta);
             }
             plan = Box::new(group_node);
         }
@@ -600,6 +714,7 @@ fn add_aggregate_nodes(
                     let sources = vec![CountSourceMeta {
                         field_name: select.collection_name.clone(),
                         filter: target_filter.clone(),
+                        is_inline_array: false,
                     }];
                     node = node.with_sources(sources);
                     plan = Box::new(node);
@@ -621,6 +736,7 @@ fn add_aggregate_nodes(
                         field_name: select.collection_name.clone(),
                         child_field_name: child_field,
                         filter: target_filter.clone(),
+                        is_inline_array: false,
                     }];
                     node = node.with_sources(sources);
                     plan = Box::new(node);
@@ -652,6 +768,7 @@ fn add_aggregate_nodes(
                         field_name: select.collection_name.clone(),
                         child_field_name: child_field,
                         filter: target_filter.clone(),
+                        is_inline_array: false,
                     }];
                     node = node.with_sources(sources);
                     plan = Box::new(node);
@@ -673,6 +790,7 @@ fn add_aggregate_nodes(
                         field_name: select.collection_name.clone(),
                         child_field_name: child_field,
                         filter: target_filter.clone(),
+                        is_inline_array: false,
                     }];
                     node = node.with_sources(sources);
                     plan = Box::new(node);

@@ -17,6 +17,8 @@ pub struct SumSourceMeta {
     pub child_field_name: Option<String>,
     /// Optional filter on this source
     pub filter: Option<Filter>,
+    /// Whether this is an inline array aggregate (emits {_neq: null} filter in explain)
+    pub is_inline_array: bool,
 }
 
 /// SumNode computes the sum of a numeric field from its source.
@@ -197,6 +199,11 @@ impl PlanNode for SumNode {
             self.start().await?;
         }
 
+        // Early return when already done (Go checks isCompleted before calling source.next)
+        if self.done {
+            return Ok(false);
+        }
+
         // Track iterations (Go counts each call to next)
         self.exec_info.iterations += 1;
 
@@ -321,11 +328,19 @@ impl PlanNode for SumNode {
                     "fieldName".to_string(),
                     JsonValue::String(s.field_name.clone()),
                 );
-                if let Some(ref child_name) = s.child_field_name {
-                    source_obj.insert(
-                        "childFieldName".to_string(),
-                        JsonValue::String(child_name.clone()),
-                    );
+                match &s.child_field_name {
+                    Some(child_name) => {
+                        source_obj.insert(
+                            "childFieldName".to_string(),
+                            JsonValue::String(child_name.clone()),
+                        );
+                    }
+                    None => {
+                        source_obj.insert(
+                            "childFieldName".to_string(),
+                            serde_json::Value::Null,
+                        );
+                    }
                 }
                 if let Some(ref filter) = s.filter {
                     let conditions = filter.conditions();

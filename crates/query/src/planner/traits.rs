@@ -29,6 +29,8 @@ pub struct Doc {
     pub status: DocStatus,
     /// Schema version ID (for migrations)
     pub schema_version_id: Option<String>,
+    /// Number of stored fields from the original document (for fieldFetches metrics)
+    pub stored_field_count: usize,
 }
 
 impl Doc {
@@ -39,6 +41,7 @@ impl Doc {
             fields: vec![None; num_fields],
             status: DocStatus::Active,
             schema_version_id: None,
+            stored_field_count: 0,
         }
     }
 
@@ -49,6 +52,7 @@ impl Doc {
             fields,
             status: DocStatus::Active,
             schema_version_id: None,
+            stored_field_count: 0,
         }
     }
 
@@ -98,6 +102,7 @@ impl Doc {
             fields: self.fields.clone(),
             status: self.status,
             schema_version_id: self.schema_version_id.clone(),
+            stored_field_count: self.stored_field_count,
         }
     }
 

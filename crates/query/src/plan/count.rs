@@ -15,6 +15,8 @@ pub struct CountSourceMeta {
     pub field_name: String,
     /// Optional filter on this source
     pub filter: Option<Filter>,
+    /// Whether this is an inline array aggregate (emits {_neq: null} filter in explain)
+    pub is_inline_array: bool,
 }
 
 /// CountNode computes the count of documents from its source.
@@ -122,6 +124,12 @@ impl PlanNode for CountNode {
     async fn next(&mut self) -> Result<bool> {
         if !self.started {
             self.start().await?;
+        }
+
+        // Early return when already done (Go checks isCompleted before calling source.next,
+        // preventing extra iterations from cascading to child nodes)
+        if self.done {
+            return Ok(false);
         }
 
         // Track iterations (Go counts each call to next)

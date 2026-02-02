@@ -20,9 +20,9 @@ mod type_join;
 pub mod view;
 
 pub use alldocs::AllDocsNode;
-pub use average::AverageNode;
+pub use average::{AvgSourceMeta, AverageNode};
 pub use count::{CountNode, CountSourceMeta};
-pub use groupby::{DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
+pub use groupby::{ChildSelectMeta, DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;
 pub use lens_node::LensNode;
 pub use limit::LimitNode;

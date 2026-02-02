@@ -64,7 +64,12 @@ impl IndexScanNode {
         document_mapping: DocumentMapping,
         index_params: IndexScanParams,
     ) -> Self {
-        let fields_per_doc = document_mapping.field_count();
+        // Count storable fields from the collection schema (matches Go's field fetch counting).
+        let fields_per_doc = collection
+            .fields
+            .iter()
+            .filter(|f| !f.id.is_empty())
+            .count();
         Self {
             collection,
             document_mapping,

@@ -8,6 +8,19 @@ use crate::error::Result;
 use crate::mapper::{Filter, Limit};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
+/// Source metadata for average explain output.
+#[derive(Debug, Clone)]
+pub struct AvgSourceMeta {
+    /// Field name (collection name or relation field name)
+    pub field_name: String,
+    /// Optional child field name for field-level aggregates
+    pub child_field_name: Option<String>,
+    /// Optional filter on this source
+    pub filter: Option<Filter>,
+    /// Whether this is an inline array aggregate (emits {_neq: null} filter in explain)
+    pub is_inline_array: bool,
+}
+
 /// AverageNode computes the average of a numeric field from its source.
 ///
 /// Operates in two modes:
@@ -43,6 +56,8 @@ pub struct AverageNode {
     child_aggregate_source: Option<(usize, String)>,
     /// Execution statistics for explain execute mode
     exec_info: ExecInfo,
+    /// Source metadata for explain output
+    sources: Vec<AvgSourceMeta>,
 }
 
 impl AverageNode {
@@ -68,7 +83,13 @@ impl AverageNode {
             aggregate_limit: None,
             child_aggregate_source: None,
             exec_info: ExecInfo::default(),
+            sources: Vec::new(),
         }
+    }
+
+    pub fn with_sources(mut self, sources: Vec<AvgSourceMeta>) -> Self {
+        self.sources = sources;
+        self
     }
 
     pub fn with_child_aggregate_source(mut self, group_index: usize, field_name: String) -> Self {
@@ -142,6 +163,68 @@ impl AverageNode {
         }
     }
 
+    /// Build the filter JSON for an average source explain.
+    /// Go adds {child_field_name: {_neq: null}} to both sumNode and countNode sources,
+    /// but only for regular fields (not aggregate refs like _avg, _count, etc.).
+    fn build_source_filter(source: &AvgSourceMeta) -> JsonValue {
+        if source.is_inline_array {
+            return serde_json::json!({"_neq": serde_json::Value::Null});
+        }
+
+        // Aggregate field refs (starting with _) don't get {_neq: null} filter
+        let is_aggregate_ref = source
+            .child_field_name
+            .as_ref()
+            .map(|n| n.starts_with('_'))
+            .unwrap_or(false);
+
+        match (&source.child_field_name, &source.filter) {
+            (Some(cfn), Some(filter)) if !is_aggregate_ref => {
+                let conditions = filter.conditions();
+                if conditions.is_empty() {
+                    serde_json::json!({cfn: {"_neq": serde_json::Value::Null}})
+                } else {
+                    // Merge {_neq: null} into existing conditions on the same field
+                    let mut merged = serde_json::Map::new();
+                    let mut added_neq = false;
+                    for (key, val) in conditions {
+                        if key == cfn {
+                            if let JsonValue::Object(existing_ops) = val {
+                                let mut ops = existing_ops.clone();
+                                ops.insert("_neq".to_string(), serde_json::Value::Null);
+                                merged.insert(key.clone(), JsonValue::Object(ops));
+                            } else {
+                                merged.insert(key.clone(), val.clone());
+                            }
+                            added_neq = true;
+                        } else {
+                            merged.insert(key.clone(), val.clone());
+                        }
+                    }
+                    if !added_neq {
+                        merged.insert(
+                            cfn.clone(),
+                            serde_json::json!({"_neq": serde_json::Value::Null}),
+                        );
+                    }
+                    JsonValue::Object(merged)
+                }
+            }
+            (Some(cfn), None) if !is_aggregate_ref => {
+                serde_json::json!({cfn: {"_neq": serde_json::Value::Null}})
+            }
+            (_, Some(filter)) => {
+                let conditions = filter.conditions();
+                if conditions.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(conditions)
+                }
+            }
+            _ => serde_json::Value::Null,
+        }
+    }
+
     /// Convert average to JSON value
     /// Returns Null for NaN/Infinity to prevent silent data corruption
     fn avg_to_json(avg: f64) -> JsonValue {
@@ -175,6 +258,11 @@ impl PlanNode for AverageNode {
     async fn next(&mut self) -> Result<bool> {
         if !self.started {
             self.start().await?;
+        }
+
+        // Early return when already done (Go checks isCompleted before calling source.next)
+        if self.done {
+            return Ok(false);
         }
 
         // Track iterations (Go counts each call to next)
@@ -292,8 +380,53 @@ impl PlanNode for AverageNode {
         // Get the source explain output
         let source_explain = self.source.explain();
 
-        // Wrap in: countNode { sumNode { ...source... } }
+        // Build sumNode sources (includes childFieldName)
+        let sum_sources: Vec<JsonValue> = self
+            .sources
+            .iter()
+            .map(|s| {
+                let mut source_obj = serde_json::Map::new();
+                source_obj.insert(
+                    "fieldName".to_string(),
+                    JsonValue::String(s.field_name.clone()),
+                );
+                match &s.child_field_name {
+                    Some(child_name) => {
+                        source_obj.insert(
+                            "childFieldName".to_string(),
+                            JsonValue::String(child_name.clone()),
+                        );
+                    }
+                    None => {
+                        source_obj.insert(
+                            "childFieldName".to_string(),
+                            serde_json::Value::Null,
+                        );
+                    }
+                }
+                source_obj.insert("filter".to_string(), Self::build_source_filter(s));
+                JsonValue::Object(source_obj)
+            })
+            .collect();
+
+        // Build countNode sources (NO childFieldName)
+        let count_sources: Vec<JsonValue> = self
+            .sources
+            .iter()
+            .map(|s| {
+                let mut source_obj = serde_json::Map::new();
+                source_obj.insert(
+                    "fieldName".to_string(),
+                    JsonValue::String(s.field_name.clone()),
+                );
+                source_obj.insert("filter".to_string(), Self::build_source_filter(s));
+                JsonValue::Object(source_obj)
+            })
+            .collect();
+
+        // Wrap in: countNode { sources: [...], sumNode { sources: [...], ...source... } }
         let mut sum_inner = serde_json::Map::new();
+        sum_inner.insert("sources".to_string(), JsonValue::Array(sum_sources));
         if let Some(source_obj) = source_explain.as_object() {
             for (key, value) in source_obj {
                 sum_inner.insert(key.clone(), value.clone());
@@ -301,6 +434,7 @@ impl PlanNode for AverageNode {
         }
 
         let mut count_inner = serde_json::Map::new();
+        count_inner.insert("sources".to_string(), JsonValue::Array(count_sources));
         count_inner.insert("sumNode".to_string(), JsonValue::Object(sum_inner));
 
         let mut obj = serde_json::Map::new();
@@ -313,7 +447,52 @@ impl PlanNode for AverageNode {
         // Same structure for debug: averageNode → countNode → sumNode → source
         let source_explain = self.source.explain_debug();
 
+        // Build sumNode sources (includes childFieldName)
+        let sum_sources: Vec<JsonValue> = self
+            .sources
+            .iter()
+            .map(|s| {
+                let mut source_obj = serde_json::Map::new();
+                source_obj.insert(
+                    "fieldName".to_string(),
+                    JsonValue::String(s.field_name.clone()),
+                );
+                match &s.child_field_name {
+                    Some(child_name) => {
+                        source_obj.insert(
+                            "childFieldName".to_string(),
+                            JsonValue::String(child_name.clone()),
+                        );
+                    }
+                    None => {
+                        source_obj.insert(
+                            "childFieldName".to_string(),
+                            serde_json::Value::Null,
+                        );
+                    }
+                }
+                source_obj.insert("filter".to_string(), Self::build_source_filter(s));
+                JsonValue::Object(source_obj)
+            })
+            .collect();
+
+        // Build countNode sources (NO childFieldName)
+        let count_sources: Vec<JsonValue> = self
+            .sources
+            .iter()
+            .map(|s| {
+                let mut source_obj = serde_json::Map::new();
+                source_obj.insert(
+                    "fieldName".to_string(),
+                    JsonValue::String(s.field_name.clone()),
+                );
+                source_obj.insert("filter".to_string(), Self::build_source_filter(s));
+                JsonValue::Object(source_obj)
+            })
+            .collect();
+
         let mut sum_inner = serde_json::Map::new();
+        sum_inner.insert("sources".to_string(), JsonValue::Array(sum_sources));
         if let Some(source_obj) = source_explain.as_object() {
             for (key, value) in source_obj {
                 sum_inner.insert(key.clone(), value.clone());
@@ -321,6 +500,7 @@ impl PlanNode for AverageNode {
         }
 
         let mut count_inner = serde_json::Map::new();
+        count_inner.insert("sources".to_string(), JsonValue::Array(count_sources));
         count_inner.insert("sumNode".to_string(), JsonValue::Object(sum_inner));
 
         let mut obj = serde_json::Map::new();
@@ -355,8 +535,11 @@ impl PlanNode for AverageNode {
         let source_explain = self.source.explain_execute();
 
         // Wrap in: countNode { iterations: N, sumNode { iterations: N, ...source... } }
+        // Go's decomposed countNode/sumNode process the same documents as averageNode,
+        // so their iteration counts match.
+        let iterations = self.exec_info.iterations as u64;
         let mut sum_inner = serde_json::Map::new();
-        sum_inner.insert("iterations".to_string(), serde_json::json!(0u64));
+        sum_inner.insert("iterations".to_string(), serde_json::json!(iterations));
         if let Some(source_obj) = source_explain.as_object() {
             for (key, value) in source_obj {
                 sum_inner.insert(key.clone(), value.clone());
@@ -364,7 +547,7 @@ impl PlanNode for AverageNode {
         }
 
         let mut count_inner = serde_json::Map::new();
-        count_inner.insert("iterations".to_string(), serde_json::json!(0u64));
+        count_inner.insert("iterations".to_string(), serde_json::json!(iterations));
         count_inner.insert("sumNode".to_string(), JsonValue::Object(sum_inner));
 
         obj.insert("countNode".to_string(), JsonValue::Object(count_inner));

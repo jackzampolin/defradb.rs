@@ -603,7 +603,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
-        if can_use_index || has_relation_aggregates {
+        // Check if this query has nested selections (relations, _group, etc.)
+        // These require the Planner to construct proper join/group nodes.
+        let has_nested = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
+
+        if can_use_index || has_relation_aggregates || has_nested {
             // Use Planner path for index-based queries or relation aggregates
             let fetcher_arc = FetcherWrapper::new(fetcher);
             let collections_map = self.collections_map().await?;
@@ -1079,15 +1086,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 if explain_type == ExplainType::Execute {
                     if agg.aggregate_type == AggregateType::Average {
                         // Go decomposes average into sumNode + countNode + averageNode
-                        // Each shows iterations in execute mode
+                        // Each shows iterations: 1 in execute mode
                         top_level_children.push(serde_json::json!({
-                            "sumNode": { "iterations": 0u64 }
+                            "sumNode": { "iterations": 1u64 }
                         }));
                         top_level_children.push(serde_json::json!({
-                            "countNode": { "iterations": 0u64 }
+                            "countNode": { "iterations": 1u64 }
                         }));
                         top_level_children.push(serde_json::json!({
-                            "averageNode": {}
+                            "averageNode": { "iterations": 1u64 }
                         }));
                     } else {
                         top_level_children.push(serde_json::json!({
@@ -1124,17 +1131,49 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                 // Go decomposes average into sumNode + countNode + averageNode
                 if agg.aggregate_type == AggregateType::Average {
+                    // Go adds {field: {_neq: null}} for both sum and count source filters,
+                    // but only for regular fields (not aggregate refs like _avg).
+                    let avg_filter = if let Some(field_name) = child_field_name {
+                        if field_name.starts_with('_') {
+                            // Aggregate field refs don't get neq filter
+                            filter_value.clone()
+                        } else if filter_value.is_null() {
+                            serde_json::json!({field_name: {"_neq": serde_json::Value::Null}})
+                        } else if let Some(obj) = filter_value.as_object() {
+                            // Merge {field: {_neq: null}} into existing filter conditions
+                            let mut merged = obj.clone();
+                            merged
+                                .entry(field_name.to_string())
+                                .and_modify(|v| {
+                                    if let JsonValue::Object(ref mut ops) = v {
+                                        ops.insert(
+                                            "_neq".to_string(),
+                                            serde_json::Value::Null,
+                                        );
+                                    }
+                                })
+                                .or_insert(
+                                    serde_json::json!({"_neq": serde_json::Value::Null}),
+                                );
+                            JsonValue::Object(merged)
+                        } else {
+                            serde_json::json!({field_name: {"_neq": serde_json::Value::Null}})
+                        }
+                    } else {
+                        filter_value.clone()
+                    };
+
                     // 1. sumNode with sources (includes childFieldName)
                     let sum_source = if let Some(field_name) = child_field_name {
                         serde_json::json!({
                             "fieldName": select.collection_name,
                             "childFieldName": field_name,
-                            "filter": filter_value
+                            "filter": avg_filter
                         })
                     } else {
                         serde_json::json!({
                             "fieldName": select.collection_name,
-                            "filter": filter_value
+                            "filter": avg_filter
                         })
                     };
                     top_level_children.push(serde_json::json!({
@@ -1143,10 +1182,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         }
                     }));
 
-                    // 2. countNode with sources (no childFieldName)
+                    // 2. countNode with sources (no childFieldName, same filter as sum)
                     let count_source = serde_json::json!({
                         "fieldName": select.collection_name,
-                        "filter": filter_value
+                        "filter": avg_filter
                     });
                     top_level_children.push(serde_json::json!({
                         "countNode": {

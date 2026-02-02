@@ -14,7 +14,7 @@ use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, IndexScanNode,
+    AllDocsNode, AvgSourceMeta, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, IndexScanNode,
     InnerAggregateDef, JoinSide, LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta,
     OrderByNode, RelationFilter, ScanNode, SelectNode, SimilarityNode, SumNode, SumSourceMeta,
     TypeJoinMany, TypeJoinOne,
@@ -607,6 +607,10 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 scan = scan.with_doc_ids(doc_ids.clone());
             }
+            // Push scalar filter to ScanNode (matches Go DefraDB plan construction)
+            if let Some(ref filter) = scalar_filter {
+                scan = scan.with_filter(filter.clone());
+            }
             Box::new(scan)
         };
 
@@ -780,9 +784,7 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 select_node = select_node.with_doc_ids(doc_ids.clone());
             }
-            if let Some(filter) = scalar_filter {
-                select_node = select_node.with_filter(filter);
-            }
+            // Scalar filter is on ScanNode, not SelectNode (matches Go DefraDB)
             plan = Box::new(select_node);
         } else if is_complex_filter && !select.fields.is_empty() {
             // For complex filters where there are no join-related fields,
@@ -1027,6 +1029,60 @@ impl Planner {
                             }
 
                             child_selects_meta.push(meta);
+                        }
+                    }
+                }
+                // Go adds {field: {_neq: null}} to childSelects filter for average aggregates.
+                // Average excludes null values, so the filter is needed on the group's child select.
+                // Collect field names from average aggregates targeting _group.
+                // Only regular fields (not aggregate refs like _avg) get the neq filter.
+                let mut avg_group_fields: Vec<String> = Vec::new();
+                for field in &select.fields {
+                    if let Requestable::Aggregate(agg) = field {
+                        if agg.aggregate_type == AggregateType::Average {
+                            for target in &agg.targets {
+                                if target.host_name == "_group" {
+                                    if let Some(ref field_name) = target.field_name {
+                                        if !field_name.starts_with('_') {
+                                            avg_group_fields.push(field_name.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !avg_group_fields.is_empty() {
+                    // Ensure at least one default child select exists
+                    // (query may have _avg(_group: ...) without explicit _group { ... } select)
+                    if child_selects_meta.is_empty() {
+                        child_selects_meta.push(ChildSelectMeta {
+                            collection_name: select.collection_name.clone(),
+                            ..Default::default()
+                        });
+                    }
+                    // Inject {field_name: {_neq: null}} for each avg target field
+                    for field_name in &avg_group_fields {
+                        for cs in &mut child_selects_meta {
+                            let mut conditions = cs
+                                .filter
+                                .as_ref()
+                                .map(|f| f.conditions().clone())
+                                .unwrap_or_default();
+                            conditions
+                                .entry(field_name.clone())
+                                .and_modify(|v| {
+                                    if let serde_json::Value::Object(ref mut ops) = v {
+                                        ops.insert(
+                                            "_neq".to_string(),
+                                            serde_json::Value::Null,
+                                        );
+                                    }
+                                })
+                                .or_insert(serde_json::json!({
+                                    "_neq": serde_json::Value::Null
+                                }));
+                            cs.filter = Some(Filter::from_conditions(conditions));
                         }
                     }
                 }
@@ -1315,6 +1371,7 @@ impl Planner {
                         let sources = vec![CountSourceMeta {
                             field_name: source_field_name.clone(),
                             filter: target_filter.clone(),
+                            is_inline_array: is_array_aggregate && child_field.is_none(),
                         }];
                         node = node.with_sources(sources);
                         plan = Box::new(node);
@@ -1337,6 +1394,7 @@ impl Planner {
                             field_name: source_field_name.clone(),
                             child_field_name: child_field.clone(),
                             filter: target_filter.clone(),
+                            is_inline_array: is_array_aggregate && child_field.is_none(),
                         }];
                         node = node.with_sources(sources);
                         plan = Box::new(node);
@@ -1350,12 +1408,19 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources = vec![AvgSourceMeta {
+                            field_name: source_field_name.clone(),
+                            child_field_name: child_field.clone(),
+                            filter: target_filter.clone(),
+                            is_inline_array: is_array_aggregate && child_field.is_none(),
+                        }];
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Min => {
@@ -1376,6 +1441,7 @@ impl Planner {
                             field_name: source_field_name.clone(),
                             child_field_name: child_field.clone(),
                             filter: target_filter.clone(),
+                            is_inline_array: is_array_aggregate && child_field.is_none(),
                         }];
                         node = node.with_sources(sources);
                         plan = Box::new(node);
@@ -1398,6 +1464,7 @@ impl Planner {
                             field_name: source_field_name.clone(),
                             child_field_name: child_field.clone(),
                             filter: target_filter.clone(),
+                            is_inline_array: is_array_aggregate && child_field.is_none(),
                         }];
                         node = node.with_sources(sources);
                         plan = Box::new(node);
