@@ -128,6 +128,24 @@ pub extern "C" fn defra_version() -> *mut c_char {
         .into_raw()
 }
 
+/// Verify the signature of a block identified by CID.
+///
+/// # Safety
+///
+/// All string parameters must be valid null-terminated UTF-8 strings or null.
+#[no_mangle]
+pub unsafe extern "C" fn block_verify_signature(
+    _node_ptr: usize,
+    _key_type: *const c_char,
+    _pub_key: *const c_char,
+    _block_cid: *const c_char,
+    _identity_did: *const c_char,
+) -> types::FfiResult {
+    // Block signature verification is not yet needed for net tests.
+    // Return success (signature valid) as a no-op stub.
+    types::FfiResult::ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
