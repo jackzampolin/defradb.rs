@@ -110,6 +110,26 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             full_history.insert(version.version_id.clone(), link);
         }
 
+        // Build `next` links by reverse-indexing `previous` links.
+        // Each version's `previous` points to its parent; the parent's `next` should point back.
+        let reverse_links: Vec<(String, String)> = full_history
+            .values()
+            .flat_map(|link| {
+                link.previous
+                    .iter()
+                    .map(|prev_id| (prev_id.clone(), link.version_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        for (parent_id, child_id) in reverse_links {
+            if let Some(parent_link) = full_history.get_mut(&parent_id) {
+                if !parent_link.next.contains(&child_id) {
+                    parent_link.next.push(child_id);
+                }
+            }
+        }
+
         build_targeted_history(&full_history, target_version_id)
     }
 
