@@ -166,6 +166,68 @@ impl SelectNode {
             "parallelNode": parallel_items
         }))
     }
+
+    /// Detect chained typeIndexJoin nodes in execute explain and flatten into a parallelNode.
+    ///
+    /// In execute mode, the structure differs from default/debug:
+    /// ```json
+    /// { "typeIndexJoin": { "iterations": N, "typeIndexJoin": {...}, "subTypeScanNode": {...} } }
+    /// ```
+    /// The nested `typeIndexJoin` key (from parent_plan.explain_execute()) indicates a chain.
+    /// The innermost join's `scanNode` is the shared root.
+    fn flatten_execute_join_chain(explain: &serde_json::Value) -> Option<serde_json::Value> {
+        let obj = explain.as_object()?;
+        let join_content = obj.get("typeIndexJoin")?.as_object()?;
+
+        // Check if this join contains another typeIndexJoin (indicating a chain)
+        if join_content.get("typeIndexJoin").is_none() {
+            return None; // Single join, no parallelNode needed
+        }
+
+        // Walk the chain collecting all joins
+        let mut joins_data: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+        let mut current = join_content.clone();
+
+        loop {
+            if let Some(inner_join) = current
+                .get("typeIndexJoin")
+                .and_then(|v| v.as_object())
+            {
+                joins_data.push(current.clone());
+                current = inner_join.clone();
+                continue;
+            }
+            // Innermost join - contains scanNode directly
+            joins_data.push(current);
+            break;
+        }
+
+        // The innermost join has the scanNode (shared root metrics)
+        let innermost = joins_data.last()?;
+        let shared_scan_node = innermost.get("scanNode")?.clone();
+
+        // Build the parallel array in reverse order (innermost first = Go convention)
+        let mut parallel_items: Vec<serde_json::Value> = Vec::new();
+        for join_data in joins_data.iter().rev() {
+            let mut join_copy = serde_json::Map::new();
+            // Copy iterations and subTypeScanNode from this join
+            if let Some(iter) = join_data.get("iterations") {
+                join_copy.insert("iterations".to_string(), iter.clone());
+            }
+            // Set the shared scanNode on every join
+            join_copy.insert("scanNode".to_string(), shared_scan_node.clone());
+            if let Some(sub) = join_data.get("subTypeScanNode") {
+                join_copy.insert("subTypeScanNode".to_string(), sub.clone());
+            }
+            parallel_items.push(serde_json::json!({
+                "typeIndexJoin": serde_json::Value::Object(join_copy)
+            }));
+        }
+
+        Some(serde_json::json!({
+            "parallelNode": parallel_items
+        }))
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -300,9 +362,10 @@ impl PlanNode for SelectNode {
         );
 
         // Recursively explain child node with execution info.
-        // Execute mode: no multiScanNode wrapper
+        // Execute mode uses a different flattening strategy since the explain
+        // structure differs (no root/typeJoinOne wrappers).
         let child_explain = self.source.explain_execute();
-        let flattened = Self::flatten_join_chain(&child_explain, false);
+        let flattened = Self::flatten_execute_join_chain(&child_explain);
         let explain_to_merge = flattened.as_ref().unwrap_or(&child_explain);
         if let Some(child_obj) = explain_to_merge.as_object() {
             for (key, value) in child_obj {
