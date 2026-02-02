@@ -286,6 +286,32 @@ impl<S: ZanzibarStore> NacManager<S> {
             .map_err(|e| Error::Acp(format!("failed to remove admin: {}", e)))
     }
 
+    /// Grant a specific permission to an identity.
+    pub async fn add_permission_grant(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        permission: NodePermission,
+    ) -> Result<bool> {
+        self.nac
+            .add_permission_grant(requestor, target, permission)
+            .await
+            .map_err(|e| Error::Acp(format!("failed to grant permission: {}", e)))
+    }
+
+    /// Revoke a specific permission from an identity.
+    pub async fn remove_permission_grant(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        permission: NodePermission,
+    ) -> Result<bool> {
+        self.nac
+            .remove_permission_grant(requestor, target, permission)
+            .await
+            .map_err(|e| Error::Acp(format!("failed to revoke permission: {}", e)))
+    }
+
     /// Get the underlying NAC config.
     pub fn config(&self) -> &NacConfig {
         &self.config

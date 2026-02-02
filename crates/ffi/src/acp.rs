@@ -305,16 +305,21 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
             return Err("operation requires ACP, but ACP not available".to_string());
         }
 
-        // Empty requestor DID means no identity - not authorized
-        if requestor_str.is_empty() {
-            return Err("node acp relationship operation requires identity".to_string());
+        // Empty or wildcard requestor: check if wildcard admin exists to decide error
+        if requestor_str.is_empty() || requestor_str == "*" {
+            let wildcard = identity::Did::wildcard();
+            let wildcard_is_admin = nac_manager.is_admin(&wildcard).await.unwrap_or(false);
+            if wildcard_is_admin {
+                return Err("node acp relationship operation requires identity".to_string());
+            } else {
+                return Err("not authorized to perform operation".to_string());
+            }
         }
 
         let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
+            .map_err(|_| "not authorized to perform operation".to_string())?;
 
         // Check admin authorization BEFORE validating target DID
-        // (Go checks auth first, then input validation)
         if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
             return Err("not authorized to perform operation".to_string());
         }
@@ -347,10 +352,10 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
                 .add_admin(&requestor, &target)
                 .await
                 .map_err(|e| normalize_auth_error(e.to_string()))?
-        } else if NodePermission::parse(&relation_str).is_some() {
-            // Grant specific permission (uses admin grant for now)
+        } else if let Some(perm) = NodePermission::parse(&relation_str) {
+            // Grant specific permission
             nac_manager
-                .add_admin(&requestor, &target)
+                .add_permission_grant(&requestor, &target, perm)
                 .await
                 .map_err(|e| normalize_auth_error(e.to_string()))?
         } else {
@@ -419,13 +424,19 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
             return Err("operation requires ACP, but ACP not available".to_string());
         }
 
-        // Empty requestor DID means no identity - not authorized
-        if requestor_str.is_empty() {
-            return Err("node acp relationship operation requires identity".to_string());
+        // Empty or wildcard requestor: check if wildcard admin exists to decide error
+        if requestor_str.is_empty() || requestor_str == "*" {
+            let wildcard = identity::Did::wildcard();
+            let wildcard_is_admin = nac_manager.is_admin(&wildcard).await.unwrap_or(false);
+            if wildcard_is_admin {
+                return Err("node acp relationship operation requires identity".to_string());
+            } else {
+                return Err("not authorized to perform operation".to_string());
+            }
         }
 
         let requestor = identity::Did::new(&requestor_str)
-            .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
+            .map_err(|_| "not authorized to perform operation".to_string())?;
 
         // Check admin authorization BEFORE validating target DID
         if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
@@ -442,9 +453,10 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
             return Err("relation not in resource".to_string());
         }
 
-        // Validate target DID
+        // Empty target with authorized requestor: Go returns {deleted: false}
         if target_str.is_empty() {
-            return Err("actor must be a valid did".to_string());
+            let json = serde_json::json!({ "deleted": false }).to_string();
+            return Ok(json);
         }
 
         let target = if target_str == "*" {
@@ -454,10 +466,19 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
                 .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?
         };
 
-        let deleted = nac_manager
-            .remove_admin(&requestor, &target)
-            .await
-            .map_err(|e| normalize_auth_error(e.to_string()))?;
+        let deleted = if relation_str == "admin" {
+            nac_manager
+                .remove_admin(&requestor, &target)
+                .await
+                .map_err(|e| normalize_auth_error(e.to_string()))?
+        } else if let Some(perm) = NodePermission::parse(&relation_str) {
+            nac_manager
+                .remove_permission_grant(&requestor, &target, perm)
+                .await
+                .map_err(|e| normalize_auth_error(e.to_string()))?
+        } else {
+            return Err("relation not in resource".to_string());
+        };
 
         let json = serde_json::json!({ "deleted": deleted }).to_string();
         Ok::<String, String>(json)
@@ -755,7 +776,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 &managing_relations,
             )
             .await
-            .map_err(|e| normalize_auth_error(e.to_string()))?;
+            .map_err(|e| e.to_string())?;
 
         let json = serde_json::json!({ "added": added }).to_string();
         Ok::<String, String>(json)
@@ -910,7 +931,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
                 &managing_relations,
             )
             .await
-            .map_err(|e| normalize_auth_error(e.to_string()))?;
+            .map_err(|e| e.to_string())?;
 
         let json = serde_json::json!({ "deleted": deleted }).to_string();
         Ok::<String, String>(json)

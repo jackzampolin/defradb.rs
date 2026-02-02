@@ -44,7 +44,17 @@ pub fn check_nac_permission(
             Ok(d) => d,
             Err(_) => return Err(FfiResult::error("not authorized to perform operation")),
         },
-        _ => return Err(FfiResult::error("not authorized to perform operation")),
+        _ => {
+            // Empty identity: check if wildcard has the permission
+            let wildcard = identity::Did::wildcard();
+            let wildcard_has_perm = rt
+                .block_on(nac_manager.check_permission(&wildcard, permission))
+                .unwrap_or(false);
+            if wildcard_has_perm {
+                return Ok(());
+            }
+            return Err(FfiResult::error("not authorized to perform operation"));
+        }
     };
 
     let has_perm = rt

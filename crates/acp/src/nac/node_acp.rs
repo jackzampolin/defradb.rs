@@ -937,4 +937,40 @@ mod tests {
         let result = nac.add_admin(&owner, &other).await;
         assert!(result.is_ok(), "add_admin should work when NAC is enabled");
     }
+
+    #[tokio::test]
+    async fn test_wildcard_admin_grants_all_permissions() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let nac = NodeACP::new(store);
+
+        let owner = test_did();
+        let other = test_did2();
+        let wildcard = Did::wildcard();
+
+        nac.enable(&owner).await.unwrap();
+
+        // Grant admin to wildcard (all identities)
+        let added = nac.add_admin(&owner, &wildcard).await.unwrap();
+        assert!(added, "should successfully add wildcard admin");
+
+        // Now any identity should have NacStatus permission
+        let has_perm = nac
+            .check_permission(&other, NodePermission::NacStatus)
+            .await
+            .unwrap();
+        assert!(
+            has_perm,
+            "any identity should have NacStatus after wildcard admin grant"
+        );
+
+        // Check another permission too
+        let has_perm = nac
+            .check_permission(&other, NodePermission::CollectionGet)
+            .await
+            .unwrap();
+        assert!(
+            has_perm,
+            "any identity should have CollectionGet after wildcard admin grant"
+        );
+    }
 }
