@@ -957,15 +957,12 @@ impl<'a> SdlParser<'a> {
         }
 
         // Topological sort using Kahn's algorithm
+        // In-degree = number of types this type depends on (not how many depend on it).
+        // Types with in-degree 0 have no unresolved dependencies and can be processed.
         let mut in_degree: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        for type_name in &sorted_type_names {
-            in_degree.insert(type_name.clone(), 0);
-        }
-        for deps in dependencies.values() {
-            for dep in deps {
-                *in_degree.get_mut(dep).unwrap() += 1;
-            }
+        for (type_name, deps) in &dependencies {
+            in_degree.insert(type_name.clone(), deps.len());
         }
 
         // Queue starts with types that have no dependencies
