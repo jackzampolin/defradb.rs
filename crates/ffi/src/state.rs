@@ -131,6 +131,9 @@ pub struct P2PState {
     pub collections: RwLock<Vec<String>>,
     /// Documents subscribed for P2P replication (by doc ID).
     pub documents: RwLock<HashSet<String>>,
+    /// Known peer addresses: peer_id_string -> full multiaddr with /p2p/ component.
+    /// Populated when peers connect via p2p_connect or p2p_set_replicator.
+    pub peer_addresses: RwLock<HashMap<String, String>>,
     /// Abort handle for the host event loop task.
     pub host_event_handle: Option<tokio::task::AbortHandle>,
     /// Abort handle for the replication loop task.
@@ -146,6 +149,7 @@ impl P2PState {
             handle,
             collections: RwLock::new(Vec::new()),
             documents: RwLock::new(HashSet::new()),
+            peer_addresses: RwLock::new(HashMap::new()),
             host_event_handle: None,
             replication_handle: None,
             broadcast_handle: None,
@@ -163,6 +167,7 @@ impl P2PState {
             handle,
             collections: RwLock::new(Vec::new()),
             documents: RwLock::new(HashSet::new()),
+            peer_addresses: RwLock::new(HashMap::new()),
             host_event_handle: Some(host_event_handle),
             replication_handle: Some(replication_handle),
             broadcast_handle: Some(broadcast_handle),
@@ -219,6 +224,18 @@ impl P2PState {
     /// Get all P2P documents.
     pub fn get_documents(&self) -> Vec<String> {
         self.documents.read().iter().cloned().collect()
+    }
+
+    /// Store a peer's full multiaddr (called on connect/set_replicator).
+    pub fn set_peer_address(&self, peer_id: &str, full_multiaddr: &str) {
+        self.peer_addresses
+            .write()
+            .insert(peer_id.to_string(), full_multiaddr.to_string());
+    }
+
+    /// Get the stored multiaddr for a peer.
+    pub fn get_peer_address(&self, peer_id: &str) -> Option<String> {
+        self.peer_addresses.read().get(peer_id).cloned()
     }
 }
 

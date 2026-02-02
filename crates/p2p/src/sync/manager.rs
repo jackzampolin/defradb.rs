@@ -219,6 +219,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_slice())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
+        eprintln!("[SYNC-MGR] process_pushlog cid={} doc_id={} collection={} block_len={}", cid, msg.doc_id, msg.collection_id, msg.block.len());
 
         // Try to acquire exclusive processing rights for this CID
         match self.process_queue.try_acquire(&cid).await {

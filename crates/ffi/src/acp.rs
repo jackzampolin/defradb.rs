@@ -227,6 +227,7 @@ pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -
 pub unsafe extern "C" fn add_nac_actor_relationship(
     node_ptr: usize,
     requestor_did: *const c_char,
+    _relation: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
@@ -294,6 +295,7 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
 pub unsafe extern "C" fn delete_nac_actor_relationship(
     node_ptr: usize,
     requestor_did: *const c_char,
+    _relation: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);

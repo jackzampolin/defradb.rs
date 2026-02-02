@@ -172,13 +172,9 @@ impl Bus for ChannelBus {
             );
         }
 
-        tracing::trace!(
-            event = %msg.name,
-            delivered = delivered,
-            dropped = dropped,
-            buffer_full = buffer_full,
-            "Published event"
-        );
+        if matches!(msg.name, EventName::MergeComplete | EventName::ReplicatorCompleted) {
+            eprintln!("[EVENT-BUS] Published event={} sub_count={} delivered={} dropped={} buffer_full={}", msg.name, sub_count, delivered, dropped, buffer_full);
+        }
     }
 
     fn subscribe(&self, events: &[EventName]) -> Subscription {

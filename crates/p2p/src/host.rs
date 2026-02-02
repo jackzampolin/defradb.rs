@@ -166,6 +166,11 @@ pub enum HostCommand {
         request: PushLogRequest,
         response: oneshot::Sender<Result<PushLogReply>>,
     },
+
+    /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
+    PeerAddresses {
+        response: oneshot::Sender<Vec<String>>,
+    },
 }
 
 /// Events emitted by the P2P host.
@@ -615,6 +620,18 @@ impl P2PHostHandle {
             .map_err(|_| Error::ChannelSend)?;
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
+
+    /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
+    pub async fn peer_addresses(&self) -> Result<Vec<String>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::PeerAddresses {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
+    }
 }
 
 /// P2P Host that manages the libp2p swarm.
@@ -635,6 +652,9 @@ pub struct P2PHost<S: Store> {
     spawned_tasks: tokio::task::JoinSet<()>,
     /// Bitswap query abort handles for cancellation support
     bitswap_queries: HashMap<QueryId, tokio::task::AbortHandle>,
+    /// Per-peer addresses learned from connections and identify protocol.
+    /// Used by ActivePeers to return full multiaddrs (Go-compatible).
+    peer_addrs: HashMap<PeerId, Multiaddr>,
 }
 
 impl<S: Store> P2PHost<S> {
@@ -762,6 +782,7 @@ impl<S: Store> P2PHost<S> {
             two_stream_event_rx,
             spawned_tasks: tokio::task::JoinSet::new(),
             bitswap_queries: HashMap::new(),
+            peer_addrs: HashMap::new(),
         };
 
         Ok((host, handle, event_rx, replicators))
@@ -1262,6 +1283,27 @@ impl<S: Store> P2PHost<S> {
                     }
                 });
             }
+
+            HostCommand::PeerAddresses { response } => {
+                // Build full multiaddrs for connected peers (matches Go's ActivePeers).
+                let connected: std::collections::HashSet<PeerId> =
+                    self.swarm.connected_peers().cloned().collect();
+                let addrs: Vec<String> = connected
+                    .iter()
+                    .filter_map(|pid| {
+                        self.peer_addrs.get(pid).map(|addr| {
+                            format!(
+                                "{}/p2p/{}",
+                                addr,
+                                pid
+                            )
+                        })
+                    })
+                    .collect();
+                if response.send(addrs).is_err() {
+                    debug!("PeerAddresses command response dropped - caller cancelled");
+                }
+            }
         }
         true
     }
@@ -1298,8 +1340,20 @@ impl<S: Store> P2PHost<S> {
                 }
             }
 
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 info!("Connected to peer: {}", peer_id);
+                // For dialer: store the address we dialed (which is the peer's listen addr).
+                // For listener: store send_back_addr temporarily; identify will update it.
+                let remote_addr = match &endpoint {
+                    libp2p::core::ConnectedPoint::Dialer { address, .. } => address.clone(),
+                    libp2p::core::ConnectedPoint::Listener {
+                        send_back_addr, ..
+                    } => send_back_addr.clone(),
+                };
+                self.peer_addrs.insert(peer_id, remote_addr);
+
                 if self
                     .event_tx
                     .send(HostEvent::PeerConnected(peer_id))
@@ -1310,8 +1364,15 @@ impl<S: Store> P2PHost<S> {
                 }
             }
 
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
                 info!("Disconnected from peer: {}", peer_id);
+                if num_established == 0 {
+                    self.peer_addrs.remove(&peer_id);
+                }
                 if self
                     .event_tx
                     .send(HostEvent::PeerDisconnected(peer_id))
@@ -1439,6 +1500,12 @@ impl<S: Store> P2PHost<S> {
     async fn handle_identify_event(&mut self, event: libp2p::identify::Event) {
         match event {
             libp2p::identify::Event::Received { peer_id, info, .. } => {
+                // Update stored address with the peer's first listen address.
+                // This corrects the ephemeral send_back_addr for incoming connections.
+                if let Some(listen_addr) = info.listen_addrs.first() {
+                    self.peer_addrs.insert(peer_id, listen_addr.clone());
+                }
+
                 debug!(
                     "Identified peer {}: {} with {} addresses, {} protocols",
                     peer_id,

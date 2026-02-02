@@ -13,6 +13,10 @@ pub enum EventName {
     Merge,
     /// P2P merge completed event.
     MergeComplete,
+    /// Replicator configuration completed (initial docs pushed).
+    ReplicatorCompleted,
+    /// GossipSub peer joined/left a topic.
+    TopicPeerEvent,
 }
 
 impl EventName {
@@ -32,6 +36,8 @@ impl std::fmt::Display for EventName {
             EventName::Update => write!(f, "update"),
             EventName::Merge => write!(f, "merge"),
             EventName::MergeComplete => write!(f, "merge-complete"),
+            EventName::ReplicatorCompleted => write!(f, "replicator-completed"),
+            EventName::TopicPeerEvent => write!(f, "topic-peer-event"),
         }
     }
 }
@@ -47,6 +53,17 @@ pub struct MergeCompleteData {
     pub collection_id: String,
     /// Peer ID that sent this block.
     pub by_peer: String,
+}
+
+/// GossipSub topic peer event data.
+#[derive(Debug, Clone)]
+pub struct TopicPeerEventData {
+    /// The peer ID that joined or left.
+    pub peer_id: String,
+    /// The topic name.
+    pub topic: String,
+    /// "JOINED" or "LEFT".
+    pub event_type: String,
 }
 
 /// Document update event data.
@@ -105,6 +122,10 @@ pub enum MessageData {
     Update(Update),
     /// P2P merge complete data.
     MergeComplete(MergeCompleteData),
+    /// Replicator completed signal (initial docs pushed).
+    ReplicatorCompleted,
+    /// GossipSub topic peer event.
+    TopicPeerEvent(TopicPeerEventData),
 }
 
 impl Message {
@@ -129,6 +150,30 @@ impl Message {
         Self {
             name: EventName::MergeComplete,
             data: MessageData::MergeComplete(data),
+        }
+    }
+
+    /// Create a new ReplicatorCompleted message (signal).
+    pub fn replicator_completed() -> Self {
+        Self {
+            name: EventName::ReplicatorCompleted,
+            data: MessageData::ReplicatorCompleted,
+        }
+    }
+
+    /// Create a new TopicPeerEvent message.
+    pub fn topic_peer_event(data: TopicPeerEventData) -> Self {
+        Self {
+            name: EventName::TopicPeerEvent,
+            data: MessageData::TopicPeerEvent(data),
+        }
+    }
+
+    /// Get the TopicPeerEventData if this is a TopicPeerEvent message.
+    pub fn as_topic_peer_event(&self) -> Option<&TopicPeerEventData> {
+        match &self.data {
+            MessageData::TopicPeerEvent(d) => Some(d),
+            _ => None,
         }
     }
 

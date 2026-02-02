@@ -153,6 +153,13 @@ pub unsafe extern "C" fn new_node_with_p2p(
             .await
             .map_err(|e| format!("failed to start listening: {}", e))?;
 
+        // Subscribe to default GossipSub topics (matches Go's p2p.New behavior)
+        for topic in &[DefraTopic::DocSync, DefraTopic::Encryption, DefraTopic::Custom("sync-branchable".to_string())] {
+            if let Err(e) = handle.subscribe(topic.clone()).await {
+                tracing::warn!(topic = %topic, error = %e, "Failed to subscribe to default topic");
+            }
+        }
+
         // Create SyncCoordinator for processing incoming P2P sync messages
         let (coordinator, sync_events_rx) =
             SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
@@ -166,11 +173,35 @@ pub unsafe extern "C" fn new_node_with_p2p(
             blockstore.clone(),
         ));
 
-        // Task 1: Host event loop - reads HostEvents and feeds them to the coordinator
+        // Task 1: Host event loop - reads HostEvents and feeds them to the coordinator.
+        // Also publishes TopicPeerEvent to the FFI event bus for GossipSub peer joins/leaves.
         let coord_for_events = coordinator.clone();
+        let event_bus_for_host = event_bus.clone();
         let host_event_task = tokio::spawn(async move {
             let mut rx = event_rx;
             while let Some(event) = rx.recv().await {
+                // Publish TopicPeerEvent for GossipSub peer subscription changes
+                match &event {
+                    p2p::HostEvent::PeerSubscribed { peer_id, topic } => {
+                        event_bus_for_host.publish(events::Message::topic_peer_event(
+                            events::TopicPeerEventData {
+                                peer_id: peer_id.to_string(),
+                                topic: topic.clone(),
+                                event_type: "JOINED".to_string(),
+                            },
+                        ));
+                    }
+                    p2p::HostEvent::PeerUnsubscribed { peer_id, topic } => {
+                        event_bus_for_host.publish(events::Message::topic_peer_event(
+                            events::TopicPeerEventData {
+                                peer_id: peer_id.to_string(),
+                                topic: topic.clone(),
+                                event_type: "LEFT".to_string(),
+                            },
+                        ));
+                    }
+                    _ => {}
+                }
                 if let Err(e) = coord_for_events.handle_host_event(event).await {
                     tracing::error!(error = %e, "Error handling host event");
                 }
@@ -192,18 +223,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     &config,
                 )
                 .await;
+                eprintln!("[REPL-LOOP] result={:?}", &result);
                 match &result {
                     ReplicationResult::Merged {
                         cid,
                         doc_id,
                         collection_id,
                     } => {
-                        tracing::info!(
-                            cid = %cid,
-                            doc_id = %doc_id,
-                            collection_id = %collection_id,
-                            "Block merged - publishing MergeComplete event"
-                        );
+                        eprintln!("[REPL-LOOP] Publishing merge_complete cid={} doc_id={} collection={}", cid, doc_id, collection_id);
                         let mc = events::MergeCompleteData {
                             doc_id: doc_id.clone(),
                             cid: *cid,
@@ -211,6 +238,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                             by_peer: coord_for_repl.local_peer_id().to_string(),
                         };
                         event_bus_for_repl.publish(events::Message::merge_complete(mc));
+                        eprintln!("[REPL-LOOP] merge_complete published for cid={}", cid);
                     }
                     ReplicationResult::MergedButBroadcastFailed {
                         cid,
@@ -257,12 +285,15 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 if let Some(update) = msg.as_update() {
                     // Skip relay updates (already from P2P)
                     if update.is_relay {
+                        eprintln!("[BROADCAST] Skipping relay update cid={} doc_id={}", update.cid, update.doc_id);
                         continue;
                     }
                     let cid = update.cid;
                     let block = update.block.clone();
                     let doc_id = update.doc_id.clone();
                     let collection_id = update.collection_id.clone();
+
+                    eprintln!("[BROADCAST] Got local update cid={} doc_id={} collection={} block_len={}", cid, doc_id, collection_id, block.len());
 
                     // Push to replicator peers via direct PushLog.
                     coord_for_broadcast
@@ -425,9 +456,9 @@ pub extern "C" fn p2p_peer_info(node_ptr: usize) -> FfiResult {
     }
 }
 
-/// Get list of connected peers.
+/// Get list of connected peers with full multiaddrs.
 ///
-/// Returns a JSON array of peer IDs.
+/// Returns a JSON array of multiaddr strings (Go-compatible format).
 ///
 /// # Safety
 ///
@@ -444,15 +475,13 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
             };
 
             rt.block_on(async {
-                let peers = p2p
+                let peer_addrs = p2p
                     .handle
-                    .connected_peers()
+                    .peer_addresses()
                     .await
-                    .map_err(|e| format!("failed to get peers: {}", e))?;
+                    .map_err(|e| format!("failed to get peer addresses: {}", e))?;
 
-                let peer_ids: Vec<String> = peers.into_iter().map(|p| p.to_string()).collect();
-
-                serde_json::to_string(&peer_ids)
+                serde_json::to_string(&peer_addrs)
                     .map_err(|e| format!("failed to serialize peer list: {}", e))
             })
         })
@@ -508,6 +537,9 @@ pub unsafe extern "C" fn p2p_connect(
                     .dial(parsed.peer_id, vec![parsed.transport_addr])
                     .await
                     .map_err(|e| format!("failed to connect: {}", e))?;
+
+                // Store the peer's full multiaddr for ActivePeers lookups
+                p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
 
                 Ok(())
             })
@@ -586,17 +618,24 @@ pub unsafe extern "C" fn p2p_set_replicator(
                     .await
                     .map_err(|e| format!("failed to connect to replicator peer: {}", e))?;
 
+                // Store the peer's full multiaddr for ActivePeers lookups
+                p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
+
                 // Set the replicator with the effective collections
                 p2p.handle
                     .set_replicator(parsed.peer_id, effective_collections.clone())
                     .await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;
 
-                // Auto-subscribe to collection topics (Go does this implicitly)
+                // Auto-subscribe to collection topics using schema root CIDs
+                // (Go does this implicitly via SetReplicator → subscribe_collection)
                 for name in &effective_collections {
-                    let topic = DefraTopic::collection(name);
-                    if let Err(e) = p2p.handle.subscribe(topic).await {
-                        tracing::warn!(collection = %name, error = %e, "Failed to subscribe to GossipSub topic for replicator");
+                    if let Ok(Some(col)) = db.get_collection(name) {
+                        let collection_id = col.collection_id().to_string();
+                        let topic = DefraTopic::collection(&collection_id);
+                        if let Err(e) = p2p.handle.subscribe(topic).await {
+                            tracing::warn!(collection = %name, collection_id = %collection_id, error = %e, "Failed to subscribe to GossipSub topic for replicator");
+                        }
                     }
                     p2p.add_collection(name);
                 }
@@ -610,6 +649,7 @@ pub unsafe extern "C" fn p2p_set_replicator(
                 let push_db = Arc::clone(db);
                 let push_peer_id = parsed.peer_id;
                 let push_collections = effective_collections;
+                let push_event_bus = state.event_bus.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = push_existing_docs(
@@ -622,6 +662,12 @@ pub unsafe extern "C" fn p2p_set_replicator(
                     {
                         tracing::error!(error = %e, "Failed to push existing docs to replicator");
                     }
+                    // Signal that the replicator configuration is complete
+                    // (all existing docs have been pushed). The Go test framework
+                    // waits for this event before proceeding.
+                    eprintln!("[PUSH-EXISTING] Publishing ReplicatorCompleted event");
+                    push_event_bus.publish(events::Message::replicator_completed());
+                    eprintln!("[PUSH-EXISTING] ReplicatorCompleted event published");
                 });
 
                 Ok(())
@@ -767,16 +813,13 @@ async fn push_existing_docs(
                     continue;
                 }
 
-                // Await send with short timeout — data is delivered even if
-                // response times out.  We must NOT fire-and-forget here because
-                // the broadcast_task may send a subsequent Update for the same
-                // document; if that Update arrives first the receiver will have
-                // an incomplete CRDT state.
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    handle.send_two_stream_request(peer_id, request),
-                )
-                .await;
+                // Fire-and-forget: spawn each push so we don't block.
+                // Go's pushHeadsForAllDocs does the same (each push is a goroutine).
+                // The receiver's sync manager handles missing DAG links via Bitswap.
+                let push_h = handle.clone();
+                tokio::spawn(async move {
+                    let _ = push_h.send_two_stream_request(peer_id, request).await;
+                });
             }
 
             iter.close()
@@ -831,6 +874,10 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                     .delete_replicator(peer_id)
                     .await
                     .map_err(|e| format!("failed to delete replicator: {}", e))?;
+
+                // Signal that the replicator deletion is complete.
+                // The Go test framework waits for this event before proceeding.
+                state.event_bus.publish(events::Message::replicator_completed());
 
                 Ok(())
             })
@@ -958,21 +1005,22 @@ pub unsafe extern "C" fn p2p_add_collections(
             let db = &state.database;
 
             rt.block_on(async {
-                // Validate all collection names exist (atomic: all or nothing)
+                // Validate all collection names exist and collect their schema root CIDs
+                let mut name_to_id = Vec::new();
                 for name in &collections {
-                    let exists = db
-                        .has_collection(name)
-                        .map_err(|e| format!("failed to check collection: {}", e))?;
-                    if !exists {
-                        return Err("collection not found".to_string());
-                    }
+                    let col = db
+                        .get_collection(name)
+                        .map_err(|e| format!("failed to get collection: {}", e))?
+                        .ok_or_else(|| "collection not found".to_string())?;
+                    name_to_id.push((name.clone(), col.collection_id().to_string()));
                 }
 
-                for name in &collections {
-                    // Subscribe to the GossipSub topic for this collection
-                    let topic = DefraTopic::collection(name);
+                for (name, collection_id) in &name_to_id {
+                    // Subscribe to the GossipSub topic using the schema root CID
+                    // (matches Go behavior which uses col.CollectionID())
+                    let topic = DefraTopic::collection(collection_id);
                     if let Err(e) = p2p.handle.subscribe(topic).await {
-                        tracing::warn!(collection = %name, error = %e, "Failed to subscribe to GossipSub topic");
+                        tracing::warn!(collection = %name, collection_id = %collection_id, error = %e, "Failed to subscribe to GossipSub topic");
                     }
                     p2p.add_collection(name);
                 }
@@ -1029,21 +1077,21 @@ pub unsafe extern "C" fn p2p_remove_collections(
             let db = &state.database;
 
             rt.block_on(async {
-                // Validate all collection names exist (atomic: all or nothing)
+                // Validate all collection names exist and collect their schema root CIDs
+                let mut name_to_id = Vec::new();
                 for name in &collections {
-                    let exists = db
-                        .has_collection(name)
-                        .map_err(|e| format!("failed to check collection: {}", e))?;
-                    if !exists {
-                        return Err("collection not found".to_string());
-                    }
+                    let col = db
+                        .get_collection(name)
+                        .map_err(|e| format!("failed to get collection: {}", e))?
+                        .ok_or_else(|| "collection not found".to_string())?;
+                    name_to_id.push((name.clone(), col.collection_id().to_string()));
                 }
 
-                for name in &collections {
-                    // Unsubscribe from the GossipSub topic for this collection
-                    let topic = DefraTopic::collection(name);
+                for (name, collection_id) in &name_to_id {
+                    // Unsubscribe from the GossipSub topic using the schema root CID
+                    let topic = DefraTopic::collection(collection_id);
                     if let Err(e) = p2p.handle.unsubscribe(topic).await {
-                        tracing::warn!(collection = %name, error = %e, "Failed to unsubscribe from GossipSub topic");
+                        tracing::warn!(collection = %name, collection_id = %collection_id, error = %e, "Failed to unsubscribe from GossipSub topic");
                     }
                     p2p.remove_collection(name);
                 }

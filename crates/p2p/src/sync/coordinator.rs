@@ -874,16 +874,19 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         let replicators = match self.host.get_all_replicators().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!(error = %e, "Failed to get replicators for push");
+                eprintln!("[PUSH-REPLICATORS] Failed to get replicators: {}", e);
                 return;
             }
         };
+
+        eprintln!("[PUSH-REPLICATORS] cid={} doc_id={} collection={} replicator_count={}", cid, doc_id, collection_id, replicators.len());
 
         for rep in &replicators {
             // Check if this replicator is registered for the collection
             // Empty collections means "all collections" in Go semantics
             if !rep.collections.is_empty() && !rep.collections.contains(&collection_id.to_string())
             {
+                eprintln!("[PUSH-REPLICATORS] Skipping replicator (collection mismatch): {:?}", rep.collections);
                 continue;
             }
 
@@ -891,6 +894,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 Some(id) => id,
                 None => continue,
             };
+            eprintln!("[PUSH-REPLICATORS] Sending to peer={} cid={}", peer_id, cid);
 
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),

@@ -184,9 +184,11 @@ pub extern "C" fn create_merge_complete_subscription(
 ) -> CreateSubscriptionResult {
     // Get the event bus from the node
     let subscription = match NODES.get(node_ptr, |state| {
-        state
-            .event_bus
-            .subscribe(&[events::EventName::MergeComplete])
+        state.event_bus.subscribe(&[
+            events::EventName::MergeComplete,
+            events::EventName::ReplicatorCompleted,
+            events::EventName::TopicPeerEvent,
+        ])
     }) {
         Some(sub) => sub,
         None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
@@ -321,11 +323,32 @@ fn message_to_json(message: &events::Message) -> String {
         .to_string();
     }
 
+    // Check if this is a ReplicatorCompleted event
+    if message.name == events::EventName::ReplicatorCompleted {
+        return serde_json::json!({
+            "type": "replicator_completed"
+        })
+        .to_string();
+    }
+
+    // Check if this is a TopicPeerEvent
+    if let Some(tpe) = message.as_topic_peer_event() {
+        return serde_json::json!({
+            "type": "topic_peer_event",
+            "peer_id": tpe.peer_id,
+            "topic": tpe.topic,
+            "event_type": tpe.event_type
+        })
+        .to_string();
+    }
+
     // Signal event without data
     let event_type = match message.name {
         events::EventName::Merge => "merge",
         events::EventName::MergeComplete => "merge_complete",
         events::EventName::Update => "update",
+        events::EventName::ReplicatorCompleted => "replicator_completed",
+        events::EventName::TopicPeerEvent => "topic_peer_event",
         events::EventName::WildCard => "wildcard",
     };
     serde_json::json!({
