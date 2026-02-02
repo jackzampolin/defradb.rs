@@ -621,9 +621,21 @@ pub unsafe extern "C" fn p2p_set_replicator(
                 // Store the peer's full multiaddr for ActivePeers lookups
                 p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
 
-                // Set the replicator with the effective collections
+                // Map collection names → CIDs for the replicator registry.
+                // The replicator registry compares against Update event collection IDs
+                // (which are CIDs), so we must store CIDs, not names.
+                let mut collection_cids = Vec::new();
+                for name in &effective_collections {
+                    if let Ok(Some(col)) = db.get_collection(name) {
+                        collection_cids.push(col.collection_id().to_string());
+                    } else {
+                        return Err(format!("collection '{}' not found", name));
+                    }
+                }
+
+                // Set the replicator with collection CIDs (not names)
                 p2p.handle
-                    .set_replicator(parsed.peer_id, effective_collections.clone())
+                    .set_replicator(parsed.peer_id, collection_cids)
                     .await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;
 
@@ -801,7 +813,7 @@ async fn push_existing_docs(
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
                     head_cid.to_bytes(),
-                    col_name.clone(),
+                    collection.collection_id().to_string(),
                     local_peer_id.to_string(),
                     block_data,
                 );

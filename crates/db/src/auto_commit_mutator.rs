@@ -375,7 +375,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         let update = Update::new(
                             doc_id.to_string(),
                             cid,
-                            collection.name().to_string(),
+                            collection.collection_id().to_string(),
                             block,
                             false, // is_retry
                             false, // is_relay (local mutation)
