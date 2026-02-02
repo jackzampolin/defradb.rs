@@ -232,12 +232,30 @@ fn build_collection_type(
         }),
     ));
 
-    // _group field (no args in Go)
+    // _group field with args sorted alphabetically
+    let group_filter = format!("{}FilterArg", coll_name);
+    let group_order = format!("{}OrderArg", coll_name);
+    let group_field_enum = format!("{}Field", coll_name);
     named_fields.push((
         "_group".to_string(),
         Field::new("_group", TypeRef::named_list(coll_name), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-        }),
+        })
+        .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
+        .argument(InputValue::new(
+            "filter",
+            TypeRef::named(&group_filter),
+        ))
+        .argument(InputValue::new(
+            "groupBy",
+            TypeRef::named_nn_list(&group_field_enum),
+        ))
+        .argument(InputValue::new("limit", TypeRef::named("Int")))
+        .argument(InputValue::new("offset", TypeRef::named("Int")))
+        .argument(InputValue::new(
+            "order",
+            TypeRef::named_list(&group_order),
+        )),
     ));
 
     // _version field
@@ -524,6 +542,20 @@ fn build_filter_input_type(
     let type_name = format!("{}FilterArg", collection.name);
     let mut fields: Vec<(String, InputValue)> = Vec::new();
 
+    // Collect relation backing field names (e.g., `_authorID` for a `author` relation field)
+    // These fields store foreign keys and should use IDOperatorBlock in filters
+    let relation_backing_fields: std::collections::HashSet<String> = collection
+        .fields
+        .iter()
+        .filter_map(|f| {
+            if f.kind.is_relation() {
+                Some(format!("_{}ID", f.name))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // Add logical operators and _docID
     fields.push((
         "_alias".to_string(),
@@ -551,7 +583,12 @@ fn build_filter_input_type(
         if field.name == "_docID" {
             continue;
         }
-        let filter_type = get_filter_type_for_field(&field.kind, id_to_name, &collection.name);
+        // Relation backing fields (e.g., _authorID) use IDOperatorBlock
+        let filter_type = if relation_backing_fields.contains(&field.name) {
+            "IDOperatorBlock".to_string()
+        } else {
+            get_filter_type_for_field(&field.kind, id_to_name, &collection.name)
+        };
         fields.push((
             field.name.clone(),
             InputValue::new(&field.name, TypeRef::named(&filter_type)),
@@ -604,22 +641,32 @@ fn build_order_input_type(
 }
 
 /// Build Field enum for a collection (e.g., UserField).
+/// Go includes system fields: _deleted, _docID, _group, _version
 fn build_field_enum(collection: &CollectionVersion) -> Enum {
     let type_name = format!("{}Field", collection.name);
-    let mut enum_type = Enum::new(&type_name);
+    let mut items: Vec<String> = Vec::new();
 
-    // Add _docID explicitly
-    enum_type = enum_type.item(EnumItem::new("_docID"));
+    // System fields that Go always includes
+    items.push("_deleted".to_string());
+    items.push("_docID".to_string());
+    items.push("_group".to_string());
+    items.push("_version".to_string());
 
-    // Add enum values for each field
+    // User-defined fields
     for field in &collection.fields {
-        // Skip _docID since we add it explicitly above
         if field.name == "_docID" {
             continue;
         }
-        enum_type = enum_type.item(EnumItem::new(&field.name));
+        items.push(field.name.clone());
     }
 
+    // Sort alphabetically to match Go
+    items.sort();
+
+    let mut enum_type = Enum::new(&type_name);
+    for item in items {
+        enum_type = enum_type.item(EnumItem::new(&item));
+    }
     enum_type
 }
 
@@ -827,15 +874,15 @@ fn get_filter_type_for_field(
 ) -> String {
     match kind {
         FieldKind::Scalar(scalar) => match scalar {
-            ScalarKind::String | ScalarKind::DocID => "StringOperatorBlock".to_string(),
+            ScalarKind::DocID => "IDOperatorBlock".to_string(),
+            ScalarKind::String => "StringOperatorBlock".to_string(),
             ScalarKind::Int => "IntOperatorBlock".to_string(),
             ScalarKind::Float64 => "Float64OperatorBlock".to_string(),
             ScalarKind::Float32 => "Float32OperatorBlock".to_string(),
             ScalarKind::Bool => "BooleanOperatorBlock".to_string(),
             ScalarKind::DateTime => "DateTimeOperatorBlock".to_string(),
-            ScalarKind::Blob | ScalarKind::Json | ScalarKind::None => {
-                "StringOperatorBlock".to_string()
-            }
+            ScalarKind::Json => "JSON".to_string(),
+            ScalarKind::Blob | ScalarKind::None => "StringOperatorBlock".to_string(),
         },
         FieldKind::ScalarArray(arr) => match arr {
             ScalarArrayKind::BoolArray => "NotNullBooleanListOperatorBlock".to_string(),
