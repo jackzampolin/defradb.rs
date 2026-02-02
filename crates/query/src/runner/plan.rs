@@ -522,12 +522,20 @@ pub(crate) fn build_plan(
                             order: nested.order_by.clone(),
                             group_by: nested.group_by.as_ref().map(|gb| gb.fields.clone()),
                         };
-                        // Check nested _group for inner groupBy
+                        // Check nested _group for inner groupBy - merge with outer
                         for inner_field in &nested.fields {
                             if let Requestable::Select(inner_nested) = inner_field {
                                 if inner_nested.field.name == "_group" {
                                     if let Some(ref inner_gb) = inner_nested.group_by {
-                                        meta.group_by = Some(inner_gb.fields.clone());
+                                        let mut merged = inner_gb.fields.clone();
+                                        if let Some(ref outer_fields) = meta.group_by {
+                                            for field in outer_fields {
+                                                if !merged.contains(field) {
+                                                    merged.push(field.clone());
+                                                }
+                                            }
+                                        }
+                                        meta.group_by = Some(merged);
                                     }
                                     break;
                                 }
@@ -711,11 +719,19 @@ fn add_aggregate_nodes(
                         node = node.with_limit(limit);
                     }
                     // Add sources for explain output
-                    let sources = vec![CountSourceMeta {
-                        field_name: select.collection_name.clone(),
-                        filter: target_filter.clone(),
-                        is_inline_array: false,
-                    }];
+                    let sources: Vec<CountSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| CountSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
                     node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
@@ -727,17 +743,20 @@ fn add_aggregate_nodes(
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
-                    let child_field = if !agg.targets.is_empty() {
-                        agg.targets[0].field_name.clone()
-                    } else {
-                        None
-                    };
-                    let sources = vec![SumSourceMeta {
-                        field_name: select.collection_name.clone(),
-                        child_field_name: child_field,
-                        filter: target_filter.clone(),
-                        is_inline_array: false,
-                    }];
+                    let sources: Vec<SumSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| SumSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            child_field_name: target.field_name.clone(),
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
                     node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
@@ -759,17 +778,20 @@ fn add_aggregate_nodes(
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
-                    let child_field = if !agg.targets.is_empty() {
-                        agg.targets[0].field_name.clone()
-                    } else {
-                        None
-                    };
-                    let sources = vec![MinSourceMeta {
-                        field_name: select.collection_name.clone(),
-                        child_field_name: child_field,
-                        filter: target_filter.clone(),
-                        is_inline_array: false,
-                    }];
+                    let sources: Vec<MinSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| MinSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            child_field_name: target.field_name.clone(),
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
                     node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
@@ -781,17 +803,20 @@ fn add_aggregate_nodes(
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
-                    let child_field = if !agg.targets.is_empty() {
-                        agg.targets[0].field_name.clone()
-                    } else {
-                        None
-                    };
-                    let sources = vec![MaxSourceMeta {
-                        field_name: select.collection_name.clone(),
-                        child_field_name: child_field,
-                        filter: target_filter.clone(),
-                        is_inline_array: false,
-                    }];
+                    let sources: Vec<MaxSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| MaxSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            child_field_name: target.field_name.clone(),
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
                     node = node.with_sources(sources);
                     plan = Box::new(node);
                 }

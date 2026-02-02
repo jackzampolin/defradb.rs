@@ -261,16 +261,115 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             MutationType::Upsert => "upsertNode",
         };
 
-        let collection = self
-            .collection_provider
-            .get_collection(&mutation.collection_name)
-            .await?
-            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+        // Execute the mutation first so that the subsequent select sees the data.
+        // This mirrors Go's behavior where execute explain actually performs the
+        // mutation before collecting metrics from the inner select plan.
+        if let Some(ref mutator) = self.mutator {
+            use chrono::{FixedOffset, Utc};
+            let utc_offset = FixedOffset::east_opt(0).unwrap();
+            let request_time = Utc::now().with_timezone(&utc_offset);
 
-        // Build select for querying results
+            let collection = self.get_collection(&mutation.collection_name).await?;
+            let mapping = self.build_mutation_mapping(mutation)?;
+            let resolved_doc_ids = self.resolve_filter_to_doc_ids(mutation).await?;
+
+            let mut plan: Box<dyn crate::planner::PlanNode> = match mutation.mutation_type {
+                MutationType::Create => {
+                    let inputs = self.build_create_inputs(mutation)?;
+                    Box::new(
+                        crate::plan::CreateNode::new(
+                            &mutation.collection_name,
+                            mutator.clone(),
+                            mapping.clone(),
+                        )
+                        .with_collection(collection.clone())
+                        .with_request_time(request_time)
+                        .with_inputs(inputs),
+                    )
+                }
+                MutationType::Update => {
+                    let input = self.build_update_input(mutation)?;
+                    let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
+                    let mut node = crate::plan::UpdateNode::new(
+                        &mutation.collection_name,
+                        mutator.clone(),
+                        fetcher,
+                        mapping.clone(),
+                    )
+                    .with_collection(collection.clone())
+                    .with_request_time(request_time)
+                    .with_input(input);
+
+                    if let Some(ref doc_ids) = resolved_doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    } else if let Some(ref doc_ids) = mutation.doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    }
+                    if let Some(ref filter) = mutation.filter {
+                        node = node.with_filter(filter.clone());
+                    }
+                    Box::new(node)
+                }
+                MutationType::Delete => {
+                    let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
+                    let mut node = crate::plan::DeleteNode::new(
+                        &mutation.collection_name,
+                        mutator.clone(),
+                        fetcher,
+                        mapping.clone(),
+                    );
+
+                    if let Some(ref doc_ids) = resolved_doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    } else if let Some(ref doc_ids) = mutation.doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    }
+                    if mutation.filter.is_some()
+                        && resolved_doc_ids.is_none()
+                        && mutation.doc_ids.is_none()
+                    {
+                        node = node.with_filter(mutation.filter.clone().unwrap());
+                    }
+                    Box::new(node)
+                }
+                MutationType::Upsert => {
+                    let mut node = crate::plan::UpsertNode::new(
+                        &mutation.collection_name,
+                        mutator.clone(),
+                        mapping.clone(),
+                    )
+                    .with_collection(collection.clone())
+                    .with_request_time(request_time);
+
+                    if !mutation.create_input.is_empty() {
+                        let create_input =
+                            self.build_upsert_input_from_map(&mutation.create_input[0])?;
+                        node = node.with_create_input(create_input);
+                    }
+                    if !mutation.update_input.is_empty() {
+                        let update_input =
+                            self.build_upsert_input_from_map(&mutation.update_input)?;
+                        node = node.with_update_input(update_input);
+                    }
+                    if let Some(ref doc_ids) = resolved_doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    } else if let Some(ref doc_ids) = mutation.doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    }
+                    Box::new(node)
+                }
+            };
+
+            // Execute the mutation plan (ignore results, we just need the side effects)
+            plan.init().await?;
+            plan.start().await?;
+            while plan.next().await? {}
+            plan.close().await?;
+        }
+
+        // Now query the collection to collect execution metrics
         let select = crate::mapper::Select::new(&mutation.collection_name);
 
-        // Execute the select and collect metrics
         let (select_explain, doc_count, iterations) = self
             .execute_select_with_metrics(&select, caller_identity)
             .await?;
@@ -610,8 +709,32 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .any(|f| matches!(f, Requestable::Select(_)));
 
-        if can_use_index || has_relation_aggregates || has_nested {
-            // Use Planner path for index-based queries or relation aggregates
+        let filter_has_relations = select
+            .filter
+            .as_ref()
+            .map(|f| f.has_relation_filters())
+            .unwrap_or(false);
+
+        let order_has_relations = select
+            .order_by
+            .as_ref()
+            .map(|o| o.has_relation_order())
+            .unwrap_or(false);
+
+        let has_similarity = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Similarity(_)));
+
+        if can_use_index
+            || has_relation_aggregates
+            || has_nested
+            || filter_has_relations
+            || order_has_relations
+            || has_similarity
+        {
+            // Use Planner path for index-based queries, relation aggregates,
+            // relation filters/ordering, or similarity
             let fetcher_arc = FetcherWrapper::new(fetcher);
             let collections_map = self.collections_map().await?;
             let collections: Vec<CollectionVersion> =
@@ -845,11 +968,55 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
+        // Check if the filter references relation fields (e.g., {author: {verified: true}})
+        let filter_has_relations = select
+            .filter
+            .as_ref()
+            .map(|f| f.has_relation_filters())
+            .unwrap_or(false);
+
+        // Check if the order references relation fields (e.g., {author: {age: DESC}})
+        let order_has_relations = select
+            .order_by
+            .as_ref()
+            .map(|o| o.has_relation_order())
+            .unwrap_or(false);
+
+        // Check if any similarity fields are present (require SimilarityNode in planner)
+        let has_similarity = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Similarity(_)));
+
+        // Check if any secondary relation ID fields are selected (e.g., `_authorID`)
+        let has_secondary_relation_id = select.fields.iter().any(|f| {
+            if let Requestable::Field(field) = f {
+                let field_name = &field.name;
+                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3
+                {
+                    let relation_name = &field_name[1..field_name.len() - 2];
+                    if let Some(relation_field) = collection.field_by_name(relation_name) {
+                        return relation_field.kind.is_relation() && !relation_field.is_primary;
+                    }
+                }
+            }
+            false
+        });
+
         let is_view = collection.query.is_some();
 
-        if is_view || has_nested || has_ordering_index || has_filter_index || has_relation_aggregates
+        if is_view
+            || has_nested
+            || has_ordering_index
+            || has_filter_index
+            || has_relation_aggregates
+            || filter_has_relations
+            || order_has_relations
+            || has_similarity
+            || has_secondary_relation_id
         {
-            // Use the Planner for views, nested selections, index usage, or relation aggregates
+            // Use the Planner for views, nested selections, index usage, relation aggregates,
+            // relation filters/ordering, similarity, or secondary relation IDs
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
