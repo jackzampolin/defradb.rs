@@ -57,6 +57,19 @@ impl Did {
         Self(s)
     }
 
+    /// Creates a wildcard DID representing "all actors".
+    ///
+    /// In Go DefraDB, the wildcard `"*"` is used in relationship operations
+    /// to mean "all actors." This creates a `Did` wrapping `"*"`.
+    pub fn wildcard() -> Self {
+        Self("*".to_string())
+    }
+
+    /// Returns true if this is the wildcard DID ("*").
+    pub fn is_wildcard(&self) -> bool {
+        self.0 == "*"
+    }
+
     /// Returns the DID as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0

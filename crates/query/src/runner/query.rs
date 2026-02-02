@@ -1,6 +1,6 @@
 //! Query execution methods for QueryRunner.
 
-use acp::Identity;
+use acp::{DocumentPermission, Identity};
 use document::Document;
 use identity::Did;
 use schema::CollectionVersion;
@@ -599,7 +599,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let plan_result = planner.plan_with_index_info(select)?;
             let mut plan = plan_result.plan;
 
-            // Wrap with permission filter if needed
+            // Wrap with permission filter if needed (explain path)
             if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
                 plan = Box::new(PermissionFilterNode::new(
                     plan,
@@ -657,20 +657,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             };
             let doc_count = plan_docs.len();
 
-            // Build the plan
-            let mut plan =
-                plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection)?;
+            // Build ACP filter config if collection has policy and ACP is configured
+            let acp_filter = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                Some(plan::AcpFilter {
+                    acp: acp.clone(),
+                    identity: Identity::from(caller_identity),
+                    policy_id: policy.id.clone(),
+                    resource_name: policy.resource_name.clone(),
+                })
+            } else {
+                None
+            };
 
-            // Wrap with permission filter if needed
-            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-                plan = Box::new(PermissionFilterNode::new(
-                    plan,
-                    acp.clone(),
-                    Identity::from(caller_identity),
-                    &policy.id,
-                    &policy.resource_name,
-                ));
-            }
+            // Build the plan (ACP filter is inserted inside, after Select but before aggregates)
+            let mut plan =
+                plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection, acp_filter)?;
 
             // Execute the plan and count iterations
             plan.init().await?;
@@ -861,7 +862,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = plan::build_mapping(select, collection)?;
 
         // Create an empty plan with no documents for explanation purposes
-        let plan = plan::build_plan(select, vec![], mapping, collection)?;
+        let plan = plan::build_plan(select, vec![], mapping, collection, None)?;
 
         // Get the plan explanation based on type
         let explain = match explain_type {
@@ -1263,7 +1264,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Handle top-level aggregates specially - return single value, not array
         if is_top_level_aggregate {
             return self
-                .execute_top_level_aggregate(select, fetcher, &collection)
+                .execute_top_level_aggregate(select, fetcher, &collection, caller_identity)
                 .await;
         }
 
@@ -2248,26 +2249,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             documents_to_plan_docs(&docs, &mapping)?
         };
 
-        // Build and execute the plan
-        let mut plan = plan::build_plan(select, plan_docs, mapping.clone(), collection)?;
+        // Build ACP filter config if collection has policy and ACP is configured
+        let acp_filter = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            Some(plan::AcpFilter {
+                acp: acp.clone(),
+                identity: Identity::from(identity),
+                policy_id: policy.id.clone(),
+                resource_name: policy.resource_name.clone(),
+            })
+        } else {
+            if collection.policy.is_some() && self.acp.is_none() {
+                tracing::warn!(
+                    collection = %collection.name,
+                    "Collection has ACP policy but QueryRunner has no ACP configured - ACP enforcement is DISABLED"
+                );
+            }
+            None
+        };
 
-        // Wrap with permission filter if collection has ACP policy and ACP is configured
-        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-            plan = Box::new(PermissionFilterNode::new(
-                plan,
-                acp.clone(),
-                Identity::from(identity),
-                &policy.id,
-                &policy.resource_name,
-            ));
-        } else if collection.policy.is_some() && self.acp.is_none() {
-            // Collection has an ACP policy but ACP is not configured on this runner
-            // This means ACP enforcement is disabled - all documents will be accessible
-            tracing::warn!(
-                collection = %collection.name,
-                "Collection has ACP policy but QueryRunner has no ACP configured - ACP enforcement is DISABLED"
-            );
-        }
+        // Build and execute the plan (ACP filter is inserted inside, after Select but before aggregates)
+        let mut plan = plan::build_plan(select, plan_docs, mapping.clone(), collection, acp_filter)?;
 
         // Execute the plan and collect results
         plan.init().await?;
@@ -2950,6 +2951,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         fetcher: &dyn DocFetcher,
         collection: &Arc<CollectionVersion>,
+        identity: Option<Did>,
     ) -> Result<JsonValue> {
         // Fetch all documents from the collection
         let docs = fetcher.get_all(&select.collection_name).await?;
@@ -2958,7 +2960,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = plan::build_mapping(select, collection)?;
 
         // Convert storage documents to values for aggregation
-        let plan_docs = documents_to_plan_docs(&docs, &mapping)?;
+        let mut plan_docs = documents_to_plan_docs(&docs, &mapping)?;
+
+        // Apply ACP filtering if collection has a policy and ACP is configured
+        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            let acp_identity = Identity::from(identity);
+            let mut filtered = Vec::with_capacity(plan_docs.len());
+            for doc in plan_docs {
+                if let Some(doc_id_val) = doc.get(0) {
+                    if let Some(doc_id) = doc_id_val.as_str() {
+                        let has_access = acp
+                            .check_doc_access(
+                                &acp_identity,
+                                DocumentPermission::Read,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
+                            .await
+                            .unwrap_or(false);
+                        if has_access {
+                            filtered.push(doc);
+                        }
+                    }
+                }
+            }
+            plan_docs = filtered;
+        }
 
         // For each aggregate in the select, compute its value
         // For top-level aggregates, we return a single object with aggregate results

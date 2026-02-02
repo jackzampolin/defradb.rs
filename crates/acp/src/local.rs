@@ -51,6 +51,8 @@ impl LocalDocumentACP {
     }
 
     /// Check if subject has a specific relation to the document.
+    ///
+    /// Checks both direct and wildcard ("*") entries.
     async fn has_relation(
         &self,
         subject: &Did,
@@ -58,8 +60,15 @@ impl LocalDocumentACP {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool> {
+        // Check direct relationship
         let tuple = RelationTuple::new(subject.clone(), relation, collection_id, doc_id);
-        self.store.has_tuple(&tuple).await
+        if self.store.has_tuple(&tuple).await? {
+            return Ok(true);
+        }
+        // Check wildcard relationship (target="*" means all actors)
+        let wildcard_tuple =
+            RelationTuple::new(Did::wildcard(), relation, collection_id, doc_id);
+        self.store.has_tuple(&wildcard_tuple).await
     }
 }
 
@@ -133,9 +142,34 @@ impl DocumentACP for LocalDocumentACP {
         }
 
         // Document is registered, need authenticated identity to access
+        // (unless a wildcard "*" grant exists for the requested permission)
         let did = match identity {
             Identity::Authenticated(did) => did,
-            Identity::Anonymous => return Ok(false), // Anonymous cannot access registered docs
+            Identity::Anonymous => {
+                // Check if wildcard grants exist for the requested permission
+                let wildcard = Did::wildcard();
+                let granted = match permission {
+                    DocumentPermission::Read => {
+                        self.has_relation(&wildcard, resource_name, doc_id, READER_RELATION)
+                            .await?
+                            || self
+                                .has_relation(&wildcard, resource_name, doc_id, UPDATER_RELATION)
+                                .await?
+                            || self
+                                .has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
+                                .await?
+                    }
+                    DocumentPermission::Update => {
+                        self.has_relation(&wildcard, resource_name, doc_id, UPDATER_RELATION)
+                            .await?
+                    }
+                    DocumentPermission::Delete => {
+                        self.has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
+                            .await?
+                    }
+                };
+                return Ok(granted);
+            }
         };
 
         // Owner always has all permissions (DPI rule: every permission starts with owner)
@@ -201,12 +235,25 @@ impl DocumentACP for LocalDocumentACP {
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        managing_relations: &[String],
     ) -> Result<bool> {
-        // Only owner can add relationships
+        // Owner or manager with a managing relation can add relationships
         if !self.is_owner(requestor, collection_id, doc_id).await? {
-            return Err(Error::NotOwner {
-                operation: "add actor relationship".to_string(),
-            });
+            let mut is_manager = false;
+            for mgr_relation in managing_relations {
+                if self
+                    .has_relation(requestor, collection_id, doc_id, mgr_relation)
+                    .await?
+                {
+                    is_manager = true;
+                    break;
+                }
+            }
+            if !is_manager {
+                return Err(Error::NotOwner {
+                    operation: "add actor relationship".to_string(),
+                });
+            }
         }
 
         // Cannot add owner relation (it's immutable)
@@ -254,12 +301,25 @@ impl DocumentACP for LocalDocumentACP {
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        managing_relations: &[String],
     ) -> Result<bool> {
-        // Only owner can delete relationships
+        // Owner or manager with a managing relation can delete relationships
         if !self.is_owner(requestor, collection_id, doc_id).await? {
-            return Err(Error::NotOwner {
-                operation: "delete actor relationship".to_string(),
-            });
+            let mut is_manager = false;
+            for mgr_relation in managing_relations {
+                if self
+                    .has_relation(requestor, collection_id, doc_id, mgr_relation)
+                    .await?
+                {
+                    is_manager = true;
+                    break;
+                }
+            }
+            if !is_manager {
+                return Err(Error::NotOwner {
+                    operation: "delete actor relationship".to_string(),
+                });
+            }
         }
 
         // Cannot delete owner relation (it's immutable)

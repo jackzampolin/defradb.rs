@@ -377,6 +377,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        _managing_relations: &[String],
     ) -> Result<bool> {
         // In DPI model, collection_id serves as both policy_id and resource_name
         // Ensure the policy exists before operating on relationships
@@ -465,6 +466,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        _managing_relations: &[String],
     ) -> Result<bool> {
         // In DPI model, collection_id serves as both policy_id and resource_name
         // Ensure the policy exists before operating on relationships
@@ -690,7 +692,7 @@ mod tests {
 
         // Add reader relationship
         let added = acp
-            .add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader")
+            .add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader", &[])
             .await
             .unwrap();
         assert!(added);
@@ -735,7 +737,7 @@ mod tests {
             .unwrap();
 
         // Add updater relationship
-        acp.add_actor_relationship(&owner, &updater, "collection1", "doc1", "updater")
+        acp.add_actor_relationship(&owner, &updater, "collection1", "doc1", "updater", &[])
             .await
             .unwrap();
 
@@ -780,7 +782,7 @@ mod tests {
 
         // Non-owner should not be able to add relationships
         let result = acp
-            .add_actor_relationship(&non_owner, &owner, "collection1", "doc1", "reader")
+            .add_actor_relationship(&non_owner, &owner, "collection1", "doc1", "reader", &[])
             .await;
 
         assert!(matches!(result, Err(Error::NotOwner { .. })));
@@ -799,13 +801,13 @@ mod tests {
             .unwrap();
 
         // Add reader relationship
-        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader")
+        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader", &[])
             .await
             .unwrap();
 
         // Delete relationship
         let deleted = acp
-            .delete_actor_relationship(&owner, &reader, "collection1", "doc1", "reader")
+            .delete_actor_relationship(&owner, &reader, "collection1", "doc1", "reader", &[])
             .await
             .unwrap();
         assert!(deleted);
@@ -861,7 +863,7 @@ mod tests {
             .unwrap();
 
         let result = acp
-            .add_actor_relationship(&owner, &target, "collection1", "doc1", "owner")
+            .add_actor_relationship(&owner, &target, "collection1", "doc1", "owner", &[])
             .await;
 
         assert!(matches!(result, Err(Error::InvalidRelation(_))));
@@ -880,7 +882,7 @@ mod tests {
             .unwrap();
 
         let result = acp
-            .add_actor_relationship(&owner, &target, "collection1", "doc1", "invalid_relation")
+            .add_actor_relationship(&owner, &target, "collection1", "doc1", "invalid_relation", &[])
             .await;
 
         assert!(matches!(result, Err(Error::InvalidRelation(_))));
@@ -909,13 +911,13 @@ mod tests {
             .unwrap();
 
         // Owner adds admin
-        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin", &[])
             .await
             .unwrap();
 
         // Admin should be able to add reader (admin manages reader)
         let added = acp
-            .add_actor_relationship(&admin, &reader, "collection1", "doc1", "reader")
+            .add_actor_relationship(&admin, &reader, "collection1", "doc1", "reader", &[])
             .await
             .unwrap();
         assert!(added);
@@ -949,18 +951,18 @@ mod tests {
             .unwrap();
 
         // Owner adds admin
-        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin", &[])
             .await
             .unwrap();
 
         // Owner adds reader
-        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader")
+        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader", &[])
             .await
             .unwrap();
 
         // Admin should be able to delete reader (admin manages reader)
         let deleted = acp
-            .delete_actor_relationship(&admin, &reader, "collection1", "doc1", "reader")
+            .delete_actor_relationship(&admin, &reader, "collection1", "doc1", "reader", &[])
             .await
             .unwrap();
         assert!(deleted);
@@ -994,13 +996,13 @@ mod tests {
             .unwrap();
 
         // Owner adds admin
-        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin", &[])
             .await
             .unwrap();
 
         // Admin should NOT be able to add another admin (admin doesn't manage admin)
         let result = acp
-            .add_actor_relationship(&admin, &other, "collection1", "doc1", "admin")
+            .add_actor_relationship(&admin, &other, "collection1", "doc1", "admin", &[])
             .await;
         assert!(matches!(result, Err(Error::NotOwner { .. })));
     }
@@ -1020,13 +1022,13 @@ mod tests {
             .unwrap();
 
         // Owner adds reader
-        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader")
+        acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader", &[])
             .await
             .unwrap();
 
         // Reader should NOT be able to add another reader (reader doesn't manage anything)
         let result = acp
-            .add_actor_relationship(&reader, &other, "collection1", "doc1", "reader")
+            .add_actor_relationship(&reader, &other, "collection1", "doc1", "reader", &[])
             .await;
         assert!(matches!(result, Err(Error::NotOwner { .. })));
     }
@@ -1045,7 +1047,7 @@ mod tests {
             .unwrap();
 
         // Owner adds admin
-        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin", &[])
             .await
             .unwrap();
 
@@ -1106,18 +1108,18 @@ mod tests {
             .unwrap();
 
         // Owner adds admin
-        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+        acp.add_actor_relationship(&owner, &admin, "collection1", "doc1", "admin", &[])
             .await
             .unwrap();
 
         // Owner revokes admin
-        acp.delete_actor_relationship(&owner, &admin, "collection1", "doc1", "admin")
+        acp.delete_actor_relationship(&owner, &admin, "collection1", "doc1", "admin", &[])
             .await
             .unwrap();
 
         // Former admin should NOT be able to add reader anymore
         let result = acp
-            .add_actor_relationship(&admin, &reader, "collection1", "doc1", "reader")
+            .add_actor_relationship(&admin, &reader, "collection1", "doc1", "reader", &[])
             .await;
         assert!(matches!(result, Err(Error::NotOwner { .. })));
     }

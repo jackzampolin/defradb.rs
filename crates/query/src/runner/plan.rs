@@ -1,5 +1,8 @@
 //! Plan building utilities for QueryRunner.
 
+use std::sync::Arc;
+
+use acp::{DocumentACP, Identity};
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 
@@ -8,9 +11,17 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Requestable, Select};
 use crate::plan::{
     AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, LimitNode,
-    MaxNode, MinNode, OrderByNode, ScanNode, SelectNode, SumNode,
+    MaxNode, MinNode, OrderByNode, PermissionFilterNode, ScanNode, SelectNode, SumNode,
 };
 use crate::planner::{Doc, PlanNode};
+
+/// ACP filter configuration for inserting PermissionFilterNode into plan trees.
+pub(crate) struct AcpFilter {
+    pub acp: Arc<dyn DocumentACP>,
+    pub identity: Identity,
+    pub policy_id: String,
+    pub resource_name: String,
+}
 
 /// Validate that the select doesn't use unsupported features.
 pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -> Result<()> {
@@ -226,10 +237,26 @@ pub(crate) fn build_mapping(
 ) -> Result<DocumentMapping> {
     let mut mapping = DocumentMapping::new();
 
-    // Add requested fields and aggregates
+    // ALWAYS reserve index 0 for _docID (required for Doc::doc_id() to work).
+    // Only add a render key if _docID was explicitly requested in the query.
+    mapping.add(0, "_docID");
+    for requestable in &select.fields {
+        if let Requestable::Field(field) = requestable {
+            if field.name == "_docID" {
+                mapping.add_render_key(0, field.output_name());
+                break;
+            }
+        }
+    }
+
+    // Add requested fields and aggregates (starting from index 1)
     for requestable in &select.fields {
         match requestable {
             Requestable::Field(field) => {
+                // Skip _docID (already handled at index 0)
+                if field.name == "_docID" {
+                    continue;
+                }
                 // Handle __typename for GraphQL introspection
                 if field.name == "__typename" {
                     mapping.set_type_name(&select.collection_name);
@@ -340,11 +367,12 @@ pub(crate) fn build_mapping(
         }
     }
 
-    // If no fields specified, add all from collection
-    if mapping.next_index() == 0 {
-        for (i, field) in collection.fields.iter().enumerate() {
-            mapping.add(i, &field.name);
-            mapping.add_render_key(i, &field.name);
+    // If no fields specified (only _docID at index 0), add all from collection
+    if mapping.next_index() == 1 {
+        for field in &collection.fields {
+            let index = mapping.next_index();
+            mapping.add(index, &field.name);
+            mapping.add_render_key(index, &field.name);
         }
     }
 
@@ -352,11 +380,16 @@ pub(crate) fn build_mapping(
 }
 
 /// Build a plan tree from a Select operation and documents.
+///
+/// If `acp_filter` is provided, a PermissionFilterNode is inserted after SelectNode
+/// but before any OrderBy/Limit/Aggregate nodes. This ensures aggregates operate
+/// on ACP-filtered documents rather than the full set.
 pub(crate) fn build_plan(
     select: &Select,
     docs: Vec<Doc>,
     mapping: DocumentMapping,
     collection: &CollectionVersion,
+    acp_filter: Option<AcpFilter>,
 ) -> Result<Box<dyn PlanNode>> {
     // Create ScanNode with preloaded documents, filter, and docIDs
     let mut scan = ScanNode::new(collection.clone(), mapping.clone())
@@ -397,6 +430,18 @@ pub(crate) fn build_plan(
         select_node = select_node.with_doc_ids(doc_ids.clone());
     }
     plan = Box::new(select_node);
+
+    // Insert ACP permission filter after Select, before OrderBy/Limit/Aggregates.
+    // This ensures aggregates (count, average, etc.) operate on filtered documents.
+    if let Some(acf) = acp_filter {
+        plan = Box::new(PermissionFilterNode::new(
+            plan,
+            acf.acp,
+            acf.identity,
+            acf.policy_id,
+            acf.resource_name,
+        ));
+    }
 
     // Check if we have GROUP BY
     let has_group_by = select.group_by.is_some();

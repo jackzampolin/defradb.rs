@@ -568,7 +568,13 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         }
     };
 
-    // Validate relation against policy definition (matches Go behavior)
+    // Owner relation is immutable - cannot be added or removed
+    if relation_str == "owner" {
+        return FfiResult::error("OPERATION_FORBIDDEN: cannot add owner relation");
+    }
+
+    // Validate relation against policy definition and resolve managing relations
+    let mut managing_relations: Vec<String> = Vec::new();
     if let Some(policy_yaml) = policy_store.get_policy(&policy_id) {
         if let Ok(parsed) = crate::policy_yaml::parse_policy_yaml(&policy_yaml) {
             if let Some(resource) = parsed.find_resource(&resource_name) {
@@ -578,6 +584,11 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                         relation_str, resource_name
                     ));
                 }
+                managing_relations = resource
+                    .get_managers_for_relation(&relation_str)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
             }
         }
     }
@@ -585,8 +596,12 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
-        let target = identity::Did::new(&target_str)
-            .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
+        let target = if target_str == "*" {
+            identity::Did::wildcard()
+        } else {
+            identity::Did::new(&target_str)
+                .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?
+        };
 
         let added = document_acp
             .add_actor_relationship(
@@ -595,6 +610,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 &resource_name,
                 &doc_id_str,
                 &relation_str,
+                &managing_relations,
             )
             .await
             .map_err(|e| format!("failed to add DAC actor relationship: {}", e))?;
@@ -703,7 +719,13 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
         }
     };
 
-    // Validate relation against policy definition (matches Go behavior)
+    // Owner relation is immutable - cannot be added or removed
+    if relation_str == "owner" {
+        return FfiResult::error("OPERATION_FORBIDDEN: cannot delete owner relation");
+    }
+
+    // Validate relation against policy definition and resolve managing relations
+    let mut managing_relations: Vec<String> = Vec::new();
     if let Some(policy_yaml) = policy_store.get_policy(&policy_id) {
         if let Ok(parsed) = crate::policy_yaml::parse_policy_yaml(&policy_yaml) {
             if let Some(resource) = parsed.find_resource(&resource_name) {
@@ -713,6 +735,11 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
                         relation_str, resource_name
                     ));
                 }
+                managing_relations = resource
+                    .get_managers_for_relation(&relation_str)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
             }
         }
     }
@@ -720,8 +747,12 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
     let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
             .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
-        let target = identity::Did::new(&target_str)
-            .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?;
+        let target = if target_str == "*" {
+            identity::Did::wildcard()
+        } else {
+            identity::Did::new(&target_str)
+                .map_err(|e| format!("invalid target DID '{}': {}", target_str, e))?
+        };
 
         let deleted = document_acp
             .delete_actor_relationship(
@@ -730,6 +761,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
                 &resource_name,
                 &doc_id_str,
                 &relation_str,
+                &managing_relations,
             )
             .await
             .map_err(|e| format!("failed to delete DAC actor relationship: {}", e))?;

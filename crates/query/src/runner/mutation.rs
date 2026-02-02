@@ -353,10 +353,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let has_acp = self.acp.is_some() && collection.policy.is_some();
         let map_doc_not_found = |e: QueryError| -> QueryError {
             if has_acp {
-                if let QueryError::DocumentNotFound(_) = &e {
-                    return QueryError::document_not_found(
-                        "document not found or not authorized to access",
-                    );
+                match &e {
+                    QueryError::DocumentNotFound(_) => {
+                        return QueryError::document_not_found(
+                            "document not found or not authorized to access",
+                        );
+                    }
+                    QueryError::Execution(msg) if msg.contains("document not found:") => {
+                        return QueryError::document_not_found(
+                            "document not found or not authorized to access",
+                        );
+                    }
+                    _ => {}
                 }
             }
             e

@@ -33,6 +33,8 @@ pub struct PolicyPermission {
 #[derive(Deserialize)]
 pub struct PolicyRelation {
     pub name: String,
+    #[serde(default)]
+    pub manages: Vec<String>,
 }
 
 impl ParsedPolicy {
@@ -48,6 +50,18 @@ impl PolicyResource {
 
     pub fn has_relation(&self, name: &str) -> bool {
         self.relations.iter().any(|r| r.name == name)
+    }
+
+    /// Get relation names that manage the given relation.
+    ///
+    /// For example, if "admin" has `manages: [reader]`, then
+    /// `get_managers_for_relation("reader")` returns `["admin"]`.
+    pub fn get_managers_for_relation(&self, relation: &str) -> Vec<&str> {
+        self.relations
+            .iter()
+            .filter(|r| r.manages.iter().any(|m| m == relation))
+            .map(|r| r.name.as_str())
+            .collect()
     }
 }
 
