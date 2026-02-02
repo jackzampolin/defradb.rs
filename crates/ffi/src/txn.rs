@@ -6,6 +6,8 @@
 use std::ffi::c_char;
 
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
+use crate::query::nac_permission_for_query;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult, NewTxnResult};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -175,12 +177,17 @@ pub unsafe extern "C" fn exec_request_in_txn(
         None => return FfiResult::error("txn_id is null"),
     };
 
-    let identity_str = c_str_to_string(identity_did);
     let query_str = match c_str_to_string(request_query) {
         Some(s) => s,
         None => return FfiResult::error("request_query is null"),
     };
 
+    let permission = nac_permission_for_query(&query_str);
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, permission) {
+        return e;
+    }
+
+    let identity_str = c_str_to_string(identity_did);
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
 
@@ -254,7 +261,7 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type TxnTest { value: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
 
         // Begin transaction
@@ -300,7 +307,7 @@ mod tests {
         let node = result.node_ptr;
 
         let sdl = CString::new("type RollbackTest { value: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
 
         // Begin transaction
@@ -359,7 +366,7 @@ mod tests {
         let node = result.node_ptr;
 
         let sdl = CString::new("type ReadOnlyTest { value: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
 
         // Begin readonly transaction

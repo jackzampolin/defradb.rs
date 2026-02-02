@@ -677,7 +677,7 @@ mod tests {
         let node = result.node_ptr;
 
         let sdl = CString::new("type User { name: String, age: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0, "add_schema failed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -815,14 +815,14 @@ mod tests {
 
         // Add two schemas
         let sdl = CString::new("type User { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         let sdl2 = CString::new("type Address { city: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl2.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl2.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };

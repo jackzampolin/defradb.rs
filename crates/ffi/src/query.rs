@@ -5,10 +5,24 @@
 
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
+
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
+
+/// Determine NAC permission based on query content.
+/// Mutations require DocumentUpdate, queries require DocumentRead.
+pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
+    let trimmed = query_str.trim_start();
+    if trimmed.starts_with("mutation") {
+        NodePermission::DocumentUpdate
+    } else {
+        NodePermission::DocumentRead
+    }
+}
 
 /// Execute a GraphQL query or mutation.
 ///
@@ -41,11 +55,17 @@ pub unsafe extern "C" fn exec_request(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    let identity_str = c_str_to_string(identity_did);
     let query_str = match c_str_to_string(request_query) {
         Some(s) => s,
         None => return FfiResult::error("request_query is null"),
     };
+
+    let permission = nac_permission_for_query(&query_str);
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, permission) {
+        return e;
+    }
+
+    let identity_str = c_str_to_string(identity_did);
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
 
@@ -117,7 +137,7 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type User { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
 
         // Query (should return empty array)
@@ -146,7 +166,7 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type User { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
 
         // Create a user
@@ -227,7 +247,7 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type User { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
 
         // Query with invalid JSON variables should return error

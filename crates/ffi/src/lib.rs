@@ -39,6 +39,7 @@ pub mod collection;
 pub mod document;
 pub mod index;
 pub mod lens;
+pub mod nac_check;
 pub mod node;
 pub mod p2p;
 mod policy_yaml;
@@ -167,14 +168,14 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type Person { name: String, age: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0, "add_schema failed");
         if !result.value.is_null() {
             unsafe { defra_free_string(result.value) };
         }
 
         // Get collections
-        let result = get_collections(node);
+        let result = unsafe { get_collections(node, ptr::null()) };
         assert_eq!(result.status, 0, "get_collections failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Person"), "should contain Person collection");

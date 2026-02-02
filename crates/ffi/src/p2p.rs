@@ -8,7 +8,10 @@
 use std::ffi::c_char;
 use std::sync::Arc;
 
+use acp::nac::NodePermission;
+
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::state::{NodeState, P2PState, PolicyStore, NODES};
 use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -429,8 +432,16 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
 ///
 /// `addr` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_connect(node_ptr: usize, addr: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn p2p_connect(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    addr: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pPeerConnect) {
+        return e;
+    }
 
     let addr_str = match c_str_to_string(addr) {
         Some(s) => s,
@@ -480,10 +491,15 @@ pub unsafe extern "C" fn p2p_connect(node_ptr: usize, addr: *const c_char) -> Ff
 #[no_mangle]
 pub unsafe extern "C" fn p2p_set_replicator(
     node_ptr: usize,
+    identity_did: *const c_char,
     peer_addr: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pReplicatorCreate) {
+        return e;
+    }
 
     let addr_str = match c_str_to_string(peer_addr) {
         Some(s) => s,
@@ -542,9 +558,14 @@ pub unsafe extern "C" fn p2p_set_replicator(
 #[no_mangle]
 pub unsafe extern "C" fn p2p_delete_replicator(
     node_ptr: usize,
+    identity_did: *const c_char,
     peer_id_str: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pReplicatorDelete) {
+        return e;
+    }
 
     let peer_str = match c_str_to_string(peer_id_str) {
         Some(s) => s,
@@ -597,8 +618,15 @@ pub unsafe extern "C" fn p2p_delete_replicator(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub extern "C" fn p2p_get_all_replicators(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn p2p_get_all_replicators(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pReplicatorList) {
+        return e;
+    }
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -659,8 +687,15 @@ pub extern "C" fn p2p_get_all_replicators(node_ptr: usize) -> FfiResult {
 #[no_mangle]
 pub unsafe extern "C" fn p2p_add_collections(
     node_ptr: usize,
+    identity_did: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionCreate) {
+        return e;
+    }
+
     let collections_str = match c_str_to_string(collections_json) {
         Some(s) => s,
         None => return FfiResult::error("collections_json is null"),
@@ -706,8 +741,15 @@ pub unsafe extern "C" fn p2p_add_collections(
 #[no_mangle]
 pub unsafe extern "C" fn p2p_remove_collections(
     node_ptr: usize,
+    identity_did: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionDelete) {
+        return e;
+    }
+
     let collections_str = match c_str_to_string(collections_json) {
         Some(s) => s,
         None => return FfiResult::error("collections_json is null"),
@@ -748,7 +790,16 @@ pub unsafe extern "C" fn p2p_remove_collections(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub extern "C" fn p2p_get_all_collections(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn p2p_get_all_collections(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionList) {
+        return e;
+    }
+
     let result = NODES
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
@@ -776,9 +827,16 @@ pub extern "C" fn p2p_get_all_collections(node_ptr: usize) -> FfiResult {
 /// `doc_ids_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_add_documents(
-    _node_ptr: usize,
+    node_ptr: usize,
+    identity_did: *const c_char,
     _doc_ids_json: *const c_char,
 ) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentCreate) {
+        return e;
+    }
+
     FfiResult::error("p2p_add_documents is not yet implemented")
 }
 
@@ -789,9 +847,16 @@ pub unsafe extern "C" fn p2p_add_documents(
 /// `doc_ids_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_remove_documents(
-    _node_ptr: usize,
+    node_ptr: usize,
+    identity_did: *const c_char,
     _doc_ids_json: *const c_char,
 ) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentDelete) {
+        return e;
+    }
+
     FfiResult::error("p2p_remove_documents is not yet implemented")
 }
 
@@ -801,6 +866,15 @@ pub unsafe extern "C" fn p2p_remove_documents(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub extern "C" fn p2p_get_all_documents(_node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn p2p_get_all_documents(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentList) {
+        return e;
+    }
+
     FfiResult::error("p2p_get_all_documents is not yet implemented")
 }

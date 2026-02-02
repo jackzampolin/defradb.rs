@@ -6,9 +6,11 @@
 
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
 use identity::Identity;
 
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::policy_yaml::{
     check_duplicate_yaml_keys, parse_policy_yaml, validate_policy_expressions,
 };
@@ -32,8 +34,15 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn get_nac_status(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn get_nac_status(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::NacStatus) {
+        return e;
+    }
 
     // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
@@ -359,6 +368,12 @@ pub unsafe extern "C" fn add_dac_policy(
     _identity_did: *const c_char,
     policy: *const c_char,
 ) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, _identity_did, NodePermission::DacPolicyAdd) {
+        return e;
+    }
+
     let policy_str = match c_str_to_string(policy) {
         Some(s) => s,
         None => return FfiResult::error("policy is null"),
@@ -496,6 +511,10 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     relation: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, requestor_did, NodePermission::DacRelationAdd) {
+        return e;
+    }
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
@@ -647,6 +666,10 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
     relation: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, requestor_did, NodePermission::DacRelationDelete) {
+        return e;
+    }
 
     let requestor_str = match c_str_to_string(requestor_did) {
         Some(s) => s,
@@ -886,7 +909,7 @@ mod tests {
         let node = result.node_ptr;
 
         // Get NAC status
-        let result = get_nac_status(node);
+        let result = unsafe { get_nac_status(node, std::ptr::null()) };
         assert_eq!(result.status, 0, "get_nac_status should succeed");
         assert!(!result.value.is_null());
 
@@ -915,7 +938,7 @@ mod tests {
         assert_eq!(result.status, 0, "enable_nac should succeed");
 
         // Verify NAC is now enabled
-        let result = get_nac_status(node);
+        let result = unsafe { get_nac_status(node, std::ptr::null()) };
         assert_eq!(result.status, 0);
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("enabled"), "NAC should be enabled");
@@ -944,7 +967,7 @@ mod tests {
         assert_eq!(result.status, 0, "disable_nac should succeed");
 
         // Verify NAC is disabled
-        let result = get_nac_status(node);
+        let result = unsafe { get_nac_status(node, std::ptr::null()) };
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(
             value.contains("disabled_temporarily"),
@@ -957,7 +980,7 @@ mod tests {
         assert_eq!(result.status, 0, "re_enable_nac should succeed");
 
         // Verify NAC is enabled again
-        let result = get_nac_status(node);
+        let result = unsafe { get_nac_status(node, std::ptr::null()) };
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(
             value.contains("\"status\":\"enabled\""),
