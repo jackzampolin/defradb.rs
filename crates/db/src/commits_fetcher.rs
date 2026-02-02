@@ -5,7 +5,7 @@
 
 use async_lock::Mutex as TokioMutex;
 use cid::Cid;
-use defra_core::block::{Block, CrdtDelta};
+use defra_core::block::{Block, CrdtDelta, Signature};
 use document::Document;
 use serde_json::{json, Value as JsonValue};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -303,6 +303,27 @@ impl<S: Store> CommitsFetcher<S> {
             .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))
     }
 
+    /// Load a signature block from blockstore by CID
+    async fn load_signature_block(
+        &self,
+        txn: &mut DbTxn<S>,
+        cid: &Cid,
+    ) -> Result<Signature> {
+        let blockstore = txn.blockstore()?;
+
+        let key = cid.to_bytes();
+        let data = blockstore
+            .get(&key)
+            .await
+            .map_err(Error::Storage)?
+            .ok_or_else(|| {
+                Error::Serialization("signature block not found".to_string())
+            })?;
+
+        Signature::from_dag_cbor(&data)
+            .map_err(|e| Error::Serialization(format!("Failed to decode signature block: {}", e)))
+    }
+
     /// Convert a block to a commit document.
     ///
     /// Loads linked blocks and head blocks to populate the `height` field
@@ -391,8 +412,26 @@ impl<S: Store> CommitsFetcher<S> {
         }
         map.insert("heads".to_string(), json!(heads));
 
-        // signature - null for now (handle signature blocks separately)
-        map.insert("signature".to_string(), JsonValue::Null);
+        // signature - load from blockstore if the block has a signature CID
+        let sig_value = if let Some(sig_cid) = &block.signature {
+            match self.load_signature_block(txn, sig_cid).await {
+                Ok(sig) => {
+                    let sig_type = match sig.header.sig_type {
+                        defra_core::block::SignatureType::ES256K => "ES256K",
+                        defra_core::block::SignatureType::EdDSA => "EdDSA",
+                    };
+                    json!({
+                        "type": sig_type,
+                        "identity": String::from_utf8_lossy(&sig.header.identity).to_string(),
+                        "value": hex::encode(&sig.value),
+                    })
+                }
+                Err(_) => JsonValue::Null,
+            }
+        } else {
+            JsonValue::Null
+        };
+        map.insert("signature".to_string(), sig_value);
 
         Document::from_map(map)
             .map_err(|e| Error::Serialization(format!("Failed to create document: {}", e)))

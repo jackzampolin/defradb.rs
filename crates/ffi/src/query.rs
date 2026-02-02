@@ -24,6 +24,48 @@ pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
     }
 }
 
+/// Check if the identity has DAC bypass permission (NAC admin/owner).
+///
+/// Sets the thread-local `dac_bypass` flag to `true` if the identity has
+/// the `DacBypass` node permission (meaning they can read all documents
+/// regardless of DAC policies).
+pub(crate) fn check_and_set_dac_bypass(
+    rt: &tokio::runtime::Runtime,
+    node_ptr: usize,
+    identity_did: *const c_char,
+) {
+    use acp::nac::NacStatus;
+
+    // Default: no bypass
+    defra_core::dac_bypass::set_dac_bypass(false);
+
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return,
+    };
+
+    // Only bypass when NAC is enabled
+    let status = rt.block_on(nac_manager.status());
+    if status != NacStatus::Enabled {
+        return;
+    }
+
+    let identity_str = unsafe { c_str_to_string(identity_did) };
+    let did = match identity_str {
+        Some(s) if !s.is_empty() => match identity::Did::new(&s) {
+            Ok(d) => d,
+            Err(_) => return,
+        },
+        _ => return,
+    };
+
+    let has_bypass = rt
+        .block_on(nac_manager.check_permission(&did, NodePermission::DacBypass))
+        .unwrap_or(false);
+
+    defra_core::dac_bypass::set_dac_bypass(has_bypass);
+}
+
 /// Execute a GraphQL query or mutation.
 ///
 /// Returns a JSON object with the query result in GraphQL format:
@@ -71,12 +113,27 @@ pub unsafe extern "C" fn exec_request(
 
     // Parse identity DID if provided
     let did = match identity_str {
-        Some(s) if !s.is_empty() => match identity::Did::new(&s) {
+        Some(ref s) if !s.is_empty() => match identity::Did::new(s) {
             Ok(d) => Some(d),
             Err(e) => return FfiResult::error(format!("invalid identity DID: {}", e)),
         },
         _ => None,
     };
+
+    // Set up thread-local signer if we have a stored identity for this DID.
+    // This enables block signing during mutations (matching Go's signBlock behavior).
+    if let Some(ref s) = identity_str {
+        if let Some(signing_config) = defra_core::signing::get_identity(s) {
+            defra_core::signing::set_signing_config(Some(signing_config));
+        } else {
+            defra_core::signing::set_signing_config(None);
+        }
+    } else {
+        defra_core::signing::set_signing_config(None);
+    }
+
+    // Check if identity has DAC bypass (NAC admin/owner can read all documents)
+    check_and_set_dac_bypass(rt, node_ptr, identity_did);
 
     // Validate node handle before entering async block
     let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {

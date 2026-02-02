@@ -39,6 +39,7 @@ hex.workspace = true
 # Internal crates
 crypto = { path = "../crypto" }
 db = { path = "../db" }
+defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 events = { path = "../events" }
 storage = { path = "../storage" }
@@ -49,6 +50,9 @@ acp = { path = "../acp" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p" }
 blockstore = { path = "../blockstore" }
+
+# IPLD
+cid.workspace = true
 
 # P2P dependencies
 libp2p = { workspace = true }

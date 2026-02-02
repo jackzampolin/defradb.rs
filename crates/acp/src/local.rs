@@ -249,6 +249,11 @@ impl DocumentACP for LocalDocumentACP {
                 }
             }
             if !is_manager {
+                if !managing_relations.is_empty() {
+                    return Err(Error::NotManager {
+                        operation: "create relationship".to_string(),
+                    });
+                }
                 return Err(Error::NotOwner {
                     operation: "add actor relationship".to_string(),
                 });
@@ -315,6 +320,11 @@ impl DocumentACP for LocalDocumentACP {
                 }
             }
             if !is_manager {
+                if !managing_relations.is_empty() {
+                    return Err(Error::NotManager {
+                        operation: "delete relationship".to_string(),
+                    });
+                }
                 return Err(Error::NotOwner {
                     operation: "delete actor relationship".to_string(),
                 });

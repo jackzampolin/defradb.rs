@@ -28,6 +28,10 @@ pub enum Error {
     #[error("UNAUTHORIZED: not document owner, cannot {operation}")]
     NotOwner { operation: String },
 
+    /// Actor is not a manager of the relation
+    #[error("cannot {operation}: actor is not a manager of relation")]
+    NotManager { operation: String },
+
     /// Invalid policy configuration
     #[error("invalid policy: {0}")]
     InvalidPolicy(String),

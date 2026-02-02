@@ -1011,6 +1011,19 @@ pub extern "C" fn create_identity() -> FfiResult {
             .map_err(|e| format!("failed to derive DID: {}", e))?;
 
         let private_key_hex = hex::encode(identity.private_key_bytes());
+        let public_key_hex = hex::encode(identity.public_key_bytes());
+
+        // Store identity in global store so block signing can look up the
+        // private key from just a DID string during mutations.
+        defra_core::signing::store_identity(
+            &did.to_string(),
+            defra_core::signing::SigningConfig {
+                key_type: "ed25519".to_string(),
+                private_key_bytes: identity.private_key_bytes().to_vec(),
+                public_key_bytes: identity.public_key_bytes().to_vec(),
+                public_key_hex: public_key_hex,
+            },
+        );
 
         let json = serde_json::json!({
             "did": did.to_string(),

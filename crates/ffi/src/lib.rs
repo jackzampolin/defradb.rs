@@ -35,6 +35,7 @@
 
 pub mod acp;
 pub mod backup;
+pub mod block;
 pub mod collection;
 pub mod document;
 pub mod index;
@@ -82,6 +83,7 @@ pub use acp::{
     get_dac_policy, get_nac_status, get_node_identity, list_dac_policies, re_enable_nac,
 };
 pub use backup::{basic_export, basic_import};
+pub use block::block_verify_signature;
 pub use collection::{
     add_view, delete_collection, find_collection_by_id, get_collection_by_name,
     get_collection_by_version_id, has_collection, patch_collection, refresh_views,

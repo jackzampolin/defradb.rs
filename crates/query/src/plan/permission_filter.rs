@@ -82,8 +82,14 @@ impl PermissionFilterNode {
 
     /// Check if the identity has read permission for a document.
     ///
+    /// Checks DAC bypass (NAC admin) first, then falls through to DAC check.
     /// Fail-closed: returns false on any error to prevent security bypass.
     async fn has_read_permission(&self, doc_id: &str) -> Result<bool> {
+        // Check if identity can bypass DAC (NAC admin/owner with dac-bypass permission)
+        if defra_core::dac_bypass::get_dac_bypass() {
+            return Ok(true);
+        }
+
         Ok(self
             .acp
             .check_doc_access(
