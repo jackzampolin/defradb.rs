@@ -1450,6 +1450,13 @@ impl<S: Store> DB<S> {
         let old_version_id = old_schema.version_id.clone();
         let collection_id = old_schema.collection_id.clone();
 
+        // Collect known collection names for Kind validation
+        let known_collection_names: Vec<String> = self
+            .list_collections()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
         // Apply the patch to the schema JSON
         let mut schema_json = serde_json::to_value(&old_schema).map_err(|e| {
             Error::Serialization(format!("failed to serialize schema to JSON: {}", e))
@@ -1505,10 +1512,53 @@ impl<S: Store> DB<S> {
                             })?
                             .clone();
 
-                        // Go compatibility: auto-generate FieldID when adding new fields
+                        // Go compatibility: validate VersionID replacement
+                        if path.ends_with("/VersionID") {
+                            let version_id_str = value.as_str().unwrap_or("");
+                            if version_id_str.is_empty() {
+                                return Err(Error::InvalidPatch(
+                                    "collection ID cannot be empty".to_string(),
+                                ));
+                            }
+                            // Validate CID format
+                            if cid::Cid::try_from(version_id_str).is_err() {
+                                return Err(Error::InvalidPatch(format!(
+                                    "invalid cid: selected encoding not supported. VersionID: {}",
+                                    version_id_str
+                                )));
+                            }
+                            // Check if this CID exists as a known collection version
+                            let all_versions = self
+                                .get_all_collection_versions()
+                                .await
+                                .unwrap_or_default();
+                            let is_known = all_versions
+                                .iter()
+                                .any(|c| c.version_id == version_id_str);
+                            if !is_known {
+                                return Err(Error::InvalidPatch(
+                                    "unknown CID, collection ids cannot be manually defined"
+                                        .to_string(),
+                                ));
+                            }
+                            // Known CIDs proceed - sources/ownership validation
+                            // is handled by definition_validation post-patch.
+                        }
+
+                        // Go compatibility: validate and auto-generate FieldID when adding new fields
                         // If path ends with /Fields/- or /Fields/<n> and value has Name but no FieldID
                         if path.contains("/Fields/") {
                             if let serde_json::Value::Object(ref mut map) = value {
+                                // Validate Kind value for new fields
+                                if let Some(kind_val) = map.get("Kind") {
+                                    Self::validate_patch_field_kind(
+                                        kind_val,
+                                        map.get("Name")
+                                            .and_then(|n| n.as_str())
+                                            .unwrap_or(""),
+                                        &known_collection_names,
+                                    )?;
+                                }
                                 if map.contains_key("Name") && !map.contains_key("FieldID") {
                                     // Find max existing FieldID to avoid collisions with gaps
                                     let max_field_id = schema_json
@@ -1963,6 +2013,59 @@ impl<S: Store> DB<S> {
     /// Handles both the collection_name prefix (e.g., "/Users/") and the
     /// actual_name prefix (when looked up by version ID, the passed-in name
     /// differs from the real collection name).
+    /// Validate a Kind value in a patch field addition.
+    /// Returns error if the Kind is an unsupported numeric value or unknown string.
+    fn validate_patch_field_kind(
+        kind_val: &serde_json::Value,
+        field_name: &str,
+        known_collections: &[String],
+    ) -> Result<()> {
+        match kind_val {
+            serde_json::Value::Number(n) => {
+                let kind_num = n.as_u64().unwrap_or(0) as u8;
+                // Valid numeric kinds: 1-14, 18-22 (0 is None, only for internal _docID)
+                let valid = matches!(
+                    kind_num,
+                    1..=14 | 18..=22
+                );
+                if !valid {
+                    return Err(Error::InvalidPatch(format!(
+                        "no type found for given name. Type: {}",
+                        kind_num
+                    )));
+                }
+                Ok(())
+            }
+            serde_json::Value::String(s) => {
+                // Known string kinds
+                let known = matches!(
+                    s.as_str(),
+                    "ID" | "Boolean" | "Int" | "DateTime" | "Float" | "Float64"
+                    | "Float32" | "String" | "Blob" | "JSON"
+                    | "[Boolean]" | "[Boolean!]" | "[Int]" | "[Int!]"
+                    | "[Float]" | "[Float64]" | "[Float!]" | "[Float64!]"
+                    | "[Float32]" | "[Float32!]" | "[String]" | "[String!]"
+                    | "Self" | "[Self]"
+                );
+                if !known {
+                    // Could be a collection name reference (e.g., "Users", "[Users]").
+                    let ref_name = s
+                        .strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(']'))
+                        .unwrap_or(s.as_str());
+                    if !known_collections.iter().any(|c| c == ref_name) {
+                        return Err(Error::InvalidPatch(format!(
+                            "no type found for given name. Field: {}, Kind: {}",
+                            field_name, s
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn strip_collection_prefix(
         path: &str,
         collection_prefix: &str,

@@ -110,6 +110,8 @@ pub struct ParsedDirectives {
     pub relation_name: Option<String>,
     /// Default value from @default directive
     pub default_value: Option<serde_json::Value>,
+    /// The argument name used in @default (e.g., "int", "bool", "string")
+    pub default_arg_name: Option<String>,
     /// Array size constraint from @constraints directive
     pub size_constraint: Option<usize>,
 }
