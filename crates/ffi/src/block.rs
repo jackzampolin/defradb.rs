@@ -4,7 +4,10 @@
 
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
+
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -21,7 +24,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// * `key_type` - Key type string (e.g., "ed25519", "secp256k1")
 /// * `public_key` - Hex-encoded public key string
 /// * `block_cid` - CID string of the block to verify
-/// * `identity_did` - Optional DID of the caller (unused, reserved for future ACP checks)
+/// * `identity_did` - DID of the caller for NAC permission check
 ///
 /// # Safety
 ///
@@ -32,9 +35,14 @@ pub unsafe extern "C" fn block_verify_signature(
     key_type: *const c_char,
     public_key: *const c_char,
     block_cid: *const c_char,
-    _identity_did: *const c_char,
+    identity_did: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    // Check NAC permission for signature verification
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::SignatureVerify) {
+        return e;
+    }
 
     let key_type_str = match c_str_to_string(key_type) {
         Some(s) if !s.is_empty() => s,

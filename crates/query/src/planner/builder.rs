@@ -1822,6 +1822,43 @@ impl Planner {
                 }
             }
 
+            // Check if parent's filter has a relation filter for this relation.
+            // If so, add those fields to child_scan_mapping so the filter can be evaluated.
+            // For example, Author(filter: {published: {rating: {_gt: 3}}}) needs the 'rating'
+            // field to be included even if it's not in the selection set.
+            if let Some(ref pf) = parent_filter {
+                if let Some(nested_filter) = pf.extract_relation_filter(relation_field_name) {
+                    for filter_field in nested_filter.referenced_fields() {
+                        // Skip special fields
+                        if filter_field.starts_with('_') {
+                            continue;
+                        }
+                        // Find the field index in the target collection
+                        if let Some(idx) = target_collection
+                            .fields
+                            .iter()
+                            .position(|f| f.name == filter_field)
+                        {
+                            // Add the field to child_scan_mapping if not present
+                            if child_scan_mapping
+                                .first_index_of_name(&filter_field)
+                                .is_none()
+                            {
+                                child_scan_mapping.add(idx, &filter_field);
+                            }
+                            // Add render_key so the field appears in the output
+                            if !child_scan_mapping
+                                .render_keys
+                                .iter()
+                                .any(|rk| rk.key == filter_field)
+                            {
+                                child_scan_mapping.add_render_key(idx, &filter_field);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check if parent's order_by references fields in this relation.
             // If so, add those fields to child_scan_mapping.render_keys so they're
             // available in the merged JSON for ordering. The fields won't appear in
@@ -3358,7 +3395,10 @@ impl Planner {
         if let Some(ref fetcher) = self.fetcher {
             child_scan = child_scan.with_fetcher(fetcher.clone());
         }
-        let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+        let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+        // Insert ACP permission filter for the child collection (if ACP-protected).
+        child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
         // Find the other side of the relation
         let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
@@ -3492,7 +3532,10 @@ impl Planner {
             if let Some(ref fetcher) = self.fetcher {
                 child_scan = child_scan.with_fetcher(fetcher.clone());
             }
-            let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+            let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+            // Insert ACP permission filter for the child collection (if ACP-protected).
+            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
             // Find the other side of the relation
             let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
@@ -3614,6 +3657,9 @@ impl Planner {
             child_scan = child_scan.with_fetcher(fetcher.clone());
         }
         let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+        // Insert ACP permission filter for the child collection (if ACP-protected).
+        child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
         // Add sub-joins for remaining path levels within the child plan
         if path.len() > 1 {

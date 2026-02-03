@@ -1319,84 +1319,91 @@ impl<S: Store> DB<S> {
 
         // Load the target collection from persistent store by version_id
         let txn = self.new_txn(false).await?;
-        let systemstore = txn.systemstore()?;
 
-        let collection_key = CollectionKey::new(version_id);
-        let target_bytes = systemstore
-            .get(&collection_key.bytes())
-            .await
-            .map_err(Error::Storage)?
-            .ok_or_else(|| Error::CollectionVersionNotFound(version_id.to_string()))?;
+        // Extract the target schema and perform all systemstore operations in a block
+        // so the systemstore reference is dropped before calling txn.commit()
+        let (target_schema, name) = {
+            let systemstore = txn.systemstore()?;
 
-        let target_schema: CollectionVersion =
-            serde_json::from_slice(&target_bytes).map_err(|e| {
-                Error::Serialization(format!(
-                    "failed to deserialize collection version '{}': {}",
-                    version_id, e
-                ))
-            })?;
-
-        let collection_id = target_schema.collection_id.clone();
-        let name = target_schema.name.clone();
-
-        // Load all versions sharing the same collection_id
-        let version_prefix = CollectionVersionKey::collection_prefix(&collection_id);
-        let mut iter = systemstore
-            .iterator(IterOptions::new().with_prefix(version_prefix))
-            .await
-            .map_err(Error::Storage)?;
-
-        let mut sibling_version_ids = Vec::new();
-        while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-            let key_str = String::from_utf8_lossy(&pair.key);
-            // Key format: /collection/version/{collection_id}/{version_id}
-            if let Some(vid) = key_str.rsplit('/').next() {
-                sibling_version_ids.push(vid.to_string());
-            }
-        }
-        drop(iter);
-
-        // For each sibling version, activate the target and deactivate others
-        for vid in &sibling_version_ids {
-            let sibling_key = CollectionKey::new(vid.as_str());
-            if let Some(sibling_bytes) = systemstore
-                .get(&sibling_key.bytes())
+            let collection_key = CollectionKey::new(version_id);
+            let target_bytes = systemstore
+                .get(&collection_key.bytes())
                 .await
                 .map_err(Error::Storage)?
-            {
-                let mut sibling_schema: CollectionVersion =
-                    serde_json::from_slice(&sibling_bytes).map_err(|e| {
+                .ok_or_else(|| Error::CollectionVersionNotFound(version_id.to_string()))?;
+
+            let target_schema: CollectionVersion =
+                serde_json::from_slice(&target_bytes).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize collection version '{}': {}",
+                        version_id, e
+                    ))
+                })?;
+
+            let collection_id = target_schema.collection_id.clone();
+            let name = target_schema.name.clone();
+
+            // Load all versions sharing the same collection_id
+            let version_prefix = CollectionVersionKey::collection_prefix(&collection_id);
+            let mut iter = systemstore
+                .iterator(IterOptions::new().with_prefix(version_prefix))
+                .await
+                .map_err(Error::Storage)?;
+
+            let mut sibling_version_ids = Vec::new();
+            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                let key_str = String::from_utf8_lossy(&pair.key);
+                // Key format: /collection/version/{collection_id}/{version_id}
+                if let Some(vid) = key_str.rsplit('/').next() {
+                    sibling_version_ids.push(vid.to_string());
+                }
+            }
+            drop(iter);
+
+            // For each sibling version, activate the target and deactivate others
+            for vid in &sibling_version_ids {
+                let sibling_key = CollectionKey::new(vid.as_str());
+                if let Some(sibling_bytes) = systemstore
+                    .get(&sibling_key.bytes())
+                    .await
+                    .map_err(Error::Storage)?
+                {
+                    let mut sibling_schema: CollectionVersion =
+                        serde_json::from_slice(&sibling_bytes).map_err(|e| {
+                            Error::Serialization(format!(
+                                "failed to deserialize sibling collection '{}': {}",
+                                vid, e
+                            ))
+                        })?;
+
+                    let should_be_active = vid == version_id;
+                    if sibling_schema.is_active == should_be_active {
+                        continue;
+                    }
+
+                    sibling_schema.is_active = should_be_active;
+                    let data = serde_json::to_vec(&sibling_schema).map_err(|e| {
                         Error::Serialization(format!(
-                            "failed to deserialize sibling collection '{}': {}",
+                            "failed to serialize schema for collection '{}': {}",
                             vid, e
                         ))
                     })?;
-
-                let should_be_active = vid == version_id;
-                if sibling_schema.is_active == should_be_active {
-                    continue;
+                    systemstore
+                        .set(&sibling_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
                 }
-
-                sibling_schema.is_active = should_be_active;
-                let data = serde_json::to_vec(&sibling_schema).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to serialize schema for collection '{}': {}",
-                        vid, e
-                    ))
-                })?;
-                systemstore
-                    .set(&sibling_key.bytes(), &data)
-                    .await
-                    .map_err(Error::Storage)?;
             }
-        }
 
-        // Update the name → version_id mapping to point to the new active version
-        let name_key = CollectionNameKey::new(&name);
-        systemstore
-            .set(&name_key.bytes(), version_id.as_bytes())
-            .await
-            .map_err(Error::Storage)?;
+            // Update the name → version_id mapping to point to the new active version
+            let name_key = CollectionNameKey::new(&name);
+            systemstore
+                .set(&name_key.bytes(), version_id.as_bytes())
+                .await
+                .map_err(Error::Storage)?;
+
+            (target_schema, name)
+        }; // systemstore reference dropped here
 
         txn.commit().await?;
 
