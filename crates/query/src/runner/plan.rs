@@ -8,10 +8,11 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
-use crate::mapper::{AggregateType, Requestable, Select};
+use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode, LimitNode,
-    MaxNode, MinNode, OrderByNode, PermissionFilterNode, ScanNode, SelectNode, SumNode,
+    AllDocsNode, AverageNode, ChildSelectMeta, CountNode, CountSourceMeta, GroupAlias,
+    GroupByNode, LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta, OrderByNode,
+    PermissionFilterNode, ScanNode, SelectNode, SumNode, SumSourceMeta,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -398,7 +399,7 @@ pub(crate) fn build_plan(
 
     // Pass filter and docIDs to ScanNode for explain output
     // First check select.filter, then fall back to aggregate target filter
-    let filter_for_scan = select.filter.clone().or_else(|| {
+    let mut filter_for_scan = select.filter.clone().or_else(|| {
         // For top-level aggregates, the filter might be on the aggregate target
         select.fields.iter().find_map(|f| {
             if let Requestable::Aggregate(agg) = f {
@@ -409,6 +410,46 @@ pub(crate) fn build_plan(
             None
         })
     });
+
+    // For top-level average with a field, Go adds {field: {_neq: null}} to exclude nulls.
+    // Merge this into the existing filter on the same field (not via _and wrapper).
+    for field in &select.fields {
+        if let Requestable::Aggregate(agg) = field {
+            if agg.aggregate_type == AggregateType::Average {
+                if let Some(field_name) = agg.targets.first().and_then(|t| t.field_name.as_ref())
+                {
+                    filter_for_scan = Some(match filter_for_scan {
+                        Some(existing) => {
+                            // Merge {field: {_neq: null}} into existing conditions
+                            let mut merged = existing.conditions().clone();
+                            merged
+                                .entry(field_name.clone())
+                                .and_modify(|v| {
+                                    if let serde_json::Value::Object(ref mut ops) = v {
+                                        ops.insert(
+                                            "_neq".to_string(),
+                                            serde_json::Value::Null,
+                                        );
+                                    }
+                                })
+                                .or_insert(
+                                    serde_json::json!({"_neq": serde_json::Value::Null}),
+                                );
+                            Filter::from_conditions(merged)
+                        }
+                        None => {
+                            let mut conditions = std::collections::HashMap::new();
+                            conditions.insert(
+                                field_name.clone(),
+                                serde_json::json!({"_neq": serde_json::Value::Null}),
+                            );
+                            Filter::from_conditions(conditions)
+                        }
+                    });
+                }
+            }
+        }
+    }
     if let Some(ref filter) = filter_for_scan {
         scan = scan.with_filter(filter.clone());
     }
@@ -451,7 +492,8 @@ pub(crate) fn build_plan(
 
         // Add GroupByNode
         if let Some(ref group_by) = select.group_by {
-            let mut group_node = GroupByNode::new(plan, group_by.clone(), mapping.clone());
+            let mut group_node = GroupByNode::new(plan, group_by.clone(), mapping.clone())
+                .with_collection_name(select.collection_name.clone());
             // Extract _group alias definitions with per-alias filter/limit/order
             let group_indices = mapping
                 .indexes_of_name("_group")
@@ -459,6 +501,7 @@ pub(crate) fn build_plan(
                 .unwrap_or_default();
             let mut group_aliases = Vec::new();
             let mut alias_count = 0;
+            let mut child_selects_meta: Vec<ChildSelectMeta> = Vec::new();
             for field in &select.fields {
                 if let Requestable::Select(nested) = field {
                     if nested.field.name == "_group" {
@@ -471,11 +514,83 @@ pub(crate) fn build_plan(
                             order: nested.order_by.clone(),
                             doc_ids: nested.doc_ids.clone(),
                         });
+                        let mut meta = ChildSelectMeta {
+                            collection_name: select.collection_name.clone(),
+                            doc_ids: nested.doc_ids.clone(),
+                            filter: nested.filter.clone(),
+                            limit: nested.limit.clone(),
+                            order: nested.order_by.clone(),
+                            group_by: nested.group_by.as_ref().map(|gb| gb.fields.clone()),
+                        };
+                        // Merge outer groupBy fields into the _group's groupBy.
+                        // Go convention: childSelects.groupBy = inner fields ++ outer fields.
+                        if let Some(ref outer_gb) = select.group_by {
+                            if let Some(ref mut inner_fields) = meta.group_by {
+                                for field in &outer_gb.fields {
+                                    if !inner_fields.contains(field) {
+                                        inner_fields.push(field.clone());
+                                    }
+                                }
+                            }
+                        }
+                        child_selects_meta.push(meta);
                     }
                 }
             }
             if !group_aliases.is_empty() {
                 group_node = group_node.with_group_aliases(group_aliases);
+            }
+            // Go adds {field: {_neq: null}} to childSelects for average aggregates.
+            // Only regular fields (not aggregate refs like _avg) get the neq filter.
+            let mut avg_group_fields: Vec<String> = Vec::new();
+            for field in &select.fields {
+                if let Requestable::Aggregate(agg) = field {
+                    if agg.aggregate_type == AggregateType::Average {
+                        for target in &agg.targets {
+                            if target.host_name == "_group" {
+                                if let Some(ref field_name) = target.field_name {
+                                    if !field_name.starts_with('_') {
+                                        avg_group_fields.push(field_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !avg_group_fields.is_empty() {
+                if child_selects_meta.is_empty() {
+                    child_selects_meta.push(ChildSelectMeta {
+                        collection_name: select.collection_name.clone(),
+                        ..Default::default()
+                    });
+                }
+                for field_name in &avg_group_fields {
+                    for cs in &mut child_selects_meta {
+                        let mut conditions = cs
+                            .filter
+                            .as_ref()
+                            .map(|f| f.conditions().clone())
+                            .unwrap_or_default();
+                        conditions
+                            .entry(field_name.clone())
+                            .and_modify(|v| {
+                                if let serde_json::Value::Object(ref mut ops) = v {
+                                    ops.insert(
+                                        "_neq".to_string(),
+                                        serde_json::Value::Null,
+                                    );
+                                }
+                            })
+                            .or_insert(serde_json::json!({
+                                "_neq": serde_json::Value::Null
+                            }));
+                        cs.filter = Some(Filter::from_conditions(conditions));
+                    }
+                }
+            }
+            if !child_selects_meta.is_empty() {
+                group_node = group_node.with_child_selects(child_selects_meta);
             }
             plan = Box::new(group_node);
         }
@@ -500,23 +615,13 @@ pub(crate) fn build_plan(
             }
         }
     } else {
-        // WITHOUT GROUP BY: OrderBy → Limit → [AllDocs if multiple aggs] → Aggregates
+        // WITHOUT GROUP BY: OrderBy → [AllDocs if multiple aggs] → Aggregates → Limit
+        // Go applies limit AFTER aggregates so limit restricts the final output,
+        // not the documents fed to aggregation.
 
-        // Add OrderByNode for sorting (after filtering, before limit)
+        // Add OrderByNode for sorting (after filtering, before aggregates)
         if let Some(ref order_by) = select.order_by {
             plan = Box::new(OrderByNode::new(plan, order_by.clone(), mapping.clone()));
-        }
-
-        // Add LimitNode
-        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
-        if let Some(ref limit) = select.limit {
-            let effective_limit = match limit.limit {
-                Some(0) => None,
-                other => other,
-            };
-            if effective_limit.is_some() || limit.offset > 0 {
-                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
-            }
         }
 
         // Count aggregates to determine if we need AllDocsNode
@@ -535,6 +640,18 @@ pub(crate) fn build_plan(
         // Add aggregate nodes
         // Without GROUP BY, aggregates return a single row for the entire result
         plan = add_aggregate_nodes(plan, select, &mapping)?;
+
+        // Add LimitNode (AFTER aggregates, matching Go behavior)
+        // Note: limit=0 means "no limit" in Go DefraDB, so we convert Some(0) to None
+        if let Some(ref limit) = select.limit {
+            let effective_limit = match limit.limit {
+                Some(0) => None,
+                other => other,
+            };
+            if effective_limit.is_some() || limit.offset > 0 {
+                plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+            }
+        }
     }
 
     Ok(plan)
@@ -596,21 +713,45 @@ fn add_aggregate_nodes(
                         node = node.with_limit(limit);
                     }
                     // Add sources for explain output
-                    let sources = vec![CountSourceMeta {
-                        field_name: select.collection_name.clone(),
-                        filter: target_filter.clone(),
-                    }];
+                    let sources: Vec<CountSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| CountSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
                     node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
                 AggregateType::Sum => {
                     let mut node = SumNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    let sources: Vec<SumSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| SumSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            child_field_name: target.field_name.clone(),
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
                 AggregateType::Average => {
@@ -625,22 +766,52 @@ fn add_aggregate_nodes(
                 }
                 AggregateType::Min => {
                     let mut node = MinNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    let sources: Vec<MinSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| MinSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            child_field_name: target.field_name.clone(),
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
                 AggregateType::Max => {
                     let mut node = MaxNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
+                    if let Some(ref filter) = target_filter {
+                        node = node.with_filter(filter.clone());
                     }
                     if let Some(limit) = target_limit {
                         node = node.with_limit(limit);
                     }
+                    let sources: Vec<MaxSourceMeta> = agg
+                        .targets
+                        .iter()
+                        .map(|target| MaxSourceMeta {
+                            field_name: if !target.host_name.is_empty() {
+                                target.host_name.clone()
+                            } else {
+                                select.collection_name.clone()
+                            },
+                            child_field_name: target.field_name.clone(),
+                            filter: target.filter.clone(),
+                            is_inline_array: target.field_name.is_none(),
+                        })
+                        .collect();
+                    node = node.with_sources(sources);
                     plan = Box::new(node);
                 }
             }

@@ -39,7 +39,7 @@ async fn test_create_index() {
     }];
 
     let desc = manager
-        .create_index(&datastore, "idx_name".to_string(), fields, false)
+        .create_index(&datastore, "users", "idx_name".to_string(), fields, false)
         .await
         .unwrap();
 
@@ -64,7 +64,7 @@ async fn test_create_unique_index() {
     }];
 
     let desc = manager
-        .create_index(&datastore, "idx_email".to_string(), fields, true)
+        .create_index(&datastore, "users", "idx_email".to_string(), fields, true)
         .await
         .unwrap();
 
@@ -87,12 +87,12 @@ async fn test_create_duplicate_index_fails() {
     }];
 
     manager
-        .create_index(&datastore, "idx_name".to_string(), fields.clone(), false)
+        .create_index(&datastore, "users", "idx_name".to_string(), fields.clone(), false)
         .await
         .unwrap();
 
     let result = manager
-        .create_index(&datastore, "idx_name".to_string(), fields, false)
+        .create_index(&datastore, "users", "idx_name".to_string(), fields, false)
         .await;
 
     assert!(result.is_err());
@@ -109,7 +109,7 @@ async fn test_create_empty_fields_fails() {
     let mut manager = IndexManager::new(1);
 
     let result = manager
-        .create_index(&datastore, "idx_empty".to_string(), vec![], false)
+        .create_index(&datastore, "users", "idx_empty".to_string(), vec![], false)
         .await;
 
     assert!(result.is_err());
@@ -134,7 +134,7 @@ async fn test_drop_index() {
     }];
 
     manager
-        .create_index(&datastore, "idx_name".to_string(), fields, false)
+        .create_index(&datastore, "users", "idx_name".to_string(), fields, false)
         .await
         .unwrap();
 
@@ -170,6 +170,7 @@ async fn test_get_indexes() {
     manager
         .create_index(
             &datastore,
+            "users",
             "idx1".to_string(),
             vec![IndexedFieldDescription {
                 name: "name".to_string(),
@@ -183,6 +184,7 @@ async fn test_get_indexes() {
     manager
         .create_index(
             &datastore,
+            "users",
             "idx2".to_string(),
             vec![IndexedFieldDescription {
                 name: "email".to_string(),
@@ -243,6 +245,7 @@ async fn test_on_document_create() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -281,6 +284,7 @@ async fn test_index_id_sequence() {
     let desc1 = manager
         .create_index(
             &datastore,
+            "users",
             "idx1".to_string(),
             vec![IndexedFieldDescription {
                 name: "name".to_string(),
@@ -294,6 +298,7 @@ async fn test_index_id_sequence() {
     let desc2 = manager
         .create_index(
             &datastore,
+            "users",
             "idx2".to_string(),
             vec![IndexedFieldDescription {
                 name: "age".to_string(),
@@ -307,6 +312,7 @@ async fn test_index_id_sequence() {
     let desc3 = manager
         .create_index(
             &datastore,
+            "users",
             "idx3".to_string(),
             vec![IndexedFieldDescription {
                 name: "email".to_string(),
@@ -338,6 +344,7 @@ async fn test_on_document_update_changes_index_entry() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -420,6 +427,7 @@ async fn test_on_document_update_no_change_when_values_same() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -472,6 +480,7 @@ async fn test_on_document_delete_removes_index_entries() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -538,6 +547,7 @@ async fn test_bulk_index_indexes_all_documents() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -596,6 +606,7 @@ async fn test_bulk_index_skips_documents_without_id() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -666,6 +677,7 @@ async fn test_on_document_create_without_id_fails() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -703,6 +715,7 @@ async fn test_on_document_update_without_id_fails() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -747,6 +760,7 @@ async fn test_on_document_delete_without_id_fails() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -801,6 +815,7 @@ async fn test_multi_index_update() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -814,6 +829,7 @@ async fn test_multi_index_update() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_email".to_string(),
                 vec![IndexedFieldDescription {
                     name: "email".to_string(),
@@ -944,6 +960,7 @@ async fn test_composite_index_through_manager() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_category_price".to_string(),
                 vec![
                     IndexedFieldDescription {
@@ -1041,6 +1058,7 @@ async fn test_missing_field_indexed_as_null() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_email".to_string(),
                 vec![IndexedFieldDescription {
                     name: "email".to_string(),
@@ -1115,6 +1133,7 @@ async fn test_unique_index_allows_multiple_nulls() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_email_unique".to_string(),
                 vec![IndexedFieldDescription {
                     name: "email".to_string(),
@@ -1207,6 +1226,7 @@ async fn test_unique_constraint_violation_returns_error() {
         let index_desc = manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_email_unique".to_string(),
                 vec![IndexedFieldDescription {
                     name: "email".to_string(),
@@ -1276,6 +1296,7 @@ async fn test_index_field_not_in_schema_fails() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_nonexistent".to_string(),
                 vec![IndexedFieldDescription {
                     name: "nonexistent_field".to_string(), // This field is NOT in schema
@@ -1322,6 +1343,7 @@ async fn test_index_idempotence_create_same_document_twice() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),
@@ -1380,6 +1402,7 @@ async fn test_delete_then_recreate_same_value() {
         manager
             .create_index(
                 &datastore,
+                "users",
                 "idx_name".to_string(),
                 vec![IndexedFieldDescription {
                     name: "name".to_string(),

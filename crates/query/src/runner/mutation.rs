@@ -513,7 +513,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// This is used for filter-based mutations where we need to first
     /// find matching documents, then perform the mutation on them.
-    async fn resolve_filter_to_doc_ids(&self, mutation: &Mutation) -> Result<Option<Vec<String>>> {
+    pub(crate) async fn resolve_filter_to_doc_ids(&self, mutation: &Mutation) -> Result<Option<Vec<String>>> {
         // Only resolve if there's a filter but no explicit doc_ids
         let filter = match (&mutation.filter, &mutation.doc_ids) {
             (Some(filter), None) => filter,
@@ -550,7 +550,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build document mapping for mutation result fields.
-    fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
+    pub(crate) fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
         let mut mapping = DocumentMapping::new();
 
         // Always reserve index 0 for _docID (matches Go DefraDB DocumentMapping pattern).
@@ -589,7 +589,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build CreateInput objects from mutation input.
-    fn build_create_inputs(&self, mutation: &Mutation) -> Result<Vec<CreateInput>> {
+    pub(crate) fn build_create_inputs(&self, mutation: &Mutation) -> Result<Vec<CreateInput>> {
         let mut inputs = Vec::new();
 
         for doc_input in &mutation.create_input {
@@ -604,7 +604,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build UpdateInput from mutation input.
-    fn build_update_input(&self, mutation: &Mutation) -> Result<UpdateInput> {
+    pub(crate) fn build_update_input(&self, mutation: &Mutation) -> Result<UpdateInput> {
         let mut update_input = UpdateInput::new();
 
         for (field_name, value) in &mutation.update_input {
@@ -615,7 +615,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build UpsertInput from a field-value map.
-    fn build_upsert_input_from_map(
+    pub(crate) fn build_upsert_input_from_map(
         &self,
         input: &std::collections::HashMap<String, JsonValue>,
     ) -> Result<UpsertInput> {

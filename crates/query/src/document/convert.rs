@@ -67,7 +67,9 @@ pub fn document_to_plan_doc_with_status(
         fields[index] = Some(JsonValue::Bool(is_deleted));
     }
 
-    // Set other fields
+    // Set other fields from the document.
+    // Count ALL stored fields (matching Go's KV-pair counting), not just those in the mapping.
+    let stored_field_count = doc.field_names().count();
     for field_name in doc.field_names() {
         if let Some(index) = mapping.first_index_of_name(field_name) {
             if let Some(value) = doc.get(field_name) {
@@ -78,6 +80,7 @@ pub fn document_to_plan_doc_with_status(
     }
 
     let mut plan_doc = Doc::with_fields(fields);
+    plan_doc.stored_field_count = stored_field_count;
     if is_deleted {
         plan_doc.status = DocStatus::Deleted;
     }

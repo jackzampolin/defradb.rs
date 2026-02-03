@@ -70,6 +70,17 @@ pub struct TypeJoinMany {
     exec_info: ExecInfo,
     /// Cached child plan execution info (captured before child is closed)
     child_exec_info: ExecInfo,
+    /// Simulated Go-compatible child metrics.
+    /// Go re-initializes the child scan per parent, reading ALL children from
+    /// the collection each time. Metrics accumulate across all parent scans.
+    go_child_iterations: u64,
+    go_child_doc_fetches: u64,
+    go_child_field_fetches: u64,
+    go_child_index_fetches: u64,
+    /// Total children in the cache (docs per full collection scan)
+    total_children_in_cache: u64,
+    /// Total field fetches per full collection scan
+    total_fields_per_scan: u64,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -138,6 +149,12 @@ impl TypeJoinMany {
             group_mapping: None,
             exec_info: ExecInfo::default(),
             child_exec_info: ExecInfo::default(),
+            go_child_iterations: 0,
+            go_child_doc_fetches: 0,
+            go_child_field_fetches: 0,
+            go_child_index_fetches: 0,
+            total_children_in_cache: 0,
+            total_fields_per_scan: 0,
         })
     }
 
@@ -301,6 +318,12 @@ impl TypeJoinMany {
 
         // Capture child plan's execution info before closing
         self.child_exec_info = self.child_plan.exec_info();
+
+        // Capture per-scan totals for Go-compatible metric simulation.
+        // Go re-scans ALL children per parent, so we need these totals.
+        self.total_children_in_cache =
+            self.child_cache.values().map(|v| v.len() as u64).sum();
+        self.total_fields_per_scan = self.child_exec_info.fields_fetched;
 
         self.child_plan.close().await?;
 
@@ -532,6 +555,12 @@ impl PlanNode for TypeJoinMany {
         // Reset execution stats
         self.exec_info = ExecInfo::default();
         self.child_exec_info = ExecInfo::default();
+        self.go_child_iterations = 0;
+        self.go_child_doc_fetches = 0;
+        self.go_child_field_fetches = 0;
+        self.go_child_index_fetches = 0;
+        self.total_children_in_cache = 0;
+        self.total_fields_per_scan = 0;
 
         // Build child cache first (scans child_plan once)
         self.build_child_cache().await?;
@@ -596,6 +625,20 @@ impl PlanNode for TypeJoinMany {
             // Get children (with ordering, offset, limit applied)
             let children = self.find_child_docs(&parent_doc_id);
 
+            // Simulate Go's per-parent child scan metrics.
+            // In Go, fetchPrimaryDocsReferencingSecondaryDoc re-initializes the child
+            // scan for each parent, reading ALL children from the collection. The scanNode
+            // filters by FK, counting iterations for each outer Next() call (matching + 1 false).
+            // docFetches/fieldFetches count ALL docs read from storage per scan.
+            let matching_count = self
+                .child_cache
+                .get(&parent_doc_id)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
+            self.go_child_iterations += matching_count + 1; // matching children + 1 false
+            self.go_child_doc_fetches += self.total_children_in_cache;
+            self.go_child_field_fetches += self.total_fields_per_scan;
+
             // Merge children array into parent
             self.merge_children(&mut parent_doc, children);
             self.current_doc = parent_doc;
@@ -657,23 +700,39 @@ impl PlanNode for TypeJoinMany {
         // Optionally includes orderNode and/or limitNode wrappers
         // selectNode must include docID and filter attributes (Go always includes these)
         let child_explain = self.child_plan.explain();
-        let mut select_node_inner = serde_json::Map::new();
-        select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
-        select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
-        // Merge child explain (e.g., scanNode) into selectNode
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                select_node_inner.insert(key.clone(), value.clone());
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        // If the child plan is already a SelectNode, its explain output already contains
+        // the selectNode wrapper with docID, filter, and inner scanNode. Use it directly
+        // to avoid double-wrapping (selectNode → selectNode → scanNode).
+        let select_node_content = if child_is_select {
+            // Child explain is {"selectNode": {"docID": ..., "filter": ..., "scanNode": ...}}
+            // Extract the selectNode's inner content
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
+            select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
+            // Merge child explain (e.g., scanNode) into selectNode
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
             }
-        }
+            serde_json::Value::Object(select_node_inner)
+        };
 
         // Build the subType structure based on order/limit presence
         // Structure: selectTopNode > [orderNode >] [limitNode >] selectNode > scanNode
         let has_order = self.child_order_by.is_some();
         let has_limit = self.child_limit.is_some() || self.child_offset > 0;
 
-        // Start with selectNode, then wrap with limitNode, then orderNode
-        let mut inner_content = serde_json::Value::Object(select_node_inner);
+        // Start with selectNode content, then wrap with limitNode, then orderNode
+        let mut inner_content = select_node_content;
 
         if has_limit {
             // Wrap selectNode in limitNode
@@ -747,21 +806,33 @@ impl PlanNode for TypeJoinMany {
         // subType: the child plan's explain_debug wrapped in selectTopNode
         // Optionally includes orderNode and/or limitNode wrappers
         let child_explain = self.child_plan.explain_debug();
-        let mut select_node_inner = serde_json::Map::new();
-        // Merge child explain into selectNode
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                select_node_inner.insert(key.clone(), value.clone());
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            // Child is SelectNode - extract inner content to avoid double wrapping
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            // Merge child explain into selectNode
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
             }
-        }
+            serde_json::Value::Object(select_node_inner)
+        };
 
         // Build the subType structure based on order/limit presence
         // Structure: selectTopNode > [orderNode >] [limitNode >] selectNode > scanNode
         let has_order = self.child_order_by.is_some();
         let has_limit = self.child_limit.is_some() || self.child_offset > 0;
 
-        // Start with selectNode, then wrap with limitNode, then orderNode
-        let mut inner_content = serde_json::Value::Object(select_node_inner);
+        // Start with selectNode content, then wrap with limitNode, then orderNode
+        let mut inner_content = select_node_content;
 
         if has_limit {
             // Wrap selectNode in limitNode (debug mode: no attributes, just structure)
@@ -809,14 +880,11 @@ impl PlanNode for TypeJoinMany {
     fn explain_execute_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations from the join node itself
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
 
-        // scanNode: parent plan's execution stats
-        // Get the parent's explain_execute and extract its inner content
         let parent_execute = self.parent_plan.explain_execute();
         if let Some(parent_obj) = parent_execute.as_object() {
             for (key, value) in parent_obj {
@@ -824,23 +892,25 @@ impl PlanNode for TypeJoinMany {
             }
         }
 
-        // subTypeScanNode: child plan's execution stats (captured before close)
+        // Use simulated Go-compatible metrics for the child scan.
+        // Go re-initializes the child scanNode per parent, reading ALL children
+        // from the collection each time with an FK filter. Metrics accumulate.
         let mut sub_type_obj = serde_json::Map::new();
         sub_type_obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.child_exec_info.iterations),
+            serde_json::json!(self.go_child_iterations),
         );
         sub_type_obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(self.child_exec_info.docs_fetched),
+            serde_json::json!(self.go_child_doc_fetches),
         );
         sub_type_obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(self.child_exec_info.fields_fetched),
+            serde_json::json!(self.go_child_field_fetches),
         );
         sub_type_obj.insert(
             "indexFetches".to_string(),
-            serde_json::json!(self.child_exec_info.indexes_fetched),
+            serde_json::json!(self.go_child_index_fetches),
         );
         obj.insert(
             "subTypeScanNode".to_string(),

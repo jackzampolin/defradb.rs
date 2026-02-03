@@ -24,6 +24,28 @@ use super::fetcher::FetcherWrapper;
 use super::plan;
 use super::{DocFetcher, QueryRunner};
 
+/// Return a GraphQL-style error when ordering by a relation field.
+///
+/// Go rejects `order: {articles: {name: ASC}}` at the GraphQL schema level because
+/// relation fields are not valid order input fields. This reproduces the same error.
+fn reject_relation_order(order_by: &crate::mapper::OrderBy) -> QueryError {
+    for condition in &order_by.conditions {
+        if condition.fields.len() > 1 {
+            let relation_field = &condition.fields[0];
+            let child_field = &condition.fields[1];
+            let direction = match condition.direction {
+                crate::mapper::OrderDirection::Asc => "ASC",
+                crate::mapper::OrderDirection::Desc => "DESC",
+            };
+            return QueryError::parse(format!(
+                "Argument \"order\" has invalid value {{{}: {{{}: {}}}}}.\nIn field \"{}\": Unknown field.",
+                relation_field, child_field, direction, relation_field
+            ));
+        }
+    }
+    QueryError::parse("Argument \"order\" has invalid value.\nUnknown field.")
+}
+
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL query and return JSON results.
     pub async fn execute_query(&self, query: &str) -> Result<JsonValue> {
@@ -192,8 +214,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let mutations = parse_mutations(mutation_str)?;
         let mut operation_children: Vec<JsonValue> = Vec::new();
-        let mut total_executions: u64 = 0;
-        let mut total_docs: usize = 0;
         let mut execution_success = true;
         let mut execution_errors: Vec<String> = Vec::new();
 
@@ -202,10 +222,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .execute_single_mutation_with_metrics(&mutation, caller_identity.clone())
                 .await
             {
-                Ok((mutation_explain, doc_count, exec_count)) => {
+                Ok((mutation_explain, _doc_count, _exec_count)) => {
                     operation_children.push(mutation_explain);
-                    total_docs += doc_count;
-                    total_executions += exec_count;
                 }
                 Err(e) => {
                     execution_success = false;
@@ -213,6 +231,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
+
+        // Go's executeAndExplainRequest calls Next() on the top-level operationNode.
+        // Each Next()=true yields one mutation result. After all mutations, Next()=false.
+        // So planExecutions = number_of_mutations + 1, sizeOfResult = number_of_mutations.
+        let num_mutations = operation_children.len() as u64;
+        let plan_executions = num_mutations + 1;
+        let size_of_result = num_mutations;
 
         // Build explain result with execution metrics
         let mut explain_result = Map::new();
@@ -226,9 +251,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         );
         explain_result.insert(
             "planExecutions".to_string(),
-            serde_json::json!(total_executions),
+            serde_json::json!(plan_executions),
         );
-        explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
+        explain_result.insert(
+            "sizeOfResult".to_string(),
+            serde_json::json!(size_of_result),
+        );
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -241,6 +269,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Execute a single mutation and return explain with metrics.
+    ///
+    /// Go's mutation plan runs as: mutationNode → selectTopNode → selectNode → scanNode.
+    /// The filter lives at the scanNode level (not selectNode). Metrics accumulate:
+    /// - Create: single pass AFTER creation
+    /// - Delete: single pass BEFORE deletion
+    /// - Update/Upsert: two passes (Phase 1: scan+mutate, Phase 2: scan+return), metrics sum
     async fn execute_single_mutation_with_metrics(
         &self,
         mutation: &crate::mapper::Mutation,
@@ -255,40 +289,234 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             MutationType::Upsert => "upsertNode",
         };
 
-        let collection = self
-            .collection_provider
-            .get_collection(&mutation.collection_name)
-            .await?
-            .ok_or_else(|| QueryError::collection_not_found(&mutation.collection_name))?;
+        // Build a select with the mutation's filter/doc_ids for metric collection.
+        // Go puts the mutation filter on the scanNode; build_plan places the filter
+        // on both scanNode (for iteration/docFetch counting) and selectNode (for
+        // filterMatches counting), which matches Go's behavior.
+        let mut metric_select = Select::new(&mutation.collection_name);
+        if let Some(ref filter) = mutation.filter {
+            metric_select.filter = Some(filter.clone());
+        }
+        if let Some(ref doc_ids) = mutation.doc_ids {
+            metric_select.doc_ids = Some(doc_ids.clone());
+        }
 
-        // Build select for querying results
-        let select = crate::mapper::Select::new(&mutation.collection_name);
+        // Phase 1: Collect metrics BEFORE mutation (delete, update, upsert).
+        // For delete: this is the only scan (single pass over original data).
+        // For update/upsert: Phase 1 captures the "find + mutate" scan metrics.
+        let phase1 = if mutation.mutation_type != MutationType::Create {
+            Some(
+                self.execute_select_with_metrics(&metric_select, caller_identity.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
 
-        // Execute the select and collect metrics
-        let (select_explain, doc_count, iterations) = self
-            .execute_select_with_metrics(&select, caller_identity)
-            .await?;
+        // Execute the actual mutation
+        if let Some(ref mutator) = self.mutator {
+            use chrono::{FixedOffset, Utc};
+            let utc_offset = FixedOffset::east_opt(0).unwrap();
+            let request_time = Utc::now().with_timezone(&utc_offset);
+
+            let collection = self.get_collection(&mutation.collection_name).await?;
+            let mapping = self.build_mutation_mapping(mutation)?;
+            let resolved_doc_ids = self.resolve_filter_to_doc_ids(mutation).await?;
+
+            let mut plan: Box<dyn crate::planner::PlanNode> = match mutation.mutation_type {
+                MutationType::Create => {
+                    let inputs = self.build_create_inputs(mutation)?;
+                    Box::new(
+                        crate::plan::CreateNode::new(
+                            &mutation.collection_name,
+                            mutator.clone(),
+                            mapping.clone(),
+                        )
+                        .with_collection(collection.clone())
+                        .with_request_time(request_time)
+                        .with_inputs(inputs),
+                    )
+                }
+                MutationType::Update => {
+                    let input = self.build_update_input(mutation)?;
+                    let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
+                    let mut node = crate::plan::UpdateNode::new(
+                        &mutation.collection_name,
+                        mutator.clone(),
+                        fetcher,
+                        mapping.clone(),
+                    )
+                    .with_collection(collection.clone())
+                    .with_request_time(request_time)
+                    .with_input(input);
+
+                    if let Some(ref doc_ids) = resolved_doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    } else if let Some(ref doc_ids) = mutation.doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    }
+                    if let Some(ref filter) = mutation.filter {
+                        node = node.with_filter(filter.clone());
+                    }
+                    Box::new(node)
+                }
+                MutationType::Delete => {
+                    let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
+                    let mut node = crate::plan::DeleteNode::new(
+                        &mutation.collection_name,
+                        mutator.clone(),
+                        fetcher,
+                        mapping.clone(),
+                    );
+
+                    if let Some(ref doc_ids) = resolved_doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    } else if let Some(ref doc_ids) = mutation.doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    }
+                    if mutation.filter.is_some()
+                        && resolved_doc_ids.is_none()
+                        && mutation.doc_ids.is_none()
+                    {
+                        node = node.with_filter(mutation.filter.clone().unwrap());
+                    }
+                    Box::new(node)
+                }
+                MutationType::Upsert => {
+                    let mut node = crate::plan::UpsertNode::new(
+                        &mutation.collection_name,
+                        mutator.clone(),
+                        mapping.clone(),
+                    )
+                    .with_collection(collection.clone())
+                    .with_request_time(request_time);
+
+                    if !mutation.create_input.is_empty() {
+                        let create_input =
+                            self.build_upsert_input_from_map(&mutation.create_input[0])?;
+                        node = node.with_create_input(create_input);
+                    }
+                    if !mutation.update_input.is_empty() {
+                        let update_input =
+                            self.build_upsert_input_from_map(&mutation.update_input)?;
+                        node = node.with_update_input(update_input);
+                    }
+                    if let Some(ref doc_ids) = resolved_doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    } else if let Some(ref doc_ids) = mutation.doc_ids {
+                        node = node.with_doc_ids(doc_ids.clone());
+                    }
+                    Box::new(node)
+                }
+            };
+
+            // Execute the mutation plan (ignore results, we just need the side effects)
+            plan.init().await?;
+            plan.start().await?;
+            while plan.next().await? {}
+            plan.close().await?;
+        }
+
+        // Phase 2: Collect metrics AFTER mutation (create, update, upsert).
+        // For create: this is the only scan (single pass over created data).
+        // For update/upsert: Phase 2 captures the "return results" scan metrics.
+        let phase2 = if mutation.mutation_type != MutationType::Delete {
+            Some(
+                self.execute_select_with_metrics(&metric_select, caller_identity.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        // Combine metrics from phases
+        let combined_explain = match (&phase1, &phase2) {
+            (Some((p1, _, _)), Some((p2, _, _))) => {
+                // Two-pass (update/upsert): merge by summing all numeric values
+                Self::merge_execute_metrics(p1, p2)
+            }
+            (Some((p1, _, _)), None) => p1.clone(),
+            (None, Some((p2, _, _))) => p2.clone(),
+            _ => unreachable!(),
+        };
 
         // Wrap in selectTopNode
-        let select_node_content =
-            Self::ensure_select_node_wrapper(select_explain, &select, ExplainType::Execute);
-        let select_top_node = serde_json::json!({
-            "selectTopNode": select_node_content
-        });
-
-        // Build mutation node with iterations
-        let mut mutation_inner = serde_json::Map::new();
-        mutation_inner.insert("iterations".to_string(), serde_json::json!(iterations));
-        mutation_inner.insert(
-            "selectTopNode".to_string(),
-            select_top_node["selectTopNode"].clone(),
+        let select_node_content = Self::ensure_select_node_wrapper(
+            combined_explain,
+            &metric_select,
+            ExplainType::Execute,
         );
+
+        // Build mutation node
+        let mut mutation_inner = serde_json::Map::new();
+
+        // Mutation-specific fields
+        match mutation.mutation_type {
+            MutationType::Create => {
+                let (_, _, plan_execs) = phase2.as_ref().unwrap();
+                mutation_inner
+                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+            }
+            MutationType::Delete => {
+                let (_, _, plan_execs) = phase1.as_ref().unwrap();
+                mutation_inner
+                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+            }
+            MutationType::Update => {
+                let (_, result_count, plan_execs) = phase1.as_ref().unwrap();
+                mutation_inner
+                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+                mutation_inner.insert(
+                    "updates".to_string(),
+                    serde_json::json!(*result_count as u64),
+                );
+            }
+            MutationType::Upsert => {
+                // Go's upsertNode returns empty map for execute explain (no iterations)
+            }
+        }
+
+        mutation_inner.insert("selectTopNode".to_string(), select_node_content);
 
         let mutation_node = serde_json::json!({
             node_kind: mutation_inner
         });
 
-        Ok((mutation_node, doc_count, iterations))
+        let doc_count = match (&phase1, &phase2) {
+            (_, Some((_, count, _))) => *count,
+            (Some((_, count, _)), None) => *count,
+            _ => 0,
+        };
+
+        Ok((mutation_node, doc_count, 1))
+    }
+
+    /// Recursively merge two execute explain JSON trees by summing numeric values.
+    /// Used to combine Phase 1 and Phase 2 metrics for update/upsert mutations.
+    fn merge_execute_metrics(phase1: &JsonValue, phase2: &JsonValue) -> JsonValue {
+        match (phase1, phase2) {
+            (JsonValue::Object(a), JsonValue::Object(b)) => {
+                let mut merged = serde_json::Map::new();
+                for (key, val_a) in a {
+                    if let Some(val_b) = b.get(key) {
+                        merged.insert(key.clone(), Self::merge_execute_metrics(val_a, val_b));
+                    } else {
+                        merged.insert(key.clone(), val_a.clone());
+                    }
+                }
+                for (key, val_b) in b {
+                    if !a.contains_key(key) {
+                        merged.insert(key.clone(), val_b.clone());
+                    }
+                }
+                JsonValue::Object(merged)
+            }
+            (JsonValue::Number(a), JsonValue::Number(b)) => {
+                let sum = a.as_u64().unwrap_or(0) + b.as_u64().unwrap_or(0);
+                serde_json::json!(sum)
+            }
+            _ => phase2.clone(),
+        }
     }
 
     /// Generate an explanation for a single mutation operation.
@@ -409,19 +637,39 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
             MutationType::Upsert => {
-                // Upsert combines create and update semantics
-                let input_array: Vec<JsonValue> = mutation
-                    .create_input
-                    .iter()
-                    .map(|input| {
-                        let mut input_obj = serde_json::Map::new();
-                        for (field_name, value) in input {
-                            input_obj.insert(field_name.clone(), value.clone());
-                        }
-                        JsonValue::Object(input_obj)
-                    })
-                    .collect();
-                mutation_attrs.insert("input".to_string(), JsonValue::Array(input_array));
+                // Go format: separate create, filter, and update fields
+                // create: map of fields for new document creation
+                if !mutation.create_input.is_empty() {
+                    let mut create_obj = serde_json::Map::new();
+                    for (field_name, value) in &mutation.create_input[0] {
+                        create_obj.insert(field_name.clone(), value.clone());
+                    }
+                    mutation_attrs
+                        .insert("create".to_string(), JsonValue::Object(create_obj));
+                }
+
+                // filter: filter expression used to find existing documents
+                if let Some(ref filter) = mutation.filter {
+                    let conditions = filter.conditions();
+                    if conditions.is_empty() {
+                        mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                    } else {
+                        mutation_attrs
+                            .insert("filter".to_string(), serde_json::json!(conditions));
+                    }
+                } else {
+                    mutation_attrs.insert("filter".to_string(), JsonValue::Null);
+                }
+
+                // update: map of fields for updating existing document
+                if !mutation.update_input.is_empty() {
+                    let mut update_obj = serde_json::Map::new();
+                    for (field_name, value) in &mutation.update_input {
+                        update_obj.insert(field_name.clone(), value.clone());
+                    }
+                    mutation_attrs
+                        .insert("update".to_string(), JsonValue::Object(update_obj));
+                }
             }
         }
 
@@ -447,12 +695,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let selects = parse_query_with_variables(query, variables)?;
 
         let mut operation_children: Vec<JsonValue> = Vec::new();
-        let mut total_executions: u64 = 0;
-        let mut total_docs: usize = 0;
         let mut execution_success = true;
         let mut execution_errors: Vec<String> = Vec::new();
 
         for select in selects {
+            // Go rejects ordering by relation fields at the GraphQL schema level.
+            // Check here so the error propagates as a top-level error, not executionErrors.
+            let order_has_relations = select
+                .order_by
+                .as_ref()
+                .map(|o| o.has_relation_order())
+                .unwrap_or(false);
+            if order_has_relations {
+                if let Some(ref order_by) = select.order_by {
+                    return Err(reject_relation_order(order_by));
+                }
+            }
+
             let is_top_level_aggregate = Self::is_top_level_aggregate(&select);
 
             // Execute the select and collect metrics
@@ -460,7 +719,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .execute_select_with_metrics(&select, caller_identity.clone())
                 .await
             {
-                Ok((explanation, doc_count, exec_count)) => {
+                Ok((explanation, _doc_count, _exec_count)) => {
                     // Ensure selectNode wrapper
                     let select_node_content = Self::ensure_select_node_wrapper(
                         explanation,
@@ -483,9 +742,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         });
                         operation_children.push(select_top_node);
                     }
-
-                    total_docs += doc_count;
-                    total_executions += exec_count;
                 }
                 Err(e) => {
                     execution_success = false;
@@ -493,6 +749,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
+
+        // Go's executeAndExplainRequest calls Next() on the top-level operationNode.
+        // Each Next()=true yields one query result. After all queries, Next()=false.
+        // So planExecutions = number_of_queries + 1, sizeOfResult = number_of_queries.
+        let num_queries = operation_children.len() as u64;
+        let plan_executions = num_queries + 1;
+        let size_of_result = num_queries;
 
         // Build explain result with operationNode and execution metrics
         let mut explain_result = Map::new();
@@ -506,9 +769,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         );
         explain_result.insert(
             "planExecutions".to_string(),
-            serde_json::json!(total_executions),
+            serde_json::json!(plan_executions),
         );
-        explain_result.insert("sizeOfResult".to_string(), serde_json::json!(total_docs));
+        explain_result.insert(
+            "sizeOfResult".to_string(),
+            serde_json::json!(size_of_result),
+        );
 
         if !execution_errors.is_empty() {
             explain_result.insert(
@@ -527,6 +793,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         caller_identity: Option<Did>,
     ) -> Result<(JsonValue, usize, u64)> {
+        // Handle _commits system collection (no real collection exists)
+        if select.collection_name == "_commits" {
+            // Actually execute the commits query to get real metrics
+            let results = self.execute_commits_query(select).await?;
+            let doc_count = results.as_array().map(|a| a.len()).unwrap_or(0);
+
+            // Build execute explain with real metrics matching Go's format:
+            // dagScanNode.iterations = doc_count + 1 (includes terminal Next()=false)
+            // selectNode.iterations = doc_count + 1
+            // selectNode.filterMatches = doc_count
+            let iterations = (doc_count as u64) + 1;
+            let explanation = serde_json::json!({
+                "selectNode": {
+                    "filterMatches": doc_count as u64,
+                    "iterations": iterations,
+                    "dagScanNode": {
+                        "iterations": iterations,
+                    }
+                }
+            });
+            return Ok((explanation, doc_count, 1));
+        }
+
         // Get collection schema
         let collection = self
             .collection_provider
@@ -585,8 +874,45 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
-        if can_use_index || has_relation_aggregates {
-            // Use Planner path for index-based queries or relation aggregates
+        // Check if this query has nested selections (relations, _group, etc.)
+        // These require the Planner to construct proper join/group nodes.
+        let has_nested = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Select(_)));
+
+        let filter_has_relations = select
+            .filter
+            .as_ref()
+            .map(|f| f.has_relation_filters())
+            .unwrap_or(false);
+
+        let order_has_relations = select
+            .order_by
+            .as_ref()
+            .map(|o| o.has_relation_order())
+            .unwrap_or(false);
+
+        // Go rejects ordering by relation fields at the GraphQL schema level.
+        if order_has_relations {
+            if let Some(ref order_by) = select.order_by {
+                return Err(reject_relation_order(order_by));
+            }
+        }
+
+        let has_similarity = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Similarity(_)));
+
+        if can_use_index
+            || has_relation_aggregates
+            || has_nested
+            || filter_has_relations
+            || has_similarity
+        {
+            // Use Planner path for index-based queries, relation aggregates,
+            // relation filters/ordering, or similarity
             let fetcher_arc = FetcherWrapper::new(fetcher);
             let collections_map = self.collections_map().await?;
             let collections: Vec<CollectionVersion> =
@@ -614,11 +940,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.init().await?;
             plan.start().await?;
 
-            let mut iterations: u64 = 0;
-            let mut result_count = 0;
+            // Go counts ALL next() calls (including the final false) for planExecutions
+            let mut plan_executions: u64 = 0;
+            let mut result_count: usize = 0;
 
-            while plan.next().await? {
-                iterations += 1;
+            loop {
+                plan_executions += 1;
+                if !plan.next().await? {
+                    break;
+                }
                 result_count += 1;
             }
 
@@ -627,7 +957,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();
 
-            Ok((explanation, result_count, iterations))
+            Ok((explanation, result_count, plan_executions))
         } else {
             // Standard path: fetch all docs and build scan-based plan
             let mapping = plan::build_mapping(select, &collection)?;
@@ -677,11 +1007,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             plan.init().await?;
             plan.start().await?;
 
-            let mut iterations: u64 = 0;
-            let mut result_count = 0;
+            // Go counts ALL next() calls (including the final false) for planExecutions
+            let mut plan_executions: u64 = 0;
+            let mut result_count: usize = 0;
 
-            while plan.next().await? {
-                iterations += 1;
+            loop {
+                plan_executions += 1;
+                if !plan.next().await? {
+                    break;
+                }
                 result_count += 1;
             }
 
@@ -690,7 +1024,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Use explain_execute to get metrics from each node
             let explanation = plan.explain_execute();
 
-            Ok((explanation, result_count, iterations))
+            Ok((explanation, result_count, plan_executions))
         }
     }
 
@@ -720,11 +1054,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Check if this object contains scanNode
             if let Some(scan_node) = obj.get_mut("scanNode") {
                 if let Some(scan_obj) = scan_node.as_object_mut() {
-                    scan_obj.insert("iterations".to_string(), serde_json::json!(iterations));
-                    scan_obj.insert("docFetches".to_string(), serde_json::json!(doc_fetches));
+                    scan_obj.insert(
+                        "iterations".to_string(),
+                        serde_json::json!(iterations as u64),
+                    );
+                    scan_obj.insert(
+                        "docFetches".to_string(),
+                        serde_json::json!(doc_fetches as u64),
+                    );
                     // fieldFetches = number of fields per doc * number of docs fetched
-                    let field_fetches = field_count * doc_fetches;
-                    scan_obj.insert("fieldFetches".to_string(), serde_json::json!(field_fetches));
+                    let field_fetches = (field_count * doc_fetches) as u64;
+                    scan_obj.insert(
+                        "fieldFetches".to_string(),
+                        serde_json::json!(field_fetches),
+                    );
 
                     // indexFetches is set by IndexScanNode::explain_inner() with
                     // the actual index key lookup count. For regular scans without an
@@ -803,11 +1146,63 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
+        // Check if the filter references relation fields (e.g., {author: {verified: true}})
+        let filter_has_relations = select
+            .filter
+            .as_ref()
+            .map(|f| f.has_relation_filters())
+            .unwrap_or(false);
+
+        // Check if the order references relation fields (e.g., {author: {age: DESC}})
+        let order_has_relations = select
+            .order_by
+            .as_ref()
+            .map(|o| o.has_relation_order())
+            .unwrap_or(false);
+
+        // Go rejects ordering by relation fields at the GraphQL schema level.
+        // Reproduce the same error for compatibility.
+        if order_has_relations {
+            if let Some(ref order_by) = select.order_by {
+                return Err(reject_relation_order(order_by));
+            }
+        }
+
+        // Check if any similarity fields are present (require SimilarityNode in planner)
+        let has_similarity = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::Similarity(_)));
+
+        // Check if any secondary relation ID fields are selected (e.g., `_authorID`)
+        let has_secondary_relation_id = select.fields.iter().any(|f| {
+            if let Requestable::Field(field) = f {
+                let field_name = &field.name;
+                if field_name.starts_with('_') && field_name.ends_with("ID") && field_name.len() > 3
+                {
+                    let relation_name = &field_name[1..field_name.len() - 2];
+                    if let Some(relation_field) = collection.field_by_name(relation_name) {
+                        return relation_field.kind.is_relation() && !relation_field.is_primary;
+                    }
+                }
+            }
+            false
+        });
+
         let is_view = collection.query.is_some();
 
-        if is_view || has_nested || has_ordering_index || has_filter_index || has_relation_aggregates
+        if is_view
+            || has_nested
+            || has_ordering_index
+            || has_filter_index
+            || has_relation_aggregates
+            || filter_has_relations
+            || order_has_relations
+            || has_similarity
+            || has_secondary_relation_id
         {
-            // Use the Planner for views, nested selections, index usage, or relation aggregates
+            // Use the Planner for views, nested selections, index usage, relation aggregates,
+            // relation filters/ordering, similarity, or secondary relation IDs
             self.explain_nested_select(select, explain_type).await
         } else {
             // Explain simple query plan
@@ -962,7 +1357,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &["countNode", "sumNode", "averageNode", "minNode", "maxNode"];
 
     /// Aggregate-specific explain fields that should be stripped when unwrapping aggregate nodes.
-    const AGGREGATE_EXPLAIN_FIELDS: [&'static str; 1] = ["sources"];
+    /// "sources" appears in default explain, "iterations" in execute explain.
+    const AGGREGATE_EXPLAIN_FIELDS: [&'static str; 2] = ["sources", "iterations"];
 
     /// Strip aggregate wrapper nodes from explain output for top-level aggregate queries.
     ///
@@ -1013,7 +1409,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         select: &Select,
         select_explain: JsonValue,
-        _explain_type: ExplainType,
+        explain_type: ExplainType,
     ) -> JsonValue {
         use crate::mapper::AggregateType;
 
@@ -1039,17 +1435,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     AggregateType::Max => "maxNode",
                 };
 
-                // Go's averageNode returns empty {} for simple explain
-                // Other aggregates (sum, count, min, max) include sources
-                if agg.aggregate_type == AggregateType::Average {
-                    top_level_children.push(serde_json::json!({
-                        node_name: {}
-                    }));
+                // For execute explain, aggregate nodes show iterations instead of sources
+                if explain_type == ExplainType::Execute {
+                    if agg.aggregate_type == AggregateType::Average {
+                        // Go decomposes average into sumNode + countNode + averageNode
+                        // Each shows iterations: 1 in execute mode
+                        top_level_children.push(serde_json::json!({
+                            "sumNode": { "iterations": 1u64 }
+                        }));
+                        top_level_children.push(serde_json::json!({
+                            "countNode": { "iterations": 1u64 }
+                        }));
+                        top_level_children.push(serde_json::json!({
+                            "averageNode": { "iterations": 1u64 }
+                        }));
+                    } else {
+                        top_level_children.push(serde_json::json!({
+                            node_name: { "iterations": 1u64 }
+                        }));
+                    }
                     continue;
                 }
 
-                // Build sources for explain output
-                // For top-level aggregates, the source is the collection
+                // Default/Debug explain: show sources metadata
                 let target_filter = if !agg.targets.is_empty() {
                     agg.targets[0].filter.as_ref()
                 } else {
@@ -1067,12 +1475,83 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     JsonValue::Null
                 };
 
-                // For aggregates that operate on a field (sum, min, max), include childFieldName
+                // For aggregates that operate on a field (sum, min, max, avg), include childFieldName
                 let child_field_name = if !agg.targets.is_empty() {
                     agg.targets[0].field_name.as_ref()
                 } else {
                     None
                 };
+
+                // Go decomposes average into sumNode + countNode + averageNode
+                if agg.aggregate_type == AggregateType::Average {
+                    // Go adds {field: {_neq: null}} for both sum and count source filters,
+                    // but only for regular fields (not aggregate refs like _avg).
+                    let avg_filter = if let Some(field_name) = child_field_name {
+                        if field_name.starts_with('_') {
+                            // Aggregate field refs don't get neq filter
+                            filter_value.clone()
+                        } else if filter_value.is_null() {
+                            serde_json::json!({field_name: {"_neq": serde_json::Value::Null}})
+                        } else if let Some(obj) = filter_value.as_object() {
+                            // Merge {field: {_neq: null}} into existing filter conditions
+                            let mut merged = obj.clone();
+                            merged
+                                .entry(field_name.to_string())
+                                .and_modify(|v| {
+                                    if let JsonValue::Object(ref mut ops) = v {
+                                        ops.insert(
+                                            "_neq".to_string(),
+                                            serde_json::Value::Null,
+                                        );
+                                    }
+                                })
+                                .or_insert(
+                                    serde_json::json!({"_neq": serde_json::Value::Null}),
+                                );
+                            JsonValue::Object(merged)
+                        } else {
+                            serde_json::json!({field_name: {"_neq": serde_json::Value::Null}})
+                        }
+                    } else {
+                        filter_value.clone()
+                    };
+
+                    // 1. sumNode with sources (includes childFieldName)
+                    let sum_source = if let Some(field_name) = child_field_name {
+                        serde_json::json!({
+                            "fieldName": select.collection_name,
+                            "childFieldName": field_name,
+                            "filter": avg_filter
+                        })
+                    } else {
+                        serde_json::json!({
+                            "fieldName": select.collection_name,
+                            "filter": avg_filter
+                        })
+                    };
+                    top_level_children.push(serde_json::json!({
+                        "sumNode": {
+                            "sources": [sum_source]
+                        }
+                    }));
+
+                    // 2. countNode with sources (no childFieldName, same filter as sum)
+                    let count_source = serde_json::json!({
+                        "fieldName": select.collection_name,
+                        "filter": avg_filter
+                    });
+                    top_level_children.push(serde_json::json!({
+                        "countNode": {
+                            "sources": [count_source]
+                        }
+                    }));
+
+                    // 3. averageNode (empty)
+                    top_level_children.push(serde_json::json!({
+                        "averageNode": {}
+                    }));
+                    continue;
+                }
 
                 let source = if let Some(field_name) = child_field_name {
                     serde_json::json!({

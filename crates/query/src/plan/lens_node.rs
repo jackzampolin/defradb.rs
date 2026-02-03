@@ -178,4 +178,16 @@ impl PlanNode for LensNode {
     fn kind(&self) -> &'static str {
         "lensNode"
     }
+
+    fn explain_inner(&self) -> serde_json::Value {
+        let child_explain = self.source.explain();
+        // Wrap the source plan in selectTopNode (Go's view pipeline convention).
+        // LensNode is the innermost view-related node when present.
+        serde_json::json!({ "selectTopNode": child_explain })
+    }
+
+    fn explain_debug_inner(&self) -> serde_json::Value {
+        let child_explain = self.source.explain_debug();
+        serde_json::json!({ "selectTopNode": child_explain })
+    }
 }

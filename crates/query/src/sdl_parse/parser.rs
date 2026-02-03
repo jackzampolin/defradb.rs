@@ -42,6 +42,25 @@ fn preprocess_empty_types(sdl: &str) -> String {
     .to_string()
 }
 
+/// Generate an index name matching Go's `{Col}_{firstField}_ASC` pattern.
+///
+/// If the base name already exists, appends `_2`, `_3`, etc. to avoid collisions.
+/// This matches Go's `generateIndexName()` in collection_index.go.
+fn generate_index_name(collection_name: &str, first_field: &str, existing_names: &[String]) -> String {
+    let base = format!("{}_{}_ASC", collection_name, first_field);
+    if !existing_names.contains(&base) {
+        return base;
+    }
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{}_{}", base, suffix);
+        if !existing_names.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 /// Convert a GraphQL schema Value to a serde_json Value
 fn graphql_schema_value_to_json(
     value: &graphql_parser::schema::Value<'_, String>,
@@ -938,15 +957,12 @@ impl<'a> SdlParser<'a> {
         }
 
         // Topological sort using Kahn's algorithm
+        // In-degree = number of types this type depends on (not how many depend on it).
+        // Types with in-degree 0 have no unresolved dependencies and can be processed.
         let mut in_degree: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        for type_name in &sorted_type_names {
-            in_degree.insert(type_name.clone(), 0);
-        }
-        for deps in dependencies.values() {
-            for dep in deps {
-                *in_degree.get_mut(dep).unwrap() += 1;
-            }
+        for (type_name, deps) in &dependencies {
+            in_degree.insert(type_name.clone(), deps.len());
         }
 
         // Queue starts with types that have no dependencies
@@ -1244,6 +1260,7 @@ impl<'a> SdlParser<'a> {
         // collection_id will be generated after fields are created (like Go)
         let mut fields = Vec::new();
         let mut indexes = Vec::new();
+        let mut existing_index_names: Vec<String> = Vec::new();
         let mut field_id_counter = 1u32;
 
         // Add implicit _docID field
@@ -1408,8 +1425,12 @@ impl<'a> SdlParser<'a> {
                             .unwrap_or(false);
 
                         if is_one_to_one {
-                            let idx_name =
-                                format!("{}_{}_unique", type_def.name, id_field_name);
+                            let idx_name = generate_index_name(
+                                &type_def.name,
+                                &id_field_name,
+                                &existing_index_names,
+                            );
+                            existing_index_names.push(idx_name.clone());
                             indexes.push(IndexDescription {
                                 name: idx_name,
                                 id: field_id_counter,
@@ -1429,10 +1450,14 @@ impl<'a> SdlParser<'a> {
 
             // Handle field-level @index directive
             if let Some(ref idx_config) = parsed_field.directives.index {
-                let idx_name = idx_config
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("{}_{}_idx", type_def.name, parsed_field.name));
+                let idx_name = idx_config.name.clone().unwrap_or_else(|| {
+                    generate_index_name(
+                        &type_def.name,
+                        &parsed_field.name,
+                        &existing_index_names,
+                    )
+                });
+                existing_index_names.push(idx_name.clone());
 
                 indexes.push(IndexDescription {
                     name: idx_name,
@@ -1466,13 +1491,14 @@ impl<'a> SdlParser<'a> {
             }
 
             let idx_name = composite_idx.name.clone().unwrap_or_else(|| {
-                let field_names: Vec<&str> = composite_idx
+                let first_field = composite_idx
                     .fields
-                    .iter()
+                    .first()
                     .map(|(n, _)| n.as_str())
-                    .collect();
-                format!("{}_{}_idx", type_def.name, field_names.join("_"))
+                    .unwrap_or("unknown");
+                generate_index_name(&type_def.name, first_field, &existing_index_names)
             });
+            existing_index_names.push(idx_name.clone());
 
             let indexed_fields: Vec<IndexedFieldDescription> = composite_idx
                 .fields
