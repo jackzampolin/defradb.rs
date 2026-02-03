@@ -150,6 +150,11 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
                 })
                 .collect(),
         )),
+        // JsonLeaf is an internal indexing type, not expected in query results
+        NormalValue::JsonLeaf(leaf) => Err(QueryError::execution(format!(
+            "JsonLeaf values should not appear in query results: {:?}",
+            leaf
+        ))),
     }
 }
 
