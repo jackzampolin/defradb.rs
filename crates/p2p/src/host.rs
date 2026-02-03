@@ -167,6 +167,13 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<PushLogReply>>,
     },
 
+    /// Send a DocSync response via two-stream protocol.
+    SendDocSyncResponse {
+        peer_id: PeerId,
+        reply: crate::message::DocSyncReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     PeerAddresses {
         response: oneshot::Sender<Vec<String>>,
@@ -237,6 +244,12 @@ pub enum HostEvent {
     TwoStreamRequest {
         peer_id: PeerId,
         request: PushLogRequest,
+    },
+
+    /// Received a DocSync request via two-stream protocol.
+    DocSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::DocSyncRequest,
     },
 }
 
@@ -621,6 +634,26 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send a DocSync response via two-stream protocol.
+    ///
+    /// This sends a response on a NEW stream, matching Go's two-stream pattern.
+    pub async fn send_doc_sync_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::DocSyncReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendDocSyncResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     pub async fn peer_addresses(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -852,6 +885,27 @@ impl<S: Store> P2PHost<S> {
                     );
                 } else {
                     info!(peer_id = %peer_id, "Forwarded TwoStreamRequest event to coordinator");
+                }
+            }
+            TwoStreamEvent::DocSyncRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.metadata.message_id,
+                    doc_ids = ?request.doc_ids,
+                    "Host received DocSync request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::DocSyncRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send DocSyncRequest event - receiver dropped"
+                    );
+                } else {
+                    info!(peer_id = %peer_id, "Forwarded DocSyncRequest event to coordinator");
                 }
             }
             TwoStreamEvent::DecodeError { peer_id, error } => {
@@ -1280,6 +1334,21 @@ impl<S: Store> P2PHost<S> {
                     let result = h.send_request(peer_id, request).await.map_err(|e| e);
                     if response.send(result).is_err() {
                         debug!(peer_id = %peer_id, "SendTwoStreamRequest command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::SendDocSyncResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_doc_sync_response(peer_id, reply).await.map_err(|e| e);
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendDocSyncResponse command response dropped - caller cancelled");
                     }
                 });
             }

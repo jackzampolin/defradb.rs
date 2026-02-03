@@ -1382,22 +1382,26 @@ pub unsafe extern "C" fn p2p_get_all_documents(
 
 /// Sync specific documents from peers.
 ///
+/// This implements the DocSync pull-based protocol: sends requests to connected peers
+/// asking for the heads of specific documents, then fetches the missing DAG blocks
+/// via Bitswap and merges them.
+///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `identity_did` - DID of the requesting identity (for NAC)
+/// * `identity_did` - Identity DID for NAC permission check
 /// * `collection_name` - Name of the collection containing the documents
 /// * `doc_ids_json` - JSON array of document IDs to sync
 ///
 /// # Safety
 ///
-/// All string parameters must be valid null-terminated UTF-8 strings or null.
+/// All string pointers must be valid null-terminated UTF-8 strings.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_sync_documents(
     node_ptr: usize,
     identity_did: *const c_char,
-    _collection_name: *const c_char,
-    _doc_ids_json: *const c_char,
+    collection_name: *const c_char,
+    doc_ids_json: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
@@ -1405,11 +1409,96 @@ pub unsafe extern "C" fn p2p_sync_documents(
         return e;
     }
 
-    // Document sync is a complex operation that involves:
-    // 1. Finding peers that have the documents
-    // 2. Requesting the documents via Bitswap
-    // 3. Merging the received blocks
-    //
-    // For now, return success as a no-op stub since this is not critical for basic tests.
-    FfiResult::ok()
+    let collection_name_str = match c_str_to_string(collection_name) {
+        Some(s) => s,
+        None => return FfiResult::error("collection_name is null"),
+    };
+
+    let doc_ids_str = match c_str_to_string(doc_ids_json) {
+        Some(s) => s,
+        None => return FfiResult::error("doc_ids_json is null"),
+    };
+
+    let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
+        Ok(d) => d,
+        Err(e) => return FfiResult::error(e),
+    };
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("P2P not enabled for this node".to_string()),
+            };
+            let db = &state.database;
+
+            rt.block_on(async {
+                // Verify the collection exists
+                let _collection = db
+                    .get_collection(&collection_name_str)
+                    .map_err(|e| format!("failed to get collection: {}", e))?
+                    .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+
+                // Get connected peers
+                let connected_peers = p2p
+                    .handle
+                    .connected_peers()
+                    .await
+                    .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+                if connected_peers.is_empty() {
+                    tracing::debug!("No connected peers for DocSync");
+                    return Ok(());
+                }
+
+                tracing::info!(
+                    collection = %collection_name_str,
+                    doc_ids = ?doc_ids,
+                    peer_count = connected_peers.len(),
+                    "Starting DocSync for documents"
+                );
+
+                // Create DocSync request
+                let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+
+                // Sign the request
+                if let Err(e) = p2p::signing::sign_message(p2p.handle.keypair(), &mut request) {
+                    return Err(format!("failed to sign DocSync request: {}", e));
+                }
+
+                // Send DocSync request to each connected peer
+                // The response handling happens asynchronously via the coordinator:
+                // 1. Request is sent via two-stream protocol
+                // 2. Peer responds with DocSyncReply containing head CIDs
+                // 3. Coordinator receives DocSyncReply and initiates Bitswap fetch
+                // 4. Blocks are stored and merged via the replication loop
+                for peer_id in connected_peers {
+                    let request_clone = request.clone();
+                    let handle = p2p.handle.clone();
+
+                    tokio::spawn(async move {
+                        tracing::info!(
+                            peer_id = %peer_id,
+                            "Sending DocSync request to peer"
+                        );
+                        if let Err(e) = handle.send_doc_sync_request(peer_id, request_clone).await {
+                            tracing::warn!(
+                                peer_id = %peer_id,
+                                error = %e,
+                                "Failed to send DocSync request"
+                            );
+                        }
+                    });
+                }
+
+                Ok(())
+            })
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(()) => FfiResult::ok(),
+        Err(e) => FfiResult::error(e),
+    }
 }

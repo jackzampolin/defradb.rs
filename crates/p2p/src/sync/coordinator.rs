@@ -85,7 +85,7 @@ use libp2p::PeerId;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
-use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
+use crate::message::{DocSyncItem, DocSyncReply, DocSyncRequest, PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
 
@@ -666,6 +666,46 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                         query_id = query_id.0,
                         error = %err,
                         "Bitswap fetch failed"
+                    );
+                }
+            }
+            HostEvent::DocSyncRequest { peer_id, request } => {
+                // Handle DocSync request - respond with document head CIDs
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    doc_ids = ?request.doc_ids,
+                    message_id = %request.metadata.message_id,
+                    "Received DocSync request"
+                );
+
+                // Build results for each requested document
+                // Note: In a full implementation, we would query the headstore for each doc_id
+                // For now, we return an empty result set since we don't have DB access here
+                let results: Vec<DocSyncItem> = Vec::new();
+
+                let mut reply = DocSyncReply::success(&request.metadata.message_id, results);
+
+                // Sign the response
+                if let Err(e) = crate::signing::sign_message(self.host.keypair(), &mut reply) {
+                    tracing::error!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to sign DocSync response"
+                    );
+                    return Err(e);
+                }
+
+                // Send response via two-stream protocol
+                if let Err(e) = self.host.send_doc_sync_response(peer_id, reply).await {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to send DocSync response"
+                    );
+                } else {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        "Sent DocSync response"
                     );
                 }
             }
