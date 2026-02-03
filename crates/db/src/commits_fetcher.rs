@@ -257,18 +257,18 @@ impl<S: Store> CommitsFetcher<S> {
         options: &CommitsQueryOptions,
     ) -> Result<Vec<Cid>> {
         let headstore = txn.headstore()?;
+        let mut cids = Vec::new();
 
-        let prefix = if let Some(ref doc_id) = options.doc_id {
+        // Query document-level heads
+        let doc_prefix = if let Some(ref doc_id) = options.doc_id {
             format!("/d/{}/", doc_id).into_bytes()
         } else {
             // All document heads start with /d/
             b"/d/".to_vec()
         };
 
-        let opts = IterOptions::new().with_prefix(prefix);
+        let opts = IterOptions::new().with_prefix(doc_prefix);
         let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
-
-        let mut cids = Vec::new();
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
             // Parse CID from key: /d/{doc_id}/{field_id}/{cid}
@@ -281,8 +281,28 @@ impl<S: Store> CommitsFetcher<S> {
                 }
             }
         }
-
         iter.close().await.map_err(Error::Storage)?;
+
+        // Also query collection-level heads when no specific doc_id filter
+        // (branchable collections have collection-level commits at /c/{collection_id}/{cid})
+        if options.doc_id.is_none() {
+            let col_opts = IterOptions::new().with_prefix(b"/c/".to_vec());
+            let mut col_iter = headstore.iterator(col_opts).await.map_err(Error::Storage)?;
+
+            while let Some(pair) = col_iter.next().await.map_err(Error::Storage)? {
+                // Parse CID from key: /c/{collection_id}/{cid}
+                let key_str = String::from_utf8_lossy(&pair.key);
+                let parts: Vec<&str> = key_str.split('/').collect();
+                if parts.len() >= 4 {
+                    // parts: ["", "c", collection_id, cid]
+                    if let Ok(cid) = Cid::from_str(parts[3]) {
+                        cids.push(cid);
+                    }
+                }
+            }
+            col_iter.close().await.map_err(Error::Storage)?;
+        }
+
         Ok(cids)
     }
 
@@ -381,17 +401,30 @@ impl<S: Store> CommitsFetcher<S> {
         );
 
         // links - array of {cid, fieldName, height}
-        // Load each linked block to get its priority/height
+        // Load each linked block to get its priority/height and fieldName from delta
         let mut links: Vec<JsonValue> = Vec::new();
         if let Some(block_links) = &block.links {
             for link in block_links {
-                let height = match self.load_block(txn, &link.link).await {
-                    Ok(linked_block) => json!(linked_block.delta.priority() as i64),
-                    Err(_) => JsonValue::Null,
+                let (height, field_name) = match self.load_block(txn, &link.link).await {
+                    Ok(linked_block) => {
+                        let h = json!(linked_block.delta.priority() as i64);
+                        // Get fieldName from linked block's delta (not from DAGLink's name)
+                        // This is important for collection-level commits where link.name is empty
+                        // but the linked block has a proper fieldName (e.g., "_C" for composite)
+                        let fn_from_delta = self.get_field_name(&linked_block.delta);
+                        // Use link.name if non-empty, otherwise fall back to delta's fieldName
+                        let fn_val = if link.name.is_empty() {
+                            fn_from_delta.unwrap_or_default()
+                        } else {
+                            link.name.clone()
+                        };
+                        (h, fn_val)
+                    }
+                    Err(_) => (JsonValue::Null, link.name.clone()),
                 };
                 links.push(json!({
                     "cid": link.link.to_string(),
-                    "fieldName": link.name,
+                    "fieldName": field_name,
                     "height": height,
                 }));
             }
