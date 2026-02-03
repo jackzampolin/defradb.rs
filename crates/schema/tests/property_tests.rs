@@ -176,6 +176,10 @@ proptest! {
             CType::None | CType::LwwRegister | CType::Composite => {
                 prop_assert!(compatible);
             }
+            // Unknown type - compatibility depends on implementation
+            CType::Unknown(_) => {
+                // No assertion - unknown types have undefined compatibility
+            }
         }
     }
 
