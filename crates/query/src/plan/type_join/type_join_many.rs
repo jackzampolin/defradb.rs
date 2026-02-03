@@ -515,7 +515,6 @@ impl TypeJoinMany {
     /// - No child document passes the filter conditions
     fn check_relation_filter(&self, children: &[Doc], rel_filter: &RelationFilter) -> Result<bool> {
         if children.is_empty() {
-            // No children - relation filter cannot pass
             return Ok(false);
         }
 
