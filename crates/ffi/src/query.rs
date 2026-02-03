@@ -3,13 +3,15 @@
 //! This module exposes GraphQL query execution that matches
 //! Go's cbindings/query.go behavior.
 
+use std::collections::HashMap;
 use std::ffi::c_char;
 
 use acp::nac::NodePermission;
+use serde_json::Value as JsonValue;
 
 use crate::get_runtime;
 use crate::nac_check::check_nac_for_node;
-use crate::state::NODES;
+use crate::state::{GraphQLSubscriptionState, GRAPHQL_SUBSCRIPTIONS, NODES};
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
@@ -165,6 +167,41 @@ pub unsafe extern "C" fn exec_request(
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)
     check_and_set_dac_bypass(rt, node_ptr, identity_did);
 
+    // Parse variables before checking for subscriptions
+    let vars_map: Option<HashMap<String, JsonValue>> = match vars_str {
+        Some(ref vars) => match serde_json::from_str::<JsonValue>(vars) {
+            Ok(JsonValue::Object(map)) => {
+                Some(map.into_iter().collect())
+            }
+            Ok(_) => None, // Non-object variables
+            Err(e) => return FfiResult::error(format!("failed to parse variables: {}", e)),
+        },
+        None => None,
+    };
+
+    // Check if this is a subscription query BEFORE calling the executor
+    // (which rejects subscriptions with an SSE error)
+    let parsed = match query::parse_request_with_variables(
+        &query_str,
+        vars_map.as_ref(),
+        op_name.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => return FfiResult::error(format!("parse error: {}", e)),
+    };
+
+    // If this is a subscription, create a GraphQL subscription and return handle
+    if let query::ParsedOperation::Subscription { select } = parsed {
+        return create_graphql_subscription_internal(
+            rt,
+            node_ptr,
+            select,
+            query_str,
+            did,
+            vars_map,
+        );
+    }
+
     // Validate node handle before entering async block
     let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
         Some(r) => r,
@@ -200,6 +237,223 @@ pub unsafe extern "C" fn exec_request(
         Ok(json) => FfiResult::success(json),
         Err(e) => FfiResult::error(e),
     }
+}
+
+/// Internal function to create a GraphQL subscription.
+///
+/// Creates an event subscription and stores the query/select for re-execution
+/// when events arrive.
+fn create_graphql_subscription_internal(
+    rt: &tokio::runtime::Runtime,
+    node_ptr: usize,
+    select: query::Select,
+    query_str: String,
+    identity: Option<identity::Did>,
+    variables: Option<HashMap<String, JsonValue>>,
+) -> FfiResult {
+    // Get the event bus from the node and subscribe to Update events
+    let subscription = match NODES.get(node_ptr, |state| {
+        state.event_bus.subscribe(&[events::EventName::Update])
+    }) {
+        Some(sub) => sub,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    // Create GraphQL subscription state
+    let state = GraphQLSubscriptionState {
+        subscription,
+        node_handle: node_ptr,
+        select,
+        query: query_str,
+        identity,
+        variables,
+    };
+
+    // Register and return handle as subscription ID
+    let handle = GRAPHQL_SUBSCRIPTIONS.insert(state);
+    FfiResult::subscription(handle.to_string())
+}
+
+/// Poll a GraphQL subscription for results.
+///
+/// When an Update event arrives that matches the subscription's collection,
+/// this re-executes the subscription query and returns the results.
+///
+/// # Returns
+///
+/// - status=0: Query result available (value contains GQL JSON)
+/// - status=1: Error occurred
+/// - status=2: No result available yet (subscription still active)
+/// - status=3: Subscription closed
+///
+/// # Safety
+///
+/// The subscription_id must be a valid null-terminated string from a previous
+/// subscription creation.
+#[no_mangle]
+pub unsafe extern "C" fn poll_graphql_subscription(
+    subscription_id: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let sub_id_str = match c_str_to_string(subscription_id) {
+        Some(s) => s,
+        None => return FfiResult::error("subscription_id is null"),
+    };
+
+    let handle: usize = match sub_id_str.parse() {
+        Ok(h) => h,
+        Err(_) => return FfiResult::error("invalid subscription handle"),
+    };
+
+    // Try to receive an event and execute the query
+    let result = GRAPHQL_SUBSCRIPTIONS.get_mut(handle, |state| {
+        // Try to receive an Update event
+        loop {
+            match state.subscription.try_recv() {
+                Ok(message) => {
+                    // Check if this is an Update event
+                    if let Some(update) = message.as_update() {
+                        // Check if the event matches our subscription's collection
+                        let collection_name = &state.select.collection_name;
+                        if !update.collection_id.contains(collection_name.as_str()) {
+                            // Skip this event, try next
+                            continue;
+                        }
+
+                        // Execute the subscription query to get current data
+                        // We need the node's query runner
+                        let runner = match NODES.get(state.node_handle, |ns| ns.query_runner.clone()) {
+                            Some(r) => r,
+                            None => return Err("node closed".to_string()),
+                        };
+
+                        // Build the query request with the event's docID and cid
+                        // This matches Go's behavior: ToSubscriptionSelect adds docID filter
+                        let mut modified_select = state.select.clone();
+
+                        // Add docID filter if not already filtered
+                        if modified_select.doc_ids.is_none() {
+                            modified_select.doc_ids = Some(vec![update.doc_id.clone()]);
+                        }
+
+                        // Add cid filter if not already set
+                        if modified_select.cid.is_none() {
+                            modified_select.cid = Some(update.cid.to_string());
+                        }
+
+                        // Execute the modified query
+                        let query_result = rt.block_on(async {
+                            // We'll execute as a regular query with the docID filter
+                            let mut request = query::QueryRequest::new(state.query.clone());
+                            if let Some(ref did) = state.identity {
+                                request = request.with_identity(Some(did.clone()));
+                            }
+                            if let Some(ref vars) = state.variables {
+                                let vars_json = serde_json::to_value(vars)
+                                    .unwrap_or(JsonValue::Null);
+                                request = request.with_variables(vars_json);
+                            }
+
+                            // Execute the query (the executor will parse it again)
+                            // For subscriptions, we need to run the query against current state
+                            runner.execute(request).await
+                        });
+
+                        // Check if result is empty (Go skips empty results)
+                        if let Some(ref data) = query_result.data {
+                            if let JsonValue::Object(map) = data {
+                                // Check if all arrays in the result are empty
+                                let all_empty = map.values().all(|v| {
+                                    if let JsonValue::Array(arr) = v {
+                                        arr.is_empty()
+                                    } else {
+                                        false
+                                    }
+                                });
+                                if all_empty {
+                                    // Skip empty results, try next event
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Serialize response
+                        let json = serde_json::to_string(&query_result)
+                            .map_err(|e| format!("failed to serialize response: {}", e))?;
+
+                        return Ok(Some(json));
+                    }
+                    // Not an Update event, skip
+                    continue;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    // No events available
+                    return Ok(None);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    // Channel closed
+                    return Err("closed".to_string());
+                }
+            }
+        }
+    });
+
+    match result {
+        Some(Ok(Some(json))) => FfiResult::success(json),
+        Some(Ok(None)) => {
+            // No event available - return status 2 with empty value
+            FfiResult {
+                status: 2,
+                error: std::ptr::null_mut(),
+                value: std::ptr::null_mut(),
+            }
+        }
+        Some(Err(e)) if e == "closed" => {
+            // Subscription closed - return status 3
+            FfiResult {
+                status: 3,
+                error: std::ptr::null_mut(),
+                value: std::ptr::null_mut(),
+            }
+        }
+        Some(Err(e)) => FfiResult::error(e),
+        None => FfiResult::error("invalid subscription handle"),
+    }
+}
+
+/// Close a GraphQL subscription and release resources.
+///
+/// # Safety
+///
+/// The subscription_id must be a valid null-terminated string from a previous
+/// subscription creation.
+#[no_mangle]
+pub unsafe extern "C" fn close_graphql_subscription(
+    subscription_id: *const c_char,
+) -> FfiResult {
+    let sub_id_str = match c_str_to_string(subscription_id) {
+        Some(s) => s,
+        None => return FfiResult::error("subscription_id is null"),
+    };
+
+    let handle: usize = match sub_id_str.parse() {
+        Ok(h) => h,
+        Err(_) => return FfiResult::error("invalid subscription handle"),
+    };
+
+    // Remove from registry
+    let state = match GRAPHQL_SUBSCRIPTIONS.remove(handle) {
+        Some(state) => state,
+        None => return FfiResult::error("invalid subscription handle"),
+    };
+
+    // Unsubscribe from the event bus
+    let _ = NODES.get(state.node_handle, |node_state| {
+        node_state.event_bus.unsubscribe(state.subscription.id());
+    });
+
+    FfiResult::ok()
 }
 
 #[cfg(test)]

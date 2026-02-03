@@ -309,6 +309,26 @@ pub struct SubscriptionState {
     pub collection_filter: Option<String>,
 }
 
+/// State held for each FFI GraphQL subscription.
+///
+/// Unlike raw event subscriptions, GraphQL subscriptions re-execute
+/// the subscription query when relevant events occur and return
+/// query results.
+pub struct GraphQLSubscriptionState {
+    /// The underlying events subscription.
+    pub subscription: events::Subscription,
+    /// The node handle this subscription belongs to.
+    pub node_handle: NodeHandle,
+    /// The parsed select for the subscription query.
+    pub select: query::Select,
+    /// The original query string (for re-execution).
+    pub query: String,
+    /// Optional identity DID for the subscription.
+    pub identity: Option<identity::Did>,
+    /// Optional variables for the subscription.
+    pub variables: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
 /// Global registry of active nodes.
 ///
 /// Uses RwLock for safe concurrent access from multiple threads.
@@ -466,6 +486,94 @@ impl SubscriptionsAccess {
 
 /// Global SUBSCRIPTIONS accessor.
 pub static SUBSCRIPTIONS: SubscriptionsAccess = SubscriptionsAccess;
+
+/// Global registry of active GraphQL subscriptions.
+pub struct GraphQLSubscriptionRegistry {
+    subscriptions: RwLock<HashMap<SubscriptionHandle, GraphQLSubscriptionState>>,
+    next_handle: AtomicUsize,
+}
+
+impl GraphQLSubscriptionRegistry {
+    fn new() -> Self {
+        Self {
+            subscriptions: RwLock::new(HashMap::new()),
+            next_handle: AtomicUsize::new(1),
+        }
+    }
+
+    /// Insert a new GraphQL subscription state and return its handle.
+    pub fn insert(&self, state: GraphQLSubscriptionState) -> SubscriptionHandle {
+        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+        let mut subs = self.subscriptions.write();
+        subs.insert(handle, state);
+        handle
+    }
+
+    /// Get mutable access to a GraphQL subscription state (required for try_recv).
+    pub fn get_mut<F, R>(&self, handle: SubscriptionHandle, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut GraphQLSubscriptionState) -> R,
+    {
+        let mut subs = self.subscriptions.write();
+        subs.get_mut(&handle).map(f)
+    }
+
+    /// Remove and return a GraphQL subscription state.
+    pub fn remove(&self, handle: SubscriptionHandle) -> Option<GraphQLSubscriptionState> {
+        let mut subs = self.subscriptions.write();
+        subs.remove(&handle)
+    }
+
+    /// Remove all GraphQL subscriptions for a given node handle.
+    pub fn remove_for_node(&self, node_handle: NodeHandle) -> Vec<GraphQLSubscriptionState> {
+        let mut subs = self.subscriptions.write();
+        let handles_to_remove: Vec<SubscriptionHandle> = subs
+            .iter()
+            .filter(|(_, state)| state.node_handle == node_handle)
+            .map(|(handle, _)| *handle)
+            .collect();
+
+        handles_to_remove
+            .into_iter()
+            .filter_map(|handle| subs.remove(&handle))
+            .collect()
+    }
+}
+
+/// Global GraphQL subscription registry singleton.
+static GRAPHQL_SUBSCRIPTION_REGISTRY: OnceLock<GraphQLSubscriptionRegistry> = OnceLock::new();
+
+/// Access the global GraphQL subscription registry.
+pub fn graphql_subscriptions() -> &'static GraphQLSubscriptionRegistry {
+    GRAPHQL_SUBSCRIPTION_REGISTRY.get_or_init(GraphQLSubscriptionRegistry::new)
+}
+
+/// Convenience wrapper for GraphQL subscription registry access.
+pub struct GraphQLSubscriptionsAccess;
+
+impl GraphQLSubscriptionsAccess {
+    pub fn insert(&self, state: GraphQLSubscriptionState) -> SubscriptionHandle {
+        graphql_subscriptions().insert(state)
+    }
+
+    pub fn get_mut<F, R>(&self, handle: SubscriptionHandle, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut GraphQLSubscriptionState) -> R,
+    {
+        graphql_subscriptions().get_mut(handle, f)
+    }
+
+    pub fn remove(&self, handle: SubscriptionHandle) -> Option<GraphQLSubscriptionState> {
+        graphql_subscriptions().remove(handle)
+    }
+
+    pub fn remove_for_node(&self, node_handle: NodeHandle) -> Vec<GraphQLSubscriptionState> {
+        graphql_subscriptions().remove_for_node(node_handle)
+    }
+}
+
+/// Global GRAPHQL_SUBSCRIPTIONS accessor.
+pub static GRAPHQL_SUBSCRIPTIONS: GraphQLSubscriptionsAccess = GraphQLSubscriptionsAccess;
 
 /// Convenience wrapper for NODES access (backwards compatibility).
 pub struct NodesAccess;

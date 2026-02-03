@@ -102,7 +102,7 @@ pub use p2p::{
     p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections, p2p_remove_documents,
     p2p_set_replicator, p2p_sync_documents,
 };
-pub use query::exec_request;
+pub use query::{close_graphql_subscription, exec_request, poll_graphql_subscription};
 pub use schema::{add_schema, get_collections};
 pub use subscription::{
     close_subscription, create_merge_complete_subscription, create_subscription, poll_subscription,
