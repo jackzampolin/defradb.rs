@@ -181,12 +181,19 @@ impl TwoStreamHandler {
             .await
             .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
 
+        // Debug: hex dump first 200 bytes of response for troubleshooting deserialization
+        let hex_preview: String = buf.iter().take(200).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        eprintln!("[TWO-STREAM-DESER] Response from peer={} len={} hex={}", peer_id, buf.len(), hex_preview);
+
+        // Also try to parse as generic CBOR value for debugging
+        if let Ok(value) = serde_cbor::from_slice::<serde_cbor::Value>(&buf) {
+            eprintln!("[TWO-STREAM-DESER] Parsed as generic CBOR: {:?}", value);
+        }
+
         // Try BranchableSyncReply first (has CollectionID + Heads fields).
         // Must come before DocSyncReply since serde_cbor ignores unknown fields.
-        if let Ok(reply) = serde_cbor::from_slice::<BranchableSyncReply>(&buf) {
-            // Only treat as BranchableSync if it has a non-empty collection_id
-            // (DocSyncReply wouldn't have this field, so it would be empty)
-            if !reply.collection_id.is_empty() {
+        match serde_cbor::from_slice::<BranchableSyncReply>(&buf) {
+            Ok(reply) if !reply.collection_id.is_empty() => {
                 tracing::debug!(
                     peer_id = %peer_id,
                     message_id = %reply.message_id,
@@ -195,6 +202,12 @@ impl TwoStreamHandler {
                     "Received BranchableSync response on two-stream protocol"
                 );
                 return Ok(Some(TwoStreamEvent::BranchableSyncReply { peer_id, reply }));
+            }
+            Ok(_) => {
+                eprintln!("[TWO-STREAM-DESER] BranchableSyncReply parsed but collection_id empty, trying other types");
+            }
+            Err(e) => {
+                eprintln!("[TWO-STREAM-DESER] BranchableSyncReply deser failed: {}", e);
             }
         }
 
