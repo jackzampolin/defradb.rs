@@ -3921,6 +3921,85 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                             JsonValue::Null,
                                                         );
                                                     }
+                                                } else if let Requestable::Select(inner_nested) =
+                                                    nested_field
+                                                {
+                                                    // Handle double-nested selects (e.g., heads { links { cid } })
+                                                    let inner_name = &inner_nested.field.name;
+                                                    let inner_output =
+                                                        inner_nested.field.output_name();
+                                                    if let Some(inner_val) = item.get(inner_name) {
+                                                        if let Some(inner_arr) = inner_val.as_array()
+                                                        {
+                                                            // Apply filter and extract requested fields
+                                                            let inner_results: Vec<JsonValue> =
+                                                                inner_arr
+                                                                    .iter()
+                                                                    .filter(|inner_item| {
+                                                                        if let Some(ref filter) =
+                                                                            inner_nested.filter
+                                                                        {
+                                                                            Self::matches_json_filter(
+                                                                                inner_item, filter,
+                                                                            )
+                                                                        } else {
+                                                                            true
+                                                                        }
+                                                                    })
+                                                                    .map(|inner_item| {
+                                                                        let mut inner_obj =
+                                                                            serde_json::Map::new();
+                                                                        for inner_field in
+                                                                            &inner_nested.fields
+                                                                        {
+                                                                            if let Requestable::Field(
+                                                                                inf,
+                                                                            ) = inner_field
+                                                                            {
+                                                                                let inf_name =
+                                                                                    &inf.name;
+                                                                                let inf_output =
+                                                                                    inf.output_name(
+                                                                                    );
+                                                                                if let Some(inv) =
+                                                                                    inner_item
+                                                                                        .get(inf_name)
+                                                                                {
+                                                                                    inner_obj.insert(
+                                                                                        inf_output
+                                                                                            .to_string(
+                                                                                            ),
+                                                                                        inv.clone(),
+                                                                                    );
+                                                                                } else {
+                                                                                    inner_obj.insert(
+                                                                                        inf_output
+                                                                                            .to_string(
+                                                                                            ),
+                                                                                        JsonValue::Null,
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        JsonValue::Object(inner_obj)
+                                                                    })
+                                                                    .collect();
+                                                            nested_obj.insert(
+                                                                inner_output.to_string(),
+                                                                JsonValue::Array(inner_results),
+                                                            );
+                                                        } else {
+                                                            nested_obj.insert(
+                                                                inner_output.to_string(),
+                                                                inner_val.clone(),
+                                                            );
+                                                        }
+                                                    } else {
+                                                        nested_obj.insert(
+                                                            inner_output.to_string(),
+                                                            JsonValue::Array(vec![]),
+                                                        );
+                                                    }
                                                 }
                                             }
                                             JsonValue::Object(nested_obj)
