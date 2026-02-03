@@ -1497,6 +1497,22 @@ impl<S: Store> DB<S> {
         Ok(versions)
     }
 
+    /// Check if a collection has any documents in the datastore.
+    async fn collection_has_data(&self, collection_id: &str) -> Result<bool> {
+        let txn = self.new_txn(true).await?;
+        let has_data = {
+            let datastore = txn.datastore()?;
+            let doc_prefix = format!("/d/{}/", collection_id);
+            let opts = IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
+            let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
+            let has_any = iter.next().await.map_err(Error::Storage)?.is_some();
+            iter.close().await.map_err(Error::Storage)?;
+            has_any
+        };
+        let _ = txn.discard();
+        Ok(has_data)
+    }
+
     /// Patch a collection's schema using JSON patch operations.
     ///
     /// This creates a new schema version with a new version_id (CID) and links
@@ -1588,6 +1604,11 @@ impl<S: Store> DB<S> {
             None
         };
 
+        // Track whether the patch deactivates this collection or explicitly changes IsActive.
+        // These require in-place updates rather than new version creation.
+        let mut is_deactivation = false;
+        let mut is_active_explicitly_set = false;
+
         if let serde_json::Value::Array(ops) = patch_ops {
             for op in ops {
                 let operation = op.get("op").and_then(|v| v.as_str());
@@ -1622,6 +1643,24 @@ impl<S: Store> DB<S> {
                                 ))
                             })?
                             .clone();
+
+                        // Go compatibility: root-level add/replace is "adding collections"
+                        if path == "/" {
+                            let name = value
+                                .as_object()
+                                .and_then(|m| m.get("Name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or(&actual_name);
+                            return Err(Error::InvalidPatch(format!(
+                                "adding collections via patch is not supported. Name: {}",
+                                name
+                            )));
+                        }
+
+                        // Track explicit IsActive changes for in-place update handling
+                        if path == "/IsActive" {
+                            is_active_explicitly_set = true;
+                        }
 
                         // Go compatibility: validate VersionID replacement
                         if path.ends_with("/VersionID") {
@@ -1714,7 +1753,12 @@ impl<S: Store> DB<S> {
                         Self::json_pointer_set(&mut schema_json, path, value)?;
                     }
                     (Some("remove"), Some(path)) => {
-                        Self::json_pointer_remove(&mut schema_json, path)?;
+                        if path == "/" {
+                            // Root-level remove = deactivate collection
+                            is_deactivation = true;
+                        } else {
+                            Self::json_pointer_remove(&mut schema_json, path)?;
+                        }
                     }
                     (Some("test"), Some(path)) => {
                         // RFC 6902 "test" operation: verify value at path equals expected
@@ -1943,6 +1987,115 @@ impl<S: Store> DB<S> {
                 return Err(Error::InvalidPatch(field_errors.join("\n")));
             }
         }
+
+        // Handle in-place updates (deactivation or IsActive-only changes).
+        // These don't create a new schema version - they update the existing one.
+        let is_isactive_only_change = is_active_explicitly_set
+            && new_schema.fields == old_schema.fields
+            && new_schema.name == old_schema.name;
+
+        if is_deactivation || is_isactive_only_change {
+            if is_deactivation {
+                new_schema.is_active = false;
+            }
+            // Keep original version_id and previous_version
+            new_schema.version_id = old_version_id.clone();
+            new_schema.previous_version = old_schema.previous_version.clone();
+
+            // Validate: can't remove a version that is a dependency of another version
+            // This check runs always for deactivation (even if already inactive),
+            // matching Go's validateCollectionDoesNotHaveHigherVersion
+            if is_deactivation {
+                let all_versions = self.get_all_collection_versions().await?;
+                for other in &all_versions {
+                    if let Some(ref prev) = other.previous_version {
+                        if prev.source_collection_id == old_version_id {
+                            return Err(Error::InvalidPatch(
+                                "cannot delete a version that is used by a newer version, first delete the new version".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Validate: can't remove a collection that has documents (only on active→inactive)
+            if !new_schema.is_active && old_schema.is_active {
+                let has_data = self.collection_has_data(&collection_id).await?;
+                if has_data {
+                    return Err(Error::InvalidPatch(
+                        "cannot delete a collection that has documents, first delete the documents and then delete the version".to_string(),
+                    ));
+                }
+            }
+
+            // Run cross-collection validators to catch issues like multiple active versions
+            let all_existing = self.get_all_collection_versions().await?;
+            let new_collections: Vec<CollectionVersion> = all_existing
+                .iter()
+                .filter(|c| c.version_id != old_version_id)
+                .cloned()
+                .chain(std::iter::once(new_schema.clone()))
+                .collect();
+            crate::definition_validation::validate_collection_changes(
+                &all_existing,
+                &new_collections,
+            )
+            .map_err(Error::InvalidPatch)?;
+
+            // Store the updated version
+            let txn = self.new_txn(false).await?;
+            {
+                let systemstore = txn.systemstore()?;
+                let key = CollectionKey::new(&old_version_id);
+                let data = serde_json::to_vec(&new_schema).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to serialize updated schema version '{}': {}",
+                        old_version_id, e
+                    ))
+                })?;
+                systemstore
+                    .set(&key.bytes(), &data)
+                    .await
+                    .map_err(Error::Storage)?;
+
+                // Update name pointer based on activation state
+                let name_key = CollectionNameKey::new(&actual_name);
+                if new_schema.is_active {
+                    systemstore
+                        .set(&name_key.bytes(), old_version_id.as_bytes())
+                        .await
+                        .map_err(Error::Storage)?;
+                } else {
+                    systemstore
+                        .delete(&name_key.bytes())
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+            }
+            txn.commit().await?;
+
+            // Update cache
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during in-place update");
+                Error::CacheUpdateFailedAfterCommit(actual_name.clone())
+            })?;
+            if new_schema.is_active {
+                cache.insert(actual_name.clone(), Collection::new(new_schema.clone()));
+            } else {
+                cache.remove(&actual_name);
+            }
+
+            tracing::info!(
+                collection = %actual_name,
+                version = %old_version_id,
+                is_active = new_schema.is_active,
+                "Updated collection version in place"
+            );
+
+            return Ok(new_schema);
+        }
+
+        // --- Normal path: create a new schema version ---
 
         // Go compatibility: default new fields with CType::None to CType::LwwRegister.
         // Go's patchCollection does this in collection_define.go for new fields that
@@ -2298,14 +2451,26 @@ impl<S: Store> DB<S> {
     ) -> String {
         if path.starts_with(collection_prefix) {
             format!("/{}", &path[collection_prefix.len()..])
-        } else if let Some(anp) = actual_name_prefix {
-            if path.starts_with(anp) {
-                format!("/{}", &path[anp.len()..])
+        } else {
+            // Also handle exact match without trailing slash (collection-level operations).
+            // E.g., path="/Users" with prefix="/Users/" → "/"
+            let exact = collection_prefix.trim_end_matches('/');
+            if path == exact {
+                return "/".to_string();
+            }
+            if let Some(anp) = actual_name_prefix {
+                if path.starts_with(anp) {
+                    format!("/{}", &path[anp.len()..])
+                } else {
+                    let anp_exact = anp.trim_end_matches('/');
+                    if path == anp_exact {
+                        return "/".to_string();
+                    }
+                    path.to_string()
+                }
             } else {
                 path.to_string()
             }
-        } else {
-            path.to_string()
         }
     }
 
@@ -2321,6 +2486,22 @@ impl<S: Store> DB<S> {
         collection_name: &str,
         patch_ops: &serde_json::Value,
     ) -> Result<CollectionVersion> {
+        // Try to extract the actual collection name from the patch value's Name field.
+        // This handles cases like path "/-" where the collection name in the path is "-"
+        // but the actual name is in the value object.
+        let effective_name = if let serde_json::Value::Array(ops) = patch_ops {
+            ops.iter()
+                .find_map(|op| {
+                    op.get("value")
+                        .and_then(|v| v.get("Name"))
+                        .and_then(|n| n.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| collection_name.to_string())
+        } else {
+            collection_name.to_string()
+        };
+
         if let serde_json::Value::Array(ops) = patch_ops {
             // Look for move/copy operations to determine if this is a routing issue
             for op in ops {
@@ -2332,7 +2513,7 @@ impl<S: Store> DB<S> {
                         // Adding/replacing collections via patch is not supported
                         return Err(Error::InvalidPatch(format!(
                             "adding collections via patch is not supported. Name: {}",
-                            collection_name,
+                            effective_name,
                         )));
                     }
                     Some("move") => {
@@ -2353,7 +2534,7 @@ impl<S: Store> DB<S> {
         // No recognized operation - adding collections via patch is not supported
         Err(Error::InvalidPatch(format!(
             "adding collections via patch is not supported. Name: {}",
-            collection_name,
+            effective_name,
         )))
     }
 

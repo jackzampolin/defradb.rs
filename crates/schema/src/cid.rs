@@ -148,7 +148,7 @@ fn field_to_delta_with_priority(
 ) -> crate::Result<FieldDefinitionDeltaPayload> {
     let mut delta = FieldDefinitionDeltaPayload::new(priority)
         .with_name(&field.name)
-        .with_crdt(field.crdt_type as u8);
+        .with_crdt(field.crdt_type.to_u8());
 
     match &field.kind {
         FieldKind::Scalar(k) => {
