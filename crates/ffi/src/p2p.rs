@@ -1610,9 +1610,10 @@ pub unsafe extern "C" fn p2p_sync_documents(
     }
 }
 
-/// Sync a branchable collection from peers.
+/// Sync a branchable collection from connected peers.
 ///
-/// Subscribes to the collection's GossipSub topic for P2P replication.
+/// Looks up the collection, verifies it is branchable, then sends a
+/// BranchableSyncRequest to each connected peer via the two-stream protocol.
 ///
 /// # Safety
 ///
@@ -1629,7 +1630,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         return e;
     }
 
-    let col_id = match c_str_to_string(collection_id) {
+    let collection_id_str = match c_str_to_string(collection_id) {
         Some(s) => s,
         None => return FfiResult::error("collection_id is null"),
     };
@@ -1640,15 +1641,63 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                 Some(p2p) => p2p,
                 None => return Err("P2P not enabled for this node".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
-                let topic = DefraTopic::collection(&col_id);
-                p2p.handle
-                    .subscribe(topic)
+                // Look up collection by its collection_id
+                let collection = db
+                    .find_collection_by_id(&collection_id_str)
+                    .map_err(|e| format!("failed to find collection: {}", e))?
+                    .ok_or_else(|| {
+                        format!("collection with ID '{}' not found", collection_id_str)
+                    })?;
+
+                // Check if the collection is branchable
+                if !collection.schema().is_branchable {
+                    return Err("collection is not branchable".to_string());
+                }
+
+                // Get connected peers
+                let connected_peers = p2p
+                    .handle
+                    .connected_peers()
                     .await
-                    .map_err(|e| format!("failed to sync branchable collection: {}", e))?;
-                p2p.add_collection(&col_id);
-                Ok::<(), String>(())
+                    .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+                if connected_peers.is_empty() {
+                    return Ok(());
+                }
+
+                // Create BranchableSync request
+                let mut request =
+                    p2p::message::BranchableSyncRequest::new(collection_id_str.clone());
+
+                // Sign the request
+                if let Err(e) = p2p::signing::sign_message(p2p.handle.keypair(), &mut request) {
+                    return Err(format!("failed to sign BranchableSync request: {}", e));
+                }
+
+                // Send to each connected peer (fire-and-forget)
+                for peer_id in &connected_peers {
+                    let request_clone = request.clone();
+                    let handle = p2p.handle.clone();
+                    let peer_id = *peer_id;
+
+                    tokio::spawn(async move {
+                        if let Err(e) = handle
+                            .send_branchable_sync_request(peer_id, request_clone)
+                            .await
+                        {
+                            tracing::warn!(
+                                peer_id = %peer_id,
+                                error = %e,
+                                "Failed to send BranchableSync request"
+                            );
+                        }
+                    });
+                }
+
+                Ok(())
             })
         })
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())

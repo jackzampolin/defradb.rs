@@ -9,10 +9,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cid::Cid;
 use storage::corekv::{IterOptions, Store};
-use storage::keys::headstore::HeadstoreDocKey;
+use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey};
 
 use p2p::sync::DocumentHeadProvider;
 
+use crate::collection::collection_short_id;
 use crate::database::DB;
 
 /// Database-backed document head provider.
@@ -68,6 +69,53 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
             }
 
             if let Ok(cid) = Cid::from_str(parts[4]) {
+                cids.push(cid);
+            }
+        }
+
+        iter.close()
+            .await
+            .map_err(|e| format!("headstore close error: {}", e))?;
+
+        Ok(cids)
+    }
+
+    async fn get_collection_heads(&self, collection_id: &str) -> Result<Vec<Cid>, String> {
+        let txn = self
+            .db
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("failed to create transaction: {}", e))?;
+
+        let headstore = txn
+            .headstore()
+            .map_err(|e| format!("failed to get headstore: {}", e))?;
+
+        // Derive short ID from collection_id string and query prefix /c/{short_id}/
+        let short_id = collection_short_id(collection_id);
+        let prefix = HeadstoreColKey::collection_prefix(short_id);
+        let opts = IterOptions::new().with_prefix(prefix);
+
+        let mut iter = headstore
+            .iterator(opts)
+            .await
+            .map_err(|e| format!("failed to iterate headstore: {}", e))?;
+
+        let mut cids = Vec::new();
+
+        while let Some(pair) = iter
+            .next()
+            .await
+            .map_err(|e| format!("headstore iteration error: {}", e))?
+        {
+            // Parse CID from key: /c/{short_id}/{cid}
+            let key_str = String::from_utf8_lossy(&pair.key);
+            let parts: Vec<&str> = key_str.split('/').collect();
+            if parts.len() < 4 {
+                continue;
+            }
+
+            if let Ok(cid) = Cid::from_str(parts[3]) {
                 cids.push(cid);
             }
         }

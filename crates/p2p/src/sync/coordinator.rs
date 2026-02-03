@@ -85,7 +85,9 @@ use libp2p::PeerId;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
-use crate::message::{DocSyncItem, DocSyncReply, PushLogBroadcast, PushLogReply, PushLogRequest};
+use crate::message::{
+    BranchableSyncReply, DocSyncItem, DocSyncReply, PushLogBroadcast, PushLogReply, PushLogRequest,
+};
 use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
 
@@ -905,6 +907,157 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 } else {
                     eprintln!("[DOCSYNC] No blocks to fetch from DocSync reply (all local)");
                     tracing::debug!("No blocks to fetch from DocSync reply (all local)");
+                }
+            }
+            HostEvent::BranchableSyncRequest { peer_id, request } => {
+                // Handle BranchableSync request - respond with collection head CIDs
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    collection_id = %request.collection_id,
+                    message_id = %request.metadata.message_id,
+                    "Received BranchableSync request"
+                );
+
+                // Query collection heads from the headstore
+                let heads = match self
+                    .head_provider
+                    .get_collection_heads(&request.collection_id)
+                    .await
+                {
+                    Ok(heads) => {
+                        tracing::debug!(
+                            collection_id = %request.collection_id,
+                            head_count = heads.len(),
+                            "Found collection heads for BranchableSync response"
+                        );
+                        heads.iter().map(|cid| cid.to_bytes()).collect()
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            collection_id = %request.collection_id,
+                            error = %e,
+                            "Failed to get collection heads for BranchableSync"
+                        );
+                        Vec::new()
+                    }
+                };
+
+                let mut reply = BranchableSyncReply::success(
+                    &request.metadata.message_id,
+                    &request.collection_id,
+                    heads,
+                );
+
+                // Sign the response
+                if let Err(e) = crate::signing::sign_message(self.host.keypair(), &mut reply) {
+                    tracing::error!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to sign BranchableSync response"
+                    );
+                    return Err(e);
+                }
+
+                if let Err(e) = self
+                    .host
+                    .send_branchable_sync_response(peer_id, reply)
+                    .await
+                {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to send BranchableSync response"
+                    );
+                }
+            }
+            HostEvent::BranchableSyncReply { peer_id, reply } => {
+                // Handle incoming BranchableSync reply - fetch missing blocks via Bitswap
+                tracing::info!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    collection_id = %reply.collection_id,
+                    heads_count = reply.heads.len(),
+                    "Processing BranchableSync reply"
+                );
+
+                if reply.heads.is_empty() {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        collection_id = %reply.collection_id,
+                        "Peer has no heads for collection"
+                    );
+                    return Ok(());
+                }
+
+                // For each head CID, check if we have it, register as pending DAG if not
+                let mut cids_to_fetch: Vec<Cid> = Vec::new();
+                for head_bytes in &reply.heads {
+                    match Cid::try_from(head_bytes.as_slice()) {
+                        Ok(cid) => {
+                            match self.manager.blockstore().has(&cid).await {
+                                Ok(true) => {
+                                    tracing::debug!(
+                                        cid = %cid,
+                                        "Already have collection head block, skipping"
+                                    );
+                                }
+                                Ok(false) => {
+                                    tracing::debug!(
+                                        cid = %cid,
+                                        "Need to fetch collection head block via Bitswap"
+                                    );
+                                    cids_to_fetch.push(cid);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        cid = %cid,
+                                        error = %e,
+                                        "Failed to check if block exists"
+                                    );
+                                    cids_to_fetch.push(cid);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to parse CID from BranchableSync reply"
+                            );
+                        }
+                    }
+                }
+
+                if !cids_to_fetch.is_empty() {
+                    tracing::info!(
+                        cid_count = cids_to_fetch.len(),
+                        collection_id = %reply.collection_id,
+                        "Initiating Bitswap fetch for branchable collection blocks"
+                    );
+
+                    for root_cid in &cids_to_fetch {
+                        // Register as pending DAG with the collection_id as the "doc_id"
+                        // The merge handler will recognize collection blocks by their CrdtDelta type
+                        self.manager
+                            .register_docsync_dag(*root_cid, reply.collection_id.clone());
+
+                        if let Err(e) = self
+                            .host
+                            .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                cid = %root_cid,
+                                collection_id = %reply.collection_id,
+                                "Failed to initiate Bitswap sync for collection head"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        collection_id = %reply.collection_id,
+                        "No blocks to fetch from BranchableSync reply (all local)"
+                    );
                 }
             }
             other => {

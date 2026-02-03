@@ -181,6 +181,20 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Send a BranchableSync response via two-stream protocol.
+    SendBranchableSyncResponse {
+        peer_id: PeerId,
+        reply: crate::message::BranchableSyncReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a BranchableSync request via two-stream protocol.
+    SendBranchableSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::BranchableSyncRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     PeerAddresses {
         response: oneshot::Sender<Vec<String>>,
@@ -263,6 +277,18 @@ pub enum HostEvent {
     DocSyncReply {
         peer_id: PeerId,
         reply: crate::message::DocSyncReply,
+    },
+
+    /// Received a BranchableSync request via two-stream protocol.
+    BranchableSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::BranchableSyncRequest,
+    },
+
+    /// Received a BranchableSync reply via two-stream protocol.
+    BranchableSyncReply {
+        peer_id: PeerId,
+        reply: crate::message::BranchableSyncReply,
     },
 }
 
@@ -688,6 +714,42 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send a BranchableSync response via two-stream protocol.
+    pub async fn send_branchable_sync_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::BranchableSyncReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendBranchableSyncResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a BranchableSync request via two-stream protocol (fire-and-forget).
+    pub async fn send_branchable_sync_request(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::BranchableSyncRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendBranchableSyncRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     pub async fn peer_addresses(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -964,6 +1026,45 @@ impl<S: Store> P2PHost<S> {
                 } else {
                     eprintln!("[DOCSYNC] Forwarded DocSyncReply to coordinator via HostEvent channel");
                     info!(peer_id = %peer_id, "Forwarded DocSyncReply event to coordinator");
+                }
+            }
+            TwoStreamEvent::BranchableSyncRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.metadata.message_id,
+                    collection_id = %request.collection_id,
+                    "Host received BranchableSync request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::BranchableSyncRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send BranchableSyncRequest event - receiver dropped"
+                    );
+                }
+            }
+            TwoStreamEvent::BranchableSyncReply { peer_id, reply } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    collection_id = %reply.collection_id,
+                    heads_count = reply.heads.len(),
+                    "Host received BranchableSync reply via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::BranchableSyncReply { peer_id, reply })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send BranchableSyncReply event - receiver dropped"
+                    );
                 }
             }
             TwoStreamEvent::DecodeError { peer_id, error } => {
@@ -1423,6 +1524,38 @@ impl<S: Store> P2PHost<S> {
                     let result = h.send_doc_sync_request_fire_and_forget(peer_id, request).await;
                     if response.send(result).is_err() {
                         debug!(peer_id = %peer_id, "SendDocSyncRequest command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::SendBranchableSyncResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_branchable_sync_response(peer_id, reply).await;
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendBranchableSyncResponse command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::SendBranchableSyncRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h
+                        .send_branchable_sync_request_fire_and_forget(peer_id, request)
+                        .await;
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendBranchableSyncRequest command response dropped - caller cancelled");
                     }
                 });
             }
