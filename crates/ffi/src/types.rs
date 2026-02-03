@@ -132,6 +132,12 @@ pub struct NodeInitOptions {
     pub in_memory: c_int,
     /// Enable block signing (1=true, 0=false).
     pub enable_signing: c_int,
+    /// Signing key type (e.g., "secp256k1"). Null for default.
+    pub signing_key_type: *const c_char,
+    /// Optional: raw private key bytes for signing. Null to auto-generate.
+    pub signing_private_key: *const u8,
+    /// Length of signing_private_key in bytes. 0 if null.
+    pub signing_private_key_len: usize,
 }
 
 impl Default for NodeInitOptions {
@@ -140,6 +146,9 @@ impl Default for NodeInitOptions {
             db_path: ptr::null(),
             in_memory: 1, // Default to in-memory
             enable_signing: 0,
+            signing_key_type: ptr::null(),
+            signing_private_key: ptr::null(),
+            signing_private_key_len: 0,
         }
     }
 }
