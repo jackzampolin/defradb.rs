@@ -480,6 +480,71 @@ struct IndexFieldInput {
     descending: bool,
 }
 
+// ============================================================================
+// Encrypted Index Stubs
+// ============================================================================
+// These functions are not yet implemented but are required by the Go FFI wrapper.
+// They return "not implemented" errors for now.
+
+/// Create an encrypted index on a collection (stub - not implemented).
+///
+/// # Safety
+///
+/// All string pointers must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn create_encrypted_index(
+    _node_ptr: usize,
+    _identity_did: *const c_char,
+    _collection_name: *const c_char,
+    _field_name: *const c_char,
+) -> FfiResult {
+    FfiResult::error("encrypted indexes not yet implemented")
+}
+
+/// Delete an encrypted index from a collection (stub - not implemented).
+///
+/// # Safety
+///
+/// All string pointers must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn delete_encrypted_index(
+    _node_ptr: usize,
+    _identity_did: *const c_char,
+    _collection_name: *const c_char,
+    _field_name: *const c_char,
+) -> FfiResult {
+    FfiResult::error("encrypted indexes not yet implemented")
+}
+
+/// List encrypted indexes for a collection (stub - not implemented).
+///
+/// # Safety
+///
+/// All string pointers must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn list_encrypted_indexes(
+    _node_ptr: usize,
+    _identity_did: *const c_char,
+    _collection_name: *const c_char,
+) -> FfiResult {
+    // Return empty array for compatibility
+    FfiResult::success("[]")
+}
+
+/// List all encrypted indexes across all collections (stub - not implemented).
+///
+/// # Safety
+///
+/// All string pointers must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn list_all_encrypted_indexes(
+    _node_ptr: usize,
+    _identity_did: *const c_char,
+) -> FfiResult {
+    // Return empty object for compatibility
+    FfiResult::success("{}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
