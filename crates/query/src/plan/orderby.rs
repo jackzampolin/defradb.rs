@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{OrderBy, OrderCondition, OrderDirection};
-use crate::planner::{Doc, PlanNode};
+use crate::planner::{Doc, ExecInfo, PlanNode};
 
 /// OrderByNode sorts documents based on ORDER BY conditions.
 ///
@@ -26,6 +26,8 @@ pub struct OrderByNode {
     buffer: Vec<Doc>,
     position: usize,
     current_doc: Doc,
+    /// Execution statistics for explain execute mode
+    exec_info: ExecInfo,
 }
 
 impl OrderByNode {
@@ -42,6 +44,7 @@ impl OrderByNode {
             buffer: Vec::new(),
             position: 0,
             current_doc: Doc::default(),
+            exec_info: ExecInfo::default(),
         }
     }
 
@@ -214,6 +217,7 @@ impl PlanNode for OrderByNode {
     async fn init(&mut self) -> Result<()> {
         self.buffer.clear();
         self.position = 0;
+        self.exec_info = ExecInfo::default();
         self.source.init().await
     }
 
@@ -261,6 +265,8 @@ impl PlanNode for OrderByNode {
     }
 
     async fn next(&mut self) -> Result<bool> {
+        self.exec_info.iterations += 1;
+
         if self.position >= self.buffer.len() {
             return Ok(false);
         }
@@ -314,6 +320,28 @@ impl PlanNode for OrderByNode {
 
         // Recursively explain child node - merge their wrapped structure
         let child_explain = self.source.explain();
+        if let Some(child_obj) = child_explain.as_object() {
+            for (key, value) in child_obj {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        JsonValue::Object(obj)
+    }
+
+    fn exec_info(&self) -> ExecInfo {
+        self.exec_info.clone()
+    }
+
+    fn explain_execute_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        obj.insert(
+            "iterations".to_string(),
+            serde_json::json!(self.exec_info.iterations as u64),
+        );
+
+        let child_explain = self.source.explain_execute();
         if let Some(child_obj) = child_explain.as_object() {
             for (key, value) in child_obj {
                 obj.insert(key.clone(), value.clone());

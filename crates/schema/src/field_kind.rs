@@ -154,6 +154,12 @@ pub enum FieldKind {
     Named { name: String, is_array: bool },
 }
 
+impl Default for FieldKind {
+    fn default() -> Self {
+        FieldKind::Scalar(ScalarKind::None)
+    }
+}
+
 impl FieldKind {
     // Convenience constructors for common scalar types
     pub fn doc_id() -> Self {

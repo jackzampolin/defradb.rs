@@ -15,10 +15,11 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
-use defra_core::encryption::{get_encryption_config, store_doc_encryption, get_doc_encryption};
 use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
+use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
+use defra_core::signing::get_signing_config;
 
 /// Document mutator that auto-commits transactions for each operation.
 ///
@@ -105,7 +106,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // The stores must be dropped before commit, so scope them
-                let commit_cid: Option<Cid> = {
+                let commit_result: Option<(Cid, Vec<u8>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -124,6 +125,9 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                     // Get encryption config from thread-local (set by plan nodes)
                     let enc_config = get_encryption_config();
+                    // Get signing config from thread-local (set by FFI exec_request)
+                    let sign_config = get_signing_config();
+                    eprintln!("[SIGN-DEBUG] auto_commit_mutator::create sign_config.is_some()={}", sign_config.is_some());
 
                     // For create operations, all fields are new - pass None for modified_fields
                     match write_document_blocks(
@@ -133,6 +137,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         schema_version_id,
                         None,
                         enc_config.as_ref(),
+                        sign_config.as_ref(),
                     )
                     .await
                     {
@@ -144,8 +149,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                             // For branchable collections, create a collection-level block
                             if collection.schema().is_branchable {
-                                let short_id =
-                                    collection_short_id(collection.collection_id());
+                                let short_id = collection_short_id(collection.collection_id());
                                 if let Err(e) = write_collection_block(
                                     &blockstore,
                                     &headstore,
@@ -163,7 +167,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 }
                             }
 
-                            Some(block_result.cid)
+                            Some((block_result.cid, block_result.block))
                         }
                         Err(e) => {
                             warn!(
@@ -193,20 +197,24 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                 // Emit update event for subscriptions
                 if let Some(bus) = self.db.event_bus() {
+                    let (cid, block) = commit_result
+                        .as_ref()
+                        .map(|(c, b)| (*c, b.clone()))
+                        .unwrap_or_default();
                     let update = Update::new(
                         doc_id.to_string(),
-                        commit_cid.unwrap_or_default(),
-                        collection.name().to_string(),
-                        vec![], // Block data not available at this layer
-                        false,  // is_retry
-                        false,  // is_relay (local mutation)
+                        cid,
+                        collection.collection_id().to_string(),
+                        block,
+                        false, // is_retry
+                        false, // is_relay (local mutation)
                     );
                     bus.publish(Message::update(update));
                 }
 
                 // Return result with commit CID if available
-                match commit_cid {
-                    Some(cid) => Ok(CreateResult::with_commit_cid(doc_id, doc, cid)),
+                match commit_result {
+                    Some((cid, _)) => Ok(CreateResult::with_commit_cid(doc_id, doc, cid)),
                     None => Ok(CreateResult::new(doc_id, doc)),
                 }
             }
@@ -265,14 +273,21 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
             collection
                 .update_with_indexes(&datastore, &doc, &index_manager)
                 .await
-                .map_err(|e| query::error::QueryError::execution(format!("update error: {}", e)))
+                .map_err(|e| match e {
+                    crate::error::Error::DocumentNotFound(id) => {
+                        query::error::QueryError::document_not_found(id)
+                    }
+                    other => {
+                        query::error::QueryError::execution(format!("update error: {}", other))
+                    }
+                })
         };
 
         match result {
             Ok(()) => {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
-                {
+                let commit_result: Option<(Cid, Vec<u8>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -292,9 +307,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     // Get encryption config: first try thread-local (explicit in mutation),
                     // then fall back to per-document stored config (from create with encryption).
                     // This matches Go's behavior where encryption propagates through the DAG.
-                    let enc_config = get_encryption_config().or_else(|| {
-                        doc.id().and_then(|id| get_doc_encryption(&id.to_string()))
-                    });
+                    let enc_config = get_encryption_config()
+                        .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
+                    // Get signing config from thread-local (set by FFI exec_request)
+                    let sign_config = get_signing_config();
 
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
@@ -305,14 +321,14 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         schema_version_id,
                         Some(&modified_fields),
                         enc_config.as_ref(),
+                        sign_config.as_ref(),
                     )
                     .await
                     {
                         Ok(block_result) => {
                             // For branchable collections, create a collection-level block
                             if collection.schema().is_branchable {
-                                let short_id =
-                                    collection_short_id(collection.collection_id());
+                                let short_id = collection_short_id(collection.collection_id());
                                 if let Err(e) = write_collection_block(
                                     &blockstore,
                                     &headstore,
@@ -329,6 +345,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     );
                                 }
                             }
+                            Some((block_result.cid, block_result.block))
                         }
                         Err(e) => {
                             warn!(
@@ -337,9 +354,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 "Failed to write document blocks - commits queries may not work"
                             );
                             // Don't fail the mutation, just log the warning
+                            None
                         }
                     }
-                } // blockstore and headstore dropped here
+                }; // blockstore and headstore dropped here
 
                 // Commit the transaction (all store references now dropped)
                 if let Err(e) = txn.commit().await {
@@ -357,11 +375,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 // Emit update event for subscriptions
                 if let Some(bus) = self.db.event_bus() {
                     if let Some(doc_id) = doc.id() {
+                        let (cid, block) = commit_result
+                            .as_ref()
+                            .map(|(c, b)| (*c, b.clone()))
+                            .unwrap_or_default();
                         let update = Update::new(
                             doc_id.to_string(),
-                            Cid::default(),
-                            collection.name().to_string(),
-                            vec![],
+                            cid,
+                            collection.collection_id().to_string(),
+                            block,
                             false, // is_retry
                             false, // is_relay (local mutation)
                         );
@@ -433,7 +455,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         match result {
             Ok(existed) => {
                 // Build delete block (composite with status=2) in a scoped block
-                let commit_cid: Option<Cid> = {
+                let commit_result: Option<(Cid, Vec<u8>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -449,12 +471,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                     let schema_version_id = collection.version_id();
                     let doc_id_str = doc_id.to_string();
+                    // Get signing config from thread-local (set by FFI exec_request)
+                    let sign_config = get_signing_config();
 
                     match write_delete_block(
                         &blockstore,
                         &headstore,
                         &doc_id_str,
                         schema_version_id,
+                        sign_config.as_ref(),
                     )
                     .await
                     {
@@ -463,8 +488,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                             // For branchable collections, also create a collection-level block
                             if collection.schema().is_branchable {
-                                let short_id =
-                                    collection_short_id(collection.collection_id());
+                                let short_id = collection_short_id(collection.collection_id());
                                 if let Err(e) = write_collection_block(
                                     &blockstore,
                                     &headstore,
@@ -482,7 +506,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 }
                             }
 
-                            Some(composite_cid)
+                            Some((composite_cid, block_result.block))
                         }
                         Err(e) => {
                             warn!(
@@ -510,11 +534,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                 // Emit update event for subscriptions (deletes are also "updates")
                 if let Some(bus) = self.db.event_bus() {
+                    let (cid, block) = commit_result
+                        .as_ref()
+                        .map(|(c, b)| (*c, b.clone()))
+                        .unwrap_or_default();
                     let update = Update::new(
                         doc_id.to_string(),
-                        commit_cid.unwrap_or_default(),
-                        collection.name().to_string(),
-                        vec![],
+                        cid,
+                        collection.collection_id().to_string(),
+                        block,
                         false, // is_retry
                         false, // is_relay (local mutation)
                     );

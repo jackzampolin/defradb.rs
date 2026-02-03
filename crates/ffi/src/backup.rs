@@ -164,10 +164,7 @@ fn compute_doc_id_new(
 ///
 /// `config_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn basic_export(
-    node_ptr: usize,
-    config_json: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
     let config_str = match c_str_to_string(config_json) {
@@ -271,13 +268,8 @@ pub unsafe extern "C" fn basic_export(
             let response = runner.execute(request).await;
 
             if !response.errors.is_empty() {
-                let errs: Vec<String> =
-                    response.errors.iter().map(|e| e.message.clone()).collect();
-                return Err(format!(
-                    "query errors for '{}': {}",
-                    name,
-                    errs.join("; ")
-                ));
+                let errs: Vec<String> = response.errors.iter().map(|e| e.message.clone()).collect();
+                return Err(format!("query errors for '{}': {}", name, errs.join("; ")));
             }
 
             let response_json = serde_json::to_value(&response.data)
@@ -327,14 +319,10 @@ pub unsafe extern "C" fn basic_export(
                 }
 
                 // Compute initial _docIDNew (including FK fields, excluding self-refs)
-                let doc_id_new =
-                    compute_doc_id_new(&doc_map, &self_ref_excludes, &schema)?;
+                let doc_id_new = compute_doc_id_new(&doc_map, &self_ref_excludes, &schema)?;
 
                 doc_id_map.insert(own_doc_id.clone(), doc_id_new.clone());
-                doc_map.insert(
-                    "_docIDNew".to_string(),
-                    JsonValue::String(doc_id_new),
-                );
+                doc_map.insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
 
                 // Strip null fields (Go omits them in export)
                 doc_map.retain(|_, v| !v.is_null());
@@ -374,10 +362,9 @@ pub unsafe extern "C" fn basic_export(
                     {
                         if let Some(new_id) = doc_id_map.get(&fk_value) {
                             if new_id != &fk_value {
-                                entry.doc_map.insert(
-                                    fk_name.clone(),
-                                    JsonValue::String(new_id.clone()),
-                                );
+                                entry
+                                    .doc_map
+                                    .insert(fk_name.clone(), JsonValue::String(new_id.clone()));
                                 needs_recompute = true;
                             }
                         }
@@ -391,12 +378,10 @@ pub unsafe extern "C" fn basic_export(
                         &col_data.schema,
                     )?;
 
-                    doc_id_map
-                        .insert(entry.own_doc_id.clone(), doc_id_new.clone());
-                    entry.doc_map.insert(
-                        "_docIDNew".to_string(),
-                        JsonValue::String(doc_id_new),
-                    );
+                    doc_id_map.insert(entry.own_doc_id.clone(), doc_id_new.clone());
+                    entry
+                        .doc_map
+                        .insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
                 }
             }
         }
@@ -457,10 +442,7 @@ pub unsafe extern "C" fn basic_export(
 ///
 /// `filepath` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn basic_import(
-    node_ptr: usize,
-    filepath: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
     let path_str = match c_str_to_string(filepath) {
@@ -677,7 +659,7 @@ mod tests {
         let node = result.node_ptr;
 
         let sdl = CString::new("type User { name: String, age: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0, "add_schema failed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -692,7 +674,15 @@ mod tests {
             name, age
         ))
         .unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "create failed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -748,8 +738,15 @@ mod tests {
 
         // Verify imported documents
         let query_str = CString::new("{ User { name age } }").unwrap();
-        let result =
-            unsafe { exec_request(node2, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node2,
+                ptr::null(),
+                query_str.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "query failed");
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Alice"), "should contain Alice");
@@ -815,25 +812,31 @@ mod tests {
 
         // Add two schemas
         let sdl = CString::new("type User { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         let sdl2 = CString::new("type Address { city: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl2.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl2.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         // Create documents in both
-        let mutation = CString::new(
-            r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#,
-        )
-        .unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let mutation =
+            CString::new(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#).unwrap();
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -842,7 +845,15 @@ mod tests {
         let mutation =
             CString::new(r#"mutation { create_Address(input: {city: "NYC"}) { _docID } }"#)
                 .unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };

@@ -68,6 +68,13 @@ pub struct TypeJoinOne {
     exec_info: ExecInfo,
     /// Cached child plan execution info (captured before child is closed)
     child_exec_info: ExecInfo,
+    /// Simulated Go-compatible child metrics.
+    /// Go re-initializes the child scan per parent with a specific docID prefix,
+    /// calling Next() exactly once per parent. Metrics accumulate across parents.
+    go_child_iterations: u64,
+    go_child_doc_fetches: u64,
+    go_child_field_fetches: u64,
+    go_child_index_fetches: u64,
 }
 
 /// A filter condition on a relation field.
@@ -129,6 +136,10 @@ impl TypeJoinOne {
             relation_filter: None,
             exec_info: ExecInfo::default(),
             child_exec_info: ExecInfo::default(),
+            go_child_iterations: 0,
+            go_child_doc_fetches: 0,
+            go_child_field_fetches: 0,
+            go_child_index_fetches: 0,
         }
     }
 
@@ -361,6 +372,10 @@ impl PlanNode for TypeJoinOne {
         // Reset execution stats
         self.exec_info = ExecInfo::default();
         self.child_exec_info = ExecInfo::default();
+        self.go_child_iterations = 0;
+        self.go_child_doc_fetches = 0;
+        self.go_child_field_fetches = 0;
+        self.go_child_index_fetches = 0;
 
         // Build child cache first (scans child_plan once)
         self.build_child_cache().await?;
@@ -394,6 +409,20 @@ impl PlanNode for TypeJoinOne {
             // Extract FK and lookup child in cache (O(1) lookup)
             let fk = self.extract_fk(&parent_doc);
             let child_doc = fk.and_then(|fk| self.find_child_doc(&fk));
+
+            // Simulate Go's per-parent child scan metrics.
+            // In Go, fetchDocWithIDAndItsSubDocs calls Init() + Next() once per parent
+            // with a docID-specific prefix. Next() is called exactly once.
+            if child_doc.is_some() {
+                // Found a child: 1 iteration (Next()=true), 1 doc fetched
+                self.go_child_iterations += 1;
+                self.go_child_doc_fetches += 1;
+                if let Some(ref doc) = child_doc {
+                    self.go_child_field_fetches += doc.stored_field_count as u64;
+                }
+            }
+            // When FK is null/empty, Go doesn't call fetchDocWithIDAndItsSubDocs at all,
+            // so no child metrics are accumulated for that parent.
 
             // Apply relation filter if present
             if let Some(ref rel_filter) = self.relation_filter {
@@ -468,18 +497,30 @@ impl PlanNode for TypeJoinOne {
         // subType: the child plan's explain wrapped in selectTopNode > selectNode
         // selectNode must include docID and filter attributes (Go always includes these)
         let child_explain = self.child_plan.explain();
-        let mut select_node_inner = serde_json::Map::new();
-        select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
-        select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
-        // Merge child explain (e.g., scanNode) into selectNode
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                select_node_inner.insert(key.clone(), value.clone());
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            // Child is SelectNode - extract inner content to avoid double wrapping
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
+            select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
+            // Merge child explain (e.g., scanNode) into selectNode
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
             }
-        }
+            serde_json::Value::Object(select_node_inner)
+        };
         let sub_type = serde_json::json!({
             "selectTopNode": {
-                "selectNode": serde_json::Value::Object(select_node_inner)
+                "selectNode": select_node_content
             }
         });
         obj.insert("subType".to_string(), sub_type);
@@ -497,16 +538,27 @@ impl PlanNode for TypeJoinOne {
 
         // subType: the child plan's explain_debug wrapped in selectTopNode > selectNode
         let child_explain = self.child_plan.explain_debug();
-        let mut select_node_inner = serde_json::Map::new();
-        // Merge child explain into selectNode
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                select_node_inner.insert(key.clone(), value.clone());
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            // Merge child explain into selectNode
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
             }
-        }
+            serde_json::Value::Object(select_node_inner)
+        };
         let sub_type = serde_json::json!({
             "selectTopNode": {
-                "selectNode": serde_json::Value::Object(select_node_inner)
+                "selectNode": select_node_content
             }
         });
         inner_obj.insert("subType".to_string(), sub_type);
@@ -528,14 +580,11 @@ impl PlanNode for TypeJoinOne {
     fn explain_execute_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations from the join node itself
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
 
-        // scanNode: parent plan's execution stats
-        // Get the parent's explain_execute and extract its inner content
         let parent_execute = self.parent_plan.explain_execute();
         if let Some(parent_obj) = parent_execute.as_object() {
             for (key, value) in parent_obj {
@@ -543,23 +592,25 @@ impl PlanNode for TypeJoinOne {
             }
         }
 
-        // subTypeScanNode: child plan's execution stats (captured before close)
+        // Use simulated Go-compatible metrics for the child scan.
+        // Go re-initializes the child scanNode per parent with a docID-specific prefix,
+        // calling Next() once per parent. Metrics accumulate across all parent lookups.
         let mut sub_type_obj = serde_json::Map::new();
         sub_type_obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.child_exec_info.iterations),
+            serde_json::json!(self.go_child_iterations),
         );
         sub_type_obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(self.child_exec_info.docs_fetched),
+            serde_json::json!(self.go_child_doc_fetches),
         );
         sub_type_obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(self.child_exec_info.fields_fetched),
+            serde_json::json!(self.go_child_field_fetches),
         );
         sub_type_obj.insert(
             "indexFetches".to_string(),
-            serde_json::json!(self.child_exec_info.indexes_fetched),
+            serde_json::json!(self.go_child_index_fetches),
         );
         obj.insert(
             "subTypeScanNode".to_string(),

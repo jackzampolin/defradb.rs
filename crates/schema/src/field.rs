@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 pub struct FieldDescription {
     /// Immutable field ID (stable across schema versions).
     /// Only fields persisted in the DAG will have a value.
-    #[serde(rename = "FieldID")]
+    #[serde(rename = "FieldID", default)]
     pub id: String,
 
     /// Human-readable field name. Must contain a valid value.
-    #[serde(rename = "Name")]
+    #[serde(rename = "Name", default)]
     pub name: String,
 
     /// The data type this field holds.
-    #[serde(rename = "Kind")]
+    #[serde(rename = "Kind", default)]
     pub kind: FieldKind,
 
     /// Which CRDT to use (defaults to LwwRegister).
@@ -111,14 +111,14 @@ impl FieldDescription {
     pub fn validate(&self) -> Result<()> {
         if !self.crdt_type.is_compatible_with(&self.kind) {
             return Err(SchemaError::InvalidCrdtForKind {
-                field_name: self.name.clone(),
-                crdt_type: self.crdt_type.to_string(),
+                crdt_type: self.crdt_type.to_string().to_lowercase(),
+                field_kind: self.kind.graphql_type_name().to_string(),
             });
         }
 
         if self.kind.is_relation() && self.relation_name.is_none() {
             return Err(SchemaError::MissingRequiredField(format!(
-                "relation_name required for relation field '{}'",
+                "relation name cannot be empty. Field: {}",
                 self.name
             )));
         }

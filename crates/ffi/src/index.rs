@@ -5,10 +5,12 @@
 
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
 use db::collection_short_id;
 use storage::corekv::Key;
 
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -44,10 +46,15 @@ use crate::ERR_INVALID_NODE_HANDLE;
 #[no_mangle]
 pub unsafe extern "C" fn create_index(
     node_ptr: usize,
+    identity_did: *const c_char,
     collection_name: *const c_char,
     index_json: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexCreate) {
+        return e;
+    }
 
     let collection_name_str = match c_str_to_string(collection_name) {
         Some(s) => s,
@@ -109,9 +116,15 @@ pub unsafe extern "C" fn create_index(
 
             // Create the index
             let index_desc = index_manager
-                .create_index(&datastore, index_input.name, fields, index_input.unique)
+                .create_index(
+                    &datastore,
+                    &collection_name_str,
+                    index_input.name,
+                    fields,
+                    index_input.unique,
+                )
                 .await
-                .map_err(|e| format!("failed to create index: {}", e))?;
+                .map_err(|e| format!("{}", e))?;
 
             // Update the collection schema with the new index
             let mut updated_schema = collection.schema().clone();
@@ -202,10 +215,15 @@ pub unsafe extern "C" fn create_index(
 #[no_mangle]
 pub unsafe extern "C" fn drop_index(
     node_ptr: usize,
+    identity_did: *const c_char,
     collection_name: *const c_char,
     index_name: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexDrop) {
+        return e;
+    }
 
     let collection_name_str = match c_str_to_string(collection_name) {
         Some(s) => s,
@@ -256,7 +274,10 @@ pub unsafe extern "C" fn drop_index(
                 .map_err(|e| format!("failed to drop index: {}", e))?;
 
             if !dropped {
-                return Err(format!("index '{}' not found", index_name_str));
+                return Err(format!(
+                    "index with name doesn't exists. Name: {}",
+                    index_name_str
+                ));
             }
 
             // Update the collection schema to remove the index
@@ -323,8 +344,16 @@ pub unsafe extern "C" fn drop_index(
 ///
 /// `collection_name` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn get_indexes(node_ptr: usize, collection_name: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn get_indexes(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    collection_name: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexList) {
+        return e;
+    }
 
     let collection_name_str = match c_str_to_string(collection_name) {
         Some(s) => s,
@@ -377,8 +406,15 @@ pub unsafe extern "C" fn get_indexes(node_ptr: usize, collection_name: *const c_
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn get_all_indexes(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn get_all_indexes(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexList) {
+        return e;
+    }
 
     // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
@@ -465,7 +501,7 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type User { name: String, email: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0, "add_schema should succeed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -476,7 +512,14 @@ mod tests {
         let index_json =
             CString::new(r#"{"Name": "idx_email", "Fields": [{"Name": "email"}], "Unique": true}"#)
                 .unwrap();
-        let result = unsafe { create_index(node, collection_name.as_ptr(), index_json.as_ptr()) };
+        let result = unsafe {
+            create_index(
+                node,
+                std::ptr::null(),
+                collection_name.as_ptr(),
+                index_json.as_ptr(),
+            )
+        };
         assert_eq!(result.status, 0, "create_index should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -484,7 +527,7 @@ mod tests {
         unsafe { crate::types::defra_free_string(result.value) };
 
         // Get indexes
-        let result = unsafe { get_indexes(node, collection_name.as_ptr()) };
+        let result = unsafe { get_indexes(node, std::ptr::null(), collection_name.as_ptr()) };
         assert_eq!(result.status, 0, "get_indexes should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -508,7 +551,7 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type Post { title: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -518,7 +561,14 @@ mod tests {
         let collection_name = CString::new("Post").unwrap();
         let index_json =
             CString::new(r#"{"Name": "idx_title", "Fields": [{"Name": "title"}]}"#).unwrap();
-        let result = unsafe { create_index(node, collection_name.as_ptr(), index_json.as_ptr()) };
+        let result = unsafe {
+            create_index(
+                node,
+                std::ptr::null(),
+                collection_name.as_ptr(),
+                index_json.as_ptr(),
+            )
+        };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -526,14 +576,21 @@ mod tests {
 
         // Drop index
         let index_name = CString::new("idx_title").unwrap();
-        let result = unsafe { drop_index(node, collection_name.as_ptr(), index_name.as_ptr()) };
+        let result = unsafe {
+            drop_index(
+                node,
+                std::ptr::null(),
+                collection_name.as_ptr(),
+                index_name.as_ptr(),
+            )
+        };
         assert_eq!(result.status, 0, "drop_index should succeed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         // Verify index is gone
-        let result = unsafe { get_indexes(node, collection_name.as_ptr()) };
+        let result = unsafe { get_indexes(node, std::ptr::null(), collection_name.as_ptr()) };
         assert_eq!(result.status, 0);
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert!(!value.contains("idx_title"), "index should be removed");
@@ -556,14 +613,14 @@ mod tests {
 
         // Add schemas
         let sdl = CString::new("type Author { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         let sdl = CString::new("type Book { title: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -575,7 +632,8 @@ mod tests {
 
         let idx1 =
             CString::new(r#"{"Name": "idx_author_name", "Fields": [{"Name": "name"}]}"#).unwrap();
-        let result = unsafe { create_index(node, author_coll.as_ptr(), idx1.as_ptr()) };
+        let result =
+            unsafe { create_index(node, std::ptr::null(), author_coll.as_ptr(), idx1.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -583,14 +641,15 @@ mod tests {
 
         let idx2 =
             CString::new(r#"{"Name": "idx_book_title", "Fields": [{"Name": "title"}]}"#).unwrap();
-        let result = unsafe { create_index(node, book_coll.as_ptr(), idx2.as_ptr()) };
+        let result =
+            unsafe { create_index(node, std::ptr::null(), book_coll.as_ptr(), idx2.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         // Get all indexes
-        let result = get_all_indexes(node);
+        let result = unsafe { get_all_indexes(node, std::ptr::null()) };
         assert_eq!(result.status, 0, "get_all_indexes should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };

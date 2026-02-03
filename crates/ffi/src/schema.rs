@@ -6,7 +6,10 @@
 use std::ffi::c_char;
 use std::sync::Arc;
 
+use acp::nac::NodePermission;
+
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::policy_yaml;
 use crate::state::{PolicyStore, NODES};
 use crate::types::{c_str_to_string, FfiResult};
@@ -31,8 +34,17 @@ use crate::ERR_INVALID_NODE_HANDLE;
 ///
 /// `schema_sdl` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn add_schema(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    schema_sdl: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
+        return e;
+    }
 
     let schema_str = match c_str_to_string(schema_sdl) {
         Some(s) => s,
@@ -48,9 +60,17 @@ pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) 
     };
 
     let result = rt.block_on(async {
-        // Parse the SDL into collection versions
-        let collections =
-            query::parse_sdl(&schema_str).map_err(|e| format!("failed to parse schema: {}", e))?;
+        // Get existing collection names so the SDL parser can resolve external type references
+        // (e.g., relations to already-created collections)
+        let known_types: std::collections::HashSet<String> = database
+            .list_collections()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        // Parse the SDL into collection versions, passing known types for resolution
+        let collections = query::parse_sdl_with_known_types(&schema_str, known_types)
+            .map_err(|e| format!("failed to parse schema: {}", e))?;
 
         // Validate policies on collections before creating them
         for collection in &collections {
@@ -87,8 +107,15 @@ pub unsafe extern "C" fn add_schema(node_ptr: usize, schema_sdl: *const c_char) 
 ///
 /// Returns a JSON array of collection descriptions.
 #[no_mangle]
-pub extern "C" fn get_collections(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn get_collections(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
+        return e;
+    }
 
     // Validate node handle before entering async block
     let database = match NODES.get(node_ptr, |state| state.database.clone()) {
@@ -180,11 +207,11 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type User { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0, "add_schema should succeed");
 
         // Get collections
-        let result = get_collections(node);
+        let result = unsafe { get_collections(node, std::ptr::null()) };
         assert_eq!(result.status, 0, "get_collections should succeed");
         assert!(!result.value.is_null());
 

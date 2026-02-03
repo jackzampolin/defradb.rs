@@ -102,6 +102,12 @@ impl FieldValue {
             CType::LwwRegister | CType::None => {
                 // LWW Register and None accept any value
             }
+            CType::Unknown(_) => {
+                return Err(Error::IncompatibleCrdtType {
+                    crdt_type,
+                    value_type: Self::value_type_name(value),
+                });
+            }
         }
         Ok(())
     }

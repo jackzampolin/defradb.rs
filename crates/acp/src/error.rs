@@ -24,9 +24,13 @@ pub enum Error {
     #[error("invalid relation: {0}")]
     InvalidRelation(String),
 
-    /// Not the owner of the document
-    #[error("not document owner: only owner can {operation}")]
+    /// Not the owner of the document (UNAUTHORIZED)
+    #[error("UNAUTHORIZED: not document owner, cannot {operation}")]
     NotOwner { operation: String },
+
+    /// Actor is not a manager of the relation
+    #[error("cannot {operation}: actor is not a manager of relation")]
+    NotManager { operation: String },
 
     /// Invalid policy configuration
     #[error("invalid policy: {0}")]

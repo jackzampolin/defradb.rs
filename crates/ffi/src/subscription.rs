@@ -168,7 +168,7 @@ pub unsafe extern "C" fn create_subscription(
     CreateSubscriptionResult::success(handle)
 }
 
-/// Create a subscription for merge-complete events (P2P sync completion).
+/// Create a subscription to P2P merge complete events.
 ///
 /// # Arguments
 ///
@@ -177,14 +177,16 @@ pub unsafe extern "C" fn create_subscription(
 /// # Returns
 ///
 /// A handle that can be used with `poll_subscription` and `close_subscription`.
+/// Events will contain merge complete data (doc_id, cid, collection_id, by_peer).
 #[no_mangle]
-pub extern "C" fn create_merge_complete_subscription(
-    node_ptr: usize,
-) -> CreateSubscriptionResult {
+pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateSubscriptionResult {
+    // Get the event bus from the node
     let subscription = match NODES.get(node_ptr, |state| {
-        state
-            .event_bus
-            .subscribe(&[events::EventName::MergeComplete])
+        state.event_bus.subscribe(&[
+            events::EventName::MergeComplete,
+            events::EventName::ReplicatorCompleted,
+            events::EventName::TopicPeerEvent,
+        ])
     }) {
         Some(sub) => sub,
         None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
@@ -307,11 +309,44 @@ fn message_to_json(message: &events::Message) -> String {
         .to_string();
     }
 
+    // Check if this is a MergeComplete event with data
+    if let Some(mc) = message.as_merge_complete() {
+        return serde_json::json!({
+            "type": "merge_complete",
+            "doc_id": mc.doc_id,
+            "cid": mc.cid.to_string(),
+            "collection_id": mc.collection_id,
+            "by_peer": mc.by_peer
+        })
+        .to_string();
+    }
+
+    // Check if this is a ReplicatorCompleted event
+    if message.name == events::EventName::ReplicatorCompleted {
+        return serde_json::json!({
+            "type": "replicator_completed"
+        })
+        .to_string();
+    }
+
+    // Check if this is a TopicPeerEvent
+    if let Some(tpe) = message.as_topic_peer_event() {
+        return serde_json::json!({
+            "type": "topic_peer_event",
+            "peer_id": tpe.peer_id,
+            "topic": tpe.topic,
+            "event_type": tpe.event_type
+        })
+        .to_string();
+    }
+
     // Signal event without data
     let event_type = match message.name {
         events::EventName::Merge => "merge",
         events::EventName::MergeComplete => "merge_complete",
         events::EventName::Update => "update",
+        events::EventName::ReplicatorCompleted => "replicator_completed",
+        events::EventName::TopicPeerEvent => "topic_peer_event",
         events::EventName::WildCard => "wildcard",
     };
     serde_json::json!({
@@ -378,7 +413,7 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type Book { title: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -392,7 +427,15 @@ mod tests {
         // Perform a mutation
         let mutation =
             CString::new(r#"mutation { create_Book(input: {title: "Test"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -495,14 +538,14 @@ mod tests {
 
         // Add two schemas
         let sdl = CString::new("type Author { name: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
 
         let sdl = CString::new("type Article { title: String }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, std::ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -518,7 +561,15 @@ mod tests {
         let mutation =
             CString::new(r#"mutation { create_Article(input: {title: "Test"}) { _docID } }"#)
                 .unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -534,7 +585,15 @@ mod tests {
         // Create an Author (should trigger subscription)
         let mutation =
             CString::new(r#"mutation { create_Author(input: {name: "Bob"}) { _docID } }"#).unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };

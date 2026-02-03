@@ -5,10 +5,12 @@
 
 pub mod block;
 pub mod collection;
+pub mod dac_bypass;
 pub mod document;
 pub mod encryption;
 pub mod error;
 pub mod ipld;
+pub mod signing;
 pub mod store;
 pub mod thread_bounds;
 pub mod transaction;

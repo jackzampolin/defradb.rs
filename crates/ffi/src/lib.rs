@@ -35,10 +35,12 @@
 
 pub mod acp;
 pub mod backup;
+pub mod block;
 pub mod collection;
 pub mod document;
 pub mod index;
 pub mod lens;
+pub mod nac_check;
 pub mod node;
 pub mod p2p;
 mod policy_yaml;
@@ -79,23 +81,27 @@ pub use acp::{
     get_dac_policy, get_nac_status, get_node_identity, list_dac_policies, re_enable_nac,
 };
 pub use backup::{basic_export, basic_import};
+pub use block::block_verify_signature;
 pub use collection::{
     add_view, delete_collection, find_collection_by_id, get_collection_by_name,
     get_collection_by_version_id, has_collection, patch_collection, refresh_views,
-    set_active_collection_version, set_migration,
+    set_active_collection_version, set_migration, truncate_collection,
 };
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use lens::{lens_add, lens_list};
 pub use node::{new_node, node_close};
 pub use p2p::{
-    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_connect, p2p_delete_replicator,
-    p2p_get_all_collections, p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections,
-    p2p_set_replicator,
+    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_add_documents, p2p_connect,
+    p2p_delete_replicator, p2p_get_all_collections, p2p_get_all_documents,
+    p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections, p2p_remove_documents,
+    p2p_set_replicator, p2p_sync_documents,
 };
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections};
-pub use subscription::{close_subscription, create_subscription, poll_subscription};
+pub use subscription::{
+    close_subscription, create_merge_complete_subscription, create_subscription, poll_subscription,
+};
 pub use txn::{begin_txn, commit_txn, exec_request_in_txn, rollback_txn};
 pub use types::defra_free_string;
 
@@ -165,14 +171,14 @@ mod tests {
 
         // Add schema
         let sdl = CString::new("type Person { name: String, age: Int }").unwrap();
-        let result = unsafe { add_schema(node, sdl.as_ptr()) };
+        let result = unsafe { add_schema(node, ptr::null(), sdl.as_ptr()) };
         assert_eq!(result.status, 0, "add_schema failed");
         if !result.value.is_null() {
             unsafe { defra_free_string(result.value) };
         }
 
         // Get collections
-        let result = get_collections(node);
+        let result = unsafe { get_collections(node, ptr::null()) };
         assert_eq!(result.status, 0, "get_collections failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Person"), "should contain Person collection");
@@ -183,7 +189,15 @@ mod tests {
             r#"mutation { create_Person(input: {name: "Bob", age: 30}) { _docID name age } }"#,
         )
         .unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "mutation failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "should contain Bob");
@@ -191,7 +205,15 @@ mod tests {
 
         // Query people
         let query_str = CString::new("{ Person { name age } }").unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                query_str.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "query failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "query should return Bob");

@@ -52,25 +52,24 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
     let result = rt.block_on(async {
         // Try parsing as Go's model.Lens format ({"Lenses": [...]}) first,
         // then fall back to single LensModule
-        let modules: Vec<LensModule> = if let Ok(lens_obj) =
-            serde_json::from_str::<serde_json::Value>(&lens_str)
-        {
-            if let Some(lenses_arr) = lens_obj.get("Lenses").and_then(|v| v.as_array()) {
-                lenses_arr
-                    .iter()
-                    .map(|v| {
-                        serde_json::from_value::<LensModule>(v.clone())
-                            .map_err(|e| format!("failed to parse lens module: {}", e))
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?
+        let modules: Vec<LensModule> =
+            if let Ok(lens_obj) = serde_json::from_str::<serde_json::Value>(&lens_str) {
+                if let Some(lenses_arr) = lens_obj.get("Lenses").and_then(|v| v.as_array()) {
+                    lenses_arr
+                        .iter()
+                        .map(|v| {
+                            serde_json::from_value::<LensModule>(v.clone())
+                                .map_err(|e| format!("failed to parse lens module: {}", e))
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?
+                } else {
+                    vec![serde_json::from_str::<LensModule>(&lens_str)
+                        .map_err(|e| format!("failed to parse lens config: {}", e))?]
+                }
             } else {
                 vec![serde_json::from_str::<LensModule>(&lens_str)
                     .map_err(|e| format!("failed to parse lens config: {}", e))?]
-            }
-        } else {
-            vec![serde_json::from_str::<LensModule>(&lens_str)
-                .map_err(|e| format!("failed to parse lens config: {}", e))?]
-        };
+            };
 
         let mut all_ids = Vec::new();
         for lens_module in modules {

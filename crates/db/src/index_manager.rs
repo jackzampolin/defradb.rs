@@ -23,6 +23,40 @@ pub struct BulkIndexResult {
     pub skipped: usize,
 }
 
+/// Generate an index name matching Go's `{Col}_{firstField}_ASC` pattern.
+///
+/// If the base name already exists, appends `_2`, `_3`, etc. to avoid collisions.
+fn generate_index_name(collection_name: &str, first_field: &str, existing_names: &[String]) -> String {
+    let base = format!("{}_{}_ASC", collection_name, first_field);
+    if !existing_names.contains(&base) {
+        return base;
+    }
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{}_{}", base, suffix);
+        if !existing_names.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+/// Check if an index name is valid per Go's rules.
+///
+/// Must start with a letter or underscore, and contain only alphanumeric characters
+/// and underscores. Matches Go's `isValidIndexName()`.
+fn is_valid_index_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Manages indexes for a collection.
 ///
 /// Provides operations for creating, dropping, and maintaining secondary indexes.
@@ -94,14 +128,35 @@ impl IndexManager {
     pub async fn create_index(
         &mut self,
         datastore: &NamespaceView,
+        collection_name: &str,
         name: String,
         fields: Vec<IndexedFieldDescription>,
         unique: bool,
     ) -> Result<IndexDescription> {
+        // Auto-generate name if empty (matches Go behavior)
+        let name = if name.is_empty() {
+            let first_field = fields
+                .first()
+                .map(|f| f.name.as_str())
+                .unwrap_or("unknown");
+            let existing: Vec<String> = self.indexes.keys().cloned().collect();
+            generate_index_name(collection_name, first_field, &existing)
+        } else {
+            name
+        };
+
+        // Validate index name
+        if !is_valid_index_name(&name) {
+            return Err(Error::Other(format!(
+                "index with invalid name. Name: {}",
+                name
+            )));
+        }
+
         // Check if index already exists
         if self.indexes.contains_key(&name) {
             return Err(Error::Other(format!(
-                "index '{}' already exists on collection",
+                "index with name already exists. Name: {}",
                 name
             )));
         }

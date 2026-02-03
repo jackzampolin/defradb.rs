@@ -34,11 +34,16 @@ use super::merge::{BlockMetadata, MergeHandler, MergeOutcome};
 #[derive(Debug, Clone)]
 pub enum ReplicationResult {
     /// Block was merged successfully
-    Merged { cid: Cid, doc_id: String },
+    Merged {
+        cid: Cid,
+        doc_id: String,
+        collection_id: String,
+    },
     /// Block was merged but re-broadcast failed (replication to other nodes may be incomplete)
     MergedButBroadcastFailed {
         cid: Cid,
         doc_id: String,
+        collection_id: String,
         broadcast_error: String,
     },
     /// Block was skipped (already applied or rejected)
@@ -110,13 +115,14 @@ impl ReplicationLoop {
                 Self::process_next(&coordinator, &mut events, handler.as_ref(), &config).await;
 
             match &result {
-                ReplicationResult::Merged { cid, doc_id } => {
+                ReplicationResult::Merged { cid, doc_id, .. } => {
                     tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
                 }
                 ReplicationResult::MergedButBroadcastFailed {
                     cid,
                     doc_id,
                     broadcast_error,
+                    ..
                 } => {
                     tracing::error!(
                         cid = %cid,
@@ -162,7 +168,11 @@ impl ReplicationLoop {
     }
 
     /// Process the next sync event.
-    async fn process_next<B, H>(
+    ///
+    /// This is public so that callers (e.g., FFI layer) can run a custom
+    /// replication loop that injects additional behavior (like publishing
+    /// MergeComplete events) after each successful merge.
+    pub async fn process_next<B, H>(
         coordinator: &SyncCoordinator<B>,
         events: &mut mpsc::Receiver<SyncEvent>,
         handler: &H,
@@ -302,8 +312,9 @@ impl ReplicationLoop {
             }
         };
 
-        // Extract doc_id for use in result (use empty string if recovery mode)
+        // Extract doc_id and collection_id for use in result (use empty string if recovery mode)
         let doc_id_for_result = metadata.doc_id.unwrap_or("").to_string();
+        let collection_id_for_result = metadata.collection_id.unwrap_or("").to_string();
         let collection_id_for_broadcast = metadata.collection_id.unwrap_or("");
 
         // Delegate merge to handler
@@ -338,6 +349,7 @@ impl ReplicationLoop {
                             return ReplicationResult::MergedButBroadcastFailed {
                                 cid,
                                 doc_id: doc_id_for_result,
+                                collection_id: collection_id_for_result,
                                 broadcast_error: format!(
                                     "Partial: document topic succeeded but collection topic failed: {}",
                                     collection_error
@@ -349,6 +361,7 @@ impl ReplicationLoop {
                             return ReplicationResult::MergedButBroadcastFailed {
                                 cid,
                                 doc_id: doc_id_for_result,
+                                collection_id: collection_id_for_result,
                                 broadcast_error: format!(
                                     "Partial: collection topic succeeded but document topic failed: {}",
                                     document_error
@@ -360,6 +373,7 @@ impl ReplicationLoop {
                             return ReplicationResult::MergedButBroadcastFailed {
                                 cid,
                                 doc_id: doc_id_for_result,
+                                collection_id: collection_id_for_result,
                                 broadcast_error: e.to_string(),
                             };
                         }
@@ -369,6 +383,7 @@ impl ReplicationLoop {
                 ReplicationResult::Merged {
                     cid,
                     doc_id: doc_id_for_result,
+                    collection_id: collection_id_for_result,
                 }
             }
             Ok(MergeOutcome::Skipped { reason }) => {
@@ -550,6 +565,7 @@ impl ReplicationLoop {
                     cid,
                     doc_id,
                     broadcast_error,
+                    ..
                 } => {
                     // Merge succeeded - count as success (broadcast not expected during recovery)
                     success_count += 1;
@@ -782,6 +798,7 @@ mod tests {
         let result = ReplicationResult::MergedButBroadcastFailed {
             cid,
             doc_id: "doc123".to_string(),
+            collection_id: "col1".to_string(),
             broadcast_error: "no peers connected".to_string(),
         };
 
@@ -790,10 +807,12 @@ mod tests {
             ReplicationResult::MergedButBroadcastFailed {
                 cid: c,
                 doc_id,
+                collection_id,
                 broadcast_error,
             } => {
                 assert_eq!(c, cid);
                 assert_eq!(doc_id, "doc123");
+                assert_eq!(collection_id, "col1");
                 assert!(broadcast_error.contains("no peers"));
             }
             _ => panic!("Expected MergedButBroadcastFailed"),

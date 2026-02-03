@@ -67,7 +67,14 @@ pub struct ScanNode {
 impl ScanNode {
     /// Create a new scan node for a collection
     pub fn new(collection: CollectionVersion, document_mapping: DocumentMapping) -> Self {
-        let fields_per_doc = document_mapping.field_count();
+        // Count storable fields from the collection schema (matches Go's field fetch counting).
+        // Go counts KV pairs from storage, which corresponds to fields with a non-empty FieldID.
+        // This excludes virtual relation objects (no FieldID) and system fields.
+        let fields_per_doc = collection
+            .fields
+            .iter()
+            .filter(|f| !f.id.is_empty())
+            .count();
         Self {
             collection,
             document_mapping,
@@ -207,8 +214,8 @@ impl PlanNode for ScanNode {
 
             // Track document fetch
             self.exec_info.docs_fetched += 1;
-            // Track field fetches (each field in the document)
-            self.exec_info.fields_fetched += self.fields_per_doc as u64;
+            // Track field fetches (actual stored fields in this document)
+            self.exec_info.fields_fetched += doc.stored_field_count as u64;
 
             // Skip deleted docs if not showing deleted
             if !self.show_deleted && doc.is_deleted() {
@@ -253,10 +260,16 @@ impl PlanNode for ScanNode {
         let mut obj = serde_json::Map::new();
 
         // Go DefraDB format: always include filter (null if none or empty)
-        // When filter has empty conditions, treat it as null to match Go behavior
+        // Only strip _docID conditions when doc_ids are provided as a query argument
+        // (Go converts those to prefix scans). When _docID is a regular filter condition,
+        // keep it in the filter output.
         if let Some(ref filter) = self.filter {
             let conditions = filter.conditions();
-            if conditions.is_empty() {
+            if self.doc_ids.is_some() {
+                // doc_ids provided → strip _docID (it's shown in prefixes)
+                let stripped = super::strip_docid_from_conditions(conditions);
+                obj.insert("filter".to_string(), stripped);
+            } else if conditions.is_empty() {
                 obj.insert("filter".to_string(), serde_json::Value::Null);
             } else {
                 obj.insert("filter".to_string(), serde_json::json!(conditions));
@@ -303,22 +316,21 @@ impl PlanNode for ScanNode {
     fn explain_execute_inner(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations, docFetches, fieldFetches, indexFetches
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
         obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(self.exec_info.docs_fetched),
+            serde_json::json!(self.exec_info.docs_fetched as u64),
         );
         obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(self.exec_info.fields_fetched),
+            serde_json::json!(self.exec_info.fields_fetched as u64),
         );
         obj.insert(
             "indexFetches".to_string(),
-            serde_json::json!(self.exec_info.indexes_fetched),
+            serde_json::json!(self.exec_info.indexes_fetched as u64),
         );
 
         serde_json::Value::Object(obj)

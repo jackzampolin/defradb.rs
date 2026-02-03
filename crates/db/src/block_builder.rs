@@ -9,12 +9,14 @@
 
 use blockstore::Blockstore;
 use cid::Cid;
+use crypto::PrivateKey;
 use datastore::NamespaceView;
 use defra_core::block::{
     Block, CollectionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink,
-    Encryption, LwwDeltaPayload,
+    Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
 };
 use defra_core::encryption::EncryptionConfig;
+use defra_core::signing::SigningConfig;
 use document::{Document, NormalValue};
 use std::sync::Arc;
 use storage::corekv::Key;
@@ -24,6 +26,84 @@ fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
     let (ciphertext, _nonce) = crypto::encryption::aes::encrypt_aes(plaintext, key, &[], true)
         .map_err(|e| format!("encryption failed: {}", e))?;
     Ok(ciphertext)
+}
+
+/// Sign a block and store the signature as a separate IPLD block.
+///
+/// Matches Go's `signBlock()` in `internal/core/block/signing.go`:
+/// 1. Only signs first field blocks (priority <= 1) and composite blocks
+/// 2. Marshals block WITHOUT signature to get bytes to sign
+/// 3. Signs the bytes with the private key
+/// 4. Creates a Signature block with header (type + public key) and value
+/// 5. Stores the signature block in blockstore
+/// 6. Returns the signature block's CID
+///
+/// The caller must then set `block.signature = Some(sig_cid)` and re-serialize.
+async fn sign_block(
+    block: &Block,
+    signer: &SigningConfig,
+    blockstore: &NamespaceView,
+) -> Result<Option<Cid>, String> {
+    // Only sign first field blocks (priority <= 1) and composite blocks.
+    // Higher-priority field blocks are not signed — their integrity is
+    // guaranteed by the signature on the parent composite block.
+    let is_field = matches!(
+        &block.delta,
+        CrdtDelta::Lww(_) | CrdtDelta::Counter(_)
+    );
+    if is_field && block.delta.priority() > 1 {
+        return Ok(None);
+    }
+
+    // Serialize the block (without signature) to get the bytes to sign
+    let block_bytes = block
+        .to_dag_cbor()
+        .map_err(|e| format!("Failed to encode block for signing: {}", e))?;
+
+    // Determine signature type and sign
+    let (sig_type, sig_bytes) = match signer.key_type.as_str() {
+        "ed25519" => {
+            let private_key = crypto::Ed25519PrivateKey::from_bytes(&signer.private_key_bytes)
+                .map_err(|e| format!("Failed to load Ed25519 private key: {}", e))?;
+            let sig = private_key
+                .sign(&block_bytes)
+                .map_err(|e| format!("Failed to sign block: {}", e))?;
+            (SignatureType::EdDSA, sig)
+        }
+        "secp256k1" => {
+            let private_key =
+                crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
+                    .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
+            let sig = private_key
+                .sign(&block_bytes)
+                .map_err(|e| format!("Failed to sign block: {}", e))?;
+            (SignatureType::ES256K, sig)
+        }
+        other => return Err(format!("Unsupported key type for signing: {}", other)),
+    };
+
+    // Create signature block.
+    // Go uses `[]byte(fullIdent.PublicKey().String())` for identity,
+    // which is the hex-encoded public key string as bytes.
+    let signature = Signature::new(
+        SignatureHeader::new(sig_type, signer.public_key_hex.as_bytes().to_vec()),
+        sig_bytes,
+    );
+
+    // Store signature block in blockstore and return its CID
+    let sig_cbor = signature
+        .to_dag_cbor()
+        .map_err(|e| format!("Failed to encode signature block: {}", e))?;
+    let sig_cid = signature
+        .generate_cid()
+        .map_err(|e| format!("Failed to generate signature CID: {}", e))?;
+
+    blockstore
+        .set(&sig_cid.to_bytes(), &sig_cbor)
+        .await
+        .map_err(|e| format!("Failed to store signature block: {}", e))?;
+
+    Ok(Some(sig_cid))
 }
 
 /// Result of building blocks from a document mutation.
@@ -329,6 +409,7 @@ pub async fn write_document_blocks(
     schema_version_id: &str,
     modified_fields: Option<&std::collections::HashSet<String>>,
     encryption_config: Option<&EncryptionConfig>,
+    signing_config: Option<&SigningConfig>,
 ) -> Result<BlockResult, String> {
     let doc_id = doc
         .id()
@@ -458,16 +539,48 @@ pub async fn write_document_blocks(
 
             // Create the field block with heads linking to previous version
             // Include encryption CID if this field was encrypted
-            let field_block =
+            let mut field_block =
                 Block::new_with_options(delta, heads.clone(), vec![], encryption_cid, None);
 
-            // Serialize and generate CID
+            // Sign the block if a signer is available.
+            // Go's signBlock: sign the block bytes (without signature), store
+            // the Signature as a separate block, then set block.signature = sig_cid.
+            if let Some(signer) = signing_config {
+                eprintln!("[SIGN-DEBUG] write_document_blocks: signing field block for field={}, priority={}", field_name, priority);
+                match sign_block(&field_block, signer, blockstore).await {
+                    Ok(Some(sig_cid)) => {
+                        eprintln!("[SIGN-DEBUG] write_document_blocks: signed! sig_cid={}", sig_cid);
+                        field_block.signature = Some(sig_cid);
+                    }
+                    Ok(None) => {
+                        eprintln!("[SIGN-DEBUG] write_document_blocks: sign_block returned None (priority too high?)");
+                    }
+                    Err(e) => {
+                        eprintln!("[SIGN-DEBUG] write_document_blocks: sign_block ERROR: {}", e);
+                        return Err(e);
+                    }
+                }
+            } else {
+                eprintln!("[SIGN-DEBUG] write_document_blocks: no signing_config for field={}", field_name);
+            }
+
+            // Serialize and generate CID (includes signature CID if signed)
             let field_block_bytes = field_block
                 .to_dag_cbor()
                 .map_err(|e| format!("Failed to encode field block: {}", e))?;
             let field_cid = field_block
                 .generate_cid()
                 .map_err(|e| format!("Failed to generate field CID: {}", e))?;
+
+            // Debug: verify roundtrip of signature through serialization
+            eprintln!("[SIGN-DEBUG] write_document_blocks: storing field block cid={}, bytes_len={}, signature={:?}", field_cid, field_block_bytes.len(), field_block.signature);
+            {
+                let rt_block = Block::from_dag_cbor(&field_block_bytes);
+                match rt_block {
+                    Ok(b) => eprintln!("[SIGN-DEBUG] write_document_blocks: roundtrip signature={:?}", b.signature),
+                    Err(e) => eprintln!("[SIGN-DEBUG] write_document_blocks: roundtrip FAILED: {}", e),
+                }
+            }
 
             // Store the field block in blockstore
             blockstore
@@ -552,7 +665,7 @@ pub async fn write_document_blocks(
     };
 
     // Create the composite block with heads linking to previous version
-    let composite_block = Block::new_with_options(
+    let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
         composite_heads,
         field_links,
@@ -560,7 +673,14 @@ pub async fn write_document_blocks(
         None,
     );
 
-    // Serialize the composite block
+    // Sign the composite block if a signer is available
+    if let Some(signer) = signing_config {
+        if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
+            composite_block.signature = Some(sig_cid);
+        }
+    }
+
+    // Serialize the composite block (includes signature CID if signed)
     let composite_bytes = composite_block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode composite block: {}", e))?;
@@ -616,6 +736,7 @@ pub async fn write_delete_block(
     headstore: &NamespaceView,
     doc_id: &str,
     schema_version_id: &str,
+    signing_config: Option<&SigningConfig>,
 ) -> Result<BlockResult, String> {
     let doc_id_bytes = doc_id.as_bytes().to_vec();
 
@@ -636,11 +757,18 @@ pub async fn write_delete_block(
     };
 
     // Create the composite block with no field links (deletes have no field blocks)
-    let composite_block = Block::new(
+    let mut composite_block = Block::new(
         CrdtDelta::Composite(composite_payload),
         composite_heads,
         vec![], // No field links for delete
     );
+
+    // Sign the delete composite block if a signer is available
+    if let Some(signer) = signing_config {
+        if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
+            composite_block.signature = Some(sig_cid);
+        }
+    }
 
     // Serialize the composite block
     let composite_bytes = composite_block
@@ -748,11 +876,7 @@ pub async fn write_collection_block(
     let links = vec![DAGLink::new(String::new(), doc_composite_cid)];
 
     // Create the collection block
-    let collection_block = Block::new(
-        CrdtDelta::Collection(collection_payload),
-        col_heads,
-        links,
-    );
+    let collection_block = Block::new(CrdtDelta::Collection(collection_payload), col_heads, links);
 
     // Serialize and generate CID
     let collection_bytes = collection_block

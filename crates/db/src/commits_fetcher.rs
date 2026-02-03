@@ -5,7 +5,7 @@
 
 use async_lock::Mutex as TokioMutex;
 use cid::Cid;
-use defra_core::block::{Block, CrdtDelta};
+use defra_core::block::{Block, CrdtDelta, Signature};
 use document::Document;
 use serde_json::{json, Value as JsonValue};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -299,8 +299,31 @@ impl<S: Store> CommitsFetcher<S> {
                 Error::Serialization("cid either does not exist or belong to document".to_string())
             })?;
 
-        Block::from_dag_cbor(&data)
-            .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))
+        let block = Block::from_dag_cbor(&data)
+            .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))?;
+        eprintln!("[SIGN-DEBUG] load_block: cid={}, data_len={}, block.signature={:?}", cid, data.len(), block.signature);
+        Ok(block)
+    }
+
+    /// Load a signature block from blockstore by CID
+    async fn load_signature_block(
+        &self,
+        txn: &mut DbTxn<S>,
+        cid: &Cid,
+    ) -> Result<Signature> {
+        let blockstore = txn.blockstore()?;
+
+        let key = cid.to_bytes();
+        let data = blockstore
+            .get(&key)
+            .await
+            .map_err(Error::Storage)?
+            .ok_or_else(|| {
+                Error::Serialization("signature block not found".to_string())
+            })?;
+
+        Signature::from_dag_cbor(&data)
+            .map_err(|e| Error::Serialization(format!("Failed to decode signature block: {}", e)))
     }
 
     /// Convert a block to a commit document.
@@ -313,6 +336,7 @@ impl<S: Store> CommitsFetcher<S> {
         cid: &Cid,
         block: &Block,
     ) -> Result<Document> {
+        eprintln!("[SIGN-DEBUG] block_to_commit_doc: cid={}, block.signature={:?}, block.encryption={:?}", cid, block.signature, block.encryption);
         let mut map = HashMap::new();
 
         // cid
@@ -391,8 +415,34 @@ impl<S: Store> CommitsFetcher<S> {
         }
         map.insert("heads".to_string(), json!(heads));
 
-        // signature - null for now (handle signature blocks separately)
-        map.insert("signature".to_string(), JsonValue::Null);
+        // signature - load from blockstore if the block has a signature CID
+        let sig_value = if let Some(sig_cid) = &block.signature {
+            eprintln!("[SIGN-DEBUG] block_to_commit_doc: loading signature block sig_cid={}", sig_cid);
+            match self.load_signature_block(txn, sig_cid).await {
+                Ok(sig) => {
+                    let sig_type = match sig.header.sig_type {
+                        defra_core::block::SignatureType::ES256K => "ES256K",
+                        defra_core::block::SignatureType::EdDSA => "EdDSA",
+                    };
+                    let sig_json = json!({
+                        "type": sig_type,
+                        "identity": String::from_utf8_lossy(&sig.header.identity).to_string(),
+                        "value": hex::encode(&sig.value),
+                    });
+                    eprintln!("[SIGN-DEBUG] block_to_commit_doc: signature loaded OK: {}", sig_json);
+                    sig_json
+                }
+                Err(e) => {
+                    eprintln!("[SIGN-DEBUG] block_to_commit_doc: load_signature_block FAILED: {}", e);
+                    JsonValue::Null
+                },
+            }
+        } else {
+            eprintln!("[SIGN-DEBUG] block_to_commit_doc: no signature CID on block");
+            JsonValue::Null
+        };
+        eprintln!("[SIGN-DEBUG] block_to_commit_doc: inserting signature into map: {}", sig_value);
+        map.insert("signature".to_string(), sig_value);
 
         Document::from_map(map)
             .map_err(|e| Error::Serialization(format!("Failed to create document: {}", e)))

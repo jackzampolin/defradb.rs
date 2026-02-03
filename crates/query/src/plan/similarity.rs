@@ -160,7 +160,7 @@ impl PlanNode for SimilarityNode {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(self.exec_info.iterations as u64),
         );
 
         let child_explain = self.source.explain_execute();

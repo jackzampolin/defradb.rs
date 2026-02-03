@@ -120,7 +120,12 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection
             .update_with_indexes(&datastore, &doc, &index_manager)
             .await
-            .map_err(|e| query::error::QueryError::execution(format!("update error: {}", e)))?;
+            .map_err(|e| match e {
+                crate::error::Error::DocumentNotFound(id) => {
+                    query::error::QueryError::document_not_found(id)
+                }
+                other => query::error::QueryError::execution(format!("update error: {}", other)),
+            })?;
 
         // Return count of actually modified fields
         let fields_modified = modified_fields.len();

@@ -41,13 +41,9 @@ impl<S: Store> VersionedFetcher<S> {
         cid_str: &str,
         expected_doc_id: Option<&str>,
     ) -> Result<Document> {
-        let docs = self
-            .get_documents_at_cid(cid_str, expected_doc_id)
-            .await?;
+        let docs = self.get_documents_at_cid(cid_str, expected_doc_id).await?;
         docs.into_iter().next().ok_or_else(|| {
-            Error::Serialization(
-                "cid either does not exist or belong to document".to_string(),
-            )
+            Error::Serialization("cid either does not exist or belong to document".to_string())
         })
     }
 
@@ -135,8 +131,7 @@ impl<S: Store> VersionedFetcher<S> {
                             let priority = doc_block.delta.priority();
                             match doc_composites.get(&doc_id) {
                                 None => {
-                                    doc_composites
-                                        .insert(doc_id, (priority, doc_composite_cid));
+                                    doc_composites.insert(doc_id, (priority, doc_composite_cid));
                                 }
                                 Some((existing_priority, _)) => {
                                     if priority > *existing_priority {
@@ -384,50 +379,48 @@ impl<S: Store> VersionedFetcher<S> {
                     // Counter: accumulate increments
                     if !payload.data.is_empty() {
                         match ciborium::from_reader::<NormalValue, _>(&payload.data[..]) {
-                            Ok(increment_value) => {
-                                match &increment_value {
-                                    NormalValue::Int(increment) => {
-                                        let current: i64 = field_values
-                                            .get(field_name)
-                                            .and_then(|(_, v)| v.as_int())
-                                            .unwrap_or(0);
-                                        let new_value = current.saturating_add(*increment);
-                                        field_values.insert(
-                                            field_name.clone(),
-                                            (payload.priority, NormalValue::Int(new_value)),
-                                        );
-                                    }
-                                    NormalValue::Float64(increment) => {
-                                        let current: f64 = field_values
-                                            .get(field_name)
-                                            .and_then(|(_, v)| v.as_float64())
-                                            .unwrap_or(0.0);
-                                        let new_value = current + increment;
-                                        field_values.insert(
-                                            field_name.clone(),
-                                            (payload.priority, NormalValue::Float64(new_value)),
-                                        );
-                                    }
-                                    NormalValue::Float32(increment) => {
-                                        let current: f32 = field_values
-                                            .get(field_name)
-                                            .and_then(|(_, v)| v.as_float32())
-                                            .unwrap_or(0.0);
-                                        let new_value = current + increment;
-                                        field_values.insert(
-                                            field_name.clone(),
-                                            (payload.priority, NormalValue::Float32(new_value)),
-                                        );
-                                    }
-                                    other => {
-                                        tracing::warn!(
-                                            field_name = %field_name,
-                                            value_type = ?other,
-                                            "Unexpected Counter value type during replay"
-                                        );
-                                    }
+                            Ok(increment_value) => match &increment_value {
+                                NormalValue::Int(increment) => {
+                                    let current: i64 = field_values
+                                        .get(field_name)
+                                        .and_then(|(_, v)| v.as_int())
+                                        .unwrap_or(0);
+                                    let new_value = current.saturating_add(*increment);
+                                    field_values.insert(
+                                        field_name.clone(),
+                                        (payload.priority, NormalValue::Int(new_value)),
+                                    );
                                 }
-                            }
+                                NormalValue::Float64(increment) => {
+                                    let current: f64 = field_values
+                                        .get(field_name)
+                                        .and_then(|(_, v)| v.as_float64())
+                                        .unwrap_or(0.0);
+                                    let new_value = current + increment;
+                                    field_values.insert(
+                                        field_name.clone(),
+                                        (payload.priority, NormalValue::Float64(new_value)),
+                                    );
+                                }
+                                NormalValue::Float32(increment) => {
+                                    let current: f32 = field_values
+                                        .get(field_name)
+                                        .and_then(|(_, v)| v.as_float32())
+                                        .unwrap_or(0.0);
+                                    let new_value = current + increment;
+                                    field_values.insert(
+                                        field_name.clone(),
+                                        (payload.priority, NormalValue::Float32(new_value)),
+                                    );
+                                }
+                                other => {
+                                    tracing::warn!(
+                                        field_name = %field_name,
+                                        value_type = ?other,
+                                        "Unexpected Counter value type during replay"
+                                    );
+                                }
+                            },
                             Err(e) => {
                                 tracing::warn!(
                                     field_name = %field_name,

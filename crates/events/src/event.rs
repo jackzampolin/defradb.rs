@@ -13,6 +13,10 @@ pub enum EventName {
     Merge,
     /// P2P merge completed event.
     MergeComplete,
+    /// Replicator configuration completed (initial docs pushed).
+    ReplicatorCompleted,
+    /// GossipSub peer joined/left a topic.
+    TopicPeerEvent,
 }
 
 impl EventName {
@@ -32,8 +36,34 @@ impl std::fmt::Display for EventName {
             EventName::Update => write!(f, "update"),
             EventName::Merge => write!(f, "merge"),
             EventName::MergeComplete => write!(f, "merge-complete"),
+            EventName::ReplicatorCompleted => write!(f, "replicator-completed"),
+            EventName::TopicPeerEvent => write!(f, "topic-peer-event"),
         }
     }
+}
+
+/// P2P merge complete event data.
+#[derive(Debug, Clone)]
+pub struct MergeCompleteData {
+    /// Document ID that was merged.
+    pub doc_id: String,
+    /// CID of the merged block.
+    pub cid: Cid,
+    /// Collection ID the document belongs to.
+    pub collection_id: String,
+    /// Peer ID that sent this block.
+    pub by_peer: String,
+}
+
+/// GossipSub topic peer event data.
+#[derive(Debug, Clone)]
+pub struct TopicPeerEventData {
+    /// The peer ID that joined or left.
+    pub peer_id: String,
+    /// The topic name.
+    pub topic: String,
+    /// "JOINED" or "LEFT".
+    pub event_type: String,
 }
 
 /// Document update event data.
@@ -90,6 +120,12 @@ pub enum MessageData {
     None,
     /// Document update data.
     Update(Update),
+    /// P2P merge complete data.
+    MergeComplete(MergeCompleteData),
+    /// Replicator completed signal (initial docs pushed).
+    ReplicatorCompleted,
+    /// GossipSub topic peer event.
+    TopicPeerEvent(TopicPeerEventData),
 }
 
 impl Message {
@@ -109,11 +145,35 @@ impl Message {
         }
     }
 
-    /// Create a new MergeComplete message (signal only, no data).
-    pub fn merge_complete() -> Self {
+    /// Create a new MergeComplete message with data.
+    pub fn merge_complete(data: MergeCompleteData) -> Self {
         Self {
             name: EventName::MergeComplete,
-            data: MessageData::None,
+            data: MessageData::MergeComplete(data),
+        }
+    }
+
+    /// Create a new ReplicatorCompleted message (signal).
+    pub fn replicator_completed() -> Self {
+        Self {
+            name: EventName::ReplicatorCompleted,
+            data: MessageData::ReplicatorCompleted,
+        }
+    }
+
+    /// Create a new TopicPeerEvent message.
+    pub fn topic_peer_event(data: TopicPeerEventData) -> Self {
+        Self {
+            name: EventName::TopicPeerEvent,
+            data: MessageData::TopicPeerEvent(data),
+        }
+    }
+
+    /// Get the TopicPeerEventData if this is a TopicPeerEvent message.
+    pub fn as_topic_peer_event(&self) -> Option<&TopicPeerEventData> {
+        match &self.data {
+            MessageData::TopicPeerEvent(d) => Some(d),
+            _ => None,
         }
     }
 
@@ -121,6 +181,14 @@ impl Message {
     pub fn as_update(&self) -> Option<&Update> {
         match &self.data {
             MessageData::Update(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    /// Get the MergeCompleteData if this is a MergeComplete message.
+    pub fn as_merge_complete(&self) -> Option<&MergeCompleteData> {
+        match &self.data {
+            MessageData::MergeComplete(d) => Some(d),
             _ => None,
         }
     }
@@ -157,5 +225,16 @@ mod tests {
         let merge_msg = Message::merge();
         assert_eq!(merge_msg.name, EventName::Merge);
         assert!(merge_msg.as_update().is_none());
+
+        let mc_data = MergeCompleteData {
+            doc_id: "doc-789".to_string(),
+            cid: Cid::default(),
+            collection_id: "col-abc".to_string(),
+            by_peer: "peer-xyz".to_string(),
+        };
+        let mc_msg = Message::merge_complete(mc_data);
+        assert_eq!(mc_msg.name, EventName::MergeComplete);
+        assert!(mc_msg.as_merge_complete().is_some());
+        assert_eq!(mc_msg.as_merge_complete().unwrap().doc_id, "doc-789");
     }
 }

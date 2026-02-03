@@ -471,6 +471,50 @@ impl Counter {
         Ok(MergeResult::Applied)
     }
 
+    /// Seed the counter CRDT storage from the document's current field value
+    /// if it hasn't been initialized yet.
+    ///
+    /// Local document creation stores counter values in the document layer but not
+    /// in CRDT accumulation storage. Before merging a remote delta, the CRDT storage
+    /// must be seeded from the document value to ensure correct accumulation.
+    /// Also marks nonce=0 as applied since the initial creation already accounts for it.
+    ///
+    /// Returns true if seeding was performed, false if already initialized.
+    pub async fn seed_if_uninitialized_int64(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        value: i64,
+    ) -> Result<bool> {
+        let has_value = rw
+            .has(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        if has_value {
+            return Ok(false);
+        }
+        self.set_int64(rw, value).await?;
+        self.mark_nonce(rw, 0).await?;
+        Ok(true)
+    }
+
+    /// Float64 variant of `seed_if_uninitialized_int64`.
+    pub async fn seed_if_uninitialized_float64(
+        &self,
+        rw: &mut dyn ReaderWriter,
+        value: f64,
+    ) -> Result<bool> {
+        let has_value = rw
+            .has(&self.value_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        if has_value {
+            return Ok(false);
+        }
+        self.set_float64(rw, value).await?;
+        self.mark_nonce(rw, 0).await?;
+        Ok(true)
+    }
+
     /// Get current value bytes (for internal use)
     async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Vec<u8>> {
         reader

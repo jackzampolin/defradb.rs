@@ -99,6 +99,9 @@ pub enum NodePermission {
     /// Get collection information (used by GET /api/v0/collections, GET /api/v0/schema)
     CollectionGet,
 
+    /// Truncate a collection (delete all documents, preserve schema)
+    CollectionTruncate,
+
     // =========================================================================
     // Document Operations
     // =========================================================================
@@ -193,6 +196,7 @@ impl NodePermission {
             // Collection operations
             Self::CollectionPatch => "collection-patch",
             Self::CollectionGet => "collection-get",
+            Self::CollectionTruncate => "collection-truncate",
 
             // Document operations
             Self::DocumentRead => "document-read",
@@ -221,7 +225,7 @@ impl NodePermission {
         }
     }
 
-    /// Returns all 33 node permissions.
+    /// Returns all 34 node permissions.
     pub fn all() -> &'static [NodePermission] {
         &[
             // DAC
@@ -243,6 +247,7 @@ impl NodePermission {
             // Collection
             Self::CollectionPatch,
             Self::CollectionGet,
+            Self::CollectionTruncate,
             // Document
             Self::DocumentRead,
             Self::DocumentUpdate,
@@ -289,6 +294,7 @@ impl NodePermission {
             // Collection
             "collection-patch" => Self::CollectionPatch,
             "collection-get" => Self::CollectionGet,
+            "collection-truncate" => Self::CollectionTruncate,
             // Document
             "document-read" => Self::DocumentRead,
             "document-update" => Self::DocumentUpdate,
@@ -316,7 +322,7 @@ impl NodePermission {
 
     /// Check if this permission is admin-only (requires owner or admin relation).
     ///
-    /// In Go DefraDB, all 33 node permissions are defined with `expr: owner + admin`,
+    /// In Go DefraDB, all 34 node permissions are defined with `expr: owner + admin`,
     /// meaning they all require either the owner or admin relation to be granted.
     /// This matches that behavior.
     pub fn is_admin_only(&self) -> bool {
@@ -337,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_all_permissions_count() {
-        assert_eq!(NodePermission::all().len(), 33);
+        assert_eq!(NodePermission::all().len(), 34);
     }
 
     #[test]
@@ -360,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_admin_only_permissions() {
-        // All 33 permissions require owner or admin relation (matches Go behavior)
+        // All 34 permissions require owner or admin relation (matches Go behavior)
         for perm in NodePermission::all() {
             assert!(
                 perm.is_admin_only(),

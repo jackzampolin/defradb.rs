@@ -356,12 +356,22 @@ impl<S: ZanzibarStore> NodeACP<S> {
             return Ok(true); // Everyone is admin when NAC is disabled
         }
 
+        self.is_admin_persisted(identity).await
+    }
+
+    /// Check if an identity is an admin based on stored relationships.
+    ///
+    /// Unlike `is_admin()`, this checks the actual stored relationships
+    /// regardless of the current NAC status. Used for operations like
+    /// `re_enable` where we need to verify admin access even when NAC
+    /// is temporarily disabled.
+    pub async fn is_admin_persisted(&self, identity: &Did) -> Result<bool> {
         // Check if owner
         if self.is_owner(identity).await {
             return Ok(true);
         }
 
-        // Check admin relation
+        // Check admin relation from stored relationships
         let engine = self.engine.read().await;
         engine
             .check(
@@ -394,6 +404,13 @@ impl<S: ZanzibarStore> NodeACP<S> {
             });
         }
 
+        // Convert target DID to appropriate Subject (wildcard "*" → Subject::Wildcard)
+        let target_subject = if target.is_wildcard() {
+            Subject::Wildcard
+        } else {
+            Subject::Entity(target.clone())
+        };
+
         // Check if already admin
         let is_already_admin = self.is_admin(target).await?;
         if is_already_admin && !self.is_owner(target).await {
@@ -405,7 +422,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
                     NODE_RESOURCE_NAME,
                     NODE_OBJECT_ID,
                     ADMIN_RELATION,
-                    &Subject::Entity(target.clone()),
+                    &target_subject,
                 )
                 .await?;
             if has_direct {
@@ -414,11 +431,11 @@ impl<S: ZanzibarStore> NodeACP<S> {
         }
 
         // Store admin relationship
-        let admin_rel = Relationship::with_entity(
+        let admin_rel = Relationship::new(
             NODE_RESOURCE_NAME,
             NODE_OBJECT_ID,
             ADMIN_RELATION,
-            target.clone(),
+            target_subject,
         );
         self.store
             .store_relationship(NODE_POLICY_ID, &admin_rel)
@@ -463,12 +480,19 @@ impl<S: ZanzibarStore> NodeACP<S> {
             });
         }
 
+        // Convert target DID to appropriate Subject (wildcard "*" → Subject::Wildcard)
+        let target_subject = if target.is_wildcard() {
+            Subject::Wildcard
+        } else {
+            Subject::Entity(target.clone())
+        };
+
         // Delete admin relationship
-        let admin_rel = Relationship::with_entity(
+        let admin_rel = Relationship::new(
             NODE_RESOURCE_NAME,
             NODE_OBJECT_ID,
             ADMIN_RELATION,
-            target.clone(),
+            target_subject,
         );
         let deleted = self
             .store
@@ -513,12 +537,19 @@ impl<S: ZanzibarStore> NodeACP<S> {
             });
         }
 
+        // Convert target DID to appropriate Subject (wildcard "*" → Subject::Wildcard)
+        let target_subject = if target.is_wildcard() {
+            Subject::Wildcard
+        } else {
+            Subject::Entity(target.clone())
+        };
+
         // Store direct relation for the permission
-        let rel = Relationship::with_entity(
+        let rel = Relationship::new(
             NODE_RESOURCE_NAME,
             NODE_OBJECT_ID,
             permission.as_str(),
-            target.clone(),
+            target_subject.clone(),
         );
 
         // Check if already exists
@@ -529,7 +560,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
                 NODE_RESOURCE_NAME,
                 NODE_OBJECT_ID,
                 permission.as_str(),
-                &Subject::Entity(target.clone()),
+                &target_subject,
             )
             .await?;
 
@@ -575,11 +606,16 @@ impl<S: ZanzibarStore> NodeACP<S> {
             });
         }
 
-        let rel = Relationship::with_entity(
+        let target_subject = if target.is_wildcard() {
+            Subject::Wildcard
+        } else {
+            Subject::Entity(target.clone())
+        };
+        let rel = Relationship::new(
             NODE_RESOURCE_NAME,
             NODE_OBJECT_ID,
             permission.as_str(),
-            target.clone(),
+            target_subject,
         );
         let deleted = self.store.delete_relationship(NODE_POLICY_ID, &rel).await?;
 
@@ -900,5 +936,41 @@ mod tests {
         // Now add admin should work
         let result = nac.add_admin(&owner, &other).await;
         assert!(result.is_ok(), "add_admin should work when NAC is enabled");
+    }
+
+    #[tokio::test]
+    async fn test_wildcard_admin_grants_all_permissions() {
+        let store = Arc::new(MemoryZanzibarStore::new());
+        let nac = NodeACP::new(store);
+
+        let owner = test_did();
+        let other = test_did2();
+        let wildcard = Did::wildcard();
+
+        nac.enable(&owner).await.unwrap();
+
+        // Grant admin to wildcard (all identities)
+        let added = nac.add_admin(&owner, &wildcard).await.unwrap();
+        assert!(added, "should successfully add wildcard admin");
+
+        // Now any identity should have NacStatus permission
+        let has_perm = nac
+            .check_permission(&other, NodePermission::NacStatus)
+            .await
+            .unwrap();
+        assert!(
+            has_perm,
+            "any identity should have NacStatus after wildcard admin grant"
+        );
+
+        // Check another permission too
+        let has_perm = nac
+            .check_permission(&other, NodePermission::CollectionGet)
+            .await
+            .unwrap();
+        assert!(
+            has_perm,
+            "any identity should have CollectionGet after wildcard admin grant"
+        );
     }
 }

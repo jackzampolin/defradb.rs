@@ -72,29 +72,50 @@ pub enum ParsedOperation {
 }
 
 /// Check if a directive list contains @explain and parse its type.
-/// Returns Some(ExplainType) if @explain is present, None otherwise.
-fn parse_explain_directive(directives: &[Directive<'_, String>]) -> Option<ExplainType> {
+/// Returns Ok(Some(ExplainType)) if @explain is present, Ok(None) if not,
+/// or Err if @explain has an invalid type argument.
+fn parse_explain_directive(directives: &[Directive<'_, String>]) -> Result<Option<ExplainType>> {
     for directive in directives {
         if directive.name == "explain" {
             // Check for type argument: @explain(type: simple|execute|debug)
             for (name, value) in &directive.arguments {
                 if name == "type" {
-                    if let Value::Enum(type_str) = value {
-                        if let Some(explain_type) = ExplainType::from_str(type_str) {
-                            return Some(explain_type);
+                    let type_str = match value {
+                        Value::Enum(s) => s.as_str(),
+                        Value::String(s) => s.as_str(),
+                        _ => {
+                            return Err(QueryError::parse(format!(
+                                "Argument \"type\" has invalid value.\nExpected type \"ExplainType\"."
+                            )));
                         }
-                    } else if let Value::String(type_str) = value {
-                        if let Some(explain_type) = ExplainType::from_str(type_str) {
-                            return Some(explain_type);
-                        }
+                    };
+                    if let Some(explain_type) = ExplainType::from_str(type_str) {
+                        return Ok(Some(explain_type));
                     }
+                    return Err(QueryError::parse(format!(
+                        "Argument \"type\" has invalid value {}.\nExpected type \"ExplainType\", found {}.",
+                        type_str, type_str
+                    )));
                 }
             }
-            // No type argument or unknown type - default to Simple
-            return Some(ExplainType::Simple);
+            // No type argument - default to Simple
+            return Ok(Some(ExplainType::Simple));
         }
     }
-    None
+    Ok(None)
+}
+
+/// Check if a field's directive list contains @explain (which is invalid on fields).
+/// Returns an error if @explain is found on a field selection.
+fn check_field_explain_directive(directives: &[Directive<'_, String>]) -> Result<()> {
+    for directive in directives {
+        if directive.name == "explain" {
+            return Err(QueryError::parse(
+                "Directive \"explain\" may not be used on FIELD.".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Type alias for fragment definitions map
@@ -110,6 +131,8 @@ fn parse_selection_to_selects<'a>(
 ) -> Result<()> {
     match selection {
         Selection::Field(field) => {
+            // Check for @explain directive on field (invalid - must be on operation)
+            check_field_explain_directive(&field.directives)?;
             // Check if this is a top-level aggregate (e.g., _avg(Users: {field: Age}))
             if let Some(agg_type) = AggregateType::parse(&field.name) {
                 let select = parse_top_level_aggregate(field, agg_type, variables)?;
@@ -348,7 +371,7 @@ pub fn parse_request_with_variables(
                     OperationDefinition::Query(q) => {
                         has_query = true;
                         // Check for @explain directive and parse type
-                        if let Some(explain_type) = parse_explain_directive(&q.directives) {
+                        if let Some(explain_type) = parse_explain_directive(&q.directives)? {
                             explain = Some(explain_type);
                         }
 
@@ -391,7 +414,7 @@ pub fn parse_request_with_variables(
                     OperationDefinition::Mutation(m) => {
                         has_mutation = true;
                         // Check for @explain directive and parse type
-                        if let Some(explain_type) = parse_explain_directive(&m.directives) {
+                        if let Some(explain_type) = parse_explain_directive(&m.directives)? {
                             explain = Some(explain_type);
                         }
 
@@ -2023,9 +2046,7 @@ fn parse_similarity_field(
     variables: Option<&HashMap<String, JsonValue>>,
 ) -> Result<Similarity> {
     if field.arguments.is_empty() {
-        return Err(QueryError::parse(
-            "_similarity requires a field argument",
-        ));
+        return Err(QueryError::parse("_similarity requires a field argument"));
     }
 
     let (target_field, value) = &field.arguments[0];

@@ -166,6 +166,25 @@ pub enum HostCommand {
         request: PushLogRequest,
         response: oneshot::Sender<Result<PushLogReply>>,
     },
+
+    /// Send a DocSync response via two-stream protocol.
+    SendDocSyncResponse {
+        peer_id: PeerId,
+        reply: crate::message::DocSyncReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a DocSync request via two-stream protocol.
+    SendDocSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::DocSyncRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
+    PeerAddresses {
+        response: oneshot::Sender<Vec<String>>,
+    },
 }
 
 /// Events emitted by the P2P host.
@@ -232,6 +251,18 @@ pub enum HostEvent {
     TwoStreamRequest {
         peer_id: PeerId,
         request: PushLogRequest,
+    },
+
+    /// Received a DocSync request via two-stream protocol.
+    DocSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::DocSyncRequest,
+    },
+
+    /// Received a DocSync reply via two-stream protocol.
+    DocSyncReply {
+        peer_id: PeerId,
+        reply: crate::message::DocSyncReply,
     },
 }
 
@@ -615,6 +646,59 @@ impl P2PHostHandle {
             .map_err(|_| Error::ChannelSend)?;
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
+
+    /// Send a DocSync response via two-stream protocol.
+    ///
+    /// This sends a response on a NEW stream, matching Go's two-stream pattern.
+    pub async fn send_doc_sync_response(
+        &self,
+        peer_id: PeerId,
+        reply: crate::message::DocSyncReply,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendDocSyncResponse {
+                peer_id,
+                reply,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a DocSync request via two-stream protocol.
+    ///
+    /// The request is sent asynchronously. The response will arrive as a
+    /// HostEvent::DocSyncReply which the coordinator will handle.
+    pub async fn send_doc_sync_request(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::DocSyncRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendDocSyncRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
+    pub async fn peer_addresses(&self) -> Result<Vec<String>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::PeerAddresses {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
+    }
 }
 
 /// P2P Host that manages the libp2p swarm.
@@ -635,6 +719,9 @@ pub struct P2PHost<S: Store> {
     spawned_tasks: tokio::task::JoinSet<()>,
     /// Bitswap query abort handles for cancellation support
     bitswap_queries: HashMap<QueryId, tokio::task::AbortHandle>,
+    /// Per-peer addresses learned from connections and identify protocol.
+    /// Used by ActivePeers to return full multiaddrs (Go-compatible).
+    peer_addrs: HashMap<PeerId, Multiaddr>,
 }
 
 impl<S: Store> P2PHost<S> {
@@ -762,6 +849,7 @@ impl<S: Store> P2PHost<S> {
             two_stream_event_rx,
             spawned_tasks: tokio::task::JoinSet::new(),
             bitswap_queries: HashMap::new(),
+            peer_addrs: HashMap::new(),
         };
 
         Ok((host, handle, event_rx, replicators))
@@ -831,6 +919,48 @@ impl<S: Store> P2PHost<S> {
                     );
                 } else {
                     info!(peer_id = %peer_id, "Forwarded TwoStreamRequest event to coordinator");
+                }
+            }
+            TwoStreamEvent::DocSyncRequest { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %request.metadata.message_id,
+                    doc_ids = ?request.doc_ids,
+                    "Host received DocSync request via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::DocSyncRequest { peer_id, request })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send DocSyncRequest event - receiver dropped"
+                    );
+                } else {
+                    info!(peer_id = %peer_id, "Forwarded DocSyncRequest event to coordinator");
+                }
+            }
+            TwoStreamEvent::DocSyncReply { peer_id, reply } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    results_count = reply.results.len(),
+                    "Host received DocSync reply via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::DocSyncReply { peer_id, reply })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send DocSyncReply event - receiver dropped"
+                    );
+                } else {
+                    info!(peer_id = %peer_id, "Forwarded DocSyncReply event to coordinator");
                 }
             }
             TwoStreamEvent::DecodeError { peer_id, error } => {
@@ -1262,6 +1392,58 @@ impl<S: Store> P2PHost<S> {
                     }
                 });
             }
+
+            HostCommand::SendDocSyncResponse {
+                peer_id,
+                reply,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_doc_sync_response(peer_id, reply).await.map_err(|e| e);
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendDocSyncResponse command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::SendDocSyncRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    // Send the request - response will arrive asynchronously via TwoStreamEvent::DocSyncReply
+                    let result = h.send_doc_sync_request_fire_and_forget(peer_id, request).await;
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendDocSyncRequest command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::PeerAddresses { response } => {
+                // Build full multiaddrs for connected peers (matches Go's ActivePeers).
+                let connected: std::collections::HashSet<PeerId> =
+                    self.swarm.connected_peers().cloned().collect();
+                let addrs: Vec<String> = connected
+                    .iter()
+                    .filter_map(|pid| {
+                        self.peer_addrs.get(pid).map(|addr| {
+                            format!(
+                                "{}/p2p/{}",
+                                addr,
+                                pid
+                            )
+                        })
+                    })
+                    .collect();
+                if response.send(addrs).is_err() {
+                    debug!("PeerAddresses command response dropped - caller cancelled");
+                }
+            }
         }
         true
     }
@@ -1298,8 +1480,20 @@ impl<S: Store> P2PHost<S> {
                 }
             }
 
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 info!("Connected to peer: {}", peer_id);
+                // For dialer: store the address we dialed (which is the peer's listen addr).
+                // For listener: store send_back_addr temporarily; identify will update it.
+                let remote_addr = match &endpoint {
+                    libp2p::core::ConnectedPoint::Dialer { address, .. } => address.clone(),
+                    libp2p::core::ConnectedPoint::Listener {
+                        send_back_addr, ..
+                    } => send_back_addr.clone(),
+                };
+                self.peer_addrs.insert(peer_id, remote_addr);
+
                 if self
                     .event_tx
                     .send(HostEvent::PeerConnected(peer_id))
@@ -1310,8 +1504,15 @@ impl<S: Store> P2PHost<S> {
                 }
             }
 
-            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
                 info!("Disconnected from peer: {}", peer_id);
+                if num_established == 0 {
+                    self.peer_addrs.remove(&peer_id);
+                }
                 if self
                     .event_tx
                     .send(HostEvent::PeerDisconnected(peer_id))
@@ -1439,6 +1640,12 @@ impl<S: Store> P2PHost<S> {
     async fn handle_identify_event(&mut self, event: libp2p::identify::Event) {
         match event {
             libp2p::identify::Event::Received { peer_id, info, .. } => {
+                // Update stored address with the peer's first listen address.
+                // This corrects the ephemeral send_back_addr for incoming connections.
+                if let Some(listen_addr) = info.listen_addrs.first() {
+                    self.peer_addrs.insert(peer_id, listen_addr.clone());
+                }
+
                 debug!(
                     "Identified peer {}: {} with {} addresses, {} protocols",
                     peer_id,
@@ -1551,12 +1758,20 @@ impl<S: Store> P2PHost<S> {
                     message_id, topic, propagation_source
                 );
 
-                // Decode the message payload
-                // Go sends PushLogRequest with MetaData, then we convert to PushLogBroadcast
-                match serde_cbor::from_slice::<PushLogRequest>(&message.data) {
-                    Ok(request) => {
-                        // Convert to broadcast format (strips metadata)
-                        let broadcast = PushLogBroadcast::from_request(&request);
+                // Decode the message payload.
+                // Rust-to-Rust sends PushLogBroadcast (no MetaData).
+                // Go-to-Rust sends PushLogRequest (with MetaData).
+                // Try PushLogBroadcast first, then fall back to PushLogRequest.
+                let broadcast =
+                    serde_cbor::from_slice::<PushLogBroadcast>(&message.data).or_else(
+                        |_| {
+                            serde_cbor::from_slice::<PushLogRequest>(&message.data)
+                                .map(|req| PushLogBroadcast::from_request(&req))
+                        },
+                    );
+
+                match broadcast {
+                    Ok(broadcast) => {
                         if self
                             .event_tx
                             .send(HostEvent::GossipMessage {
@@ -1582,7 +1797,7 @@ impl<S: Store> P2PHost<S> {
                             topic = %topic,
                             message_size = message.data.len(),
                             error = %e,
-                            "Failed to decode gossipsub message"
+                            "Failed to decode gossipsub message as PushLogBroadcast or PushLogRequest"
                         );
                     }
                 }

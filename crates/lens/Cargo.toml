@@ -27,6 +27,10 @@ thiserror.workspace = true
 # Encoding
 base64.workspace = true
 
+# Hashing for content-based deduplication
+sha2.workspace = true
+hex.workspace = true
+
 # Wasmtime runtime dependencies (optional for wasm32)
 tokio = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }

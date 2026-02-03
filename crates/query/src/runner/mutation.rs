@@ -187,10 +187,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 })?;
 
                             if !has_permission {
-                                return Err(QueryError::permission_denied(format!(
-                                    "caller_identity does not have update permission on document '{}'",
-                                    doc_id
-                                )));
+                                return Err(QueryError::document_not_found(
+                                    "document not found or not authorized to access",
+                                ));
                             }
                         }
                     } else {
@@ -227,10 +226,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 })?;
 
                             if !has_permission {
-                                return Err(QueryError::permission_denied(format!(
-                                    "caller_identity does not have delete permission on document '{}'",
-                                    doc_id
-                                )));
+                                return Err(QueryError::document_not_found(
+                                    "document not found or not authorized to access",
+                                ));
                             }
                         }
                     } else {
@@ -349,13 +347,35 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         };
 
-        // Execute the plan
-        plan.init().await?;
-        plan.start().await?;
+        // Execute the plan.
+        // When ACP is active, wrap DocumentNotFound errors to match Go's generic message
+        // (security best practice: don't reveal whether document exists vs unauthorized).
+        let has_acp = self.acp.is_some() && collection.policy.is_some();
+        let map_doc_not_found = |e: QueryError| -> QueryError {
+            if has_acp {
+                match &e {
+                    QueryError::DocumentNotFound(_) => {
+                        return QueryError::document_not_found(
+                            "document not found or not authorized to access",
+                        );
+                    }
+                    QueryError::Execution(msg) if msg.contains("document not found:") => {
+                        return QueryError::document_not_found(
+                            "document not found or not authorized to access",
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            e
+        };
+
+        plan.init().await.map_err(&map_doc_not_found)?;
+        plan.start().await.map_err(&map_doc_not_found)?;
 
         let mut results = Vec::new();
 
-        while plan.next().await? {
+        while plan.next().await.map_err(&map_doc_not_found)? {
             let doc = plan.value();
             let json = self.doc_to_json(doc, &mapping)?;
             results.push(json);
@@ -364,7 +384,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Clear encryption config after plan execution
         defra_core::encryption::set_encryption_config(None);
 
-        plan.close().await?;
+        plan.close().await.map_err(&map_doc_not_found)?;
 
         // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
         if matches!(
@@ -493,7 +513,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// This is used for filter-based mutations where we need to first
     /// find matching documents, then perform the mutation on them.
-    async fn resolve_filter_to_doc_ids(&self, mutation: &Mutation) -> Result<Option<Vec<String>>> {
+    pub(crate) async fn resolve_filter_to_doc_ids(&self, mutation: &Mutation) -> Result<Option<Vec<String>>> {
         // Only resolve if there's a filter but no explicit doc_ids
         let filter = match (&mutation.filter, &mutation.doc_ids) {
             (Some(filter), None) => filter,
@@ -530,7 +550,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build document mapping for mutation result fields.
-    fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
+    pub(crate) fn build_mutation_mapping(&self, mutation: &Mutation) -> Result<DocumentMapping> {
         let mut mapping = DocumentMapping::new();
 
         // Always reserve index 0 for _docID (matches Go DefraDB DocumentMapping pattern).
@@ -553,9 +573,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // When _version is requested, ensure _docID is always rendered
         // (needed to look up version/commit data for each document)
-        let has_version = mutation.fields.iter().any(|r| {
-            matches!(r, Requestable::Select(s) if s.field.name == "_version")
-        });
+        let has_version = mutation
+            .fields
+            .iter()
+            .any(|r| matches!(r, Requestable::Select(s) if s.field.name == "_version"));
         if has_version && !has_docid_render {
             mapping.add_render_key(0, "_docID");
         }
@@ -569,7 +590,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build CreateInput objects from mutation input.
-    fn build_create_inputs(&self, mutation: &Mutation) -> Result<Vec<CreateInput>> {
+    pub(crate) fn build_create_inputs(&self, mutation: &Mutation) -> Result<Vec<CreateInput>> {
         let mut inputs = Vec::new();
 
         for doc_input in &mutation.create_input {
@@ -584,7 +605,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build UpdateInput from mutation input.
-    fn build_update_input(&self, mutation: &Mutation) -> Result<UpdateInput> {
+    pub(crate) fn build_update_input(&self, mutation: &Mutation) -> Result<UpdateInput> {
         let mut update_input = UpdateInput::new();
 
         for (field_name, value) in &mutation.update_input {
@@ -595,7 +616,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build UpsertInput from a field-value map.
-    fn build_upsert_input_from_map(
+    pub(crate) fn build_upsert_input_from_map(
         &self,
         input: &std::collections::HashMap<String, JsonValue>,
     ) -> Result<UpsertInput> {

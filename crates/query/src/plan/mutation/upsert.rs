@@ -311,13 +311,18 @@ impl UpsertNode {
                         .find(|f| f.name == *field_name)
                         .map(|f| &f.kind)
                 });
-                let crdt_type = self.collection.as_ref().and_then(|c| {
-                    c.fields
-                        .iter()
-                        .find(|f| f.name == *field_name)
-                        .map(|f| f.crdt_type)
-                }).unwrap_or(CType::LwwRegister);
-                let normal_value = json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
+                let crdt_type = self
+                    .collection
+                    .as_ref()
+                    .and_then(|c| {
+                        c.fields
+                            .iter()
+                            .find(|f| f.name == *field_name)
+                            .map(|f| f.crdt_type)
+                    })
+                    .unwrap_or(CType::LwwRegister);
+                let normal_value =
+                    json_to_normal_value_with_kind_and_time(value, field_kind, Some(utc_now))?;
                 doc.set_with_crdt(field_name.clone(), crdt_type, normal_value)
                     .map_err(|e| {
                         QueryError::execution(format!(

@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use acp::DocumentACP;
+use identity::Did;
 use schema::CollectionVersion;
 use tracing::{debug, warn};
 
@@ -14,9 +16,10 @@ use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
-    AllDocsNode, AverageNode, CountNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef,
-    JoinSide, LimitNode, MaxNode, MinNode, OrderByNode, RelationFilter, ScanNode, SelectNode,
-    SimilarityNode, SumNode, TypeJoinMany, TypeJoinOne,
+    AllDocsNode, AvgSourceMeta, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
+    IndexScanNode, InnerAggregateDef, JoinSide, LimitNode, MaxNode, MaxSourceMeta, MinNode,
+    MinSourceMeta, OrderByNode, PermissionFilterNode, RelationFilter, ScanNode, SelectNode,
+    SimilarityNode, SumNode, SumSourceMeta, TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::index_selection::{
     can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
@@ -65,6 +68,10 @@ pub struct Planner {
     fetcher: Option<Arc<dyn DocFetcher>>,
     /// Optional lens transform store for view queries with transforms
     lens_store: Option<Arc<dyn lens::TransformStore>>,
+    /// Optional ACP for permission filtering in plans
+    acp: Option<Arc<dyn DocumentACP>>,
+    /// Identity for ACP permission checks
+    identity_did: Option<Did>,
 }
 
 impl Planner {
@@ -91,6 +98,8 @@ impl Planner {
             collections_by_id,
             fetcher: None,
             lens_store: None,
+            acp: None,
+            identity_did: None,
         }
     }
 
@@ -107,6 +116,32 @@ impl Planner {
     pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
         self.lens_store = Some(store);
         self
+    }
+
+    /// Set ACP and identity for permission filtering in plans.
+    pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>, identity_did: Option<Did>) -> Self {
+        self.acp = Some(acp);
+        self.identity_did = identity_did;
+        self
+    }
+
+    /// Conditionally wrap a plan with a PermissionFilterNode if the collection has an ACP policy.
+    fn maybe_wrap_with_acp_filter(
+        &self,
+        plan: Box<dyn PlanNode>,
+        collection: &CollectionVersion,
+    ) -> Box<dyn PlanNode> {
+        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            Box::new(PermissionFilterNode::from_optional_did(
+                plan,
+                acp.clone(),
+                self.identity_did.clone(),
+                &policy.id,
+                &policy.resource_name,
+            ))
+        } else {
+            plan
+        }
     }
 
     /// Get a collection by name or CollectionID.
@@ -340,7 +375,10 @@ impl Planner {
                 let agg_type_name = agg.aggregate_type.as_str();
                 let output_name = agg.output_name();
                 // Add a new index if this specific output name isn't already registered
-                if scan_mapping.try_find_index_from_render_key(&output_name).is_none() {
+                if scan_mapping
+                    .try_find_index_from_render_key(&output_name)
+                    .is_none()
+                {
                     let scan_index = scan_mapping.next_index();
                     scan_mapping.add(scan_index, agg_type_name);
                     scan_mapping.add_render_key(scan_index, output_name);
@@ -371,16 +409,15 @@ impl Planner {
                                 // It's an inline array field — ensure it's in scan_mapping
                                 // with a render_key so data appears in output for
                                 // compute_relation_aggregates().
-                                let idx =
-                                    if let Some(existing) =
-                                        scan_mapping.first_index_of_name(host_name)
-                                    {
-                                        existing
-                                    } else {
-                                        let new_idx = scan_mapping.next_index();
-                                        scan_mapping.add(new_idx, host_name);
-                                        new_idx
-                                    };
+                                let idx = if let Some(existing) =
+                                    scan_mapping.first_index_of_name(host_name)
+                                {
+                                    existing
+                                } else {
+                                    let new_idx = scan_mapping.next_index();
+                                    scan_mapping.add(new_idx, host_name);
+                                    new_idx
+                                };
                                 if !scan_mapping
                                     .render_keys
                                     .iter()
@@ -484,21 +521,25 @@ impl Planner {
         let filter_for_plan = if let Some(ref doc_ids) = select.doc_ids {
             let doc_ids_filter = if doc_ids.len() == 1 {
                 let mut conditions = HashMap::new();
-                conditions.insert(
-                    "_docID".to_string(),
-                    serde_json::json!({"_eq": doc_ids[0]}),
-                );
+                conditions.insert("_docID".to_string(), serde_json::json!({"_eq": doc_ids[0]}));
                 Filter::from_conditions(conditions)
             } else {
                 let mut conditions = HashMap::new();
-                conditions.insert(
-                    "_docID".to_string(),
-                    serde_json::json!({"_in": doc_ids}),
-                );
+                conditions.insert("_docID".to_string(), serde_json::json!({"_in": doc_ids}));
                 Filter::from_conditions(conditions)
             };
             match filter_for_plan {
-                Some(existing) => Some(doc_ids_filter.and(existing)),
+                Some(existing) => {
+                    // Flat-merge _docID into existing conditions instead of wrapping in _and.
+                    // Using .and() would create {_and: [conditions, {_docID: ...}]} which defeats
+                    // split_by_relation() — the entire _and block gets classified as "relation"
+                    // if any inner condition references a relation field.
+                    let mut merged = existing.conditions().clone();
+                    for (k, v) in doc_ids_filter.conditions() {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    Some(Filter::from_conditions(merged))
+                }
                 None => Some(doc_ids_filter),
             }
         } else {
@@ -606,6 +647,10 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 scan = scan.with_doc_ids(doc_ids.clone());
             }
+            // Push scalar filter to ScanNode (matches Go DefraDB plan construction)
+            if let Some(ref filter) = scalar_filter {
+                scan = scan.with_filter(filter.clone());
+            }
             Box::new(scan)
         };
 
@@ -668,7 +713,9 @@ impl Planner {
         // The `author` relation must be joined for the filter even though it's not selected.
         //
         // Skip relations that are part of multi-level paths (already handled above).
-        if filter_has_relations {
+        // Also skip when filter_for_joins was provided (non-complex filter) because
+        // apply_joins already handles relation filter joins via parent_filter.
+        if filter_has_relations && filter_for_joins.is_none() {
             // Get the names of relation fields already joined from selection
             let selected_relation_names: Vec<&str> = select
                 .fields
@@ -779,8 +826,11 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 select_node = select_node.with_doc_ids(doc_ids.clone());
             }
-            if let Some(filter) = scalar_filter {
-                select_node = select_node.with_filter(filter);
+            // Set relation filter on SelectNode for explain display (matches Go DefraDB).
+            // The actual relation filtering is handled by TypeJoin's RelationFilter,
+            // but Go's selectNode stores the relation filter and shows it in explain output.
+            if let Some(ref rel_filter) = relation_filter {
+                select_node = select_node.with_filter(rel_filter.clone());
             }
             plan = Box::new(select_node);
         } else if is_complex_filter && !select.fields.is_empty() {
@@ -854,6 +904,10 @@ impl Planner {
                 }
             }
         }
+
+        // Insert ACP permission filter for the root collection (if ACP-protected).
+        // Position: after Select/joins/similarity but before GroupBy/Aggregates/OrderBy/Limit.
+        plan = self.maybe_wrap_with_acp_filter(plan, &collection);
 
         // Check if we have GROUP BY - this affects the order of operations
         let has_group_by = select.group_by.is_some();
@@ -1013,19 +1067,73 @@ impl Planner {
                                 group_by: nested.group_by.as_ref().map(|gb| gb.fields.clone()),
                             };
 
-                            // If this _group has a nested _group with further groupBy, include that
-                            for inner_field in &nested.fields {
-                                if let Requestable::Select(inner_nested) = inner_field {
-                                    if inner_nested.field.name == "_group" {
-                                        if let Some(ref inner_gb) = inner_nested.group_by {
-                                            meta.group_by = Some(inner_gb.fields.clone());
+                            // Merge outer groupBy fields into the _group's groupBy.
+                            // Go convention: childSelects.groupBy = inner fields ++ outer fields.
+                            if let Some(ref outer_gb) = select.group_by {
+                                if let Some(ref mut inner_fields) = meta.group_by {
+                                    for field in &outer_gb.fields {
+                                        if !inner_fields.contains(field) {
+                                            inner_fields.push(field.clone());
                                         }
-                                        break;
                                     }
                                 }
                             }
 
                             child_selects_meta.push(meta);
+                        }
+                    }
+                }
+                // Go adds {field: {_neq: null}} to childSelects filter for average aggregates.
+                // Average excludes null values, so the filter is needed on the group's child select.
+                // Collect field names from average aggregates targeting _group.
+                // Only regular fields (not aggregate refs like _avg) get the neq filter.
+                let mut avg_group_fields: Vec<String> = Vec::new();
+                for field in &select.fields {
+                    if let Requestable::Aggregate(agg) = field {
+                        if agg.aggregate_type == AggregateType::Average {
+                            for target in &agg.targets {
+                                if target.host_name == "_group" {
+                                    if let Some(ref field_name) = target.field_name {
+                                        if !field_name.starts_with('_') {
+                                            avg_group_fields.push(field_name.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !avg_group_fields.is_empty() {
+                    // Ensure at least one default child select exists
+                    // (query may have _avg(_group: ...) without explicit _group { ... } select)
+                    if child_selects_meta.is_empty() {
+                        child_selects_meta.push(ChildSelectMeta {
+                            collection_name: select.collection_name.clone(),
+                            ..Default::default()
+                        });
+                    }
+                    // Inject {field_name: {_neq: null}} for each avg target field
+                    for field_name in &avg_group_fields {
+                        for cs in &mut child_selects_meta {
+                            let mut conditions = cs
+                                .filter
+                                .as_ref()
+                                .map(|f| f.conditions().clone())
+                                .unwrap_or_default();
+                            conditions
+                                .entry(field_name.clone())
+                                .and_modify(|v| {
+                                    if let serde_json::Value::Object(ref mut ops) = v {
+                                        ops.insert(
+                                            "_neq".to_string(),
+                                            serde_json::Value::Null,
+                                        );
+                                    }
+                                })
+                                .or_insert(serde_json::json!({
+                                    "_neq": serde_json::Value::Null
+                                }));
+                            cs.filter = Some(Filter::from_conditions(conditions));
                         }
                     }
                 }
@@ -1073,9 +1181,11 @@ impl Planner {
                 }
             }
         } else {
-            // WITHOUT GROUP BY: OrderBy → Limit → [AllDocsNode] → Aggregates
+            // WITHOUT GROUP BY: OrderBy → [AllDocsNode] → Aggregates → Limit
+            // Go applies limit AFTER aggregates so limit restricts the final output,
+            // not the documents fed to aggregation.
 
-            // 5. Apply order by (before limit)
+            // 5. Apply order by (before aggregates)
             // Skip if index already provides the ordering
             if let Some(ref order_by) = select.order_by {
                 if !index_provides_ordering {
@@ -1087,18 +1197,7 @@ impl Planner {
                 }
             }
 
-            // 6. Apply limit/offset
-            if let Some(ref limit) = select.limit {
-                let effective_limit = match limit.limit {
-                    Some(0) => None, // limit: 0 means no limit (Go compatibility)
-                    other => other,
-                };
-                if effective_limit.is_some() || limit.offset > 0 {
-                    plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
-                }
-            }
-
-            // 7. Count simple (non-per-row) aggregates to determine if we need AllDocsNode.
+            // 6. Count simple (non-per-row) aggregates to determine if we need AllDocsNode.
             // Relation-based and inline-array aggregates use child_aggregate_source and
             // operate per-row (each parent gets its own aggregate). They do NOT need
             // AllDocsNode. Only simple field aggregates (e.g., _sum(Age: {})) need it
@@ -1122,8 +1221,19 @@ impl Planner {
                 plan = Box::new(AllDocsNode::new(plan, scan_mapping.clone()));
             }
 
-            // 8. Add aggregate nodes (for top-level aggregates without GROUP BY)
+            // 7. Add aggregate nodes (for top-level aggregates without GROUP BY)
             plan = self.add_aggregate_nodes(plan, select, &scan_mapping)?;
+
+            // 8. Apply limit/offset (AFTER aggregates, matching Go behavior)
+            if let Some(ref limit) = select.limit {
+                let effective_limit = match limit.limit {
+                    Some(0) => None, // limit: 0 means no limit (Go compatibility)
+                    other => other,
+                };
+                if effective_limit.is_some() || limit.offset > 0 {
+                    plan = Box::new(LimitNode::new(plan, effective_limit, limit.offset));
+                }
+            }
         }
 
         Ok(PlanResult {
@@ -1149,14 +1259,15 @@ impl Planner {
         for field in &select.fields {
             if let Requestable::Similarity(sim) = field {
                 // Find the target field index (document's vector)
-                let field_index = mapping
-                    .first_index_of_name(&sim.target_field)
-                    .ok_or_else(|| {
-                        QueryError::internal(format!(
-                            "similarity target field '{}' not found in mapping",
-                            sim.target_field
-                        ))
-                    })?;
+                let field_index =
+                    mapping
+                        .first_index_of_name(&sim.target_field)
+                        .ok_or_else(|| {
+                            QueryError::internal(format!(
+                                "similarity target field '{}' not found in mapping",
+                                sim.target_field
+                            ))
+                        })?;
 
                 // Find the similarity result index
                 let similarity_index = mapping
@@ -1233,9 +1344,7 @@ impl Planner {
                                 fname.as_str(),
                                 "_count" | "_sum" | "_avg" | "_min" | "_max"
                             );
-                            if is_aggregate_name
-                                || mapping.first_index_of_name(fname).is_none()
-                            {
+                            if is_aggregate_name || mapping.first_index_of_name(fname).is_none() {
                                 is_array_aggregate = true;
                                 array_field_index =
                                     mapping.first_index_of_name("_group").unwrap_or(0);
@@ -1291,12 +1400,27 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources: Vec<CountSourceMeta> = agg
+                            .targets
+                            .iter()
+                            .map(|target| CountSourceMeta {
+                                field_name: if !target.host_name.is_empty() {
+                                    target.host_name.clone()
+                                } else {
+                                    select.collection_name.clone()
+                                },
+                                filter: target.filter.clone(),
+                                is_inline_array: is_array_aggregate
+                                    && target.field_name.is_none(),
+                            })
+                            .collect();
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Sum => {
@@ -1307,12 +1431,28 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources: Vec<SumSourceMeta> = agg
+                            .targets
+                            .iter()
+                            .map(|target| SumSourceMeta {
+                                field_name: if !target.host_name.is_empty() {
+                                    target.host_name.clone()
+                                } else {
+                                    select.collection_name.clone()
+                                },
+                                child_field_name: target.field_name.clone(),
+                                filter: target.filter.clone(),
+                                is_inline_array: is_array_aggregate
+                                    && target.field_name.is_none(),
+                            })
+                            .collect();
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Average => {
@@ -1324,12 +1464,28 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources: Vec<AvgSourceMeta> = agg
+                            .targets
+                            .iter()
+                            .map(|target| AvgSourceMeta {
+                                field_name: if !target.host_name.is_empty() {
+                                    target.host_name.clone()
+                                } else {
+                                    select.collection_name.clone()
+                                },
+                                child_field_name: target.field_name.clone(),
+                                filter: target.filter.clone(),
+                                is_inline_array: is_array_aggregate
+                                    && target.field_name.is_none(),
+                            })
+                            .collect();
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Min => {
@@ -1340,12 +1496,28 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources: Vec<MinSourceMeta> = agg
+                            .targets
+                            .iter()
+                            .map(|target| MinSourceMeta {
+                                field_name: if !target.host_name.is_empty() {
+                                    target.host_name.clone()
+                                } else {
+                                    select.collection_name.clone()
+                                },
+                                child_field_name: target.field_name.clone(),
+                                filter: target.filter.clone(),
+                                is_inline_array: is_array_aggregate
+                                    && target.field_name.is_none(),
+                            })
+                            .collect();
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                     AggregateType::Max => {
@@ -1356,12 +1528,28 @@ impl Planner {
                                 target_field_name.clone(),
                             );
                         }
-                        if let Some(filter) = target_filter {
-                            node = node.with_filter(filter);
+                        if let Some(ref filter) = target_filter {
+                            node = node.with_filter(filter.clone());
                         }
                         if let Some(limit) = target_limit {
                             node = node.with_limit(limit);
                         }
+                        let sources: Vec<MaxSourceMeta> = agg
+                            .targets
+                            .iter()
+                            .map(|target| MaxSourceMeta {
+                                field_name: if !target.host_name.is_empty() {
+                                    target.host_name.clone()
+                                } else {
+                                    select.collection_name.clone()
+                                },
+                                child_field_name: target.field_name.clone(),
+                                filter: target.filter.clone(),
+                                is_inline_array: is_array_aggregate
+                                    && target.field_name.is_none(),
+                            })
+                            .collect();
+                        node = node.with_sources(sources);
                         plan = Box::new(node);
                     }
                 }
@@ -1470,6 +1658,24 @@ impl Planner {
                 }
             }
         }
+
+        // Collect info about selection joins so aggregates can share when compatible.
+        // Go shares joins when: same relation, same filter, no limit on selection.
+        struct SelectionJoinInfo {
+            filter_json: Option<String>,
+            has_limit: bool,
+        }
+        let selection_join_info: std::collections::HashMap<String, SelectionJoinInfo> =
+            selects_to_process
+                .iter()
+                .map(|(s, _)| {
+                    let filter_json = s.filter.as_ref().map(|f| {
+                        serde_json::to_string(f.conditions()).unwrap_or_default()
+                    });
+                    let has_limit = s.limit.as_ref().map_or(false, |l| l.limit.is_some());
+                    (s.field.name.clone(), SelectionJoinInfo { filter_json, has_limit })
+                })
+                .collect();
 
         for (nested_select, group_index) in selects_to_process {
             let relation_field_name = &nested_select.field.name;
@@ -1724,6 +1930,33 @@ impl Planner {
                     .with_show_deleted(select.show_deleted);
             if let Some(ref fetcher) = self.fetcher {
                 child_scan = child_scan.with_fetcher(fetcher.clone());
+            }
+
+            // Apply aggregate target filters to the scan node.
+            // For example, _avg(books: {field: pages, filter: {pages: {_neq: null}}})
+            // should apply the filter {pages: {_neq: null}} to the books scan node.
+            // Go places these filters on the scanNode (not a wrapping SelectNode).
+            let mut agg_scan_filter: Option<Filter> = None;
+            for requestable in &select.fields {
+                if let Requestable::Aggregate(agg) = requestable {
+                    for target in &agg.targets {
+                        if target.host_name == *relation_field_name {
+                            if let Some(ref filter) = target.filter {
+                                // Only apply non-relation filters to scan node.
+                                // Relation filters need sub-joins (handled separately).
+                                if !filter.has_relation_filters() {
+                                    agg_scan_filter = Some(match agg_scan_filter {
+                                        Some(existing) => existing.and(filter.clone()),
+                                        None => filter.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(filter) = agg_scan_filter {
+                child_scan = child_scan.with_filter(filter);
             }
 
             // Extract nested limit/offset and order_by for per-parent application in TypeJoin.
@@ -1995,9 +2228,7 @@ impl Planner {
                     if filter_field.starts_with('_') {
                         continue;
                     }
-                    if let Some(filter_rel_field) =
-                        target_collection.field_by_name(&filter_field)
-                    {
+                    if let Some(filter_rel_field) = target_collection.field_by_name(&filter_field) {
                         if filter_rel_field.kind.is_relation() {
                             // Skip if already joined from selection or other sub-joins
                             if let Some(rel_idx) =
@@ -2033,6 +2264,9 @@ impl Planner {
                         .with_filter(filter.clone()),
                 );
             }
+
+            // Insert ACP permission filter for the child collection (if ACP-protected).
+            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
             // Update parent mapping with the final child mapping (after sub-joins)
             // This ensures the nested relation mappings are included
@@ -2490,15 +2724,31 @@ impl Planner {
 
                     let relation_field_name = &target.host_name;
 
-                    // Check if this relation is already joined by a prior aggregate.
-                    // Multiple aggregates on the same relation share one TypeJoinMany;
-                    // compute_relation_aggregates() handles per-aggregate limit/offset/order
-                    // in post-processing.
-                    // NOTE: We intentionally do NOT share with selection joins because
-                    // selections may apply their own filter/order/limit that restricts
-                    // the data. Aggregates need independent access to all children.
+                    // Check if this relation is already joined by a prior aggregate
+                    // or by a selection. Multiple aggregates on the same relation share
+                    // one TypeJoinMany; compute_relation_aggregates() handles per-aggregate
+                    // limit/offset/order in post-processing.
+                    // Go also shares joins between selections and aggregates targeting
+                    // the same relation (e.g., books(filter: X) + _count(books: {filter: X})).
                     let already_joined =
-                        aggregate_joined_relations.contains(relation_field_name.as_str());
+                        aggregate_joined_relations.contains(relation_field_name.as_str())
+                            || selection_join_info.get(relation_field_name.as_str()).map_or(false, |info| {
+                                if info.has_limit {
+                                    return false;
+                                }
+                                // If aggregate has no filter but specifies a field_name, it's a
+                                // field-level operation (e.g. _avg(books: {field: rating})) that
+                                // piggybacks on the selection's join. Share unconditionally.
+                                if target.filter.is_none() {
+                                    return target.field_name.is_some();
+                                }
+                                // If aggregate has a filter, share only if it matches the
+                                // selection's filter exactly.
+                                let agg_filter_json = target.filter.as_ref().map(|f| {
+                                    serde_json::to_string(f.conditions()).unwrap_or_default()
+                                });
+                                info.filter_json == agg_filter_json
+                            });
 
                     // Find the field in the parent collection
                     let relation_field = match parent_collection.field_by_name(relation_field_name)
@@ -2595,8 +2845,7 @@ impl Planner {
                                             .iter()
                                             .any(|rk| rk.key == filter_field)
                                         {
-                                            child_mapping
-                                                .add_render_key(idx, &filter_field);
+                                            child_mapping.add_render_key(idx, &filter_field);
                                         }
                                     }
                                 }
@@ -2622,9 +2871,7 @@ impl Planner {
                                     if let Some(child_mapping) =
                                         mapping.child_at_mut(relation_field_index)
                                     {
-                                        if child_mapping
-                                            .first_index_of_name(order_field)
-                                            .is_none()
+                                        if child_mapping.first_index_of_name(order_field).is_none()
                                         {
                                             child_mapping.add(idx, order_field);
                                         }
@@ -2741,6 +2988,49 @@ impl Planner {
                     if let Some(ref fetcher) = self.fetcher {
                         child_scan = child_scan.with_fetcher(fetcher.clone());
                     }
+                    // Apply aggregate target filter to the scan node.
+                    // Go places these filters on the scanNode in explain output.
+                    // Also synthesize {field: {_neq: null}} for Average aggregates
+                    // to exclude null values (matching Go behavior).
+                    let mut scan_filter = target.filter.clone();
+                    if agg.aggregate_type == AggregateType::Average {
+                        if let Some(ref field_name) = target.field_name {
+                            let neq_null_filter = Filter::from_conditions({
+                                let mut c = HashMap::new();
+                                c.insert(
+                                    field_name.clone(),
+                                    serde_json::json!({"_neq": serde_json::Value::Null}),
+                                );
+                                c
+                            });
+                            scan_filter = Some(match scan_filter {
+                                Some(existing) => {
+                                    // Merge {field: {_neq: null}} into existing conditions
+                                    let mut merged = existing.conditions().clone();
+                                    merged
+                                        .entry(field_name.clone())
+                                        .and_modify(|v| {
+                                            if let serde_json::Value::Object(ref mut ops) = v {
+                                                ops.insert(
+                                                    "_neq".to_string(),
+                                                    serde_json::Value::Null,
+                                                );
+                                            }
+                                        })
+                                        .or_insert(
+                                            serde_json::json!({"_neq": serde_json::Value::Null}),
+                                        );
+                                    Filter::from_conditions(merged)
+                                }
+                                None => neq_null_filter,
+                            });
+                        }
+                    }
+                    if let Some(ref filter) = scan_filter {
+                        if !filter.has_relation_filters() {
+                            child_scan = child_scan.with_filter(filter.clone());
+                        }
+                    }
                     let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
 
                     // Add sub-joins for deep order relation fields (e.g., publisher.yearOpened).
@@ -2754,8 +3044,8 @@ impl Planner {
                                     target_collection.field_by_name(order_relation_name)
                                 {
                                     if order_rel_field.kind.is_relation() {
-                                        let (new_plan, new_mapping) =
-                                            self.apply_filter_relation_join(
+                                        let (new_plan, new_mapping) = self
+                                            .apply_filter_relation_join(
                                                 child_plan,
                                                 &target_collection,
                                                 order_rel_field,
@@ -2804,20 +3094,19 @@ impl Planner {
                                             continue;
                                         }
                                     }
-                                    let (new_plan, new_mapping) =
-                                        self.apply_filter_relation_join(
-                                            child_plan,
-                                            &target_collection,
-                                            filter_rel_field,
-                                            &filter_field,
-                                            child_scan_mapping.clone(),
-                                        )?;
+                                    let (new_plan, new_mapping) = self.apply_filter_relation_join(
+                                        child_plan,
+                                        &target_collection,
+                                        filter_rel_field,
+                                        &filter_field,
+                                        child_scan_mapping.clone(),
+                                    )?;
                                     child_plan = new_plan;
                                     child_scan_mapping = new_mapping;
                                     // Ensure render_key for the relation so it appears
                                     // in rendered JSON for post-processing filter
-                                    if let Some(rel_idx) = child_scan_mapping
-                                        .first_index_of_name(&filter_field)
+                                    if let Some(rel_idx) =
+                                        child_scan_mapping.first_index_of_name(&filter_field)
                                     {
                                         if !child_scan_mapping
                                             .render_keys
@@ -2832,6 +3121,9 @@ impl Planner {
                             }
                         }
                     }
+
+                    // Insert ACP permission filter for the aggregate child collection (if ACP-protected).
+                    child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
                     // Set up child mapping in parent for TypeJoin (after sub-join modifications)
                     mapping.set_child_at(effective_relation_index, child_scan_mapping.clone());
@@ -3284,16 +3576,12 @@ impl Planner {
             )));
         }
 
-        let target_collection_id =
-            first_field
-                .kind
-                .relation_collection_id()
-                .ok_or_else(|| {
-                    QueryError::internal(format!(
-                        "relation field '{}' has no target collection",
-                        first_name
-                    ))
-                })?;
+        let target_collection_id = first_field.kind.relation_collection_id().ok_or_else(|| {
+            QueryError::internal(format!(
+                "relation field '{}' has no target collection",
+                first_name
+            ))
+        })?;
 
         let target_collection = if target_collection_id.is_empty() {
             Arc::new(start_collection.clone())
@@ -3312,14 +3600,12 @@ impl Planner {
             m
         };
 
-        let relation_field_index = mapping
-            .first_index_of_name(first_name)
-            .ok_or_else(|| {
-                QueryError::internal(format!(
-                    "relation field '{}' not in parent mapping",
-                    first_name
-                ))
-            })?;
+        let relation_field_index = mapping.first_index_of_name(first_name).ok_or_else(|| {
+            QueryError::internal(format!(
+                "relation field '{}' not in parent mapping",
+                first_name
+            ))
+        })?;
 
         // Build child scan
         let mut child_scan =
@@ -3347,11 +3633,7 @@ impl Planner {
 
         // Find the other side of the relation
         let target_relation_field = if let Some(rel_name) = &first_field.relation_name {
-            target_collection.field_by_relation(
-                rel_name,
-                &start_collection.name,
-                first_name,
-            )
+            target_collection.field_by_relation(rel_name, &start_collection.name, first_name)
         } else {
             None
         };
@@ -3644,9 +3926,7 @@ impl Planner {
             .query
             .get("Name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                QueryError::execution("view QuerySource.Query missing 'Name' field")
-            })?;
+            .ok_or_else(|| QueryError::execution("view QuerySource.Query missing 'Name' field"))?;
 
         // Build a Select for the underlying query from the stored JSON
         let source_fields_json = query_source
@@ -3667,8 +3947,7 @@ impl Planner {
             if let Some(inner_fields) = field_json.get("Fields").and_then(|v| v.as_array()) {
                 // Nested select (relation)
                 let inner_name = field_name.to_string();
-                let mut inner_select = Select::new(inner_name.clone())
-                    .with_field_name(inner_name);
+                let mut inner_select = Select::new(inner_name.clone()).with_field_name(inner_name);
                 // Populate inner fields from stored JSON.
                 // Use original field names only (no aliases) on the source select.
                 // The ViewNode's child_mapping handles renaming via render keys.
@@ -3680,15 +3959,18 @@ impl Planner {
                     if inner_field_json.get("Fields").is_some() {
                         // Deeper nested select (relation within relation)
                         let deep_name = inner_field_name.to_string();
-                        let deep_select = Select::new(deep_name.clone())
-                            .with_field_name(deep_name);
-                        inner_select.fields.push(Requestable::Select(Box::new(deep_select)));
+                        let deep_select = Select::new(deep_name.clone()).with_field_name(deep_name);
+                        inner_select
+                            .fields
+                            .push(Requestable::Select(Box::new(deep_select)));
                     } else {
                         let field = crate::mapper::Field::new(inner_field_name);
                         inner_select.fields.push(Requestable::Field(field));
                     }
                 }
-                source_select.fields.push(Requestable::Select(Box::new(inner_select)));
+                source_select
+                    .fields
+                    .push(Requestable::Select(Box::new(inner_select)));
             } else if field_json.get("Targets").is_some() {
                 // Aggregate field (e.g., _count, _sum)
                 let agg_type = crate::mapper::AggregateType::parse(field_name)
@@ -3823,16 +4105,12 @@ impl Planner {
             target_mapping.clone(),
         ));
 
-        // Apply the user's query-level filter on top of the view if present.
-        // The view's stored query filter is already applied in the source plan;
-        // this handles additional filters specified by the caller.
+        // Always wrap viewNode in SelectNode (Go always has selectNode → viewNode).
+        // Apply user's query-level filter if present.
         let plan: Box<dyn PlanNode> = if let Some(ref filter) = select.filter {
-            Box::new(
-                SelectNode::new(view_plan, target_mapping)
-                    .with_filter(filter.clone()),
-            )
+            Box::new(SelectNode::new(view_plan, target_mapping).with_filter(filter.clone()))
         } else {
-            view_plan
+            Box::new(SelectNode::new(view_plan, target_mapping))
         };
 
         Ok(PlanResult {

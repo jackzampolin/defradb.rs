@@ -26,7 +26,6 @@ use std::sync::Arc;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::{CollectionProvider, StaticCollectionProvider};
-use crate::mapper::Select;
 use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
@@ -231,58 +230,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Convert a plan Doc to JSON for output.
     pub(crate) fn doc_to_json(&self, doc: &Doc, mapping: &DocumentMapping) -> Result<JsonValue> {
         plan::doc_to_json(doc, mapping)
-    }
-
-    /// Find the first ACP-protected collection in nested selections.
-    ///
-    /// This resolves relation field names to actual collection names by looking up
-    /// the relation definition in the parent collection's schema.
-    ///
-    /// Returns Some(collection_name) if an ACP-protected collection is found, None otherwise.
-    pub(crate) async fn find_acp_collection_in_nested(
-        &self,
-        select: &Select,
-        parent_collection: &CollectionVersion,
-    ) -> Result<Option<String>> {
-        use crate::mapper::Requestable;
-
-        for field in &select.fields {
-            if let Requestable::Select(nested) = field {
-                // The nested select's collection_name is the field name in the query
-                // We need to resolve it to the actual target collection via the relation
-                let field_name = &nested.collection_name;
-
-                // Find the relation field in the parent collection
-                if let Some(relation_field) = parent_collection
-                    .fields
-                    .iter()
-                    .find(|f| &f.name == field_name)
-                {
-                    // Get the target collection name from the relation field's kind
-                    if let Some(target_coll_name) = relation_field.kind.relation_collection_id() {
-                        // Check if target collection has ACP
-                        if let Some(target_coll) = self
-                            .collection_provider
-                            .get_collection(target_coll_name)
-                            .await?
-                        {
-                            if target_coll.policy.is_some() {
-                                return Ok(Some(target_coll.name.clone()));
-                            }
-
-                            // Recursively check deeper nested selections
-                            if let Some(deep_acp) =
-                                Box::pin(self.find_acp_collection_in_nested(nested, &target_coll))
-                                    .await?
-                            {
-                                return Ok(Some(deep_acp));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// Execute an introspection query (__schema, __type).

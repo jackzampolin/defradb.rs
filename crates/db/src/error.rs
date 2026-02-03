@@ -18,7 +18,7 @@ pub enum Error {
     #[error("collection not found: {0}")]
     CollectionNotFound(String),
 
-    #[error("collection version not found: {0}")]
+    #[error("key not found. collection version: {0}")]
     CollectionVersionNotFound(String),
 
     #[error("collection already exists. Name: {0}")]

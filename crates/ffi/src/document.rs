@@ -5,11 +5,13 @@
 
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
 use serde_json::Value as JsonValue;
 
 use query;
 
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -87,10 +89,15 @@ fn build_create_many_mutation(collection: &str, docs: &[JsonValue]) -> String {
 #[no_mangle]
 pub unsafe extern "C" fn collection_create(
     node_ptr: usize,
+    identity_did: *const c_char,
     collection_name: *const c_char,
     json_data: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::DocumentUpdate) {
+        return e;
+    }
 
     let collection = match c_str_to_string(collection_name) {
         Some(s) => s,
@@ -362,7 +369,6 @@ pub unsafe extern "C" fn parse_string_array(input: *const c_char) -> FfiResult {
     let json = serde_json::to_string(&parts).unwrap_or_else(|_| "[]".to_string());
     FfiResult::success(json)
 }
-
 
 #[cfg(test)]
 mod tests {

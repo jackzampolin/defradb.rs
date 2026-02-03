@@ -126,15 +126,9 @@ impl PlanNode for LensNode {
             let doc_stream: std::pin::Pin<Box<dyn futures::Stream<Item = LensDoc> + Send>> =
                 Box::pin(futures::stream::iter(current_docs));
 
-            let result_stream = self
-                .lens_store
-                .transform(tid, doc_stream)
-                .map_err(|e| {
-                    crate::error::QueryError::execution(format!(
-                        "lens transform failed: {}",
-                        e
-                    ))
-                })?;
+            let result_stream = self.lens_store.transform(tid, doc_stream).map_err(|e| {
+                crate::error::QueryError::execution(format!("lens transform failed: {}", e))
+            })?;
 
             let results: Vec<_> = result_stream.collect().await;
             current_docs = results.into_iter().filter_map(|r| r.ok()).collect();
@@ -177,5 +171,17 @@ impl PlanNode for LensNode {
 
     fn kind(&self) -> &'static str {
         "lensNode"
+    }
+
+    fn explain_inner(&self) -> serde_json::Value {
+        let child_explain = self.source.explain();
+        // Wrap the source plan in selectTopNode (Go's view pipeline convention).
+        // LensNode is the innermost view-related node when present.
+        serde_json::json!({ "selectTopNode": child_explain })
+    }
+
+    fn explain_debug_inner(&self) -> serde_json::Value {
+        let child_explain = self.source.explain_debug();
+        serde_json::json!({ "selectTopNode": child_explain })
     }
 }

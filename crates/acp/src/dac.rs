@@ -73,14 +73,16 @@ pub trait DocumentACP: MaybeSendSync {
 
     /// Add actor relationship (sharing).
     ///
-    /// Only the document owner can add relationships.
+    /// The requestor must be the document owner or have a managing relation
+    /// that grants them authority to add the requested relation.
     ///
     /// # Arguments
-    /// * `requestor` - The DID making the request (must be owner)
+    /// * `requestor` - The DID making the request (must be owner or manager)
     /// * `target` - The DID to grant the relation to
     /// * `collection_id` - The collection ID (used as resource identifier)
     /// * `doc_id` - The document ID
     /// * `relation` - The relation to grant (e.g., "reader", "updater")
+    /// * `managing_relations` - Relations that can manage `relation` (from policy)
     ///
     /// # Returns
     /// * `Ok(true)` - Relationship was added
@@ -92,18 +94,21 @@ pub trait DocumentACP: MaybeSendSync {
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        managing_relations: &[String],
     ) -> Result<bool>;
 
     /// Remove actor relationship.
     ///
-    /// Only the document owner can remove relationships.
+    /// The requestor must be the document owner or have a managing relation
+    /// that grants them authority to remove the requested relation.
     ///
     /// # Arguments
-    /// * `requestor` - The DID making the request (must be owner)
+    /// * `requestor` - The DID making the request (must be owner or manager)
     /// * `target` - The DID to remove the relation from
     /// * `collection_id` - The collection ID
     /// * `doc_id` - The document ID
     /// * `relation` - The relation to remove
+    /// * `managing_relations` - Relations that can manage `relation` (from policy)
     ///
     /// # Returns
     /// * `Ok(true)` - Relationship was removed
@@ -115,6 +120,7 @@ pub trait DocumentACP: MaybeSendSync {
         collection_id: &str,
         doc_id: &str,
         relation: &str,
+        managing_relations: &[String],
     ) -> Result<bool>;
 
     /// Unregister a document, removing all ACP tuples.
