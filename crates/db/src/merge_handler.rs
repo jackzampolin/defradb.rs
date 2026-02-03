@@ -19,6 +19,7 @@ use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
 use schema;
 use storage::corekv::Store;
 
+use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::error::Error;
 
@@ -1084,6 +1085,204 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
     }
 
+    /// Process a Collection delta from a block.
+    ///
+    /// Collection blocks are metadata containers that link to document composite
+    /// blocks. The collection CRDT merge itself is a no-op (matching Go behavior).
+    /// The real work is:
+    /// 1. Recursively process parent collection blocks from `heads`
+    /// 2. Process each linked document composite via `process_composite_delta`
+    /// 3. Update the collection headstore with the new head CID
+    async fn process_collection_delta(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CollectionDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
+        tracing::info!(
+            cid = %cid,
+            schema_version_id = %payload.schema_version_id,
+            priority = payload.priority,
+            links = block.links.as_ref().map(|l| l.len()).unwrap_or(0),
+            heads = block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
+            "Processing Collection delta"
+        );
+
+        // Recursively process parent collection blocks from `heads` before
+        // this block, ensuring older documents are merged first.
+        if let Some(heads) = &block.heads {
+            for head_cid in heads {
+                let head_data = match self.blockstore.get(head_cid).await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        tracing::debug!(
+                            parent_cid = %head_cid,
+                            child_cid = %cid,
+                            "Parent collection block not in blockstore, skipping"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            parent_cid = %head_cid,
+                            error = %e,
+                            "Failed to load parent collection block, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                let head_block = match Block::from_dag_cbor(&head_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+
+                if let CrdtDelta::Collection(head_payload) = &head_block.delta {
+                    tracing::info!(
+                        parent_cid = %head_cid,
+                        child_cid = %cid,
+                        "Recursively merging parent collection block"
+                    );
+                    let _ = Box::pin(
+                        self.process_collection_delta(head_cid, &head_block, head_payload, metadata),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // Process linked document composites
+        let mut any_merged = false;
+        if let Some(links) = &block.links {
+            for dag_link in links {
+                let link_cid = &dag_link.link;
+
+                tracing::debug!(
+                    collection_cid = %cid,
+                    link_cid = %link_cid,
+                    link_name = %dag_link.name,
+                    "Processing linked block from Collection delta"
+                );
+
+                let linked_data = match self.blockstore.get(link_cid).await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        tracing::warn!(
+                            link_cid = %link_cid,
+                            "Linked block not found in blockstore"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            link_cid = %link_cid,
+                            error = %e,
+                            "Failed to load linked block"
+                        );
+                        continue;
+                    }
+                };
+
+                let linked_block = match Block::from_dag_cbor(&linked_data) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            link_cid = %link_cid,
+                            error = %e,
+                            "Failed to decode linked block"
+                        );
+                        continue;
+                    }
+                };
+
+                match &linked_block.delta {
+                    CrdtDelta::Composite(composite_payload) => {
+                        match self
+                            .process_composite_delta(link_cid, &linked_block, composite_payload, metadata)
+                            .await
+                        {
+                            Ok(MergeOutcome::Merged) => {
+                                any_merged = true;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    link_cid = %link_cid,
+                                    error = %e,
+                                    "Failed to merge linked composite from collection block"
+                                );
+                            }
+                        }
+                    }
+                    other => {
+                        tracing::debug!(
+                            link_cid = %link_cid,
+                            delta_type = ?std::mem::discriminant(other),
+                            "Skipping non-composite linked block in collection delta"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Update collection headstore: write the new collection head CID
+        // and delete any previous heads that this block supersedes.
+        let collection_id = metadata
+            .collection_id
+            .unwrap_or(&payload.schema_version_id);
+        let short_id = collection_short_id(collection_id);
+
+        let txn = self.db.new_txn(false).await?;
+        if let Ok(headstore) = txn.headstore() {
+            // Delete existing collection heads
+            let prefix = storage::keys::headstore::HeadstoreColKey::collection_prefix(short_id);
+            if let Ok(mut iter) = headstore
+                .iterator(datastore::IterOptions::new().with_prefix(prefix))
+                .await
+            {
+                while let Ok(Some(pair)) = iter.next().await {
+                    let _ = headstore.delete(&pair.key).await;
+                }
+                let _ = iter.close().await;
+            }
+
+            // Write the new collection head
+            let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
+            let priority_bytes = encode_priority_varint(payload.priority);
+            if let Err(e) = headstore
+                .set(
+                    &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
+                        &col_key,
+                    ),
+                    &priority_bytes,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    collection_id = %collection_id,
+                    "Failed to write collection head to headstore"
+                );
+            }
+        }
+        txn.force_commit().await?;
+
+        tracing::info!(
+            cid = %cid,
+            collection_id = %collection_id,
+            short_id = short_id,
+            any_merged = any_merged,
+            "Collection delta processed"
+        );
+
+        if any_merged {
+            Ok(MergeOutcome::Merged)
+        } else {
+            Ok(MergeOutcome::skipped("no linked composites needed merging"))
+        }
+    }
+
     /// Create a CounterDelta from the block payload
     fn create_counter_delta(
         &self,
@@ -1173,11 +1372,9 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 self.process_composite_delta(cid, &block, payload, &metadata)
                     .await
             }
-            CrdtDelta::Collection(_) => {
-                tracing::debug!(cid = %cid, "Collection delta - skipping (handled at schema level)");
-                Ok(MergeOutcome::skipped(
-                    "collection deltas handled at schema level",
-                ))
+            CrdtDelta::Collection(payload) => {
+                self.process_collection_delta(cid, &block, payload, &metadata)
+                    .await
             }
             CrdtDelta::FieldDefinition(_) | CrdtDelta::CollectionDefinition(_) => {
                 tracing::debug!(cid = %cid, "Schema definition delta - skipping");
