@@ -546,9 +546,22 @@ pub async fn write_document_blocks(
             // Go's signBlock: sign the block bytes (without signature), store
             // the Signature as a separate block, then set block.signature = sig_cid.
             if let Some(signer) = signing_config {
-                if let Some(sig_cid) = sign_block(&field_block, signer, blockstore).await? {
-                    field_block.signature = Some(sig_cid);
+                eprintln!("[SIGN-DEBUG] write_document_blocks: signing field block for field={}, priority={}", field_name, priority);
+                match sign_block(&field_block, signer, blockstore).await {
+                    Ok(Some(sig_cid)) => {
+                        eprintln!("[SIGN-DEBUG] write_document_blocks: signed! sig_cid={}", sig_cid);
+                        field_block.signature = Some(sig_cid);
+                    }
+                    Ok(None) => {
+                        eprintln!("[SIGN-DEBUG] write_document_blocks: sign_block returned None (priority too high?)");
+                    }
+                    Err(e) => {
+                        eprintln!("[SIGN-DEBUG] write_document_blocks: sign_block ERROR: {}", e);
+                        return Err(e);
+                    }
                 }
+            } else {
+                eprintln!("[SIGN-DEBUG] write_document_blocks: no signing_config for field={}", field_name);
             }
 
             // Serialize and generate CID (includes signature CID if signed)
@@ -558,6 +571,16 @@ pub async fn write_document_blocks(
             let field_cid = field_block
                 .generate_cid()
                 .map_err(|e| format!("Failed to generate field CID: {}", e))?;
+
+            // Debug: verify roundtrip of signature through serialization
+            eprintln!("[SIGN-DEBUG] write_document_blocks: storing field block cid={}, bytes_len={}, signature={:?}", field_cid, field_block_bytes.len(), field_block.signature);
+            {
+                let rt_block = Block::from_dag_cbor(&field_block_bytes);
+                match rt_block {
+                    Ok(b) => eprintln!("[SIGN-DEBUG] write_document_blocks: roundtrip signature={:?}", b.signature),
+                    Err(e) => eprintln!("[SIGN-DEBUG] write_document_blocks: roundtrip FAILED: {}", e),
+                }
+            }
 
             // Store the field block in blockstore
             blockstore

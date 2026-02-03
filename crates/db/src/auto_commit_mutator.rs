@@ -127,6 +127,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let enc_config = get_encryption_config();
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
+                    eprintln!("[SIGN-DEBUG] auto_commit_mutator::create sign_config.is_some()={}", sign_config.is_some());
 
                     // For create operations, all fields are new - pass None for modified_fields
                     match write_document_blocks(

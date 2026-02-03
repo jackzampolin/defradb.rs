@@ -120,16 +120,46 @@ pub unsafe extern "C" fn exec_request(
         _ => None,
     };
 
-    // Set up thread-local signer if we have a stored identity for this DID.
-    // This enables block signing during mutations (matching Go's signBlock behavior).
+    // Set up thread-local signer for block signing during mutations.
+    // Matches Go's behavior: if no explicit identity, fall back to node identity.
     if let Some(ref s) = identity_str {
-        if let Some(signing_config) = defra_core::signing::get_identity(s) {
-            defra_core::signing::set_signing_config(Some(signing_config));
+        if !s.is_empty() {
+            if let Some(signing_config) = defra_core::signing::get_identity(s) {
+                eprintln!("[SIGN-DEBUG] Using explicit identity signing config for DID: {}", s);
+                defra_core::signing::set_signing_config(Some(signing_config));
+            } else {
+                eprintln!("[SIGN-DEBUG] No signing config found for explicit DID: {}", s);
+                defra_core::signing::set_signing_config(None);
+            }
         } else {
-            defra_core::signing::set_signing_config(None);
+            // Empty string identity — fall back to node identity
+            let node_did = NODES.get(node_ptr, |state| state.node_identity_did.clone()).flatten();
+            eprintln!("[SIGN-DEBUG] Empty identity, node_identity_did={:?}", node_did);
+            let node_signing_config = NODES
+                .get(node_ptr, |state| {
+                    state
+                        .node_identity_did
+                        .as_ref()
+                        .and_then(|did| defra_core::signing::get_identity(did))
+                })
+                .flatten();
+            eprintln!("[SIGN-DEBUG] Node signing config present: {}", node_signing_config.is_some());
+            defra_core::signing::set_signing_config(node_signing_config);
         }
     } else {
-        defra_core::signing::set_signing_config(None);
+        // Null identity — fall back to node identity
+        let node_did = NODES.get(node_ptr, |state| state.node_identity_did.clone()).flatten();
+        eprintln!("[SIGN-DEBUG] Null identity, node_identity_did={:?}", node_did);
+        let node_signing_config = NODES
+            .get(node_ptr, |state| {
+                state
+                    .node_identity_did
+                    .as_ref()
+                    .and_then(|did| defra_core::signing::get_identity(did))
+            })
+            .flatten();
+        eprintln!("[SIGN-DEBUG] Node signing config present: {}", node_signing_config.is_some());
+        defra_core::signing::set_signing_config(node_signing_config);
     }
 
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)

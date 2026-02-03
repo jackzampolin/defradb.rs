@@ -392,6 +392,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             event_bus,
             policy_store,
             p2p: Some(p2p_state),
+            node_identity_did: None,
         };
 
         // Register and get handle

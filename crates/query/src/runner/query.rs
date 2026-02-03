@@ -3795,6 +3795,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             // Handle nested selects (e.g., links { cid })
                             if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
                                 if let Some(arr) = json_val.as_array() {
+                                    // Handle array nested selects (e.g., links { cid }, heads { cid })
                                     let nested_results: Vec<JsonValue> = arr
                                         .iter()
                                         .map(|item: &JsonValue| {
@@ -3822,6 +3823,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     obj.insert(
                                         output_name.to_string(),
                                         JsonValue::Array(nested_results),
+                                    );
+                                } else if json_val.is_object() {
+                                    // Handle object nested selects (e.g., signature { type identity value })
+                                    let mut nested_obj = serde_json::Map::new();
+                                    for nested_field in &nested.fields {
+                                        if let Requestable::Field(nf) = nested_field {
+                                            let nf_name = &nf.name;
+                                            let nf_output = nf.output_name();
+                                            if let Some(nv) = json_val.get(nf_name) {
+                                                nested_obj.insert(
+                                                    nf_output.to_string(),
+                                                    nv.clone(),
+                                                );
+                                            } else {
+                                                nested_obj.insert(
+                                                    nf_output.to_string(),
+                                                    JsonValue::Null,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    obj.insert(
+                                        output_name.to_string(),
+                                        JsonValue::Object(nested_obj),
                                     );
                                 } else {
                                     obj.insert(output_name.to_string(), JsonValue::Null);
