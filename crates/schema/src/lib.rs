@@ -25,7 +25,7 @@ pub use cid::{
     generate_field_block_with_priority_and_heads, generate_field_cid,
     generate_field_cid_with_priority, generate_field_cid_with_priority_and_heads, BlockWithCid,
 };
-pub use collection::{CollectionBuilder, CollectionVersion};
+pub use collection::{CollectionBuilder, CollectionVersion, ORPHAN_COLLECTION_ID};
 pub use ctype::CType;
 pub use embedding::VectorEmbeddingDescription;
 pub use error::{Result, SchemaError};

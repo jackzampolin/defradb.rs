@@ -8,6 +8,9 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Sentinel collection ID for placeholder versions whose real collection is unknown.
+pub const ORPHAN_COLLECTION_ID: &str = "OrphanCollectionID";
+
 /// Helper to deserialize `null` as an empty Vec (Go serializes empty slices as null).
 fn deserialize_null_as_empty_vec<'de, D, T>(
     deserializer: D,

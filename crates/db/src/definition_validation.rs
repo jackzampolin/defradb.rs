@@ -3,7 +3,7 @@
 //! This module mirrors Go DefraDB's `definition_validation.go`, running the same
 //! set of validators after every patch to ensure old vs new state consistency.
 
-use schema::{CType, CollectionVersion, FieldKind, ScalarKind};
+use schema::{CType, CollectionVersion, FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
 use std::collections::HashMap;
 
 /// Snapshot of all collection versions for validation.
@@ -107,6 +107,9 @@ fn validate_collection_not_added(
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
+        if col.is_placeholder {
+            continue;
+        }
         if !old_state.collections_by_id.contains_key(&col.version_id)
             && !old_state
                 .active_by_collection_id
@@ -129,6 +132,9 @@ fn validate_collection_name_not_mutated(
     let mut errs = Vec::new();
     for new_col in &new_state.collections {
         if let Some(old_col) = old_state.collections_by_id.get(&new_col.version_id) {
+            if old_col.is_placeholder {
+                continue;
+            }
             if new_col.name != old_col.name {
                 errs.push(format!(
                     "collection name cannot be mutated. NewName: {}, OldName: {}",
@@ -356,6 +362,9 @@ fn validate_policy_not_modified(
                 }
             }
         };
+        if old_col.is_placeholder {
+            continue;
+        }
 
         if new_col.policy != old_col.policy {
             errs.push(format!(
@@ -386,6 +395,9 @@ fn validate_indexes_not_modified(
                 }
             }
         };
+        if old_col.is_placeholder {
+            continue;
+        }
 
         if new_col.indexes != old_col.indexes {
             errs.push(format!(
@@ -410,6 +422,9 @@ fn validate_sources_not_redefined(
             Some(c) => c,
             None => continue,
         };
+        if old_col.is_placeholder {
+            continue;
+        }
 
         // If version ID is the same (in-place change, not a new version):
         // check PreviousVersion changes
@@ -509,6 +524,9 @@ fn validate_collection_name_not_empty(
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
+        if col.collection_id == ORPHAN_COLLECTION_ID || col.is_placeholder {
+            continue;
+        }
         if col.name.is_empty() {
             errs.push("collection name can't be empty".to_string());
         }
