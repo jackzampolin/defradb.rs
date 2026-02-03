@@ -512,7 +512,14 @@ mod tests {
         let index_json =
             CString::new(r#"{"Name": "idx_email", "Fields": [{"Name": "email"}], "Unique": true}"#)
                 .unwrap();
-        let result = unsafe { create_index(node, std::ptr::null(), collection_name.as_ptr(), index_json.as_ptr()) };
+        let result = unsafe {
+            create_index(
+                node,
+                std::ptr::null(),
+                collection_name.as_ptr(),
+                index_json.as_ptr(),
+            )
+        };
         assert_eq!(result.status, 0, "create_index should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -554,7 +561,14 @@ mod tests {
         let collection_name = CString::new("Post").unwrap();
         let index_json =
             CString::new(r#"{"Name": "idx_title", "Fields": [{"Name": "title"}]}"#).unwrap();
-        let result = unsafe { create_index(node, std::ptr::null(), collection_name.as_ptr(), index_json.as_ptr()) };
+        let result = unsafe {
+            create_index(
+                node,
+                std::ptr::null(),
+                collection_name.as_ptr(),
+                index_json.as_ptr(),
+            )
+        };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -562,7 +576,14 @@ mod tests {
 
         // Drop index
         let index_name = CString::new("idx_title").unwrap();
-        let result = unsafe { drop_index(node, std::ptr::null(), collection_name.as_ptr(), index_name.as_ptr()) };
+        let result = unsafe {
+            drop_index(
+                node,
+                std::ptr::null(),
+                collection_name.as_ptr(),
+                index_name.as_ptr(),
+            )
+        };
         assert_eq!(result.status, 0, "drop_index should succeed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -611,7 +632,8 @@ mod tests {
 
         let idx1 =
             CString::new(r#"{"Name": "idx_author_name", "Fields": [{"Name": "name"}]}"#).unwrap();
-        let result = unsafe { create_index(node, std::ptr::null(), author_coll.as_ptr(), idx1.as_ptr()) };
+        let result =
+            unsafe { create_index(node, std::ptr::null(), author_coll.as_ptr(), idx1.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
@@ -619,7 +641,8 @@ mod tests {
 
         let idx2 =
             CString::new(r#"{"Name": "idx_book_title", "Fields": [{"Name": "title"}]}"#).unwrap();
-        let result = unsafe { create_index(node, std::ptr::null(), book_coll.as_ptr(), idx2.as_ptr()) };
+        let result =
+            unsafe { create_index(node, std::ptr::null(), book_coll.as_ptr(), idx2.as_ptr()) };
         assert_eq!(result.status, 0);
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };

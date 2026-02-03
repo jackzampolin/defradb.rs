@@ -20,9 +20,9 @@ mod source;
 mod validation;
 
 pub use cid::{
-    generate_collection_cid, generate_collection_cid_with_priority,
+    generate_collection_cid, generate_collection_cid_full, generate_collection_cid_with_priority,
     generate_collection_cid_with_priority_and_heads, generate_field_cid,
-    generate_field_cid_with_priority,
+    generate_field_cid_with_priority, generate_field_cid_with_priority_and_heads,
 };
 pub use collection::{CollectionBuilder, CollectionVersion};
 pub use ctype::CType;

@@ -15,10 +15,10 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
-use defra_core::encryption::{get_encryption_config, store_doc_encryption, get_doc_encryption};
 use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
+use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 
 /// Document mutator that auto-commits transactions for each operation.
 ///
@@ -144,8 +144,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                             // For branchable collections, create a collection-level block
                             if collection.schema().is_branchable {
-                                let short_id =
-                                    collection_short_id(collection.collection_id());
+                                let short_id = collection_short_id(collection.collection_id());
                                 if let Err(e) = write_collection_block(
                                     &blockstore,
                                     &headstore,
@@ -273,7 +272,9 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     crate::error::Error::DocumentNotFound(id) => {
                         query::error::QueryError::document_not_found(id)
                     }
-                    other => query::error::QueryError::execution(format!("update error: {}", other)),
+                    other => {
+                        query::error::QueryError::execution(format!("update error: {}", other))
+                    }
                 })
         };
 
@@ -301,9 +302,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     // Get encryption config: first try thread-local (explicit in mutation),
                     // then fall back to per-document stored config (from create with encryption).
                     // This matches Go's behavior where encryption propagates through the DAG.
-                    let enc_config = get_encryption_config().or_else(|| {
-                        doc.id().and_then(|id| get_doc_encryption(&id.to_string()))
-                    });
+                    let enc_config = get_encryption_config()
+                        .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
 
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
@@ -320,8 +320,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         Ok(block_result) => {
                             // For branchable collections, create a collection-level block
                             if collection.schema().is_branchable {
-                                let short_id =
-                                    collection_short_id(collection.collection_id());
+                                let short_id = collection_short_id(collection.collection_id());
                                 if let Err(e) = write_collection_block(
                                     &blockstore,
                                     &headstore,
@@ -478,8 +477,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                             // For branchable collections, also create a collection-level block
                             if collection.schema().is_branchable {
-                                let short_id =
-                                    collection_short_id(collection.collection_id());
+                                let short_id = collection_short_id(collection.collection_id());
                                 if let Err(e) = write_collection_block(
                                     &blockstore,
                                     &headstore,

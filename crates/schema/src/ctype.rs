@@ -16,21 +16,22 @@ use std::fmt;
 
 /// Which CRDT to use for a field
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[repr(u8)]
 pub enum CType {
     /// No CRDT (for relations and special fields)
-    None = 0,
+    None,
     /// Last-Write-Wins Register (default for most fields)
     #[default]
-    LwwRegister = 1,
+    LwwRegister,
     /// Object CRDT (for embedded objects)
-    Object = 2,
+    Object,
     /// Composite CRDT (document level)
-    Composite = 3,
+    Composite,
     /// Positive-Negative Counter (increment/decrement)
-    PnCounter = 4,
+    PnCounter,
     /// Positive Counter (increment only)
-    PCounter = 5,
+    PCounter,
+    /// Unknown CRDT type (preserves raw value for validation errors)
+    Unknown(u8),
 }
 
 impl Serialize for CType {
@@ -38,7 +39,16 @@ impl Serialize for CType {
     where
         S: Serializer,
     {
-        serializer.serialize_u8(*self as u8)
+        let value = match self {
+            CType::None => 0u8,
+            CType::LwwRegister => 1,
+            CType::Object => 2,
+            CType::Composite => 3,
+            CType::PnCounter => 4,
+            CType::PCounter => 5,
+            CType::Unknown(v) => *v,
+        };
+        serializer.serialize_u8(value)
     }
 }
 
@@ -63,7 +73,7 @@ impl<'de> Deserialize<'de> for CType {
                     3 => CType::Composite,
                     4 => CType::PnCounter,
                     5 => CType::PCounter,
-                    _ => CType::None, // Unknown defaults to None
+                    _ => CType::Unknown(kind), // Preserve unknown for validation
                 })
             }
             // String format (for human-readable configs)
@@ -84,6 +94,19 @@ impl<'de> Deserialize<'de> for CType {
 }
 
 impl CType {
+    /// Convert to u8 representation for CID generation
+    pub fn to_u8(self) -> u8 {
+        match self {
+            CType::None => 0,
+            CType::LwwRegister => 1,
+            CType::Object => 2,
+            CType::Composite => 3,
+            CType::PnCounter => 4,
+            CType::PCounter => 5,
+            CType::Unknown(v) => v,
+        }
+    }
+
     /// Check if this CRDT type is compatible with a field kind
     pub fn is_compatible_with(&self, kind: &FieldKind) -> bool {
         match self {
@@ -93,6 +116,7 @@ impl CType {
             CType::Composite => true,
             // Counters only work with numeric types
             CType::PnCounter | CType::PCounter => kind.is_numeric(),
+            CType::Unknown(_) => false,
         }
     }
 
@@ -119,6 +143,7 @@ impl fmt::Display for CType {
             CType::Composite => write!(f, "Composite"),
             CType::PnCounter => write!(f, "PnCounter"),
             CType::PCounter => write!(f, "PCounter"),
+            CType::Unknown(v) => write!(f, "Unknown({})", v),
         }
     }
 }
@@ -170,13 +195,29 @@ mod tests {
     }
 
     #[test]
-    fn test_repr_values() {
-        assert_eq!(CType::None as u8, 0);
-        assert_eq!(CType::LwwRegister as u8, 1);
-        assert_eq!(CType::Object as u8, 2);
-        assert_eq!(CType::Composite as u8, 3);
-        assert_eq!(CType::PnCounter as u8, 4);
-        assert_eq!(CType::PCounter as u8, 5);
+    fn test_serialization_values() {
+        // Verify each variant serializes to the expected integer
+        assert_eq!(serde_json::to_string(&CType::None).unwrap(), "0");
+        assert_eq!(serde_json::to_string(&CType::LwwRegister).unwrap(), "1");
+        assert_eq!(serde_json::to_string(&CType::Object).unwrap(), "2");
+        assert_eq!(serde_json::to_string(&CType::Composite).unwrap(), "3");
+        assert_eq!(serde_json::to_string(&CType::PnCounter).unwrap(), "4");
+        assert_eq!(serde_json::to_string(&CType::PCounter).unwrap(), "5");
+    }
+
+    #[test]
+    fn test_unknown_preserved() {
+        let parsed: CType = serde_json::from_str("99").unwrap();
+        assert_eq!(parsed, CType::Unknown(99));
+        assert!(!matches!(
+            parsed,
+            CType::None
+                | CType::LwwRegister
+                | CType::Object
+                | CType::Composite
+                | CType::PnCounter
+                | CType::PCounter
+        ));
     }
 
     #[test]

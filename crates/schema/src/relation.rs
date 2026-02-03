@@ -62,7 +62,10 @@ impl CollectionVersion {
         }
 
         // No existing index - create automatic unique index
-        let index_name = format!("{}_{}_unique", self.name, relation_field_name);
+        // Go names these as {Collection}__{fieldWithoutPrefix}_ASC (e.g., User__bossID_ASC)
+        // The id_field_name is "_bossID", so strip leading underscore for the index name
+        let field_for_name = id_field_name.trim_start_matches('_');
+        let index_name = format!("{}__{}_ASC", self.name, field_for_name);
         let mut index = IndexDescription::new(index_name)
             .with_field(id_field_name, false)
             .as_unique();

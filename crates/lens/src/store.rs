@@ -80,7 +80,6 @@ pub trait TransformStore: Send + Sync {
 #[derive(Default)]
 pub struct MemoryTransformStore {
     transforms: std::sync::RwLock<std::collections::HashMap<TransformId, LensConfig>>,
-    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl MemoryTransformStore {
@@ -93,16 +92,29 @@ impl MemoryTransformStore {
 #[async_trait]
 impl TransformStore for MemoryTransformStore {
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
-        let id = TransformId::new(format!(
-            "lens_{}",
-            self.next_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        ));
+        use sha2::{Digest, Sha256};
+
+        // Compute content-based ID for deduplication (matches Go's IPLD CID approach)
+        // Hash only the lens modules, not the version IDs, so identical lens content
+        // produces the same ID regardless of which versions it's associated with.
+        let lenses_json = serde_json::to_vec(&config.lenses)
+            .map_err(|e| Error::Pipeline(format!("failed to serialize lenses: {}", e)))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&lenses_json);
+        let hash = hasher.finalize();
+        // Use "baf" prefix to mimic CID format, then 16 bytes of hash for uniqueness
+        let id = TransformId::new(format!("baf{}", hex::encode(&hash[..16])));
 
         let mut transforms = self
             .transforms
             .write()
             .map_err(|e| Error::Pipeline(format!("failed to acquire write lock: {}", e)))?;
+
+        // Deduplication: if this config already exists, return the existing ID
+        if transforms.contains_key(&id) {
+            return Ok(id);
+        }
+
         transforms.insert(id.clone(), config);
 
         Ok(id)
@@ -116,7 +128,7 @@ impl TransformStore for MemoryTransformStore {
 
         let result = transforms
             .iter()
-            .map(|(id, config)| (id.to_string(), config.lens.clone()))
+            .filter_map(|(id, config)| config.lens().cloned().map(|l| (id.to_string(), l)))
             .collect();
 
         Ok(result)

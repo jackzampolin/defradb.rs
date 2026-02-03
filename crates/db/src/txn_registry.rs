@@ -28,8 +28,8 @@ use tracing::{error, warn};
 
 use crate::collection::Collection;
 use crate::database::DB;
-use crate::doc_fetcher::DbDocFetcher;
 use crate::error::{Error, Result};
+use crate::lensed_fetcher::LensedDocFetcher;
 use crate::txn_context::DbTransactionContext;
 
 /// Result of a stale transaction cleanup operation.
@@ -265,7 +265,9 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         // Transaction-scoped collection caching: collections are loaded lazily
         // from the SystemStore on first access within the transaction. Once loaded,
         // the collection metadata is cached for the transaction's duration.
-        let fetcher = Arc::new(DbDocFetcher::new(db_txn));
+        // Use LensedDocFetcher to support lens migrations within transactions.
+        let lens_store = self.db.lens_store().clone();
+        let fetcher = Arc::new(LensedDocFetcher::new(db_txn, lens_store));
         let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
 
         self.transactions
@@ -606,7 +608,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_doc_fetcher_get_by_ids_invalid_id_returns_error() {
+    async fn test_doc_fetcher_get_by_ids_invalid_id_treated_as_not_found() {
+        // Go DefraDB treats invalid doc IDs as "not found" rather than errors.
+        // This matches behavior where querying for a non-existent ID returns empty results.
         let db = test_db_with_collections().await;
         let registry = DbTransactionRegistry::new(db);
 
@@ -616,9 +620,11 @@ mod tests {
 
         let result = fetcher
             .get_by_ids("Users", &["not-a-valid-docid".to_string()])
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid doc ID"));
+            .await
+            .unwrap();
+        // Invalid doc ID is treated as not found, not an error
+        assert!(result.docs().is_empty());
+        assert_eq!(result.missing_ids(), &["not-a-valid-docid".to_string()]);
 
         registry.rollback(&txn_id).await.unwrap();
     }

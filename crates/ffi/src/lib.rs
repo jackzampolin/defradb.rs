@@ -53,6 +53,8 @@ pub mod types;
 
 use std::ffi::{c_char, CString};
 
+use types::FfiResult;
+
 /// Error message for invalid node handle.
 pub const ERR_INVALID_NODE_HANDLE: &str = "invalid node handle";
 
@@ -93,7 +95,7 @@ pub use p2p::{
     new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_add_documents, p2p_connect,
     p2p_delete_replicator, p2p_get_all_collections, p2p_get_all_documents,
     p2p_get_all_replicators, p2p_peer_info, p2p_remove_collections, p2p_remove_documents,
-    p2p_set_replicator,
+    p2p_set_replicator, p2p_sync_documents,
 };
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections};
@@ -205,7 +207,15 @@ mod tests {
             r#"mutation { create_Person(input: {name: "Bob", age: 30}) { _docID name age } }"#,
         )
         .unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), mutation.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                mutation.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "mutation failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "should contain Bob");
@@ -213,7 +223,15 @@ mod tests {
 
         // Query people
         let query_str = CString::new("{ Person { name age } }").unwrap();
-        let result = unsafe { exec_request(node, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
+        let result = unsafe {
+            exec_request(
+                node,
+                ptr::null(),
+                query_str.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
         assert_eq!(result.status, 0, "query failed");
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Bob"), "query should return Bob");

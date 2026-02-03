@@ -133,10 +133,7 @@ fn select_to_go_json(select: &query::Select) -> serde_json::Value {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 let mut filter_obj = serde_json::Map::new();
-                filter_obj.insert(
-                    "Conditions".into(),
-                    serde_json::Value::Object(conditions),
-                );
+                filter_obj.insert("Conditions".into(), serde_json::Value::Object(conditions));
                 serde_json::Value::Object(filter_obj)
             })
             .unwrap_or(serde_json::Value::Null),
@@ -294,7 +291,8 @@ pub unsafe extern "C" fn delete_collection(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -411,7 +409,8 @@ pub unsafe extern "C" fn set_active_collection_version(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -469,7 +468,8 @@ pub unsafe extern "C" fn patch_collection(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -567,6 +567,66 @@ pub unsafe extern "C" fn get_collection_by_version_id(
     }
 }
 
+/// Truncate a collection: delete all documents while preserving the schema.
+///
+/// This removes all document data, CRDT heads, blocks, and index entries
+/// for the collection. The collection schema remains intact.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `name` - The collection name to truncate
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn truncate_collection(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    name: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionTruncate,
+    ) {
+        return e;
+    }
+
+    let name_str = match c_str_to_string(name) {
+        Some(s) => s,
+        None => return FfiResult::error("name is null"),
+    };
+
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        database
+            .truncate_collection(&name_str)
+            .await
+            .map_err(|e| format!("failed to truncate collection: {}", e))?;
+
+        Ok::<String, String>("{}".to_string())
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
 // =============================================================================
 // View and Migration APIs
 // =============================================================================
@@ -600,7 +660,8 @@ pub unsafe extern "C" fn add_view(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -747,7 +808,8 @@ pub unsafe extern "C" fn set_migration(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -780,30 +842,6 @@ pub unsafe extern "C" fn set_migration(
         Ok(transform_id) => FfiResult::success(&transform_id),
         Err(e) => FfiResult::error(&e),
     }
-}
-
-/// Truncate a collection (delete all documents, preserve schema).
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `name` - The collection name to truncate
-///
-/// # Returns
-///
-/// - Status 0: Success (value is "{}")
-/// - Status 1: Error (error field contains message)
-///
-/// # Safety
-///
-/// `name` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn truncate_collection(
-    _node_ptr: usize,
-    _identity_did: *const c_char,
-    _name: *const c_char,
-) -> FfiResult {
-    FfiResult::error("truncate_collection is not yet implemented")
 }
 
 #[cfg(test)]
@@ -1037,7 +1075,8 @@ mod tests {
 
         // Set active version (should succeed)
         let version_cstr = CString::new(version_id).unwrap();
-        let result = unsafe { set_active_collection_version(node, std::ptr::null(), version_cstr.as_ptr()) };
+        let result =
+            unsafe { set_active_collection_version(node, std::ptr::null(), version_cstr.as_ptr()) };
         assert_eq!(
             result.status, 0,
             "set_active_collection_version should succeed"
@@ -1057,7 +1096,8 @@ mod tests {
         let node = result.node_ptr;
 
         let version_id = CString::new("nonexistent-version-id").unwrap();
-        let result = unsafe { set_active_collection_version(node, std::ptr::null(), version_id.as_ptr()) };
+        let result =
+            unsafe { set_active_collection_version(node, std::ptr::null(), version_id.as_ptr()) };
         assert_eq!(result.status, 1, "should fail for non-existent version");
 
         unsafe { crate::types::defra_free_string(result.error) };
@@ -1086,7 +1126,8 @@ mod tests {
 
         // Get by version ID
         let version_cstr = CString::new(version_id).unwrap();
-        let result = unsafe { get_collection_by_version_id(node, std::ptr::null(), version_cstr.as_ptr()) };
+        let result =
+            unsafe { get_collection_by_version_id(node, std::ptr::null(), version_cstr.as_ptr()) };
         assert_eq!(
             result.status, 0,
             "get_collection_by_version_id should succeed"
@@ -1117,7 +1158,8 @@ mod tests {
         // Patch the collection - change is_active to false
         let patch = CString::new(r#"[{"op":"replace","path":"/IsActive","value":false}]"#).unwrap();
         let name = CString::new("Patchable").unwrap();
-        let result = unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
+        let result =
+            unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
         assert_eq!(result.status, 0, "patch_collection should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
@@ -1142,7 +1184,8 @@ mod tests {
 
         let patch = CString::new(r#"[{"op":"replace","path":"/IsActive","value":false}]"#).unwrap();
         let name = CString::new("NonExistent").unwrap();
-        let result = unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
+        let result =
+            unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
         assert_eq!(result.status, 1, "should fail for non-existent collection");
 
         unsafe { crate::types::defra_free_string(result.error) };
@@ -1167,7 +1210,8 @@ mod tests {
         // Invalid patch - not valid JSON
         let patch = CString::new("not valid json").unwrap();
         let name = CString::new("PatchTest").unwrap();
-        let result = unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
+        let result =
+            unsafe { patch_collection(node, std::ptr::null(), name.as_ptr(), patch.as_ptr()) };
         assert_eq!(result.status, 1, "should fail for invalid patch");
 
         unsafe { crate::types::defra_free_string(result.error) };
@@ -1221,8 +1265,15 @@ mod tests {
         let node = result.node_ptr;
 
         let view_sdl = CString::new("type V { name: String }").unwrap();
-        let result =
-            unsafe { add_view(node, std::ptr::null(), std::ptr::null(), view_sdl.as_ptr(), std::ptr::null()) };
+        let result = unsafe {
+            add_view(
+                node,
+                std::ptr::null(),
+                std::ptr::null(),
+                view_sdl.as_ptr(),
+                std::ptr::null(),
+            )
+        };
         assert_eq!(result.status, 1, "should fail with null query");
 
         unsafe { crate::types::defra_free_string(result.error) };

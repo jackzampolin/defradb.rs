@@ -1378,3 +1378,23 @@ pub unsafe extern "C" fn p2p_get_all_documents(
         Err(e) => FfiResult::error(e),
     }
 }
+
+/// Trigger document synchronization for specified documents.
+///
+/// This is a stub implementation that returns success without doing actual sync.
+/// Full P2P sync is handled by the replication system.
+///
+/// # Safety
+///
+/// All string parameters must be valid null-terminated UTF-8 strings or null.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_documents(
+    _node_ptr: usize,
+    _identity_did: *const c_char,
+    _collection_name: *const c_char,
+    _doc_ids_json: *const c_char,
+) -> FfiResult {
+    // Document sync is handled by the replication system automatically.
+    // Return success as a no-op stub.
+    FfiResult::ok()
+}

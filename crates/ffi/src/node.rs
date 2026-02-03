@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-
 use crate::get_runtime;
 use crate::state::{NodeState, PolicyStore, NODES};
 use crate::types::{FfiResult, NewNodeResult, NodeInitOptions};
@@ -151,7 +150,6 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
         Err(e) => FfiResult::error(format!("failed to close database: {}", e)),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -11,10 +11,10 @@ pub enum SchemaError {
     #[error("duplicate field. Name: {0}")]
     DuplicateFieldName(String),
 
-    #[error("invalid CRDT type for field kind: {field_name} cannot use {crdt_type} (only numeric fields support counters)")]
+    #[error("CRDT type {crdt_type} can't be assigned to field kind {field_kind}")]
     InvalidCrdtForKind {
-        field_name: String,
         crdt_type: String,
+        field_kind: String,
     },
 
     #[error("invalid relation: field {field_name} references unknown collection {collection_id}")]
@@ -76,10 +76,12 @@ mod tests {
     #[test]
     fn test_invalid_crdt_error() {
         let err = SchemaError::InvalidCrdtForKind {
-            field_name: "title".into(),
-            crdt_type: "PnCounter".into(),
+            crdt_type: "pncounter".into(),
+            field_kind: "String".into(),
         };
-        assert!(err.to_string().contains("title"));
-        assert!(err.to_string().contains("PnCounter"));
+        assert_eq!(
+            err.to_string(),
+            "CRDT type pncounter can't be assigned to field kind String"
+        );
     }
 }

@@ -6,28 +6,34 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for a Lens migration.
 ///
-/// Matches Go's client.LensConfig.
+/// Matches Go's client.LensConfig, which embeds model.Lens (flattened).
+/// JSON format: {"SourceCollectionVersionID":"...","DestinationCollectionVersionID":"...","Lenses":[...]}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LensConfig {
-    /// ID of the schema version to migrate from.
+    /// ID of the collection version to migrate from.
     ///
-    /// The source and destination versions must be adjacent in the schema history.
-    #[serde(rename = "SourceSchemaVersionID")]
+    /// The source and destination versions must be adjacent in the version history.
+    #[serde(rename = "SourceCollectionVersionID", alias = "SourceSchemaVersionID")]
     pub source_schema_version_id: String,
 
-    /// ID of the schema version to migrate to.
+    /// ID of the collection version to migrate to.
     ///
-    /// The source and destination versions must be adjacent in the schema history.
-    #[serde(rename = "DestinationSchemaVersionID")]
+    /// The source and destination versions must be adjacent in the version history.
+    #[serde(
+        rename = "DestinationCollectionVersionID",
+        alias = "DestinationSchemaVersionID"
+    )]
     pub destination_schema_version_id: String,
 
-    /// The Lens module configuration.
-    #[serde(rename = "Lens")]
-    pub lens: LensModule,
+    /// The Lens modules to apply, in execution order.
+    ///
+    /// Go's model.Lens embeds this as a flat `Lenses` array.
+    #[serde(rename = "Lenses", alias = "Lens", default)]
+    pub lenses: Vec<LensModule>,
 }
 
 impl LensConfig {
-    /// Create a new lens configuration.
+    /// Create a new lens configuration with a single module.
     pub fn new(
         source_schema_version_id: impl Into<String>,
         destination_schema_version_id: impl Into<String>,
@@ -36,14 +42,19 @@ impl LensConfig {
         Self {
             source_schema_version_id: source_schema_version_id.into(),
             destination_schema_version_id: destination_schema_version_id.into(),
-            lens,
+            lenses: vec![lens],
         }
+    }
+
+    /// Get the first lens module (convenience accessor).
+    pub fn lens(&self) -> Option<&LensModule> {
+        self.lenses.first()
     }
 }
 
 /// Configuration for a Lens WASM module.
 ///
-/// Matches Go's model.Lens from lens/host-go/config/model.
+/// Matches Go's model.LensModule from lens/host-go/config/model.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LensModule {
     /// Path to the WASM module file.
@@ -51,6 +62,10 @@ pub struct LensModule {
     /// The WASM module must remain at this location as long as the migration is active.
     #[serde(rename = "Path", default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+
+    /// Whether to inverse the module transform.
+    #[serde(rename = "Inverse", default)]
+    pub inverse: bool,
 
     /// Raw WASM module bytes (alternative to path).
     #[serde(
@@ -71,6 +86,7 @@ impl LensModule {
     pub fn from_path(path: impl Into<String>) -> Self {
         Self {
             path: Some(path.into()),
+            inverse: false,
             module: None,
             arguments: None,
         }
@@ -80,6 +96,7 @@ impl LensModule {
     pub fn from_bytes(module: Vec<u8>) -> Self {
         Self {
             path: None,
+            inverse: false,
             module: Some(module),
             arguments: None,
         }
@@ -137,13 +154,31 @@ mod tests {
         );
 
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("\"SourceSchemaVersionID\""));
-        assert!(json.contains("\"DestinationSchemaVersionID\""));
-        assert!(json.contains("\"Lens\""));
+        assert!(json.contains("\"SourceCollectionVersionID\""));
+        assert!(json.contains("\"DestinationCollectionVersionID\""));
+        assert!(json.contains("\"Lenses\""));
         assert!(json.contains("\"Path\""));
 
         let parsed: LensConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn test_lens_config_go_format() {
+        // Go sends this format (embedded model.Lens with Lenses array)
+        let json = r#"{
+            "SourceCollectionVersionID": "v1",
+            "DestinationCollectionVersionID": "v2",
+            "Lenses": [{"Path": "/path/to/transform.wasm", "Inverse": false}]
+        }"#;
+        let parsed: LensConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.source_schema_version_id, "v1");
+        assert_eq!(parsed.destination_schema_version_id, "v2");
+        assert_eq!(parsed.lenses.len(), 1);
+        assert_eq!(
+            parsed.lenses[0].path,
+            Some("/path/to/transform.wasm".to_string())
+        );
     }
 
     #[test]

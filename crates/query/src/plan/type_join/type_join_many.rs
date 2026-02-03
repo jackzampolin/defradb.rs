@@ -245,10 +245,7 @@ impl TypeJoinMany {
                             (val_a.cloned(), val_b.cloned())
                         };
 
-                        let cmp = compare_json_values(
-                            resolved_a.as_ref(),
-                            resolved_b.as_ref(),
-                        );
+                        let cmp = compare_json_values(resolved_a.as_ref(), resolved_b.as_ref());
                         let cmp = match condition.direction {
                             OrderDirection::Asc => cmp,
                             OrderDirection::Desc => cmp.reverse(),
@@ -262,9 +259,7 @@ impl TypeJoinMany {
             });
         } else {
             // Default: sort by _docID (index 0) for deterministic ordering
-            children.sort_by(|a, b| {
-                compare_json_values(a.get(0), b.get(0))
-            });
+            children.sort_by(|a, b| compare_json_values(a.get(0), b.get(0)));
         }
 
         // NOTE: Limit/offset are NOT applied here. They are applied in the runner's

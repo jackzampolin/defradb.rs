@@ -219,13 +219,19 @@ async fn transform_to_target(
             .get(&current_version)
             .ok_or_else(|| Error::SchemaVersionNotFound(current_version.clone()))?;
 
-        if let Some(ref next_version) = current_link.next {
-            if visited.contains(next_version) {
-                return Err(Error::Pipeline(format!(
-                    "cycle detected in migration path at version {}",
-                    next_version
-                )));
-            }
+        // Try forward (next) first, then backward (previous).
+        // If the forward direction was already visited, fall through to backward.
+        let can_go_next = current_link
+            .next
+            .as_ref()
+            .is_some_and(|v| !visited.contains(v));
+        let can_go_prev = current_link
+            .previous
+            .as_ref()
+            .is_some_and(|v| !visited.contains(v));
+
+        if can_go_next {
+            let next_version = current_link.next.as_ref().unwrap();
 
             let next_link = collection_history
                 .get(next_version)
@@ -239,13 +245,8 @@ async fn transform_to_target(
 
             current_version = next_version.clone();
             visited.insert(current_version.clone());
-        } else if let Some(ref prev_version) = current_link.previous {
-            if visited.contains(prev_version) {
-                return Err(Error::Pipeline(format!(
-                    "cycle detected in migration path at version {}",
-                    prev_version
-                )));
-            }
+        } else if can_go_prev {
+            let prev_version = current_link.previous.as_ref().unwrap();
 
             if let Some(ref transform_id) = current_link.transform {
                 current_doc =

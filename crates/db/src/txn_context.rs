@@ -7,24 +7,25 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage::corekv::Store;
 
-use crate::doc_fetcher::DbDocFetcher;
 use crate::doc_mutator::DbDocMutator;
+use crate::lensed_fetcher::LensedDocFetcher;
 use crate::txn::DbTxn;
 
 /// Transaction context for query execution.
 ///
 /// Implements `query::TransactionContext` to provide transaction-scoped
-/// document fetching to the query executor.
+/// document fetching to the query executor. Uses `LensedDocFetcher` to support
+/// lens migrations within transactions.
 pub struct DbTransactionContext<S: Store> {
     id: String,
     readonly: bool,
-    fetcher: Arc<DbDocFetcher<S>>,
+    fetcher: Arc<LensedDocFetcher<S>>,
     created_at: Instant,
 }
 
 impl<S: Store> DbTransactionContext<S> {
     /// Create a new transaction context.
-    pub(crate) fn new(id: String, readonly: bool, fetcher: Arc<DbDocFetcher<S>>) -> Self {
+    pub(crate) fn new(id: String, readonly: bool, fetcher: Arc<LensedDocFetcher<S>>) -> Self {
         Self {
             id,
             readonly,

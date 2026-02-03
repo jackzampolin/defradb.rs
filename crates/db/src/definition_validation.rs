@@ -47,7 +47,6 @@ const UPDATE_VALIDATORS: &[Validator] = &[
     validate_collection_id_not_mutated,
     validate_id_not_empty,
     validate_id_unique,
-    validate_single_version_active,
     validate_field_not_moved,
     validate_field_not_mutated,
     validate_policy_not_modified,
@@ -399,26 +398,45 @@ fn validate_indexes_not_modified(
 }
 
 /// Matches Go's validateSourcesNotRedefined.
+/// Checks that PreviousVersion and Query sources are not added/removed/mutated.
 fn validate_sources_not_redefined(
     new_state: &DefinitionState,
     old_state: &DefinitionState,
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for new_col in &new_state.collections {
-        let old_col = match old_state.collections_by_id.get(&new_col.version_id) {
+        // Go looks up by name in activeCollectionsByName
+        let old_col = match old_state.active_by_name.get(&new_col.name) {
             Some(c) => c,
-            None => {
-                match old_state
-                    .active_by_collection_id
-                    .get(&new_col.collection_id)
-                {
-                    Some(c) => c,
-                    None => continue,
-                }
-            }
+            None => continue,
         };
 
-        // Check if sources were added or removed
+        // If version ID is the same (in-place change, not a new version):
+        // check PreviousVersion changes
+        if old_col.version_id == new_col.version_id {
+            let old_has_prev = old_col.previous_version.is_some();
+            let new_has_prev = new_col.previous_version.is_some();
+            if old_has_prev != new_has_prev {
+                errs.push(format!(
+                    "collection sources cannot be added or removed. CollectionID: {}",
+                    new_col.version_id
+                ));
+            }
+
+            // Check if source collection ID was mutated
+            if let (Some(old_prev), Some(new_prev)) =
+                (&old_col.previous_version, &new_col.previous_version)
+            {
+                if old_prev.source_collection_id != new_prev.source_collection_id {
+                    errs.push(format!(
+                        "collection source ID cannot be mutated. NewSourceID: {}, OldSourceID: {}",
+                        new_prev.source_collection_id, old_prev.source_collection_id
+                    ));
+                }
+            }
+        }
+
+        // Check if Query source was added or removed (regardless of version ID)
         let old_has_query = old_col.query.is_some();
         let new_has_query = new_col.query.is_some();
         if old_has_query != new_has_query {
@@ -471,17 +489,15 @@ fn validate_collection_name_unique(
     _old_state: &DefinitionState,
 ) -> Vec<String> {
     let mut errs = Vec::new();
-    let mut seen: HashMap<&str, &str> = HashMap::new(); // name -> collection_id
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for col in &new_state.collections {
         if !col.is_active || col.name.is_empty() {
             continue;
         }
-        if let Some(&existing_id) = seen.get(col.name.as_str()) {
-            if existing_id != col.collection_id {
-                errs.push(format!("collection already exists. Name: {}", col.name));
-            }
+        if seen.contains(col.name.as_str()) {
+            errs.push(format!("collection already exists. Name: {}", col.name));
         }
-        seen.insert(&col.name, &col.collection_id);
+        seen.insert(&col.name);
     }
     errs
 }
@@ -559,14 +575,18 @@ fn validate_field_not_duplicated(
 }
 
 /// Matches Go's validateCollectionMaterialized.
+///
+/// Go only rejects is_materialized=false on regular collections (no query source).
+/// Views (collections with a query source) CAN be non-materialized.
 fn validate_collection_materialized(
     new_state: &DefinitionState,
     _old_state: &DefinitionState,
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
-        // Go checks: if query source exists and is_materialized is false
-        if col.query.is_some() && !col.is_materialized {
+        // Non-materialized is only valid for views (has query source).
+        // Regular collections (no query source) must be materialized.
+        if !col.is_materialized && col.query.is_none() {
             errs.push(format!(
                 "non-materialized collections are not supported. Collection: {}",
                 col.name
@@ -771,14 +791,15 @@ fn is_known_embedding_provider(provider: &str) -> bool {
 }
 
 /// Format a CType for error messages (matches Go's CType.String()).
-fn format_crdt_type(crdt: CType) -> &'static str {
+fn format_crdt_type(crdt: CType) -> String {
     match crdt {
-        CType::None => "none",
-        CType::LwwRegister => "lww",
-        CType::Object => "object",
-        CType::Composite => "composite",
-        CType::PnCounter => "pncounter",
-        CType::PCounter => "pcounter",
+        CType::None => "none".to_string(),
+        CType::LwwRegister => "lww".to_string(),
+        CType::Object => "object".to_string(),
+        CType::Composite => "composite".to_string(),
+        CType::PnCounter => "pncounter".to_string(),
+        CType::PCounter => "pcounter".to_string(),
+        CType::Unknown(_) => "unknown".to_string(),
     }
 }
 

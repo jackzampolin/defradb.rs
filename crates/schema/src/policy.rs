@@ -15,11 +15,11 @@ pub struct PolicyDescription {
     /// The policy ID.
     /// - For local ACP: local policy ID
     /// - For remote ACP (SourceHub): global policy ID
-    #[serde(rename = "ID")]
+    #[serde(rename = "ID", default)]
     pub id: String,
 
     /// Name of the corresponding resource within the policy.
-    #[serde(rename = "ResourceName")]
+    #[serde(rename = "ResourceName", default)]
     pub resource_name: String,
 }
 

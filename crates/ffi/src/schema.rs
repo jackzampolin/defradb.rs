@@ -41,7 +41,8 @@ pub unsafe extern "C" fn add_schema(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
         return e;
     }
 
@@ -59,9 +60,17 @@ pub unsafe extern "C" fn add_schema(
     };
 
     let result = rt.block_on(async {
-        // Parse the SDL into collection versions
-        let collections =
-            query::parse_sdl(&schema_str).map_err(|e| format!("failed to parse schema: {}", e))?;
+        // Get existing collection names so the SDL parser can resolve external type references
+        // (e.g., relations to already-created collections)
+        let known_types: std::collections::HashSet<String> = database
+            .list_collections()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        // Parse the SDL into collection versions, passing known types for resolution
+        let collections = query::parse_sdl_with_known_types(&schema_str, known_types)
+            .map_err(|e| format!("failed to parse schema: {}", e))?;
 
         // Validate policies on collections before creating them
         for collection in &collections {

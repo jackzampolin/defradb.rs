@@ -106,6 +106,9 @@ pub struct DB<S: Store> {
     event_bus: Option<Arc<dyn Bus>>,
     /// Lens transform store for schema migrations.
     lens_store: Arc<dyn TransformStore>,
+    /// Pending migrations registered before their destination version exists.
+    /// Maps dest_version_id -> (source_version_id, transform_id_string).
+    pending_migrations: RwLock<HashMap<String, (String, String)>>,
 }
 
 impl<S: Store> DB<S> {
@@ -130,6 +133,7 @@ impl<S: Store> DB<S> {
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store,
+            pending_migrations: RwLock::new(HashMap::new()),
         })
     }
 
@@ -174,6 +178,7 @@ impl<S: Store> DB<S> {
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store,
+            pending_migrations: RwLock::new(HashMap::new()),
         })
     }
 
@@ -390,6 +395,18 @@ impl<S: Store> DB<S> {
                             ))
                         })?;
 
+                    // Validate version adjacency: if destination already has a previous_version,
+                    // the source must match it (can't skip versions in migration chain)
+                    if let Some(ref prev) = schema.previous_version {
+                        if prev.source_collection_id != source_version_id {
+                            return Err(Error::InvalidPatch(format!(
+                                "cannot configure migration between non-adjacent collection versions. \
+                                 Destination '{}' already has previous version '{}', but migration source is '{}'",
+                                dest_version_id, prev.source_collection_id, source_version_id
+                            )));
+                        }
+                    }
+
                     // Ensure previous_version exists and set transform
                     let prev = schema
                         .previous_version
@@ -411,13 +428,26 @@ impl<S: Store> DB<S> {
                     )
                 }
                 None => {
-                    // Destination schema doesn't exist yet (e.g., registering for P2P)
-                    // This is allowed per Go behavior - transforms can be registered
-                    // before schemas exist
+                    // Destination schema doesn't exist yet (e.g., migration registered
+                    // before patch creates the version). Store as pending so
+                    // patch_collection can link it when the version is created.
                     tracing::debug!(
                         dest_version_id = %dest_version_id,
-                        "Destination schema not found, skipping schema update"
+                        source_version_id = %source_version_id,
+                        "Destination schema not found, storing as pending migration"
                     );
+                    {
+                        let mut pending = self.pending_migrations.write().map_err(|e| {
+                            tracing::error!(error = ?e, "Pending migrations lock poisoned");
+                            Error::LockPoisoned(
+                                "pending migrations lock poisoned during set_migration".into(),
+                            )
+                        })?;
+                        pending.insert(
+                            dest_version_id.clone(),
+                            (source_version_id.clone(), transform_id.to_string()),
+                        );
+                    }
                     (collection_key, None, String::new())
                 }
             }
@@ -1029,6 +1059,143 @@ impl<S: Store> DB<S> {
         }
     }
 
+    /// Truncate a collection: delete all documents, heads, blocks, and index entries
+    /// while preserving the collection schema.
+    ///
+    /// This resets the collection to an empty state as if it were just created.
+    pub async fn truncate_collection(&self, name: &str) -> Result<()> {
+        let collection = self
+            .get_collection(name)?
+            .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;
+
+        let collection_id = collection.collection_id().to_string();
+        // Hash-based short ID used by index manager and collection head keys
+        let short_id = crate::collection::collection_short_id(&collection_id);
+
+        let mut txn = self.new_txn(false).await?;
+        match self
+            .truncate_collection_inner(&mut txn, &collection_id, short_id)
+            .await
+        {
+            Ok(()) => {
+                txn.commit().await?;
+                Ok(())
+            }
+            Err(e) => {
+                if let Err(discard_err) = txn.discard() {
+                    tracing::warn!(
+                        error = %discard_err,
+                        original_error = %e,
+                        "Transaction discard failed after truncate_collection error"
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Inner truncation logic within an existing transaction.
+    async fn truncate_collection_inner(
+        &self,
+        txn: &mut DbTxn<S>,
+        collection_id: &str,
+        short_id: u32,
+    ) -> Result<()> {
+        use storage::keys::{HeadstoreColKey, HeadstoreDocKey, IndexDataStoreKey};
+
+        let datastore = txn.datastore()?;
+        let headstore = txn.headstore()?;
+        let blockstore = txn.blockstore()?;
+
+        // Document data key prefix: /d/<collection_id>/
+        let doc_prefix = format!("/d/{}/", collection_id).into_bytes();
+        // Deletion marker prefix: /del/<collection_id>/
+        let del_prefix = format!("/del/{}/", collection_id).into_bytes();
+
+        // 1. Collect doc_ids from document data keys (/d/<collection_id>/<doc_id>)
+        let mut doc_ids: Vec<String> = Vec::new();
+        {
+            let opts = IterOptions::new().with_prefix(doc_prefix.clone());
+            let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
+            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                // Skip version keys (end with /v)
+                if pair.key.ends_with(b"/v") {
+                    continue;
+                }
+                // Key format: /d/<collection_id>/<doc_id>
+                if let Some(pos) = pair.key.iter().rposition(|&b| b == b'/') {
+                    let doc_id = String::from_utf8_lossy(&pair.key[pos + 1..]).to_string();
+                    if !doc_id.is_empty() {
+                        doc_ids.push(doc_id);
+                    }
+                }
+            }
+            iter.close().await.map_err(Error::Storage)?;
+        }
+
+        // 2. Delete all document data from datastore
+        delete_prefix(&datastore, doc_prefix).await?;
+
+        // 3. Delete all deletion markers from datastore
+        delete_prefix(&datastore, del_prefix).await?;
+
+        // 4. Delete index entries from datastore (uses hash-based short_id)
+        let idx_prefix = IndexDataStoreKey::collection_prefix(short_id);
+        delete_prefix(&datastore, idx_prefix).await?;
+
+        // 5. Delete document head entries from headstore + collect block CIDs
+        let mut block_cids: Vec<Vec<u8>> = Vec::new();
+        for doc_id in &doc_ids {
+            let head_prefix = HeadstoreDocKey::document_prefix(doc_id);
+            let opts = IterOptions::new().with_prefix(head_prefix);
+            let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
+            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                // Extract CID string from key: /d/{doc_id}/{field_id}/{CID_string}
+                if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
+                    if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
+                        block_cids.push(cid.to_bytes());
+                    }
+                }
+            }
+            iter.close().await.map_err(Error::Storage)?;
+
+            // Now delete all head entries for this doc
+            let head_prefix = HeadstoreDocKey::document_prefix(doc_id);
+            delete_prefix(&headstore, head_prefix).await?;
+        }
+
+        // 6. Delete collection-level head entries from headstore (uses hash-based short_id)
+        let col_head_prefix = HeadstoreColKey::collection_prefix(short_id);
+        {
+            let opts = IterOptions::new().with_prefix(col_head_prefix.clone());
+            let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
+            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
+                    if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
+                        block_cids.push(cid.to_bytes());
+                    }
+                }
+            }
+            iter.close().await.map_err(Error::Storage)?;
+        }
+        delete_prefix(&headstore, col_head_prefix).await?;
+
+        // 7. Delete blocks from blockstore
+        for cid_bytes in &block_cids {
+            let _ = blockstore.delete(cid_bytes).await;
+        }
+
+        tracing::info!(
+            collection_id = %collection_id,
+            short_id = short_id,
+            doc_count = doc_ids.len(),
+            block_count = block_cids.len(),
+            "Truncated collection"
+        );
+
+        Ok(())
+    }
+
     /// List all collection names using the transaction's cache.
     ///
     /// This loads all collections from the store into the transaction cache
@@ -1144,7 +1311,14 @@ impl<S: Store> DB<S> {
     ///
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
     pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
-        // Find the collection by version_id in the cache
+        // Empty version ID is not allowed
+        if version_id.is_empty() {
+            return Err(Error::Other(
+                "collection version ID can't be empty".to_string(),
+            ));
+        }
+
+        // Find the collection by version_id - first check cache, then search all stored versions
         let (name, mut schema) = {
             let cache = self.collections.read().map_err(|e| {
                 tracing::error!(
@@ -1162,7 +1336,19 @@ impl<S: Store> DB<S> {
                 .find(|(_, c)| c.schema().version_id == version_id)
                 .map(|(n, c)| (n.clone(), c.schema().clone()));
 
-            found.ok_or_else(|| Error::CollectionVersionNotFound(version_id.to_string()))?
+            match found {
+                Some(pair) => pair,
+                None => {
+                    // Not in cache - search all stored versions (including inactive)
+                    drop(cache);
+                    let all_versions = self.get_all_collection_versions().await?;
+                    all_versions
+                        .into_iter()
+                        .find(|v| v.version_id == version_id)
+                        .map(|v| (v.name.clone(), v))
+                        .ok_or_else(|| Error::CollectionVersionNotFound(version_id.to_string()))?
+                }
+            }
         };
 
         // Set is_active to true
@@ -1170,17 +1356,64 @@ impl<S: Store> DB<S> {
 
         // Create transaction and update the schema in the store
         let txn = self.new_txn(false).await?;
-        let key = CollectionNameKey::new(&name);
-        let data = serde_json::to_vec(&schema).map_err(|e| {
-            Error::Serialization(format!(
-                "failed to serialize schema for collection '{}': {}",
-                name, e
-            ))
-        })?;
-        txn.systemstore()?
-            .set(&key.bytes(), &data)
-            .await
-            .map_err(Error::Storage)?;
+        {
+            let systemstore = txn.systemstore()?;
+
+            // Deactivate the currently active version for the same collection_id (if any).
+            // Go's setActiveVersion deactivates the old version before activating the new one.
+            let all_versions = {
+                let mut versions = Vec::new();
+                let prefix = CollectionKey::collection_prefix();
+                let opts = IterOptions::new().with_prefix(prefix);
+                let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
+                while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                    if let Ok(v) = serde_json::from_slice::<CollectionVersion>(&pair.value) {
+                        versions.push((pair.key.to_vec(), v));
+                    }
+                }
+                iter.close().await.map_err(Error::Storage)?;
+                versions
+            };
+
+            for (stored_key, mut old_ver) in all_versions {
+                if old_ver.collection_id == schema.collection_id
+                    && old_ver.is_active
+                    && old_ver.version_id != schema.version_id
+                {
+                    old_ver.is_active = false;
+                    let old_data = serde_json::to_vec(&old_ver).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize old version for deactivation: {}",
+                            e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&stored_key, &old_data)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+            }
+
+            // Store the activated version
+            let version_key = CollectionKey::new(&schema.version_id);
+            let data = serde_json::to_vec(&schema).map_err(|e| {
+                Error::Serialization(format!(
+                    "failed to serialize schema for collection '{}': {}",
+                    name, e
+                ))
+            })?;
+            systemstore
+                .set(&version_key.bytes(), &data)
+                .await
+                .map_err(Error::Storage)?;
+
+            // Update name pointer
+            let name_key = CollectionNameKey::new(&name);
+            systemstore
+                .set(&name_key.bytes(), schema.version_id.as_bytes())
+                .await
+                .map_err(Error::Storage)?;
+        }
         txn.commit().await?;
 
         // Update the cache
@@ -1226,6 +1459,23 @@ impl<S: Store> DB<S> {
             .cloned())
     }
 
+    /// Get a collection by version ID, searching both cache and KV store.
+    async fn get_collection_by_version_id_full(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<Collection>> {
+        // Check cache first
+        if let Some(c) = self.get_collection_by_version_id(version_id)? {
+            return Ok(Some(c));
+        }
+        // Search all stored versions (including inactive)
+        let all_versions = self.get_all_collection_versions().await?;
+        Ok(all_versions
+            .into_iter()
+            .find(|v| v.version_id == version_id)
+            .map(Collection::new))
+    }
+
     /// Get all collection versions from storage (active and inactive).
     ///
     /// This scans `/collection/id/` prefix to load ALL versions, matching
@@ -1259,6 +1509,22 @@ impl<S: Store> DB<S> {
         Ok(versions)
     }
 
+    /// Check if a collection has any documents in the datastore.
+    async fn collection_has_data(&self, collection_id: &str) -> Result<bool> {
+        let txn = self.new_txn(true).await?;
+        let has_data = {
+            let datastore = txn.datastore()?;
+            let doc_prefix = format!("/d/{}/", collection_id);
+            let opts = IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
+            let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
+            let has_any = iter.next().await.map_err(Error::Storage)?.is_some();
+            iter.close().await.map_err(Error::Storage)?;
+            has_any
+        };
+        let _ = txn.discard();
+        Ok(has_data)
+    }
+
     /// Patch a collection's schema using JSON patch operations.
     ///
     /// This creates a new schema version with a new version_id (CID) and links
@@ -1288,13 +1554,16 @@ impl<S: Store> DB<S> {
         let patch_ops: serde_json::Value =
             serde_json::from_str(patch).map_err(|e| Error::InvalidPatch(e.to_string()))?;
 
-        // Get the current schema - try by name first, then by version ID, then
-        // check for collection-level move/copy targeting a non-existent collection
+        // Get the current schema - try by name first, then by version ID (including KV store),
+        // then check for collection-level move/copy targeting a non-existent collection
         let collection = match self.get_collection(collection_name)? {
             Some(c) => c,
             None => {
-                // Try looking up by version ID (tests use CIDs as collection identifiers)
-                match self.get_collection_by_version_id(collection_name)? {
+                // Try looking up by version ID - search both cache and KV store
+                match self
+                    .get_collection_by_version_id_full(collection_name)
+                    .await?
+                {
                     Some(c) => c,
                     None => {
                         // Collection not found by name or version ID.
@@ -1312,6 +1581,13 @@ impl<S: Store> DB<S> {
         let actual_name = old_schema.name.clone();
         let old_version_id = old_schema.version_id.clone();
         let collection_id = old_schema.collection_id.clone();
+
+        // Collect known collection names for Kind validation
+        let known_collection_names: Vec<String> = self
+            .list_collections()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         // Apply the patch to the schema JSON
         let mut schema_json = serde_json::to_value(&old_schema).map_err(|e| {
@@ -1340,6 +1616,11 @@ impl<S: Store> DB<S> {
             None
         };
 
+        // Track whether the patch deactivates this collection or explicitly changes IsActive.
+        // These require in-place updates rather than new version creation.
+        let mut is_deactivation = false;
+        let mut is_active_explicitly_set = false;
+
         if let serde_json::Value::Array(ops) = patch_ops {
             for op in ops {
                 let operation = op.get("op").and_then(|v| v.as_str());
@@ -1347,15 +1628,22 @@ impl<S: Store> DB<S> {
                 let value = op.get("value");
 
                 // Strip collection name/version prefix from path if present (Go compatibility)
-                let path = raw_path.map(|p| {
-                    let stripped = Self::strip_collection_prefix(
+                let stripped_path = raw_path.map(|p| {
+                    Self::strip_collection_prefix(
                         p,
                         &collection_prefix,
                         actual_name_prefix.as_deref(),
-                    );
-                    // Go compatibility: substitute field names for indices in /Fields/<name> paths
-                    Self::substitute_field_name_in_path(&stripped, &schema_json)
+                    )
                 });
+
+                // Extract field name from path before substitution (for name mismatch validation)
+                let field_name_from_path = stripped_path
+                    .as_deref()
+                    .and_then(|p| Self::extract_field_name_from_path(p));
+
+                // Go compatibility: substitute field names for indices in /Fields/<name> paths
+                let path =
+                    stripped_path.map(|p| Self::substitute_field_name_in_path(&p, &schema_json));
 
                 match (operation, path.as_deref()) {
                     (Some("replace"), Some(path)) | (Some("add"), Some(path)) => {
@@ -1368,10 +1656,89 @@ impl<S: Store> DB<S> {
                             })?
                             .clone();
 
-                        // Go compatibility: auto-generate FieldID when adding new fields
+                        // Go compatibility: root-level add/replace is "adding collections"
+                        if path == "/" {
+                            let name = value
+                                .as_object()
+                                .and_then(|m| m.get("Name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or(&actual_name);
+                            return Err(Error::InvalidPatch(format!(
+                                "adding collections via patch is not supported. Name: {}",
+                                name
+                            )));
+                        }
+
+                        // Track explicit IsActive changes for in-place update handling
+                        if path == "/IsActive" {
+                            is_active_explicitly_set = true;
+                        }
+
+                        // Go compatibility: validate VersionID replacement
+                        if path.ends_with("/VersionID") {
+                            let version_id_str = value.as_str().unwrap_or("");
+                            if version_id_str.is_empty() {
+                                return Err(Error::InvalidPatch(
+                                    "collection ID cannot be empty".to_string(),
+                                ));
+                            }
+                            // Validate CID format
+                            if cid::Cid::try_from(version_id_str).is_err() {
+                                return Err(Error::InvalidPatch(format!(
+                                    "invalid cid: selected encoding not supported. VersionID: {}",
+                                    version_id_str
+                                )));
+                            }
+                            // Check if this CID exists as a known collection version
+                            let all_versions =
+                                self.get_all_collection_versions().await.unwrap_or_default();
+                            let is_known =
+                                all_versions.iter().any(|c| c.version_id == version_id_str);
+                            if !is_known {
+                                return Err(Error::InvalidPatch(
+                                    "unknown CID, collection ids cannot be manually defined"
+                                        .to_string(),
+                                ));
+                            }
+                            // Known CIDs proceed - sources/ownership validation
+                            // is handled by definition_validation post-patch.
+                        }
+
+                        // Go compatibility: validate and auto-generate FieldID when adding new fields
                         // If path ends with /Fields/- or /Fields/<n> and value has Name but no FieldID
                         if path.contains("/Fields/") {
                             if let serde_json::Value::Object(ref mut map) = value {
+                                // Validate field name matches path index name (Go compatibility)
+                                if let Some(ref path_name) = field_name_from_path {
+                                    if let Some(value_name) =
+                                        map.get("Name").and_then(|n| n.as_str())
+                                    {
+                                        if !value_name.is_empty()
+                                            && value_name != path_name.as_str()
+                                        {
+                                            return Err(Error::InvalidPatch(format!(
+                                                "the index used does not match the given name. index: {}, name: {}",
+                                                path_name, value_name
+                                            )));
+                                        }
+                                    }
+                                    // If value doesn't have Name, set it from the path
+                                    if !map.contains_key("Name") {
+                                        map.insert(
+                                            "Name".to_string(),
+                                            serde_json::Value::String(path_name.clone()),
+                                        );
+                                    }
+                                }
+
+                                // Validate Kind value for new fields
+                                if let Some(kind_val) = map.get("Kind") {
+                                    Self::validate_patch_field_kind(
+                                        kind_val,
+                                        map.get("Name").and_then(|n| n.as_str()).unwrap_or(""),
+                                        &known_collection_names,
+                                    )?;
+                                }
                                 if map.contains_key("Name") && !map.contains_key("FieldID") {
                                     // Find max existing FieldID to avoid collisions with gaps
                                     let max_field_id = schema_json
@@ -1398,7 +1765,12 @@ impl<S: Store> DB<S> {
                         Self::json_pointer_set(&mut schema_json, path, value)?;
                     }
                     (Some("remove"), Some(path)) => {
-                        Self::json_pointer_remove(&mut schema_json, path)?;
+                        if path == "/" {
+                            // Root-level remove = deactivate collection
+                            is_deactivation = true;
+                        } else {
+                            Self::json_pointer_remove(&mut schema_json, path)?;
+                        }
                     }
                     (Some("test"), Some(path)) => {
                         // RFC 6902 "test" operation: verify value at path equals expected
@@ -1590,6 +1962,153 @@ impl<S: Store> DB<S> {
         let mut new_schema: CollectionVersion = serde_json::from_value(schema_json)
             .map_err(|e| Error::InvalidPatch(format!("invalid resulting schema: {}", e)))?;
 
+        // Go compatibility: check for removed/empty required fields after deserialization.
+        // Go's JSON unmarshaling uses zero values for missing fields; our serde defaults
+        // replicate this. Now check for invalid empty values that indicate patch corruption.
+        if new_schema.version_id.is_empty() {
+            return Err(Error::InvalidPatch(
+                "invalid cid: cid too short. VersionID: ".to_string(),
+            ));
+        }
+
+        // Check for field-level corruption from patches (empty names from removed fields)
+        {
+            let old_field_names: std::collections::HashSet<&str> =
+                old_schema.fields.iter().map(|f| f.name.as_str()).collect();
+            let mut field_errors = Vec::new();
+
+            for field in &new_schema.fields {
+                if field.name.is_empty() {
+                    if old_field_names.contains("") {
+                        // This shouldn't happen - old field shouldn't have empty name
+                        field_errors.push(
+                            "Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but '' was found"
+                                .to_string(),
+                        );
+                    } else {
+                        // A field name was removed by the patch
+                        field_errors.push(
+                            "mutating an existing field is not supported. ProposedName: "
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
+            if !field_errors.is_empty() {
+                return Err(Error::InvalidPatch(field_errors.join("\n")));
+            }
+        }
+
+        // Handle in-place updates (deactivation or IsActive-only changes).
+        // These don't create a new schema version - they update the existing one.
+        let is_isactive_only_change = is_active_explicitly_set
+            && new_schema.fields == old_schema.fields
+            && new_schema.name == old_schema.name;
+
+        if is_deactivation || is_isactive_only_change {
+            if is_deactivation {
+                new_schema.is_active = false;
+            }
+            // Keep original version_id and previous_version
+            new_schema.version_id = old_version_id.clone();
+            new_schema.previous_version = old_schema.previous_version.clone();
+
+            // Validate: can't remove a version that is a dependency of another version
+            // This check runs always for deactivation (even if already inactive),
+            // matching Go's validateCollectionDoesNotHaveHigherVersion
+            if is_deactivation {
+                let all_versions = self.get_all_collection_versions().await?;
+                for other in &all_versions {
+                    if let Some(ref prev) = other.previous_version {
+                        if prev.source_collection_id == old_version_id {
+                            return Err(Error::InvalidPatch(
+                                "cannot delete a version that is used by a newer version, first delete the new version".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Validate: can't remove a collection that has documents (only on active→inactive)
+            if !new_schema.is_active && old_schema.is_active {
+                let has_data = self.collection_has_data(&collection_id).await?;
+                if has_data {
+                    return Err(Error::InvalidPatch(
+                        "cannot delete a collection that has documents, first delete the documents and then delete the version".to_string(),
+                    ));
+                }
+            }
+
+            // Run cross-collection validators to catch issues like multiple active versions
+            let all_existing = self.get_all_collection_versions().await?;
+            let new_collections: Vec<CollectionVersion> = all_existing
+                .iter()
+                .filter(|c| c.version_id != old_version_id)
+                .cloned()
+                .chain(std::iter::once(new_schema.clone()))
+                .collect();
+            crate::definition_validation::validate_collection_changes(
+                &all_existing,
+                &new_collections,
+            )
+            .map_err(Error::InvalidPatch)?;
+
+            // Store the updated version
+            let txn = self.new_txn(false).await?;
+            {
+                let systemstore = txn.systemstore()?;
+                let key = CollectionKey::new(&old_version_id);
+                let data = serde_json::to_vec(&new_schema).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to serialize updated schema version '{}': {}",
+                        old_version_id, e
+                    ))
+                })?;
+                systemstore
+                    .set(&key.bytes(), &data)
+                    .await
+                    .map_err(Error::Storage)?;
+
+                // Update name pointer based on activation state
+                let name_key = CollectionNameKey::new(&actual_name);
+                if new_schema.is_active {
+                    systemstore
+                        .set(&name_key.bytes(), old_version_id.as_bytes())
+                        .await
+                        .map_err(Error::Storage)?;
+                } else {
+                    systemstore
+                        .delete(&name_key.bytes())
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+            }
+            txn.commit().await?;
+
+            // Update cache
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during in-place update");
+                Error::CacheUpdateFailedAfterCommit(actual_name.clone())
+            })?;
+            if new_schema.is_active {
+                cache.insert(actual_name.clone(), Collection::new(new_schema.clone()));
+            } else {
+                cache.remove(&actual_name);
+            }
+
+            tracing::info!(
+                collection = %actual_name,
+                version = %old_version_id,
+                is_active = new_schema.is_active,
+                "Updated collection version in place"
+            );
+
+            return Ok(new_schema);
+        }
+
+        // --- Normal path: create a new schema version ---
+
         // Go compatibility: default new fields with CType::None to CType::LwwRegister.
         // Go's patchCollection does this in collection_define.go for new fields that
         // don't have an explicit CRDT type. This must happen before CID generation.
@@ -1635,6 +2154,27 @@ impl<S: Store> DB<S> {
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
         new_schema.previous_version = Some(CollectionSource::new(&old_version_id));
+
+        // Check for pending migrations targeting this new version
+        {
+            let pending = self.pending_migrations.read().map_err(|e| {
+                tracing::error!(error = ?e, "Pending migrations lock poisoned");
+                Error::LockPoisoned(
+                    "pending migrations lock poisoned during patch_collection".into(),
+                )
+            })?;
+            if let Some((_source_id, transform_id)) = pending.get(&new_version_id) {
+                if let Some(ref mut prev) = new_schema.previous_version {
+                    prev.transform = Some(transform_id.clone());
+                    tracing::debug!(
+                        new_version = %new_version_id,
+                        transform_id = %transform_id,
+                        "Linked pending migration to new schema version"
+                    );
+                }
+            }
+        }
+
         new_schema.is_active = true;
 
         // Create old schema copy with is_active = false for storage
@@ -1708,6 +2248,15 @@ impl<S: Store> DB<S> {
 
         txn.commit().await?;
 
+        // Clean up any pending migration that was linked to this version
+        {
+            let mut pending = self.pending_migrations.write().map_err(|e| {
+                tracing::error!(error = ?e, "Pending migrations lock poisoned during cleanup");
+                Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
+            })?;
+            pending.remove(&new_version_id);
+        }
+
         // Update cache with new schema
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(
@@ -1727,12 +2276,11 @@ impl<S: Store> DB<S> {
 
     /// Generate a version ID (CID) from schema content during patching.
     ///
-    /// This generates a CID compatible with Go DefraDB's block-based approach:
-    /// - Existing fields (present in old_schema) reuse their existing CID (field.id)
-    /// - New fields get CIDs generated with priority = version_depth + 1
-    /// - The collection block uses the same priority as new fields
-    ///
-    /// Also updates field.id on new fields to their generated CID string.
+    /// Matches Go DefraDB's saveBlocks() behavior:
+    /// - Existing fields (present in old_schema) are SKIPPED entirely
+    /// - Only NEW fields get CIDs generated with priority=1 (empty headstore)
+    /// - The collection block gets priority=version_depth+1, heads=[old_version_CID],
+    ///   and links containing only new field CIDs
     fn generate_patch_version_id(
         schema: &mut CollectionVersion,
         old_schema: &CollectionVersion,
@@ -1742,28 +2290,35 @@ impl<S: Store> DB<S> {
         use sha2::{Digest, Sha256};
         use std::str::FromStr;
 
-        let new_priority = version_depth + 1;
+        let collection_priority = version_depth + 1;
 
-        // Build map of old field names → field.id (CID string) for reuse
-        let old_field_ids: std::collections::HashMap<&str, &str> = old_schema
+        // Build set of old field names for detecting which fields are new
+        let old_field_names: std::collections::HashSet<&str> = old_schema
             .fields
             .iter()
             .filter(|f| !f.id.is_empty())
-            .map(|f| (f.name.as_str(), f.id.as_str()))
+            .map(|f| f.name.as_str())
             .collect();
 
-        // Sort fields for deterministic ordering: _docID first, then alphabetically
-        // Include all fields with non-empty FieldID in the CID.
-        // Self-ref relation objects (both primary and secondary) have field IDs.
-        // Non-self-ref secondary relations have empty IDs and are excluded.
-        let field_indices: Vec<usize> = {
+        // Go's saveBlocks skips fields that already have a FieldID (existing fields).
+        // Only NEW fields (not in old_schema) get CID generation and DAGLink inclusion.
+        // Go also skips secondary relation fields (those have empty FieldID in old schema too,
+        // but Delta returns hasFieldChanged=false for them).
+        let new_field_indices: Vec<usize> = {
             let mut indices: Vec<usize> = schema
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| !f.id.is_empty())
+                .filter(|(_, f)| {
+                    // New field: not in old schema and not a secondary relation
+                    // (secondary relations have relation_name set and is_primary=false)
+                    let is_new = !old_field_names.contains(f.name.as_str());
+                    let is_secondary_relation = f.relation_name.is_some() && !f.is_primary;
+                    is_new && !is_secondary_relation
+                })
                 .map(|(i, _)| i)
                 .collect();
+            // Sort: _docID first, then alphabetically
             indices.sort_by(|&a, &b| {
                 let fa = &schema.fields[a];
                 let fb = &schema.fields[b];
@@ -1778,30 +2333,35 @@ impl<S: Store> DB<S> {
             indices
         };
 
-        // Generate CIDs for each field
+        // Generate CIDs only for NEW fields with priority=1 (matching Go's empty headstore)
         let mut field_cids: Vec<Cid> = Vec::new();
-        for &idx in &field_indices {
+        for &idx in &new_field_indices {
             let field = &schema.fields[idx];
-            let field_name = field.name.as_str();
-
-            // Try to reuse existing field CID from old schema
-            if let Some(&old_id) = old_field_ids.get(field_name) {
-                if let Ok(cid) = Cid::from_str(old_id) {
+            match schema::generate_field_cid_with_priority(field, 1) {
+                Ok(cid) => {
+                    schema.fields[idx].id = cid.to_string();
                     field_cids.push(cid);
-                    continue;
                 }
-            }
-
-            // New field: generate CID with new_priority
-            if let Ok(cid) = schema::generate_field_cid_with_priority(field, new_priority) {
-                schema.fields[idx].id = cid.to_string();
-                field_cids.push(cid);
+                Err(_e) => {}
             }
         }
 
-        // Generate collection CID with new_priority
-        match schema::generate_collection_cid_with_priority(&schema.name, &field_cids, new_priority)
-        {
+        // Generate collection CID with old version as head.
+        // Go's Delta only includes name when it changed. For field-only patches, name=None.
+        let name_changed = schema.name != old_schema.name;
+        let collection_name = if name_changed {
+            Some(schema.name.as_str())
+        } else {
+            None
+        };
+        let old_version_cid = Cid::from_str(&old_schema.version_id).ok();
+        let collection_heads: Vec<Cid> = old_version_cid.into_iter().collect();
+        match schema::generate_collection_cid_full(
+            collection_name,
+            &field_cids,
+            collection_priority,
+            &collection_heads,
+        ) {
             Ok(cid) => cid.to_string(),
             Err(_) => {
                 // Fallback to simple hash if CID generation fails
@@ -1826,6 +2386,76 @@ impl<S: Store> DB<S> {
     /// Handles both the collection_name prefix (e.g., "/Users/") and the
     /// actual_name prefix (when looked up by version ID, the passed-in name
     /// differs from the real collection name).
+    /// Validate a Kind value in a patch field addition.
+    /// Returns error if the Kind is an unsupported numeric value or unknown string.
+    fn validate_patch_field_kind(
+        kind_val: &serde_json::Value,
+        field_name: &str,
+        known_collections: &[String],
+    ) -> Result<()> {
+        match kind_val {
+            serde_json::Value::Number(n) => {
+                let kind_num = n.as_u64().unwrap_or(0) as u8;
+                // Valid numeric kinds: 1-14, 18-22 (0 is None, only for internal _docID)
+                let valid = matches!(
+                    kind_num,
+                    1..=14 | 18..=22
+                );
+                if !valid {
+                    return Err(Error::InvalidPatch(format!(
+                        "no type found for given name. Type: {}",
+                        kind_num
+                    )));
+                }
+                Ok(())
+            }
+            serde_json::Value::String(s) => {
+                // Known string kinds
+                let known = matches!(
+                    s.as_str(),
+                    "ID" | "Boolean"
+                        | "Int"
+                        | "DateTime"
+                        | "Float"
+                        | "Float64"
+                        | "Float32"
+                        | "String"
+                        | "Blob"
+                        | "JSON"
+                        | "[Boolean]"
+                        | "[Boolean!]"
+                        | "[Int]"
+                        | "[Int!]"
+                        | "[Float]"
+                        | "[Float64]"
+                        | "[Float!]"
+                        | "[Float64!]"
+                        | "[Float32]"
+                        | "[Float32!]"
+                        | "[String]"
+                        | "[String!]"
+                        | "Self"
+                        | "[Self]"
+                );
+                if !known {
+                    // Could be a collection name reference (e.g., "Users", "[Users]").
+                    let ref_name = s
+                        .strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(']'))
+                        .unwrap_or(s.as_str());
+                    if !known_collections.iter().any(|c| c == ref_name) {
+                        return Err(Error::InvalidPatch(format!(
+                            "no type found for given name. Field: {}, Kind: {}",
+                            field_name, s
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn strip_collection_prefix(
         path: &str,
         collection_prefix: &str,
@@ -1833,14 +2463,26 @@ impl<S: Store> DB<S> {
     ) -> String {
         if path.starts_with(collection_prefix) {
             format!("/{}", &path[collection_prefix.len()..])
-        } else if let Some(anp) = actual_name_prefix {
-            if path.starts_with(anp) {
-                format!("/{}", &path[anp.len()..])
+        } else {
+            // Also handle exact match without trailing slash (collection-level operations).
+            // E.g., path="/Users" with prefix="/Users/" → "/"
+            let exact = collection_prefix.trim_end_matches('/');
+            if path == exact {
+                return "/".to_string();
+            }
+            if let Some(anp) = actual_name_prefix {
+                if path.starts_with(anp) {
+                    format!("/{}", &path[anp.len()..])
+                } else {
+                    let anp_exact = anp.trim_end_matches('/');
+                    if path == anp_exact {
+                        return "/".to_string();
+                    }
+                    path.to_string()
+                }
             } else {
                 path.to_string()
             }
-        } else {
-            path.to_string()
         }
     }
 
@@ -1856,6 +2498,22 @@ impl<S: Store> DB<S> {
         collection_name: &str,
         patch_ops: &serde_json::Value,
     ) -> Result<CollectionVersion> {
+        // Try to extract the actual collection name from the patch value's Name field.
+        // This handles cases like path "/-" where the collection name in the path is "-"
+        // but the actual name is in the value object.
+        let effective_name = if let serde_json::Value::Array(ops) = patch_ops {
+            ops.iter()
+                .find_map(|op| {
+                    op.get("value")
+                        .and_then(|v| v.get("Name"))
+                        .and_then(|n| n.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| collection_name.to_string())
+        } else {
+            collection_name.to_string()
+        };
+
         if let serde_json::Value::Array(ops) = patch_ops {
             // Look for move/copy operations to determine if this is a routing issue
             for op in ops {
@@ -1863,11 +2521,11 @@ impl<S: Store> DB<S> {
                 let from_raw = op.get("from").and_then(|v| v.as_str());
 
                 match operation {
-                    Some("copy") => {
-                        // Collection-level copy is not supported
+                    Some("copy") | Some("add") | Some("replace") => {
+                        // Adding/replacing collections via patch is not supported
                         return Err(Error::InvalidPatch(format!(
                             "adding collections via patch is not supported. Name: {}",
-                            collection_name,
+                            effective_name,
                         )));
                     }
                     Some("move") => {
@@ -1885,8 +2543,11 @@ impl<S: Store> DB<S> {
             }
         }
 
-        // No move/copy fallback found - truly not found
-        Err(Error::CollectionNotFound(collection_name.to_string()))
+        // No recognized operation - adding collections via patch is not supported
+        Err(Error::InvalidPatch(format!(
+            "adding collections via patch is not supported. Name: {}",
+            effective_name,
+        )))
     }
 
     /// Helper: Set a value at a JSON pointer path.
@@ -2023,6 +2684,22 @@ impl<S: Store> DB<S> {
         Err(Error::InvalidPatch("failed to remove value".to_string()))
     }
 
+    /// Extract a field name from a path like `/Fields/email` or `/Fields/email/Name`.
+    /// Returns None if the segment after /Fields/ is numeric, "-", or /Fields/ isn't present.
+    fn extract_field_name_from_path(path: &str) -> Option<String> {
+        let segments: Vec<&str> = path.split('/').collect();
+        for (i, seg) in segments.iter().enumerate() {
+            if *seg == "Fields" && i + 1 < segments.len() {
+                let next = segments[i + 1];
+                if next.parse::<usize>().is_ok() || next == "-" {
+                    return None;
+                }
+                return Some(next.to_string());
+            }
+        }
+        None
+    }
+
     /// Helper: Get a value at a JSON pointer path (for test operation).
     fn json_pointer_get(json: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -2070,7 +2747,7 @@ impl<S: Store> DB<S> {
                 if next_segment.parse::<usize>().is_ok() || next_segment == "-" {
                     result_segments.push(next_segment.to_string());
                 } else {
-                    // It's a field name - look up the index
+                    // It's a field name - look up the index in the existing Fields array
                     if let Some(fields) = schema_json.get("Fields").and_then(|f| f.as_array()) {
                         let mut found = false;
                         for (idx, field) in fields.iter().enumerate() {
@@ -2083,11 +2760,12 @@ impl<S: Store> DB<S> {
                             }
                         }
                         if !found {
-                            // Field name not found, keep as-is (will error later)
-                            result_segments.push(next_segment.to_string());
+                            // Field name not found in existing fields - treat as append
+                            // (Go interprets unknown field names as new field additions)
+                            result_segments.push("-".to_string());
                         }
                     } else {
-                        result_segments.push(next_segment.to_string());
+                        result_segments.push("-".to_string());
                     }
                 }
             } else {
@@ -2180,4 +2858,31 @@ impl<S: Store> DB<S> {
             None => Ok(None),
         }
     }
+}
+
+/// Delete all keys matching a prefix from a namespace view.
+async fn delete_prefix(store: &datastore::NamespaceView, prefix: Vec<u8>) -> Result<()> {
+    let opts = IterOptions::new().with_prefix(prefix);
+    let mut iter = store.iterator(opts).await.map_err(Error::Storage)?;
+    let mut keys = Vec::new();
+    while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+        keys.push(pair.key.clone());
+    }
+    iter.close().await.map_err(Error::Storage)?;
+    for key in keys {
+        store.delete(&key).await.map_err(Error::Storage)?;
+    }
+    Ok(())
+}
+
+/// Extract the last path segment from a `/`-separated key as a UTF-8 string.
+/// For key `/d/doc123/C/bafyrei...`, returns `"bafyrei..."`.
+fn extract_last_path_segment_str(key: &[u8]) -> Option<String> {
+    if let Some(pos) = key.iter().rposition(|&b| b == b'/') {
+        let segment = &key[pos + 1..];
+        if !segment.is_empty() {
+            return String::from_utf8(segment.to_vec()).ok();
+        }
+    }
+    None
 }

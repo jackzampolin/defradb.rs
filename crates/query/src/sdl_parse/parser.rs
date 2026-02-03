@@ -293,7 +293,10 @@ impl<'a> SdlParser<'a> {
             }
         }
 
-        // Second pass: resolve relations and build CollectionVersions
+        // Second pass: validate parsed types before building
+        self.validate_types()?;
+
+        // Third pass: resolve relations and build CollectionVersions
         let collections = self.build_collections()?;
 
         Ok(ParseOutput {
@@ -414,7 +417,11 @@ impl<'a> SdlParser<'a> {
                 "crdt" => result.crdt_type = Some(self.parse_crdt_directive(directive)?),
                 "index" => result.index = Some(self.parse_index_directive(directive, field_name)?),
                 "relation" => result.relation_name = get_directive_string(directive, "name"),
-                "default" => result.default_value = Some(self.parse_default_directive(directive)?),
+                "default" => {
+                    let arg_name = directive.arguments.first().map(|(n, _)| n.clone());
+                    result.default_value = Some(self.parse_default_directive(directive, field_name)?);
+                    result.default_arg_name = arg_name;
+                }
                 "constraints" => {
                     if let Some(size) =
                         self.get_int_with_warning(directive, "size", &type_name, Some(field_name))
@@ -648,7 +655,10 @@ impl<'a> SdlParser<'a> {
             "lwwregister" | "lww" | "lww_register" => Ok(CType::LwwRegister),
             "pncounter" | "counter" | "pn_counter" => Ok(CType::PnCounter),
             "pcounter" | "p_counter" => Ok(CType::PCounter),
-            other => Err(QueryError::parse(format!("unknown CRDT type: {}", other))),
+            other => Err(QueryError::parse(format!(
+                "Argument \"type\" has invalid value \"{}\"",
+                other
+            ))),
         }
     }
 
@@ -725,6 +735,7 @@ impl<'a> SdlParser<'a> {
     fn parse_default_directive(
         &self,
         directive: &Directive<'_, String>,
+        field_name: &str,
     ) -> Result<serde_json::Value> {
         // Go supports: string, bool, int, float, float32, float64, dateTime, json, blob
         let Some((name, value)) = directive.arguments.first() else {
@@ -732,6 +743,14 @@ impl<'a> SdlParser<'a> {
                 "@default directive requires a value argument",
             ));
         };
+
+        // Multiple arguments not allowed
+        if directive.arguments.len() > 1 {
+            return Err(QueryError::parse(format!(
+                "default value must specify one argument. Field: {}",
+                field_name
+            )));
+        }
 
         match name.as_str() {
             "string" | "value" => match value {
@@ -890,6 +909,162 @@ impl<'a> SdlParser<'a> {
         result
     }
 
+    /// Validate parsed types before building collections.
+    /// Checks for NonNull fields, one-one relation primary constraints, and default value constraints.
+    fn validate_types(&self) -> Result<()> {
+        let type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
+        let all_type_names: std::collections::HashSet<String> = type_names
+            .iter()
+            .cloned()
+            .chain(self.known_external_types.iter().cloned())
+            .collect();
+
+        for type_def in self.type_defs.values() {
+            for field in &type_def.fields {
+                // NonNull scalar fields are not supported
+                if field.field_type.is_non_null && !field.field_type.is_list {
+                    return Err(QueryError::parse(
+                        "NonNull fields are not currently supported",
+                    ));
+                }
+
+                // NonNull list element types are not supported for relation types (e.g., [Dogs!])
+                // Scalar array types like [Float32!], [Int!], [String!] are allowed
+                if field.field_type.is_list
+                    && field.field_type.element_non_null
+                    && all_type_names.contains(&field.field_type.base_type)
+                {
+                    return Err(QueryError::parse(format!(
+                        "NonNull variants for type are not supported. Type: {}",
+                        field.field_type.base_type
+                    )));
+                }
+
+                // Default value validation
+                if let Some(ref _default_val) = field.directives.default_value {
+                    let base_type = &field.field_type.base_type;
+
+                    // @default not allowed on relation fields
+                    if all_type_names.contains(base_type) {
+                        return Err(QueryError::parse(format!(
+                            "default value is not allowed for this field type. Name: {}, Type: {}",
+                            field.name, base_type
+                        )));
+                    }
+
+                    // @default not allowed on list fields
+                    if field.field_type.is_list {
+                        return Err(QueryError::parse(format!(
+                            "default value is not allowed for this field type. Name: {}, Type: List",
+                            field.name
+                        )));
+                    }
+
+                    // Type mismatch: check @default argument name against field type
+                    if let Some(ref default_arg_name) = field.directives.default_arg_name {
+                        let expected = match base_type.as_str() {
+                            "Boolean" => Some("bool"),
+                            "Int" => Some("int"),
+                            "Float" | "Float64" => Some("float"),
+                            "Float32" => Some("float32"),
+                            "String" => Some("string"),
+                            "DateTime" => Some("dateTime"),
+                            "JSON" => Some("json"),
+                            "Blob" => Some("blob"),
+                            _ => None,
+                        };
+                        if let Some(expected_arg) = expected {
+                            // "value" is a generic alias for "string", always valid for String fields
+                            let arg = default_arg_name.as_str();
+                            if arg != expected_arg
+                                && !(arg == "value" && expected_arg == "string")
+                                && !(arg == "float64" && expected_arg == "float")
+                            {
+                                return Err(QueryError::parse(format!(
+                                    "default value type must match field type. Name: {}, Expected: {}, Actual: {}",
+                                    field.name, expected_arg, arg
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate one-to-one cross-type relation @primary constraints.
+        // Self-referencing relations (User→User) are excluded as they handle
+        // primary/secondary through field-level @primary directives.
+        // Relations with explicit @relation(name:) on both sides using DIFFERENT
+        // names are separate relations and skip this check.
+        {
+            let mut checked_pairs = std::collections::HashSet::new();
+
+            for type_def in self.type_defs.values() {
+                for field in &type_def.fields {
+                    let target = &field.field_type.base_type;
+
+                    // Skip non-relations, array relations, and self-references
+                    if !all_type_names.contains(target)
+                        || field.field_type.is_list
+                        || target == &type_def.name
+                    {
+                        continue;
+                    }
+
+                    // Check if counterpart type has a single-object field pointing back
+                    // that shares the same relation (either no explicit name, or same name)
+                    let counterpart_field = self.type_defs.get(target).and_then(|target_def| {
+                        target_def.fields.iter().find(|f| {
+                            if f.field_type.base_type != type_def.name || f.field_type.is_list {
+                                return false;
+                            }
+                            // If both fields have explicit relation names, they must match
+                            // to be considered part of the same relation
+                            match (&field.directives.relation_name, &f.directives.relation_name) {
+                                (Some(a), Some(b)) => a == b,
+                                _ => true, // At least one has no explicit name → same relation
+                            }
+                        })
+                    });
+
+                    let Some(counter_field) = counterpart_field else {
+                        continue; // Not a one-to-one relation
+                    };
+
+                    // Avoid checking the same pair twice
+                    let pair_key = if type_def.name < *target {
+                        (type_def.name.clone(), target.clone())
+                    } else {
+                        (target.clone(), type_def.name.clone())
+                    };
+                    if !checked_pairs.insert(pair_key) {
+                        continue;
+                    }
+
+                    let this_has_primary = field.directives.is_primary;
+                    let counterpart_has_primary = counter_field.directives.is_primary;
+
+                    // Both sides have @primary → error
+                    if this_has_primary && counterpart_has_primary {
+                        return Err(QueryError::parse(
+                            "relation can only have a single field set as primary",
+                        ));
+                    }
+
+                    // Neither side has @primary → error
+                    if !this_has_primary && !counterpart_has_primary {
+                        return Err(QueryError::parse(format!(
+                            "relation missing field. Object type {}, Field {}",
+                            type_def.name, field.name
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
         // Build collection names set for relation detection, including external types
         let mut type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
@@ -932,6 +1107,9 @@ impl<'a> SdlParser<'a> {
                 let target = &field.field_type.base_type;
                 if !type_names.contains(target) || target == type_name {
                     continue; // Not a relation to another type in schema, or self-ref
+                }
+                if self.known_external_types.contains(target) {
+                    continue; // External type already exists, no CID dependency
                 }
 
                 // Check if this field is PRIMARY (included in CID calculation)
@@ -1277,6 +1455,7 @@ impl<'a> SdlParser<'a> {
         for parsed_field in &type_def.fields {
             let kind = self.resolve_field_kind(
                 &parsed_field.field_type,
+                &parsed_field.name,
                 type_names,
                 &type_def.name,
                 collection_set,
@@ -1559,6 +1738,7 @@ impl<'a> SdlParser<'a> {
     fn resolve_field_kind(
         &self,
         parsed_type: &ParsedType,
+        field_name: &str,
         type_names: &std::collections::HashSet<String>,
         current_type: &str,
         collection_set: &std::collections::HashMap<String, i32>,
@@ -1616,8 +1796,8 @@ impl<'a> SdlParser<'a> {
 
         // Unknown type - error for Go compatibility
         Err(QueryError::parse(format!(
-            "no type found for given name. Name: {}",
-            base
+            "no type found for given name. Field: {}, Kind: {}",
+            field_name, base
         )))
     }
 }
@@ -1881,19 +2061,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_non_null_type() {
+    fn test_parse_non_null_type_returns_error() {
         let sdl = r#"
             type Post {
                 title: String!
             }
         "#;
 
-        let collections = parse_sdl(sdl).unwrap();
-        let post = &collections[0];
-
-        let title_field = post.field_by_name("title").unwrap();
-        // In DefraDB, all fields are nillable. Non-null is only used for array elements.
-        assert_eq!(title_field.kind, FieldKind::string());
+        let result = parse_sdl(sdl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("NonNull fields are not currently supported"),
+            "error should reject NonNull: {}",
+            err
+        );
     }
 
     #[test]
@@ -2514,8 +2696,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("unknown CRDT type"),
-            "error should mention unknown CRDT type: {}",
+            err.contains("Argument \"type\" has invalid value"),
+            "error should mention invalid CRDT type argument: {}",
             err
         );
     }
