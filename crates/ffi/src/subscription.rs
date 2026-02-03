@@ -295,30 +295,39 @@ pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscri
     CloseSubscriptionResult::success()
 }
 
-/// Poll a GraphQL subscription for results (stub - not yet implemented).
+// ============================================================================
+// GraphQL Subscription Stubs (for compatibility with other worktrees)
+// ============================================================================
+
+/// Poll a GraphQL subscription for the next result (stub).
+///
+/// This is a stub function for compatibility with worktrees that have
+/// GraphQL subscription support. Returns an error indicating the feature
+/// is not available.
 ///
 /// # Safety
 ///
-/// `subscription_id` must be a valid null-terminated UTF-8 string.
+/// The subscription_id must be a valid null-terminated C string or null.
 #[no_mangle]
 pub unsafe extern "C" fn poll_graphql_subscription(
-    _subscription_id: *const c_char,
+    _subscription_id: *const std::ffi::c_char,
 ) -> PollSubscriptionResult {
-    // GraphQL subscriptions are not yet implemented
-    PollSubscriptionResult::error("GraphQL subscriptions not yet implemented in Rust FFI")
+    PollSubscriptionResult::error("GraphQL subscriptions not implemented in this build")
 }
 
-/// Close a GraphQL subscription (stub - not yet implemented).
+/// Close a GraphQL subscription (stub).
+///
+/// This is a stub function for compatibility with worktrees that have
+/// GraphQL subscription support.
 ///
 /// # Safety
 ///
-/// `subscription_id` must be a valid null-terminated UTF-8 string.
+/// The subscription_id must be a valid null-terminated C string or null.
 #[no_mangle]
 pub unsafe extern "C" fn close_graphql_subscription(
-    _subscription_id: *const c_char,
+    _subscription_id: *const std::ffi::c_char,
 ) -> CloseSubscriptionResult {
-    // GraphQL subscriptions are not yet implemented
-    CloseSubscriptionResult::error("GraphQL subscriptions not yet implemented in Rust FFI")
+    CloseSubscriptionResult::error("GraphQL subscriptions not implemented in this build")
 }
 
 /// Convert an event message to JSON.

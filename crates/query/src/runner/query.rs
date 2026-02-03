@@ -1897,13 +1897,40 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Execute an encrypted search query (`encrypted_<Collection>`).
     ///
-    /// Fetches all documents, applies _eq filter conditions, and returns
-    /// Go-compatible `[{"docIDs": [...]}]` format.
+    /// Validates encrypted index exists, then fetches documents, applies _eq filter
+    /// conditions, and returns Go-compatible `[{"docIDs": [...]}]` format.
     async fn execute_encrypted_select(
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
     ) -> Result<JsonValue> {
+        // Get collection to check for encrypted indexes
+        let collection = self.get_collection(&select.collection_name).await?;
+
+        // Validate collection has encrypted indexes (Go-compatible error)
+        if collection.encrypted_indexes.is_empty() {
+            return Err(QueryError::internal(
+                "collection has no encrypted indexes",
+            ));
+        }
+
+        // Extract filtered field names and validate they have encrypted indexes
+        if let Some(ref filter) = select.filter {
+            let filtered_fields = filter.referenced_fields();
+            for field_name in &filtered_fields {
+                let has_index = collection
+                    .encrypted_indexes
+                    .iter()
+                    .any(|idx| idx.field_name == *field_name);
+                if !has_index {
+                    return Err(QueryError::internal(format!(
+                        "no encrypted index found for field: {}",
+                        field_name
+                    )));
+                }
+            }
+        }
+
         let docs = fetcher.get_all(&select.collection_name).await?;
 
         let matching_ids: Vec<String> = if let Some(ref filter) = select.filter {
