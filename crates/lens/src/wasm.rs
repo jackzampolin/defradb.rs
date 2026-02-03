@@ -21,7 +21,6 @@ pub struct WasmTransformStore {
     engine: Engine,
     modules: RwLock<HashMap<TransformId, CompiledModule>>,
     configs: RwLock<HashMap<TransformId, LensConfig>>,
-    next_id: std::sync::atomic::AtomicU64,
 }
 
 struct CompiledModule {
@@ -53,7 +52,6 @@ impl WasmTransformStore {
             engine,
             modules: RwLock::new(HashMap::new()),
             configs: RwLock::new(HashMap::new()),
-            next_id: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -179,13 +177,30 @@ impl Default for WasmTransformStore {
 #[async_trait]
 impl TransformStore for WasmTransformStore {
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
+        use sha2::{Digest, Sha256};
+
+        // Compute content-based ID for deduplication (matches Go's IPLD CID approach)
+        // Hash only the lens modules, not the version IDs, so identical lens content
+        // produces the same ID regardless of which versions it's associated with.
+        let lenses_json = serde_json::to_vec(&config.lenses)
+            .map_err(|e| Error::Pipeline(format!("failed to serialize lenses: {}", e)))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&lenses_json);
+        let hash = hasher.finalize();
+        // Use "baf" prefix to mimic CID format, then 16 bytes of hash for uniqueness
+        let id = TransformId::new(format!("baf{}", hex::encode(&hash[..16])));
+
+        // Check if this transform already exists (deduplication)
+        {
+            let modules = self.modules.read();
+            if modules.contains_key(&id) {
+                return Ok(id);
+            }
+        }
+
+        // Load and compile the WASM module
         let first_lens = config.lens().cloned().unwrap_or_default();
         let module = self.load_module(&first_lens)?;
-        let id = TransformId::new(format!(
-            "lens_{}",
-            self.next_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        ));
 
         let compiled = CompiledModule {
             module,
