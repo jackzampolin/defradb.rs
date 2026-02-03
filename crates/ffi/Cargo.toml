@@ -56,7 +56,6 @@ cid.workspace = true
 
 # P2P dependencies
 libp2p = { workspace = true }
-cid.workspace = true
 
 [build-dependencies]
 cbindgen = "0.28"
