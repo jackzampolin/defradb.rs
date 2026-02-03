@@ -3791,7 +3791,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let field_name = &f.name;
                         let output_name = f.output_name();
 
-                        if let Some(value) = commit.get(field_name) {
+                        // Handle __typename specially for commits (Go returns "Commit")
+                        if field_name == "__typename" {
+                            obj.insert(output_name.to_string(), JsonValue::String("Commit".to_string()));
+                        } else if let Some(value) = commit.get(field_name) {
                             let json_value = crate::json_convert::normal_value_to_json(value)
                                 .unwrap_or(JsonValue::Null);
                             obj.insert(output_name.to_string(), json_value);
@@ -3890,8 +3893,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
                                 if let Some(arr) = json_val.as_array() {
                                     // Handle array nested selects (e.g., links { cid }, heads { cid })
+                                    // Apply filter if present (e.g., links(filter: {fieldName: {_eq: "age"}}))
                                     let nested_results: Vec<JsonValue> = arr
                                         .iter()
+                                        .filter(|item| {
+                                            // Apply nested filter if present
+                                            if let Some(ref filter) = nested.filter {
+                                                Self::matches_json_filter(item, filter)
+                                            } else {
+                                                true
+                                            }
+                                        })
                                         .map(|item: &JsonValue| {
                                             let mut nested_obj = serde_json::Map::new();
                                             for nested_field in &nested.fields {
@@ -4010,6 +4022,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 )
             }
         }
+    }
+
+    /// Check if a JSON value matches a filter.
+    /// Used for filtering nested arrays like links and heads in commit queries.
+    fn matches_json_filter(value: &JsonValue, filter: &crate::Filter) -> bool {
+        filter.matches_json_object(value).unwrap_or(false)
     }
 
     /// Build a DocumentMapping for commit fields.

@@ -671,3 +671,6 @@ mod tests {
         node_close(node);
     }
 }
+
+// Stub implementations for encrypted index operations (not yet supported)
+
