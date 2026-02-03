@@ -128,16 +128,19 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Create event bus for subscriptions
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
 
-        // Generate or load node identity for signing (matches new_node behavior)
+        // Generate or load node identity BEFORE opening database so it can be passed via options.
         let (raw_identity_opt, node_identity_did) = if enable_signing {
+            // Check if a signing key was provided by the caller
             let raw_identity = if !options.signing_private_key.is_null()
                 && options.signing_private_key_len > 0
             {
-                let key_bytes = std::slice::from_raw_parts(
-                    options.signing_private_key,
-                    options.signing_private_key_len,
-                );
-                let key_type = crate::types::c_str_to_string(options.signing_key_type)
+                let key_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        options.signing_private_key,
+                        options.signing_private_key_len,
+                    )
+                };
+                let key_type = unsafe { crate::types::c_str_to_string(options.signing_key_type) }
                     .unwrap_or_else(|| "secp256k1".to_string());
 
                 match key_type.as_str() {
@@ -160,6 +163,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     }
                 }
             } else {
+                // Auto-generate secp256k1 key
                 let private_key = crypto::generate_secp256k1()
                     .map_err(|e| format!("failed to generate node signing key: {}", e))?;
                 identity::RawIdentity::from_secp256k1(private_key)
@@ -172,12 +176,13 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let did_str = did.to_string();
 
             let key_type = if !options.signing_private_key.is_null() {
-                crate::types::c_str_to_string(options.signing_key_type)
+                unsafe { crate::types::c_str_to_string(options.signing_key_type) }
                     .unwrap_or_else(|| "secp256k1".to_string())
             } else {
                 "secp256k1".to_string()
             };
 
+            // Store in global identity store so exec_request can look up the signing config
             defra_core::signing::store_identity(
                 &did_str,
                 defra_core::signing::SigningConfig {
