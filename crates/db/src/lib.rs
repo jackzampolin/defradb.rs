@@ -44,6 +44,8 @@
 /// ```
 #[cfg(feature = "p2p")]
 pub mod acp_merge_handler;
+#[cfg(feature = "p2p")]
+pub mod head_provider;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod block_builder;
@@ -105,6 +107,8 @@ pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
+#[cfg(feature = "p2p")]
+pub use head_provider::DbHeadProvider;
 #[cfg(feature = "p2p")]
 pub use merge_handler::{DbMergeHandler, MergeError};
 #[cfg(feature = "p2p")]

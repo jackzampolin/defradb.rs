@@ -174,6 +174,13 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Send a DocSync request via two-stream protocol.
+    SendDocSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::DocSyncRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     PeerAddresses {
         response: oneshot::Sender<Vec<String>>,
@@ -250,6 +257,12 @@ pub enum HostEvent {
     DocSyncRequest {
         peer_id: PeerId,
         request: crate::message::DocSyncRequest,
+    },
+
+    /// Received a DocSync reply via two-stream protocol.
+    DocSyncReply {
+        peer_id: PeerId,
+        reply: crate::message::DocSyncReply,
     },
 }
 
@@ -654,6 +667,27 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send a DocSync request via two-stream protocol.
+    ///
+    /// The request is sent asynchronously. The response will arrive as a
+    /// HostEvent::DocSyncReply which the coordinator will handle.
+    pub async fn send_doc_sync_request(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::DocSyncRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendDocSyncRequest {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     pub async fn peer_addresses(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -906,6 +940,27 @@ impl<S: Store> P2PHost<S> {
                     );
                 } else {
                     info!(peer_id = %peer_id, "Forwarded DocSyncRequest event to coordinator");
+                }
+            }
+            TwoStreamEvent::DocSyncReply { peer_id, reply } => {
+                info!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    results_count = reply.results.len(),
+                    "Host received DocSync reply via two-stream protocol"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::DocSyncReply { peer_id, reply })
+                    .await
+                    .is_err()
+                {
+                    error!(
+                        peer_id = %peer_id,
+                        "Failed to send DocSyncReply event - receiver dropped"
+                    );
+                } else {
+                    info!(peer_id = %peer_id, "Forwarded DocSyncReply event to coordinator");
                 }
             }
             TwoStreamEvent::DecodeError { peer_id, error } => {
@@ -1349,6 +1404,22 @@ impl<S: Store> P2PHost<S> {
                     let result = h.send_doc_sync_response(peer_id, reply).await.map_err(|e| e);
                     if response.send(result).is_err() {
                         debug!(peer_id = %peer_id, "SendDocSyncResponse command response dropped - caller cancelled");
+                    }
+                });
+            }
+
+            HostCommand::SendDocSyncRequest {
+                peer_id,
+                request,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    // Send the request - response will arrive asynchronously via TwoStreamEvent::DocSyncReply
+                    let result = h.send_doc_sync_request_fire_and_forget(peer_id, request).await;
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendDocSyncRequest command response dropped - caller cancelled");
                     }
                 });
             }

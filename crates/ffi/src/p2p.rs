@@ -160,11 +160,22 @@ pub unsafe extern "C" fn new_node_with_p2p(
             }
         }
 
+        // Create head provider for DocSync responses
+        let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
+            Arc::new(db::DbHeadProvider::new(database.clone()));
+
         // Create SyncCoordinator for processing incoming P2P sync messages
-        let (coordinator, sync_events_rx) =
-            SyncCoordinator::new(handle.clone(), blockstore.clone(), SyncConfig::default())
-                .await
-                .map_err(|e| format!("failed to create sync coordinator: {}", e))?;
+        let (coordinator, sync_events_rx) = SyncCoordinator::with_head_provider(
+            handle.clone(),
+            blockstore.clone(),
+            SyncConfig::default(),
+            p2p::bitswap::AccessMode::Open,
+            Arc::new(p2p::bitswap::ReplicatorRegistry::new()),
+            Arc::new(p2p::sync::NoOpCollectionStorage),
+            head_provider,
+        )
+        .await
+        .map_err(|e| format!("failed to create sync coordinator: {}", e))?;
         let coordinator = Arc::new(coordinator);
 
         // Create DbMergeHandler for merging CRDT blocks into the database

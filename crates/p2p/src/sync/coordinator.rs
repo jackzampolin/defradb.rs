@@ -90,6 +90,7 @@ use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
 
 use super::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
+use super::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
 
 /// Result of setting a replicator with auto-subscribe.
 #[derive(Debug, Clone)]
@@ -159,6 +160,9 @@ pub struct SyncCoordinator<B: Blockstore> {
 
     /// Persistent storage for P2P collection subscriptions
     collection_store: Arc<dyn P2PCollectionStorage>,
+
+    /// Document head provider for DocSync responses
+    head_provider: Arc<dyn DocumentHeadProvider>,
 }
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
@@ -239,6 +243,40 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         replicators: Arc<ReplicatorRegistry>,
         collection_store: Arc<dyn P2PCollectionStorage>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
+        Self::with_head_provider(
+            host,
+            blockstore,
+            config,
+            access_mode,
+            replicators,
+            collection_store,
+            Arc::new(NoOpHeadProvider),
+        )
+        .await
+    }
+
+    /// Create a new sync coordinator with a document head provider for DocSync.
+    ///
+    /// Returns the coordinator and a receiver for sync events.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - Handle to the P2P host
+    /// * `blockstore` - Shared blockstore for storing blocks
+    /// * `config` - Sync configuration
+    /// * `access_mode` - Access control mode (Open or Controlled)
+    /// * `replicators` - Registry of authorized replicator peers
+    /// * `collection_store` - Persistent storage for P2P collection subscriptions
+    /// * `head_provider` - Provider for document head CIDs (for DocSync responses)
+    pub async fn with_head_provider(
+        host: P2PHostHandle,
+        blockstore: Arc<B>,
+        config: SyncConfig,
+        access_mode: AccessMode,
+        replicators: Arc<ReplicatorRegistry>,
+        collection_store: Arc<dyn P2PCollectionStorage>,
+        head_provider: Arc<dyn DocumentHeadProvider>,
+    ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         let local_peer_id = host.local_peer_id().await?.to_string();
         let broadcaster = Broadcaster::new(host.clone());
         let peer_state = Arc::new(PeerStateTracker::new());
@@ -257,6 +295,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     std::collections::HashSet::new(),
                 )),
                 collection_store,
+                head_provider,
             },
             events,
         ))
@@ -678,10 +717,38 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     "Received DocSync request"
                 );
 
-                // Build results for each requested document
-                // Note: In a full implementation, we would query the headstore for each doc_id
-                // For now, we return an empty result set since we don't have DB access here
-                let results: Vec<DocSyncItem> = Vec::new();
+                // Build results for each requested document by querying the headstore
+                let mut results: Vec<DocSyncItem> = Vec::new();
+                for doc_id in &request.doc_ids {
+                    match self.head_provider.get_document_heads(doc_id).await {
+                        Ok(heads) => {
+                            if !heads.is_empty() {
+                                tracing::debug!(
+                                    doc_id = %doc_id,
+                                    head_count = heads.len(),
+                                    "Found document heads for DocSync response"
+                                );
+                                results.push(DocSyncItem {
+                                    doc_id: doc_id.clone(),
+                                    heads: heads.iter().map(|cid| cid.to_bytes()).collect(),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                doc_id = %doc_id,
+                                error = %e,
+                                "Failed to get document heads for DocSync"
+                            );
+                        }
+                    }
+                }
+
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    result_count = results.len(),
+                    "Sending DocSync response"
+                );
 
                 let mut reply = DocSyncReply::success(&request.metadata.message_id, results);
 
@@ -707,6 +774,88 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                         peer_id = %peer_id,
                         "Sent DocSync response"
                     );
+                }
+            }
+            HostEvent::DocSyncReply { peer_id, reply } => {
+                // Handle incoming DocSync reply - fetch missing blocks via Bitswap
+                tracing::info!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    results_count = reply.results.len(),
+                    "Processing DocSync reply"
+                );
+
+                // Collect all head CIDs from the reply
+                let mut cids_to_fetch: Vec<Cid> = Vec::new();
+                for item in &reply.results {
+                    for head_bytes in &item.heads {
+                        match Cid::try_from(head_bytes.as_slice()) {
+                            Ok(cid) => {
+                                // Check if we already have this block
+                                match self.manager.blockstore().has(&cid).await {
+                                    Ok(true) => {
+                                        tracing::debug!(
+                                            cid = %cid,
+                                            doc_id = %item.doc_id,
+                                            "Already have block, skipping fetch"
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        tracing::debug!(
+                                            cid = %cid,
+                                            doc_id = %item.doc_id,
+                                            "Need to fetch block via Bitswap"
+                                        );
+                                        cids_to_fetch.push(cid);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            cid = %cid,
+                                            error = %e,
+                                            "Failed to check if block exists"
+                                        );
+                                        // Still try to fetch
+                                        cids_to_fetch.push(cid);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    doc_id = %item.doc_id,
+                                    error = %e,
+                                    "Failed to parse CID from DocSync reply"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if !cids_to_fetch.is_empty() {
+                    tracing::info!(
+                        cid_count = cids_to_fetch.len(),
+                        "Initiating Bitswap fetch for DocSync blocks"
+                    );
+
+                    // Use Bitswap to fetch the blocks - the blocks will be stored
+                    // via BitswapBlockReceived events and merged via the replication loop
+                    // Each head CID is a DAG root that we need to fetch
+                    for root_cid in &cids_to_fetch {
+                        // Start with the root CID as the missing CID to fetch
+                        // Bitswap will handle fetching child blocks as needed
+                        if let Err(e) = self
+                            .host
+                            .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                cid = %root_cid,
+                                "Failed to initiate Bitswap sync for DocSync CID"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!("No blocks to fetch from DocSync reply (all local)");
                 }
             }
             other => {
