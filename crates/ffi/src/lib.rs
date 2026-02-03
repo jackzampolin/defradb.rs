@@ -38,6 +38,7 @@ pub mod backup;
 pub mod block;
 pub mod collection;
 pub mod document;
+pub mod encrypted_index;
 pub mod index;
 pub mod lens;
 pub mod nac_check;
@@ -88,6 +89,10 @@ pub use collection::{
     set_active_collection_version, set_migration, truncate_collection,
 };
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
+pub use encrypted_index::{
+    create_encrypted_index, delete_encrypted_index, list_all_encrypted_indexes,
+    list_encrypted_indexes,
+};
 pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use lens::{lens_add, lens_list};
 pub use node::{new_node, node_close};

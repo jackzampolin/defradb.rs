@@ -3358,7 +3358,10 @@ impl Planner {
         if let Some(ref fetcher) = self.fetcher {
             child_scan = child_scan.with_fetcher(fetcher.clone());
         }
-        let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+        let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+        // Insert ACP permission filter for the child collection (if ACP-protected).
+        child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
         // Find the other side of the relation
         let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
@@ -3492,7 +3495,10 @@ impl Planner {
             if let Some(ref fetcher) = self.fetcher {
                 child_scan = child_scan.with_fetcher(fetcher.clone());
             }
-            let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+            let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+            // Insert ACP permission filter for the child collection (if ACP-protected).
+            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
             // Find the other side of the relation
             let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
@@ -3614,6 +3620,9 @@ impl Planner {
             child_scan = child_scan.with_fetcher(fetcher.clone());
         }
         let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+
+        // Insert ACP permission filter for the child collection (if ACP-protected).
+        child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
 
         // Add sub-joins for remaining path levels within the child plan
         if path.len() > 1 {
