@@ -85,7 +85,7 @@ use libp2p::PeerId;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::{Error, Result};
 use crate::host::{HostEvent, P2PHostHandle};
-use crate::message::{DocSyncItem, DocSyncReply, DocSyncRequest, PushLogBroadcast, PushLogReply, PushLogRequest};
+use crate::message::{DocSyncItem, DocSyncReply, PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
 

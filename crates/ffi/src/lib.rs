@@ -54,8 +54,6 @@ pub mod types;
 
 use std::ffi::{c_char, CString};
 
-use types::FfiResult;
-
 /// Error message for invalid node handle.
 pub const ERR_INVALID_NODE_HANDLE: &str = "invalid node handle";
 

@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-use crate::codec::{read_message, write_message};
+use crate::codec::write_message;
 use crate::error::{Error, Result};
 use crate::message::{DocSyncReply, DocSyncRequest, PushLogReply, PushLogRequest};
 use crate::protocol::{REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL};

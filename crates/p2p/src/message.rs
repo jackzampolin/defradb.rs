@@ -394,7 +394,7 @@ impl Message for PushLogReply {
 ///
 /// Use this for arrays of byte fields like CID heads in DocSync.
 mod vec_of_bytes {
-    use serde::{de::SeqAccess, de::Visitor, ser::SerializeSeq, Deserialize, Deserializer, Serializer};
+    use serde::{de::SeqAccess, de::Visitor, ser::SerializeSeq, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &Vec<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
     where
