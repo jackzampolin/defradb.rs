@@ -16,7 +16,7 @@ use lens::MemoryTransformStore;
 #[cfg(feature = "native")]
 use lens::WasmTransformStore;
 use lens::{LensConfig, TransformId, TransformStore};
-use schema::{CollectionSource, CollectionVersion};
+use schema::{CollectionSource, CollectionVersion, ORPHAN_COLLECTION_ID};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -363,6 +363,92 @@ impl<S: Store> DB<S> {
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
 
+        let txn = self.new_txn(false).await?;
+
+        // Look up source and destination versions, creating placeholders if needed
+        // (matches Go's setMigration in internal/db/lens.go)
+        let (source_col, mut dst_col) = {
+            let systemstore = txn.systemstore()?;
+
+            // Look up source version
+            let src_key = CollectionKey::new(&source_version_id);
+            let src_data = systemstore
+                .get(&src_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let source_col: CollectionVersion = match src_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize source schema '{}': {}",
+                        source_version_id, e
+                    ))
+                })?,
+                None => {
+                    // Source doesn't exist — create a placeholder
+                    let mut placeholder = CollectionVersion {
+                        version_id: source_version_id.clone(),
+                        collection_id: ORPHAN_COLLECTION_ID.to_string(),
+                        is_materialized: true,
+                        is_placeholder: true,
+                        ..CollectionVersion::new("", "", "", Vec::new())
+                    };
+                    placeholder.is_active = false;
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize source placeholder '{}': {}",
+                            source_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&src_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            // Look up destination version
+            let dst_key = CollectionKey::new(&dest_version_id);
+            let dst_data = systemstore
+                .get(&dst_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let dst_col: CollectionVersion = match dst_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize destination schema '{}': {}",
+                        dest_version_id, e
+                    ))
+                })?,
+                None => {
+                    // Destination doesn't exist — create a placeholder
+                    let mut placeholder = CollectionVersion {
+                        name: source_col.name.clone(),
+                        version_id: dest_version_id.clone(),
+                        collection_id: source_col.collection_id.clone(),
+                        is_materialized: true,
+                        is_placeholder: true,
+                        ..CollectionVersion::new("", "", "", Vec::new())
+                    };
+                    placeholder.is_active = false;
+                    placeholder
+                }
+            };
+
+            (source_col, dst_col)
+        };
+
+        // Validate version adjacency
+        if let Some(ref prev) = dst_col.previous_version {
+            if prev.source_collection_id != source_col.version_id {
+                return Err(Error::InvalidPatch(format!(
+                    "cannot migrate between non-adjacent collection versions. \
+                     Destination '{}' already has previous version '{}', but migration source is '{}'",
+                    dest_version_id, prev.source_collection_id, source_version_id
+                )));
+            }
+        }
+
         // Register the transform in the lens store
         let transform_id = self
             .lens_store
@@ -370,115 +456,43 @@ impl<S: Store> DB<S> {
             .await
             .map_err(|e| Error::Lens(e.to_string()))?;
 
-        // Update the destination schema's previous_version.transform field
-        // This is needed so that collection_has_migrations() returns true
-        let txn = self.new_txn(false).await?;
+        // Set the destination's previous_version with source and transform
+        dst_col.previous_version = Some(CollectionSource {
+            source_collection_id: source_col.version_id.clone(),
+            transform: Some(transform_id.to_string()),
+        });
 
-        // Prepare updated schema data outside the systemstore scope
-        let (collection_key, updated_data, collection_name) = {
+        // Save the destination version
+        let collection_name = dst_col.name.clone();
+        let dst_key = CollectionKey::new(&dest_version_id);
+        let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize destination schema '{}': {}",
+                dest_version_id, e
+            ))
+        })?;
+
+        {
             let systemstore = txn.systemstore()?;
-
-            // Load the destination schema
-            let collection_key = CollectionKey::new(&dest_version_id);
-            let schema_data = systemstore
-                .get(&collection_key.bytes())
+            systemstore
+                .set(&dst_key.bytes(), &dst_data)
                 .await
                 .map_err(Error::Storage)?;
+        }
+        txn.commit().await?;
 
-            match schema_data {
-                Some(data) => {
-                    let mut schema: CollectionVersion =
-                        serde_json::from_slice(&data).map_err(|e| {
-                            Error::Serialization(format!(
-                                "failed to deserialize destination schema '{}': {}",
-                                dest_version_id, e
-                            ))
-                        })?;
-
-                    // Validate version adjacency: if destination already has a previous_version,
-                    // the source must match it (can't skip versions in migration chain)
-                    if let Some(ref prev) = schema.previous_version {
-                        if prev.source_collection_id != source_version_id {
-                            return Err(Error::InvalidPatch(format!(
-                                "cannot configure migration between non-adjacent collection versions. \
-                                 Destination '{}' already has previous version '{}', but migration source is '{}'",
-                                dest_version_id, prev.source_collection_id, source_version_id
-                            )));
-                        }
-                    }
-
-                    // Ensure previous_version exists and set transform
-                    let prev = schema
-                        .previous_version
-                        .get_or_insert_with(|| CollectionSource::new(&source_version_id));
-                    prev.transform = Some(transform_id.to_string());
-
-                    let collection_name = schema.name.clone();
-                    let updated_data = serde_json::to_vec(&schema).map_err(|e| {
-                        Error::Serialization(format!(
-                            "failed to serialize updated schema '{}': {}",
-                            dest_version_id, e
-                        ))
-                    })?;
-
-                    (
-                        collection_key,
-                        Some((updated_data, schema)),
-                        collection_name,
-                    )
-                }
-                None => {
-                    // Destination schema doesn't exist yet (e.g., migration registered
-                    // before patch creates the version). Store as pending so
-                    // patch_collection can link it when the version is created.
-                    tracing::debug!(
-                        dest_version_id = %dest_version_id,
-                        source_version_id = %source_version_id,
-                        "Destination schema not found, storing as pending migration"
-                    );
-                    {
-                        let mut pending = self.pending_migrations.write().map_err(|e| {
-                            tracing::error!(error = ?e, "Pending migrations lock poisoned");
-                            Error::LockPoisoned(
-                                "pending migrations lock poisoned during set_migration".into(),
-                            )
-                        })?;
-                        pending.insert(
-                            dest_version_id.clone(),
-                            (source_version_id.clone(), transform_id.to_string()),
-                        );
-                    }
-                    (collection_key, None, String::new())
-                }
-            }
-        };
-
-        // Write updated schema if we have one
-        if let Some((data, schema)) = updated_data {
-            {
-                let systemstore = txn.systemstore()?;
-                systemstore
-                    .set(&collection_key.bytes(), &data)
-                    .await
-                    .map_err(Error::Storage)?;
-            }
-            txn.commit().await?;
-
-            // Update in-memory cache if this is the active collection
+        // Update in-memory cache if this is the active collection
+        if !collection_name.is_empty() {
             let mut cache = self.collections.write().map_err(|e| {
                 tracing::error!(error = ?e, "Collection cache lock poisoned during set_migration");
                 Error::LockPoisoned("collection cache lock poisoned during set_migration".into())
             })?;
 
-            // Check if this version is the active version for its collection
             if let Some(cached) = cache.get(&collection_name) {
                 if cached.schema().version_id == dest_version_id {
-                    cache.insert(collection_name, Collection::new(schema));
+                    cache.insert(collection_name, Collection::new(dst_col));
                 }
             }
-        } else {
-            // No schema update needed, just discard the transaction
-            let _ = txn.discard();
         }
 
         Ok(transform_id)
@@ -1361,9 +1375,7 @@ impl<S: Store> DB<S> {
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
     pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
         if version_id.is_empty() {
-            return Err(Error::CollectionVersionNotFound(
-                "empty version ID".to_string(),
-            ));
+            return Err(Error::CollectionVersionIDEmpty);
         }
 
         // Load the target collection from persistent store by version_id

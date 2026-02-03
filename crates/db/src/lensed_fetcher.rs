@@ -85,10 +85,26 @@ impl<S: Store> LensedDocFetcher<S> {
         self.txn.clone()
     }
 
-    /// Check if a collection has migrations registered.
+    /// Check if any version in a list of collection versions has migrations registered.
     ///
-    /// A collection has migrations if its schema or any of its previous versions
-    /// have a transform configured in the previous_version field.
+    /// A collection has migrations if any version in its history has a transform
+    /// configured in the previous_version field. This matches Go's behavior of
+    /// checking the full history, not just the current version.
+    fn versions_have_migrations(versions: &[CollectionVersion]) -> bool {
+        for version in versions {
+            if let Some(ref prev) = version.previous_version {
+                if prev.transform.is_some() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a collection has migrations registered (quick check).
+    ///
+    /// This is a fast check that only looks at the current version.
+    /// For a full check, use `versions_have_migrations` with all loaded versions.
     fn collection_has_migrations(collection: &Collection) -> bool {
         // Check if the current collection version has a previous version with a transform
         if let Some(ref prev) = collection.schema().previous_version {
@@ -135,6 +151,42 @@ impl<S: Store> LensedDocFetcher<S> {
         build_targeted_history(&full_history, target_version_id)
     }
 
+    /// Load all versions of a collection and check if any have migrations.
+    ///
+    /// Returns the list of versions and a boolean indicating if any have transforms.
+    /// This matches Go's behavior of checking the full history for migrations.
+    async fn load_versions_and_check_migrations(
+        &self,
+        collection: &Collection,
+    ) -> query::error::Result<(Vec<CollectionVersion>, bool)> {
+        let collection_id = &collection.schema().collection_id;
+
+        // Load all versions from systemstore
+        let txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("transaction not available for version lookup")
+        })?;
+        let systemstore = txn.systemstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
+        })?;
+
+        let versions = get_collections_by_collection_id(&systemstore, collection_id)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to load collection versions: {}",
+                    e
+                ))
+            })?;
+
+        drop(txn_guard); // Release lock
+
+        // Check if any version has migrations (matching Go's behavior)
+        let has_migrations = Self::versions_have_migrations(&versions);
+
+        Ok((versions, has_migrations))
+    }
+
     /// Load full collection history from systemstore.
     ///
     /// This loads all versions of a collection and builds the targeted history graph.
@@ -153,25 +205,8 @@ impl<S: Store> LensedDocFetcher<S> {
             }
         }
 
-        // Load all versions from systemstore
-        let txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("transaction not available for history lookup")
-        })?;
-        let systemstore = txn.systemstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
-        })?;
-
-        let versions = get_collections_by_collection_id(&systemstore, collection_id)
-            .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to load collection versions: {}",
-                    e
-                ))
-            })?;
-
-        drop(txn_guard); // Release lock before building history
+        // Load versions using the helper
+        let (versions, _) = self.load_versions_and_check_migrations(collection).await?;
 
         if versions.is_empty() {
             return Err(query::error::QueryError::execution(format!(
@@ -452,15 +487,15 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        // Check if collection has migrations registered
-        let has_migrations = Self::collection_has_migrations(&collection);
+        // Check if collection has migrations by loading full version history (matching Go)
+        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
         let target_version_id = &collection.schema().version_id;
 
         if has_migrations {
             debug!(
                 collection = %collection_name,
                 version_id = %target_version_id,
-                "Collection has migrations registered"
+                "Collection has migrations registered (full history check)"
             );
         }
 
@@ -512,8 +547,8 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        // Check if collection has migrations registered
-        let has_migrations = Self::collection_has_migrations(&collection);
+        // Check if collection has migrations by loading full version history (matching Go)
+        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
 
         let docs_with_status = collection
             .get_all_with_datastore_include_deleted(&datastore, show_deleted)
@@ -540,7 +575,8 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        let has_migrations = Self::collection_has_migrations(&collection);
+        // Check if collection has migrations by loading full version history (matching Go)
+        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
         let target_version_id = &collection.schema().version_id;
 
         let mut docs = Vec::new();
@@ -616,7 +652,8 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        let has_migrations = Self::collection_has_migrations(&collection);
+        // Check if collection has migrations by loading full version history (matching Go)
+        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
         let target_version_id = &collection.schema().version_id;
 
         let all_docs = collection
