@@ -2229,7 +2229,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                         ordered_items.sort_by(|a, b| {
                                             let resolve_value =
                                                 |item: &&JsonValue| -> Option<JsonValue> {
-                                                    if fields.is_empty() {
+                                                    // For scalar inline arrays, order: ASC/DESC has no field path
+                                                    // (fields is either empty or contains a single empty string)
+                                                    if fields.is_empty()
+                                                        || (fields.len() == 1 && fields[0].is_empty())
+                                                    {
                                                         return Some((*item).clone());
                                                     }
                                                     // Start with the first field
