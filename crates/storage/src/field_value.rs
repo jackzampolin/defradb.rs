@@ -238,6 +238,14 @@ pub fn decode_field_value<'a>(
             let dt = dt_utc.with_timezone(&utc_offset);
             Ok((rest, NormalValue::Time(dt)))
         }
+        EncodedType::Json => {
+            let (rest, leaf) = if descending {
+                encoding::json::decode_json_descending(buf)?
+            } else {
+                encoding::json::decode_json_ascending(buf)?
+            };
+            Ok((rest, NormalValue::JsonLeaf(leaf)))
+        }
         _ => Err(crate::corekv::Error::Other(format!(
             "cannot decode field value: unknown type {:?} (marker byte: 0x{:02x}, buffer len: {})",
             typ,
