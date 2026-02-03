@@ -17,6 +17,7 @@ default = []
 [dependencies]
 # Async runtime
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+async-trait.workspace = true
 
 # Serialization
 serde.workspace = true

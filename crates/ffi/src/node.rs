@@ -8,8 +8,8 @@ use std::sync::Arc;
 use identity::Identity;
 
 use crate::get_runtime;
-use crate::state::{NodeState, PolicyStore, NODES};
-use crate::types::{FfiResult, NewNodeResult, NodeInitOptions};
+use crate::state::{FfiStore, NodeState, PolicyStore, NODES};
+use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Create a new DefraDB node.
@@ -27,8 +27,16 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
     let enable_signing = options.enable_signing != 0;
 
     let result = rt.block_on(async {
-        // Create in-memory storage (for MVP)
-        let store = Arc::new(storage::MemoryStore::new());
+        // Create storage backend based on options
+        let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
+            let path = unsafe { c_str_to_string(options.db_path) }
+                .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
+            let redb = storage::RedbStore::open(&path)
+                .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
+            Arc::new(FfiStore::Redb(redb))
+        } else {
+            Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
+        };
 
         // Create event bus for subscriptions (created early so it can be wired to database)
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());

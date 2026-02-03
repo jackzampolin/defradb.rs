@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use async_trait::async_trait;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use storage::MemoryStore;
@@ -239,8 +240,34 @@ impl P2PState {
     }
 }
 
+/// Storage backend enum for FFI nodes.
+///
+/// Wraps both MemoryStore and RedbStore so that `DB<FfiStore>` works for
+/// either backend without requiring separate type aliases or code paths.
+pub enum FfiStore {
+    Memory(MemoryStore),
+    Redb(storage::RedbStore),
+}
+
+#[async_trait]
+impl storage::Store for FfiStore {
+    async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
+        match self {
+            FfiStore::Memory(s) => s.new_txn(readonly).await,
+            FfiStore::Redb(s) => s.new_txn(readonly).await,
+        }
+    }
+
+    async fn close(&self) -> storage::Result<()> {
+        match self {
+            FfiStore::Memory(s) => s.close().await,
+            FfiStore::Redb(s) => s.close().await,
+        }
+    }
+}
+
 /// Type alias for the database type used in FFI.
-pub type FfiDatabase = db::DB<MemoryStore>;
+pub type FfiDatabase = db::DB<FfiStore>;
 
 /// Type alias for node handles (opaque to FFI callers).
 pub type NodeHandle = usize;

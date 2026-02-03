@@ -13,7 +13,7 @@ use acp::nac::NodePermission;
 
 use crate::get_runtime;
 use crate::nac_check::check_nac_for_node;
-use crate::state::{NodeState, P2PState, PolicyStore, NODES};
+use crate::state::{FfiStore, NodeState, P2PState, PolicyStore, NODES};
 use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::ERR_INVALID_NODE_HANDLE;
 
@@ -100,7 +100,7 @@ fn parse_doc_ids_json(json_str: &str) -> Result<Vec<String>, String> {
 /// * The returned `node_ptr` must be freed by calling `node_close`
 #[no_mangle]
 pub unsafe extern "C" fn new_node_with_p2p(
-    _options: NodeInitOptions,
+    options: NodeInitOptions,
     listen_addr: *const c_char,
 ) -> NewNodeResult {
     let rt = get_runtime!(NewNodeResult);
@@ -111,8 +111,16 @@ pub unsafe extern "C" fn new_node_with_p2p(
     };
 
     let result = rt.block_on(async {
-        // Create in-memory storage
-        let store = Arc::new(storage::MemoryStore::new());
+        // Create storage backend based on options
+        let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
+            let path = c_str_to_string(options.db_path)
+                .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
+            let redb = storage::RedbStore::open(&path)
+                .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
+            Arc::new(FfiStore::Redb(redb))
+        } else {
+            Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
+        };
 
         // Create event bus for subscriptions
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
@@ -917,6 +925,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
     node_ptr: usize,
     identity_did: *const c_char,
     peer_id_str: *const c_char,
+    collections_json: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
@@ -927,6 +936,18 @@ pub unsafe extern "C" fn p2p_delete_replicator(
     let peer_str = match c_str_to_string(peer_id_str) {
         Some(s) => s,
         None => return FfiResult::error("peer_id_str is null"),
+    };
+
+    // Parse optional collections filter
+    let collections: Vec<String> = if !collections_json.is_null() {
+        match c_str_to_string(collections_json) {
+            Some(s) if !s.is_empty() && s != "[]" => {
+                serde_json::from_str(&s).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
     };
 
     let result = NODES
@@ -942,7 +963,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                     .map_err(|e| format!("invalid peer ID '{}': {}", peer_str, e))?;
 
                 p2p.handle
-                    .delete_replicator(peer_id)
+                    .remove_replicator_collections(peer_id, collections)
                     .await
                     .map_err(|e| format!("failed to delete replicator: {}", e))?;
 
@@ -1503,6 +1524,56 @@ pub unsafe extern "C" fn p2p_sync_documents(
                 }
 
                 Ok(())
+            })
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(()) => FfiResult::ok(),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Sync a branchable collection from peers.
+///
+/// Subscribes to the collection's GossipSub topic for P2P replication.
+///
+/// # Safety
+///
+/// `identity_did` and `collection_id` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_branchable_collection(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    collection_id: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionCreate) {
+        return e;
+    }
+
+    let col_id = match c_str_to_string(collection_id) {
+        Some(s) => s,
+        None => return FfiResult::error("collection_id is null"),
+    };
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("P2P not enabled for this node".to_string()),
+            };
+
+            rt.block_on(async {
+                let topic = DefraTopic::collection(&col_id);
+                p2p.handle
+                    .subscribe(topic)
+                    .await
+                    .map_err(|e| format!("failed to sync branchable collection: {}", e))?;
+                p2p.add_collection(&col_id);
+                Ok::<(), String>(())
             })
         })
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
