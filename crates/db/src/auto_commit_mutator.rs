@@ -19,6 +19,7 @@ use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
 use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
+use defra_core::signing::get_signing_config;
 
 /// Document mutator that auto-commits transactions for each operation.
 ///
@@ -124,6 +125,9 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                     // Get encryption config from thread-local (set by plan nodes)
                     let enc_config = get_encryption_config();
+                    // Get signing config from thread-local (set by FFI exec_request)
+                    let sign_config = get_signing_config();
+                    eprintln!("[SIGN-DEBUG] auto_commit_mutator::create sign_config.is_some()={}", sign_config.is_some());
 
                     // For create operations, all fields are new - pass None for modified_fields
                     match write_document_blocks(
@@ -133,6 +137,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         schema_version_id,
                         None,
                         enc_config.as_ref(),
+                        sign_config.as_ref(),
                     )
                     .await
                     {
@@ -304,6 +309,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     // This matches Go's behavior where encryption propagates through the DAG.
                     let enc_config = get_encryption_config()
                         .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
+                    // Get signing config from thread-local (set by FFI exec_request)
+                    let sign_config = get_signing_config();
 
                     // For update operations, pass the modified fields to only create blocks
                     // for the fields that actually changed
@@ -314,6 +321,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         schema_version_id,
                         Some(&modified_fields),
                         enc_config.as_ref(),
+                        sign_config.as_ref(),
                     )
                     .await
                     {
@@ -463,12 +471,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                     let schema_version_id = collection.version_id();
                     let doc_id_str = doc_id.to_string();
+                    // Get signing config from thread-local (set by FFI exec_request)
+                    let sign_config = get_signing_config();
 
                     match write_delete_block(
                         &blockstore,
                         &headstore,
                         &doc_id_str,
                         schema_version_id,
+                        sign_config.as_ref(),
                     )
                     .await
                     {

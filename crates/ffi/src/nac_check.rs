@@ -8,7 +8,7 @@
 use std::ffi::c_char;
 use std::sync::Arc;
 
-use acp::nac::NodePermission;
+use acp::nac::{NacStatus, NodePermission};
 
 use crate::state::{FfiNacManager, NODES};
 use crate::types::{c_str_to_string, FfiResult};
@@ -28,8 +28,12 @@ pub fn check_nac_permission(
     identity_did: *const c_char,
     permission: NodePermission,
 ) -> Result<(), FfiResult> {
-    let is_enabled = rt.block_on(nac_manager.is_enabled());
-    if !is_enabled {
+    // Check runtime NAC status directly rather than is_enabled(),
+    // because is_enabled() also requires config.enabled which is a
+    // startup flag. FFI nodes start with config.enabled=false and
+    // enable NAC at runtime via enable_nac().
+    let status = rt.block_on(nac_manager.status());
+    if status != NacStatus::Enabled {
         return Ok(());
     }
 
@@ -40,7 +44,17 @@ pub fn check_nac_permission(
             Ok(d) => d,
             Err(_) => return Err(FfiResult::error("not authorized to perform operation")),
         },
-        _ => return Err(FfiResult::error("not authorized to perform operation")),
+        _ => {
+            // Empty identity: check if wildcard has the permission
+            let wildcard = identity::Did::wildcard();
+            let wildcard_has_perm = rt
+                .block_on(nac_manager.check_permission(&wildcard, permission))
+                .unwrap_or(false);
+            if wildcard_has_perm {
+                return Ok(());
+            }
+            return Err(FfiResult::error("not authorized to perform operation"));
+        }
     };
 
     let has_perm = rt

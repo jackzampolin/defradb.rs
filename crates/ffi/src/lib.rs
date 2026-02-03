@@ -35,6 +35,7 @@
 
 pub mod acp;
 pub mod backup;
+pub mod block;
 pub mod collection;
 pub mod document;
 pub mod index;
@@ -82,6 +83,7 @@ pub use acp::{
     get_dac_policy, get_nac_status, get_node_identity, list_dac_policies, re_enable_nac,
 };
 pub use backup::{basic_export, basic_import};
+pub use block::block_verify_signature;
 pub use collection::{
     add_view, delete_collection, find_collection_by_id, get_collection_by_name,
     get_collection_by_version_id, has_collection, patch_collection, refresh_views,
@@ -128,24 +130,6 @@ pub extern "C" fn defra_version() -> *mut c_char {
     CString::new(version)
         .unwrap_or_else(|_| CString::new("unknown").unwrap())
         .into_raw()
-}
-
-/// Verify the signature of a block identified by CID.
-///
-/// # Safety
-///
-/// All string parameters must be valid null-terminated UTF-8 strings or null.
-#[no_mangle]
-pub unsafe extern "C" fn block_verify_signature(
-    _node_ptr: usize,
-    _key_type: *const c_char,
-    _pub_key: *const c_char,
-    _block_cid: *const c_char,
-    _identity_did: *const c_char,
-) -> types::FfiResult {
-    // Block signature verification is not yet needed for net tests.
-    // Return success (signature valid) as a no-op stub.
-    types::FfiResult::ok()
 }
 
 #[cfg(test)]

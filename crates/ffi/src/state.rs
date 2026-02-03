@@ -267,6 +267,9 @@ pub struct NodeState {
     pub policy_store: Arc<PolicyStore>,
     /// P2P state (optional - not all nodes have P2P enabled).
     pub p2p: Option<Arc<P2PState>>,
+    /// Node identity DID (set when signing is enabled).
+    /// Used as fallback identity for signing blocks when no explicit identity is provided.
+    pub node_identity_did: Option<String>,
 }
 
 /// State held for each FFI subscription.
