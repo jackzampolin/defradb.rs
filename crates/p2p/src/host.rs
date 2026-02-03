@@ -943,6 +943,7 @@ impl<S: Store> P2PHost<S> {
                 }
             }
             TwoStreamEvent::DocSyncReply { peer_id, reply } => {
+                eprintln!("[DOCSYNC] Host received TwoStreamEvent::DocSyncReply from peer={} results_count={}", peer_id, reply.results.len());
                 info!(
                     peer_id = %peer_id,
                     message_id = %reply.message_id,
@@ -955,11 +956,13 @@ impl<S: Store> P2PHost<S> {
                     .await
                     .is_err()
                 {
+                    eprintln!("[DOCSYNC] Failed to send DocSyncReply HostEvent - receiver dropped");
                     error!(
                         peer_id = %peer_id,
                         "Failed to send DocSyncReply event - receiver dropped"
                     );
                 } else {
+                    eprintln!("[DOCSYNC] Forwarded DocSyncReply to coordinator via HostEvent channel");
                     info!(peer_id = %peer_id, "Forwarded DocSyncReply event to coordinator");
                 }
             }
