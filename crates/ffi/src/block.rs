@@ -86,48 +86,55 @@ pub unsafe extern "C" fn block_verify_signature(
     };
 
     let result = rt.block_on(async {
-        // Create a read-only transaction to access the blockstore
+        // Create a read-only transaction to access the blockstore.
+        // Load block and signature data inside a scope so the blockstore
+        // borrow is dropped before we discard the transaction.
         let txn = database
             .new_txn(true)
             .await
             .map_err(|e| format!("failed to create transaction: {}", e))?;
 
-        // Load the block from blockstore
-        let blockstore = txn
-            .blockstore()
-            .map_err(|e| format!("failed to get blockstore: {}", e))?;
+        let (block, signature) = {
+            let blockstore = txn
+                .blockstore()
+                .map_err(|e| format!("failed to get blockstore: {}", e))?;
 
-        let block_bytes = blockstore
-            .get(&parsed_cid.to_bytes())
-            .await
-            .map_err(|e| format!("failed to load block: {}", e))?
-            .ok_or_else(|| format!("block not found: {}", cid_str))?;
+            let block_bytes = blockstore
+                .get(&parsed_cid.to_bytes())
+                .await
+                .map_err(|e| format!("failed to load block: {}", e))?
+                .ok_or_else(|| format!("could not find block {}", cid_str))?;
 
-        let block = defra_core::block::Block::from_dag_cbor(&block_bytes)
-            .map_err(|e| format!("failed to decode block: {}", e))?;
+            let block = defra_core::block::Block::from_dag_cbor(&block_bytes)
+                .map_err(|e| format!("failed to decode block: {}", e))?;
 
-        // Check that the block has a signature
-        let sig_cid = block
-            .signature
-            .ok_or("block has no signature")?;
+            // Check that the block has a signature
+            let sig_cid = block
+                .signature
+                .ok_or("block has no signature")?;
 
-        // Load the signature block from blockstore
-        let sig_bytes = blockstore
-            .get(&sig_cid.to_bytes())
-            .await
-            .map_err(|e| format!("failed to load signature block: {}", e))?
-            .ok_or_else(|| format!("signature block not found: {}", sig_cid))?;
+            // Load the signature block from blockstore
+            let sig_bytes = blockstore
+                .get(&sig_cid.to_bytes())
+                .await
+                .map_err(|e| format!("failed to load signature block: {}", e))?
+                .ok_or_else(|| format!("signature block not found: {}", sig_cid))?;
 
-        let signature = defra_core::block::Signature::from_dag_cbor(&sig_bytes)
-            .map_err(|e| format!("failed to decode signature block: {}", e))?;
+            let signature = defra_core::block::Signature::from_dag_cbor(&sig_bytes)
+                .map_err(|e| format!("failed to decode signature block: {}", e))?;
+
+            (block, signature)
+        };
+        // blockstore borrow is now dropped
+
+        // Discard the read-only transaction
+        txn.discard()
+            .map_err(|e| format!("failed to discard transaction: {}", e))?;
 
         // Verify that the identity matches the signature's identity
         let sig_identity = String::from_utf8_lossy(&signature.header.identity);
         if sig_identity.as_ref() != pub_key_str {
-            return Err(format!(
-                "signature public key mismatch: expected {}, got {}",
-                pub_key_str, sig_identity
-            ));
+            return Err("signature was created by a different key".to_string());
         }
 
         // Get the bytes to verify (block serialized without signature)
@@ -145,10 +152,6 @@ pub unsafe extern "C" fn block_verify_signature(
         if !valid {
             return Err("signature verification failed".to_string());
         }
-
-        // Discard the read-only transaction
-        txn.discard()
-            .map_err(|e| format!("failed to discard transaction: {}", e))?;
 
         Ok::<(), String>(())
     });
