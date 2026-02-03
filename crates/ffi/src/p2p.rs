@@ -1635,6 +1635,11 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         None => return FfiResult::error("collection_id is null"),
     };
 
+    eprintln!(
+        "[FFI-BRANCHABLE] p2p_sync_branchable_collection called with collection_id={}",
+        collection_id_str
+    );
+
     let result = NODES
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
@@ -1645,12 +1650,32 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
 
             rt.block_on(async {
                 // Look up collection by its collection_id
-                let collection = db
-                    .find_collection_by_id(&collection_id_str)
-                    .map_err(|e| format!("failed to find collection: {}", e))?
-                    .ok_or_else(|| {
-                        format!("collection with ID '{}' not found", collection_id_str)
-                    })?;
+                let collection = match db.find_collection_by_id(&collection_id_str) {
+                    Ok(Some(c)) => c,
+                    Ok(None) => {
+                        eprintln!(
+                            "[FFI-BRANCHABLE] collection '{}' not found",
+                            collection_id_str
+                        );
+                        return Err(format!(
+                            "collection with ID '{}' not found",
+                            collection_id_str
+                        ));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[FFI-BRANCHABLE] find_collection_by_id error: {}",
+                            e
+                        );
+                        return Err(format!("failed to find collection: {}", e));
+                    }
+                };
+
+                eprintln!(
+                    "[FFI-BRANCHABLE] Found collection name={} branchable={}",
+                    collection.name(),
+                    collection.schema().is_branchable
+                );
 
                 // Check if the collection is branchable
                 if !collection.schema().is_branchable {
@@ -1664,7 +1689,13 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
+                eprintln!(
+                    "[FFI-BRANCHABLE] Connected peers: {}",
+                    connected_peers.len()
+                );
+
                 if connected_peers.is_empty() {
+                    eprintln!("[FFI-BRANCHABLE] No connected peers, returning early");
                     return Ok(());
                 }
 
@@ -1679,6 +1710,10 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
 
                 // Send to each connected peer (fire-and-forget)
                 for peer_id in &connected_peers {
+                    eprintln!(
+                        "[FFI-BRANCHABLE] Sending BranchableSyncRequest to peer={}",
+                        peer_id
+                    );
                     let request_clone = request.clone();
                     let handle = p2p.handle.clone();
                     let peer_id = *peer_id;
@@ -1688,10 +1723,14 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                             .send_branchable_sync_request(peer_id, request_clone)
                             .await
                         {
-                            tracing::warn!(
-                                peer_id = %peer_id,
-                                error = %e,
-                                "Failed to send BranchableSync request"
+                            eprintln!(
+                                "[FFI-BRANCHABLE] Failed to send request to peer={}: {}",
+                                peer_id, e
+                            );
+                        } else {
+                            eprintln!(
+                                "[FFI-BRANCHABLE] Successfully sent request to peer={}",
+                                peer_id
                             );
                         }
                     });

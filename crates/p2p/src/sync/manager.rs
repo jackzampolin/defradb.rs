@@ -448,23 +448,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         Ok(())
     }
 
-    /// Find missing blocks by extracting links from the block data.
+    /// Find missing blocks by extracting links from the block data (one level).
     ///
     /// This parses the block's IPLD structure and checks which linked CIDs
     /// are not present in the blockstore.
-    ///
-    /// # Behavior
-    ///
-    /// - Raw blocks or blocks with unsupported codecs are treated as having no links
-    /// - IPLD blocks (DAG-CBOR, DAG-JSON, etc.) that fail to parse return an error
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::BlockParseError` if an IPLD block cannot be parsed,
-    /// indicating possible data corruption.
     async fn find_missing_links(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
-        // Try to parse the block to extract references
-        // Create a CID with DAG-CBOR codec to ensure proper IPLD parsing
+        self.extract_references(block_data).await
+    }
+
+    /// Extract IPLD references from block data and check which are missing.
+    async fn extract_references(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
         use libipld::multihash::{Code, MultihashDigest};
         let hash = Code::Sha2_256.digest(block_data);
         let dummy_cid = Cid::new_v1(0x71, hash); // 0x71 = DAG-CBOR codec
@@ -472,38 +465,19 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         let mut refs = Vec::new();
         let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
         if let Err(e) = block.references(&mut refs) {
-            // Check if this is an unsupported codec error vs a parse error
             let error_msg = e.to_string();
             if error_msg.contains("Unsupported codec") {
-                // Block uses an unsupported codec (e.g., raw blocks with codec 0).
-                // This is not an error - these blocks simply have no IPLD links.
-                tracing::debug!(
-                    error = %e,
-                    block_data_len = block_data.len(),
-                    "Block uses unsupported codec, assuming no IPLD links"
-                );
                 return Ok(Vec::new());
             }
-
-            // This is a parse error for a block that should be IPLD.
-            // This may indicate corruption or encoding mismatch.
-            tracing::warn!(
-                error = %e,
-                block_data_len = block_data.len(),
-                "Failed to parse block as IPLD - cannot extract links"
-            );
             return Err(Error::BlockParseError {
                 reason: format!("Failed to extract references: {}. Block may be corrupt.", e),
             });
         }
 
-        // Check which CIDs are missing
         let mut missing = Vec::new();
         for link_cid in refs {
             match self.blockstore.has(&link_cid).await {
-                Ok(true) => {
-                    // Already have this block
-                }
+                Ok(true) => {}
                 Ok(false) => {
                     missing.push(link_cid);
                 }
@@ -519,6 +493,78 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
 
         Ok(missing)
+    }
+
+    /// Recursively find ALL missing blocks in the DAG rooted at `block_data`.
+    ///
+    /// Unlike `find_missing_links` (one level), this walks the entire DAG tree.
+    /// For multi-level DAGs (Collection → Composite → LWW), this discovers
+    /// missing blocks at any depth.
+    async fn find_all_missing_links(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
+        let mut missing = Vec::new();
+        let mut visited = HashSet::new();
+        self.find_missing_recursive(block_data, &mut missing, &mut visited)
+            .await?;
+        Ok(missing)
+    }
+
+    /// Inner recursive link walker.
+    fn find_missing_recursive<'a>(
+        &'a self,
+        block_data: &'a [u8],
+        missing: &'a mut Vec<Cid>,
+        visited: &'a mut HashSet<Cid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            use libipld::multihash::{Code, MultihashDigest};
+            let hash = Code::Sha2_256.digest(block_data);
+            let dummy_cid = Cid::new_v1(0x71, hash);
+
+            let mut refs = Vec::new();
+            let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
+            if let Err(e) = block.references(&mut refs) {
+                let error_msg = e.to_string();
+                if error_msg.contains("Unsupported codec") {
+                    return Ok(());
+                }
+                return Err(Error::BlockParseError {
+                    reason: format!("Failed to extract references: {}", e),
+                });
+            }
+
+            for link_cid in refs {
+                if visited.contains(&link_cid) {
+                    continue;
+                }
+                visited.insert(link_cid);
+
+                match self.blockstore.has(&link_cid).await {
+                    Ok(true) => {
+                        // Block exists — recursively check ITS links too
+                        if let Ok(Some(child_data)) = self.blockstore.get(&link_cid).await {
+                            self.find_missing_recursive(&child_data, missing, visited)
+                                .await?;
+                        }
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "[DAG-WALK] Missing block at depth: cid={}",
+                            link_cid
+                        );
+                        missing.push(link_cid);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            cid = %link_cid,
+                            error = %e,
+                            "Failed to check if block exists, treating as missing"
+                        );
+                        missing.push(link_cid);
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Get providers (peers that may have the blocks) for the given CIDs.
@@ -692,6 +738,30 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         );
     }
 
+    /// Register a pending DAG for branchable collection sync.
+    ///
+    /// Unlike `register_docsync_dag` which stores the document ID,
+    /// this stores the collection ID so the merge handler can look up
+    /// the local collection for cross-schema-version merges.
+    pub fn register_branchable_dag(&self, root_cid: Cid, collection_id: String) {
+        tracing::debug!(
+            cid = %root_cid,
+            collection_id = %collection_id,
+            "Registering branchable sync pending DAG"
+        );
+
+        let mut pending = self.pending_dags.write();
+        pending.insert(
+            root_cid,
+            PendingDag {
+                doc_id: String::new(),
+                collection_id,
+                creator: String::new(),
+                missing: std::iter::once(root_cid).collect(),
+            },
+        );
+    }
+
     /// Check if a block exists and is merged.
     pub async fn is_merged(&self, cid: &Cid) -> Result<bool> {
         self.blockstore
@@ -779,7 +849,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// This is called when BitswapComplete is received, indicating all requested
     /// blocks have arrived. We re-check the DAG for any remaining missing links
-    /// and process it if complete.
+    /// (recursively, at all depths) and process it if complete.
     pub async fn retry_pending_dag(&self, root_cid: &Cid) -> Result<bool> {
         // Get the pending DAG info
         let pending_info = {
@@ -815,8 +885,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         };
 
-        // Re-check missing links
-        let missing = match self.find_missing_links(&block_data).await {
+        // Recursively check ALL missing links at every depth of the DAG.
+        // This is critical for multi-level DAGs like Collection → Composite → LWW
+        // where a single-level check would declare the DAG "ready" prematurely.
+        let missing = match self.find_all_missing_links(&block_data).await {
             Ok(missing) => missing,
             Err(e) => {
                 tracing::error!(
@@ -828,11 +900,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         };
 
+        eprintln!(
+            "[DAG-RETRY] root_cid={} doc_id={} missing_count={}",
+            root_cid, info.doc_id, missing.len()
+        );
+
         if !missing.is_empty() {
-            tracing::debug!(
-                root_cid = %root_cid,
-                missing_count = missing.len(),
-                "Pending DAG still has missing links after Bitswap fetch"
+            eprintln!(
+                "[DAG-RETRY] Still missing {} blocks: {:?}",
+                missing.len(),
+                missing.iter().map(|c| c.to_string()).collect::<Vec<_>>()
             );
             // Update the pending info with new missing CIDs
             self.pending_dags.write().insert(
@@ -845,12 +922,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             return Ok(false);
         }
 
-        // DAG is complete - remove from pending and process
+        // DAG is complete at all depths - remove from pending and process
         self.pending_dags.write().remove(root_cid);
-        tracing::info!(
-            root_cid = %root_cid,
-            doc_id = %info.doc_id,
-            "Pending DAG is complete after Bitswap fetch"
+        eprintln!(
+            "[DAG-RETRY] DAG complete! root_cid={} doc_id={} — emitting DagReady",
+            root_cid, info.doc_id
         );
 
         // Emit event that DAG is ready for merge
@@ -860,7 +936,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 root_cid: *root_cid,
                 doc_id: info.doc_id.clone(),
                 collection_id: info.collection_id.clone(),
-                schema_version_id: info.creator.clone(), // Use creator as stand-in for schema_version_id
+                schema_version_id: info.creator.clone(),
             })
             .await;
 
