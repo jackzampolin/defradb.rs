@@ -130,6 +130,8 @@ pub struct NodeInitOptions {
     pub db_path: *const c_char,
     /// Use in-memory storage (1=true, 0=false).
     pub in_memory: c_int,
+    /// Enable block signing (1=true, 0=false).
+    pub enable_signing: c_int,
 }
 
 impl Default for NodeInitOptions {
@@ -137,6 +139,7 @@ impl Default for NodeInitOptions {
         Self {
             db_path: ptr::null(),
             in_memory: 1, // Default to in-memory
+            enable_signing: 0,
         }
     }
 }

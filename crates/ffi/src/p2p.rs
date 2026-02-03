@@ -475,13 +475,44 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
             };
 
             rt.block_on(async {
-                let peer_addrs = p2p
+                // Get connected peers with addresses from the P2P host
+                // (populated by ConnectionEstablished events).
+                let host_addrs = p2p
                     .handle
                     .peer_addresses()
                     .await
                     .map_err(|e| format!("failed to get peer addresses: {}", e))?;
 
-                serde_json::to_string(&peer_addrs)
+                // Also get the full connected peer list so we can merge in
+                // FFI-stored addresses for peers the host hasn't resolved yet.
+                let connected = p2p
+                    .handle
+                    .connected_peers()
+                    .await
+                    .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+                // Build a set of peer IDs already covered by host_addrs
+                let mut covered: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for addr_str in &host_addrs {
+                    // Extract peer ID from the /p2p/<id> component
+                    if let Some(pid) = addr_str.rsplit("/p2p/").next() {
+                        covered.insert(pid.to_string());
+                    }
+                }
+
+                // Merge FFI-stored addresses for connected peers not in host map
+                let mut all_addrs = host_addrs;
+                for pid in &connected {
+                    let pid_str = pid.to_string();
+                    if !covered.contains(&pid_str) {
+                        if let Some(ffi_addr) = p2p.get_peer_address(&pid_str) {
+                            all_addrs.push(ffi_addr.to_string());
+                        }
+                    }
+                }
+
+                serde_json::to_string(&all_addrs)
                     .map_err(|e| format!("failed to serialize peer list: {}", e))
             })
         })
@@ -537,6 +568,22 @@ pub unsafe extern "C" fn p2p_connect(
                     .dial(parsed.peer_id, vec![parsed.transport_addr])
                     .await
                     .map_err(|e| format!("failed to connect: {}", e))?;
+
+                // Wait until the connection is established so that
+                // p2p_active_peers returns the peer immediately after connect.
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if let Ok(connected) = p2p.handle.connected_peers().await {
+                        if connected.contains(&parsed.peer_id) {
+                            break;
+                        }
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("connection timed out waiting for peer".to_string());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
 
                 // Store the peer's full multiaddr for ActivePeers lookups
                 p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);

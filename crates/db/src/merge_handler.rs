@@ -597,15 +597,45 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 );
                             }
                         } else if !field_values.is_empty() {
-                            // Store the reconstructed document within the same transaction
-                            let mut doc = Document::new();
-                            for (field_name, value) in &field_values {
-                                doc.set(field_name, value.clone());
-                            }
-
+                            // Store the reconstructed document within the same transaction.
+                            // Load the existing document first so unmodified fields (e.g.
+                            // foreign keys like _AuthorID) are preserved across partial
+                            // updates that only touch a subset of fields.
                             match DocID::from_string(&doc_id_str) {
                                 Ok(doc_id) => {
-                                    doc.set_id(doc_id.clone());
+                                    let mut doc = match collection
+                                        .get_with_datastore(&datastore, &doc_id)
+                                        .await
+                                    {
+                                        Ok(Some(existing)) => existing,
+                                        _ => {
+                                            let mut new_doc = Document::new();
+                                            new_doc.set_id(doc_id.clone());
+                                            new_doc
+                                        }
+                                    };
+
+                                    // Overlay new/winning field values on top of existing fields
+                                    for (field_name, value) in &field_values {
+                                        doc.set(field_name, value.clone());
+                                    }
+
+                                    // Only store fields that the local collection knows about,
+                                    // so cross-version syncs don't leak unknown fields into
+                                    // query results.
+                                    let known_fields: std::collections::HashSet<&str> = collection
+                                        .schema()
+                                        .fields
+                                        .iter()
+                                        .map(|f| f.name.as_str())
+                                        .collect();
+                                    let all_field_names: Vec<String> =
+                                        doc.field_names().map(|s| s.to_string()).collect();
+                                    for fname in &all_field_names {
+                                        if !known_fields.contains(fname.as_str()) {
+                                            doc.remove(fname);
+                                        }
+                                    }
 
                                     if let Err(e) =
                                         collection.save_with_datastore(&datastore, &doc).await
