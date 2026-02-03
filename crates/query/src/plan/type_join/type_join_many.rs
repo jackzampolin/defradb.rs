@@ -313,6 +313,7 @@ impl TypeJoinMany {
 
         // Capture child plan's execution info before closing
         self.child_exec_info = self.child_plan.exec_info();
+        self.go_child_index_fetches = self.child_exec_info.indexes_fetched;
 
         // Capture per-scan totals for Go-compatible metric simulation.
         // Go re-scans ALL children per parent, so we need these totals.

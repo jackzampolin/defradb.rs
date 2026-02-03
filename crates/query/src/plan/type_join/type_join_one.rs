@@ -265,6 +265,7 @@ impl TypeJoinOne {
 
         // Capture child plan's execution info before closing
         self.child_exec_info = self.child_plan.exec_info();
+        self.go_child_index_fetches = self.child_exec_info.indexes_fetched;
 
         self.child_plan.close().await?;
         Ok(())

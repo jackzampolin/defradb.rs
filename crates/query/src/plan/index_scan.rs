@@ -276,7 +276,9 @@ impl PlanNode for IndexScanNode {
     }
 
     fn exec_info(&self) -> ExecInfo {
-        self.exec_info.clone()
+        let mut info = self.exec_info.clone();
+        info.indexes_fetched = self.index_fetches;
+        info
     }
 
     fn explain_execute_inner(&self) -> serde_json::Value {
